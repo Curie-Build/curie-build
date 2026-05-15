@@ -1,4 +1,4 @@
-use crate::{descriptor, docker};
+use crate::{descriptor, docker, test};
 use anyhow::{bail, Context, Result};
 use curie_deps::resolver::{resolve, ResolveOptions};
 use curie_deps::repo::Repository;
@@ -61,10 +61,32 @@ pub fn build(project_root: &Path, opts: BuildOptions) -> Result<()> {
     Ok(())
 }
 
-pub fn do_build(
+/// Build the list of extra Maven repositories from the descriptor.
+pub fn extra_repos(desc: &descriptor::Descriptor) -> Vec<Repository> {
+    desc.repositories
+        .iter()
+        .map(|r| Repository {
+            name: r.name.clone(),
+            url: r.url.clone(),
+        })
+        .collect()
+}
+
+/// Intermediate output from the compile phase.
+pub struct CompileOutput {
+    pub jar_path: PathBuf,
+    pub jar_name: String,
+    pub classes_dir: PathBuf,
+    /// Resolved production dependency JARs (empty when no [dependencies] declared).
+    pub dep_jars: Vec<PathBuf>,
+}
+
+/// Phase 1: resolve production deps and compile production sources.
+/// Does NOT run tests or package a JAR.
+pub fn compile(
     project_root: &Path,
     desc: &descriptor::Descriptor,
-) -> Result<BuildOutput> {
+) -> Result<CompileOutput> {
     // --- directories ---------------------------------------------------------
     let src_root = project_root.join("src").join("main").join("java");
     if !src_root.exists() {
@@ -77,7 +99,7 @@ pub fn do_build(
     std::fs::create_dir_all(&classes_dir)
         .context("failed to create target/classes")?;
 
-    // --- resolve dependencies ------------------------------------------------
+    // --- resolve production dependencies -------------------------------------
     let dep_jars = if desc.dependencies.is_empty() {
         vec![]
     } else {
@@ -87,14 +109,7 @@ pub fn do_build(
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        let extra_repos: Vec<Repository> = desc
-            .repositories
-            .iter()
-            .map(|r| Repository {
-                name: r.name.clone(),
-                url: r.url.clone(),
-            })
-            .collect();
+        let extra_repos = extra_repos(desc);
 
         let jars = resolve(
             &pairs,
@@ -109,9 +124,7 @@ pub fn do_build(
         jars
     };
 
-    // --- discover sources (exclude *Test.java, *Tests.java, *Spec.java) ------
-    // Sort deterministically so javac always receives files in the same order
-    // regardless of filesystem or OS.
+    // --- discover production sources (exclude test files) --------------------
     let mut sources: Vec<_> = WalkDir::new(&src_root)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -129,7 +142,6 @@ pub fn do_build(
         bail!("no Java source files found under {}", src_root.display());
     }
 
-    // Lexicographic sort → deterministic javac input order.
     sources.sort();
 
     // --- compile (incremental) -----------------------------------------------
@@ -170,23 +182,36 @@ pub fn do_build(
         println!("  Compile         up to date");
     }
 
-    // --- package (deterministic JAR, incremental) ----------------------------
     let jar_name = format!(
         "{}-{}.jar",
         desc.project_name(), desc.project_version()
     );
     let jar_path = output_dir.join(&jar_name);
 
-    if needs_repackage(&jar_path, &classes_dir) {
-        println!("  Package         {}", jar_name);
+    Ok(CompileOutput { jar_path, jar_name, classes_dir, dep_jars })
+}
+
+/// Phase 2: compile production sources, run tests, then package JAR.
+pub fn do_build(
+    project_root: &Path,
+    desc: &descriptor::Descriptor,
+) -> Result<BuildOutput> {
+    let compiled = compile(project_root, desc)?;
+
+    // --- run tests before packaging ------------------------------------------
+    test::run_tests(project_root, desc, &compiled.classes_dir, &compiled.dep_jars, None)?;
+
+    // --- package (deterministic JAR, incremental) ----------------------------
+    if needs_repackage(&compiled.jar_path, &compiled.classes_dir) {
+        println!("  Package         {}", compiled.jar_name);
         let main_class = desc.application.as_ref().map(|a| a.main_class.as_str());
-        write_deterministic_jar(&jar_path, &classes_dir, main_class, &dep_jars)
+        write_deterministic_jar(&compiled.jar_path, &compiled.classes_dir, main_class, &compiled.dep_jars)
             .context("failed to write JAR")?;
     } else {
         println!("  Package         up to date");
     }
 
-    Ok(BuildOutput { jar: jar_path, dep_jars })
+    Ok(BuildOutput { jar: compiled.jar_path, dep_jars: compiled.dep_jars })
 }
 
 // ---------------------------------------------------------------------------

@@ -14,6 +14,9 @@ pub struct Descriptor {
     /// `[dependencies]` table: keys are `"group:artifact"`, values are version strings.
     #[serde(default)]
     pub dependencies: BTreeMap<String, String>,
+    /// `[test-dependencies]` table: test-scoped deps not included in the production JAR.
+    #[serde(rename = "test-dependencies", default)]
+    pub test_dependencies: BTreeMap<String, String>,
     /// `[[repositories]]` array for additional Maven repositories.
     #[serde(default)]
     pub repositories: Vec<RepositoryEntry>,

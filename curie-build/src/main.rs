@@ -2,6 +2,7 @@ mod build;
 mod descriptor;
 mod docker;
 mod run;
+mod test;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -19,11 +20,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Compile the project, package a JAR, and (when applicable) build a Docker image
+    /// Compile the project, run tests, package a JAR, and (when applicable) build a Docker image
     Build {
         /// Skip Docker build even when Docker support is configured
         #[arg(long)]
         no_docker: bool,
+    },
+    /// Compile the project and run its tests (no JAR or Docker build)
+    Test {
+        /// Only run tests whose fully-qualified class name matches this pattern
+        #[arg(long)]
+        filter: Option<String>,
     },
     /// Build the project and run it (via Docker or java -jar)
     Run {
@@ -45,6 +52,31 @@ fn main() {
     let result = match cli.command {
         Cmd::Build { no_docker } => {
             build::build(&cli.project, build::BuildOptions { no_docker })
+        }
+        Cmd::Test { filter } => {
+            let desc = match descriptor::load(&cli.project) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("error: {:#}", e);
+                    std::process::exit(1);
+                }
+            };
+            println!(
+                "Testing {} v{}",
+                desc.project_name(),
+                desc.project_version()
+            );
+            let compiled = build::compile(&cli.project, &desc).and_then(|compiled| {
+                test::run_tests(
+                    &cli.project,
+                    &desc,
+                    &compiled.classes_dir,
+                    &compiled.dep_jars,
+                    filter.as_deref(),
+                )?;
+                Ok(())
+            });
+            compiled
         }
         Cmd::Run { no_docker, args } => {
             run::run(&cli.project, run::RunOptions { no_docker }, &args)
