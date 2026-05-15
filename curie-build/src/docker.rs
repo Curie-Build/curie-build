@@ -93,8 +93,48 @@ fn docker_image_created(image_ref: &str) -> Option<SystemTime> {
     }
 
     let ts = std::str::from_utf8(&out.stdout).ok()?.trim();
-    // Parse RFC 3339 / ISO 8601, e.g. "2026-05-15T10:23:45.123456789Z"
-    humantime::parse_rfc3339(ts).ok()
+    // Parse RFC 3339 / ISO 8601.
+    // humantime only accepts UTC ("Z") but Docker may emit a local-timezone offset
+    // like "2026-05-15T10:23:45.123456789+02:00".  Normalise to UTC first.
+    parse_rfc3339_to_system_time(ts)
+}
+
+/// Parse an RFC 3339 timestamp that may have a `±HH:MM` timezone offset.
+/// Converts to UTC by subtracting the offset, then delegates to `humantime`.
+fn parse_rfc3339_to_system_time(ts: &str) -> Option<SystemTime> {
+    // humantime handles "Z" suffix natively — fast path.
+    if ts.ends_with('Z') {
+        return humantime::parse_rfc3339(ts).ok();
+    }
+
+    // Look for a `+HH:MM` or `-HH:MM` suffix (last 6 chars, e.g. "+02:00").
+    if ts.len() < 6 {
+        return None;
+    }
+    let (body, offset_str) = ts.split_at(ts.len() - 6);
+    let sign = offset_str.chars().next()?;
+    if sign != '+' && sign != '-' {
+        return None;
+    }
+    let parts: Vec<&str> = offset_str[1..].splitn(2, ':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let offset_hours: i64 = parts[0].parse().ok()?;
+    let offset_mins: i64 = parts[1].parse().ok()?;
+    let offset_secs: i64 = (offset_hours * 60 + offset_mins) * 60;
+    let offset_secs = if sign == '+' { offset_secs } else { -offset_secs };
+
+    // Build a UTC string that humantime can parse.
+    let utc_ts = format!("{}Z", body);
+    let t = humantime::parse_rfc3339(&utc_ts).ok()?;
+
+    // Subtract the UTC offset to get actual UTC time.
+    if offset_secs >= 0 {
+        t.checked_sub(std::time::Duration::from_secs(offset_secs as u64))
+    } else {
+        t.checked_add(std::time::Duration::from_secs((-offset_secs) as u64))
+    }
 }
 
 /// Return the newest mtime among all Docker build inputs in `target/`:
@@ -153,6 +193,7 @@ fn build_with_user_dockerfile(
         }
     }
 
+    println!("  Docker image    building {}", image_ref);
     // Make JAR path relative to project root for the build arg.
     let jar_rel = jar
         .strip_prefix(project_root)
@@ -264,6 +305,7 @@ fn build_with_generated_dockerfile(
         }
     }
 
+    println!("  Docker image    building {}", image_ref);
     let status = Command::new("docker")
         .arg("build")
         .arg("-t")
@@ -340,6 +382,35 @@ mod tests {
              COPY myapp-1.0.jar app.jar\n\
              ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]\n"
         );
+    }
+
+    #[test]
+    fn parse_ts_utc_z() {
+        // Plain UTC with Z suffix — humantime fast path.
+        let t = parse_rfc3339_to_system_time("2026-05-15T08:44:03.776995931Z");
+        assert!(t.is_some());
+    }
+
+    #[test]
+    fn parse_ts_positive_offset() {
+        // +02:00 means the wall clock was 2 h ahead of UTC.
+        // Both strings should resolve to the same UTC instant.
+        let utc = parse_rfc3339_to_system_time("2026-05-15T08:44:03Z").unwrap();
+        let local = parse_rfc3339_to_system_time("2026-05-15T10:44:03+02:00").unwrap();
+        assert_eq!(utc, local);
+    }
+
+    #[test]
+    fn parse_ts_negative_offset() {
+        // -05:00 means wall clock was 5 h behind UTC.
+        let utc = parse_rfc3339_to_system_time("2026-05-15T13:00:00Z").unwrap();
+        let local = parse_rfc3339_to_system_time("2026-05-15T08:00:00-05:00").unwrap();
+        assert_eq!(utc, local);
+    }
+
+    #[test]
+    fn parse_ts_invalid_returns_none() {
+        assert!(parse_rfc3339_to_system_time("not-a-timestamp").is_none());
     }
 
     #[test]

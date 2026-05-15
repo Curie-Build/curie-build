@@ -48,7 +48,6 @@ pub fn build(project_root: &Path, opts: BuildOptions) -> Result<()> {
     );
 
     if !opts.no_docker && descriptor::docker_enabled(project_root, &desc) {
-        println!("  Docker image    building {}", desc.image_ref());
         docker::docker_build(project_root, &desc, &output.jar, &output.dep_jars)?;
     }
 
