@@ -3,6 +3,8 @@ use crate::descriptor::Descriptor;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
+use walkdir::WalkDir;
 
 /// Determines which Dockerfile strategy to use.
 enum DockerfileSource {
@@ -78,6 +80,57 @@ pub fn docker_run(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Ask Docker when the local image was last created.
+/// Returns `None` when the image doesn't exist locally or Docker is unavailable.
+fn docker_image_created(image_ref: &str) -> Option<SystemTime> {
+    let out = Command::new("docker")
+        .args(["inspect", "--format", "{{.Created}}", image_ref])
+        .output()
+        .ok()?;
+
+    if !out.status.success() {
+        return None;
+    }
+
+    let ts = std::str::from_utf8(&out.stdout).ok()?.trim();
+    // Parse RFC 3339 / ISO 8601, e.g. "2026-05-15T10:23:45.123456789Z"
+    humantime::parse_rfc3339(ts).ok()
+}
+
+/// Return the newest mtime among all Docker build inputs in `target/`:
+/// Dockerfile, .dockerignore, the app JAR, and every file under libs/.
+fn newest_input_mtime(target_dir: &Path, jar_filename: &str, has_libs: bool) -> SystemTime {
+    let mut newest = SystemTime::UNIX_EPOCH;
+
+    for name in &["Dockerfile", ".dockerignore"] {
+        let t = mtime(&target_dir.join(name));
+        if t > newest {
+            newest = t;
+        }
+    }
+
+    let t = mtime(&target_dir.join(jar_filename));
+    if t > newest {
+        newest = t;
+    }
+
+    if has_libs {
+        let libs_dir = target_dir.join("libs");
+        for entry in WalkDir::new(&libs_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let t = mtime(entry.path());
+            if t > newest {
+                newest = t;
+            }
+        }
+    }
+
+    newest
+}
+
 fn build_with_user_dockerfile(
     project_root: &Path,
     _desc: &Descriptor,
@@ -85,6 +138,20 @@ fn build_with_user_dockerfile(
     image_ref: &str,
 ) -> Result<()> {
     println!("  Dockerfile      using project root Dockerfile");
+
+    // Skip if the image is newer than both the Dockerfile and the app JAR.
+    let newest_input = {
+        let mut t = mtime(&project_root.join("Dockerfile"));
+        let jar_t = mtime(jar);
+        if jar_t > t { t = jar_t; }
+        t
+    };
+    if let Some(image_time) = docker_image_created(image_ref) {
+        if newest_input <= image_time {
+            println!("  Docker image    up to date");
+            return Ok(());
+        }
+    }
 
     // Make JAR path relative to project root for the build arg.
     let jar_rel = jar
@@ -185,6 +252,16 @@ fn build_with_generated_dockerfile(
         std::fs::write(&dockerignore_path, &dockerignore_content)
             .context("failed to write .dockerignore")?;
         println!("  .dockerignore   generated  (target/.dockerignore)");
+    }
+
+    let has_libs = !dep_jars.is_empty();
+
+    // Skip docker build if the image is newer than all inputs.
+    if let Some(image_time) = docker_image_created(image_ref) {
+        if newest_input_mtime(&target_dir, &jar_filename, has_libs) <= image_time {
+            println!("  Docker image    up to date");
+            return Ok(());
+        }
     }
 
     let status = Command::new("docker")
