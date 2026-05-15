@@ -74,10 +74,41 @@ pub fn run_tests(
 
     let toml_path = project_root.join("curie.toml");
 
-    if needs_test_recompile(&test_sources, &test_classes_dir, &toml_path) {
+    // Remove stale test class files before checking whether recompilation is
+    // needed.  Test sources may come from two roots (co-located in
+    // src/main/java, or separate-tree in src/test/java), so we supply both.
+    let main_src = project_root.join("src").join("main").join("java");
+    let test_src = project_root.join("src").join("test").join("java");
+
+    // Partition test_sources by which root they belong to.
+    let main_src_tests: Vec<PathBuf> = test_sources
+        .iter()
+        .filter(|p| p.starts_with(&main_src))
+        .cloned()
+        .collect();
+    let test_src_tests: Vec<PathBuf> = test_sources
+        .iter()
+        .filter(|p| p.starts_with(&test_src))
+        .cloned()
+        .collect();
+
+    let stale_removed = build::remove_stale_classes(
+        &[
+            (main_src.as_path(), &main_src_tests),
+            (test_src.as_path(), &test_src_tests),
+        ],
+        &test_classes_dir,
+    )?;
+
+    let needs_recompile = stale_removed > 0
+        || needs_test_recompile(&test_sources, &test_classes_dir, &toml_path);
+
+    if needs_recompile {
+        let reason = if stale_removed > 0 { "  [stale classes removed]" } else { "" };
         println!(
-            "  Compile tests   {} source file(s)",
-            test_sources.len()
+            "  Compile tests   {} source file(s){}",
+            test_sources.len(),
+            reason,
         );
 
         // Classpath for compiling tests:

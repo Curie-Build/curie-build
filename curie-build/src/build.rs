@@ -167,7 +167,21 @@ pub fn compile(
 
     // --- compile (incremental) -----------------------------------------------
     let toml_path = project_root.join("curie.toml");
-    let compile_status = needs_recompile(&sources, &classes_dir, &toml_path);
+
+    // Remove stale class files before checking whether recompilation is needed.
+    // If any are removed we must recompile even if no source is newer than the
+    // oldest surviving class file.
+    let stale_removed = remove_stale_classes(
+        &[(&src_root, &sources)],
+        &classes_dir,
+    )?;
+
+    let compile_status = if stale_removed > 0 {
+        CompileStatus::StaleClasses
+    } else {
+        needs_recompile(&sources, &classes_dir, &toml_path)
+    };
+
     if compile_status.needs_recompile() {
         println!(
             "  Compile         {} source file(s)  [{}]",
@@ -341,6 +355,8 @@ pub(crate) enum CompileStatus {
     SourceChanged,
     /// `curie.toml` is newer than the oldest `.class` file.
     TomlChanged,
+    /// Stale `.class` files were found (sources deleted since last compile).
+    StaleClasses,
     /// All outputs are up to date — no recompile needed.
     UpToDate,
 }
@@ -356,6 +372,7 @@ impl CompileStatus {
             CompileStatus::NoClassFiles => "no class files",
             CompileStatus::SourceChanged => "source changed",
             CompileStatus::TomlChanged => "curie.toml changed",
+            CompileStatus::StaleClasses => "stale classes removed",
             CompileStatus::UpToDate => "up to date",
         }
     }
@@ -378,6 +395,95 @@ pub(crate) fn needs_recompile(
         return CompileStatus::TomlChanged;
     }
     CompileStatus::UpToDate
+}
+
+/// Remove `.class` files in `classes_dir` that have no corresponding source
+/// file in `sources` (relative to `src_root`).
+///
+/// A `.class` file belongs to a source `Foo.java` when its top-level class
+/// stem matches — i.e. the class file is `Foo.class` or `Foo$anything.class`.
+/// Inner and anonymous classes (`Foo$Bar.class`, `Foo$1.class`) are therefore
+/// covered automatically by their enclosing top-level class.
+///
+/// Multiple `(src_root, sources)` pairs can be supplied so that co-located
+/// tests and separate-tree tests can both be accounted for when cleaning
+/// `target/test-classes/`.
+///
+/// Returns the number of `.class` files deleted.
+pub(crate) fn remove_stale_classes(
+    src_roots_and_sources: &[(&Path, &[PathBuf])],
+    classes_dir: &Path,
+) -> Result<usize> {
+    // Build a set of expected stems: relative path without extension.
+    // e.g. src_root=src/main/java, source=src/main/java/com/foo/Bar.java
+    //   -> stem = "com/foo/Bar"
+    let mut expected: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    for (src_root, sources) in src_roots_and_sources {
+        for src in *sources {
+            if let Ok(rel) = src.strip_prefix(src_root) {
+                let s = rel.to_string_lossy();
+                // Strip the ".java" extension to get the stem.
+                let stem = if s.ends_with(".java") {
+                    s[..s.len() - 5].replace('\\', "/")
+                } else {
+                    s.replace('\\', "/")
+                };
+                expected.insert(stem);
+            }
+        }
+    }
+
+    if !classes_dir.exists() {
+        return Ok(0);
+    }
+
+    let mut removed = 0usize;
+
+    for entry in WalkDir::new(classes_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_type().is_file()
+                && e.file_name().to_string_lossy().ends_with(".class")
+        })
+    {
+        let rel = entry
+            .path()
+            .strip_prefix(classes_dir)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+
+        // Derive the top-level class stem: strip ".class" and everything
+        // from the first "$" onward in the filename component.
+        let stem = {
+            // Remove ".class"
+            let without_ext = &rel[..rel.len() - 6];
+            // Split off any inner-class suffix in the final component.
+            // e.g. "com/foo/Bar$Inner" -> "com/foo/Bar"
+            if let Some(dollar) = without_ext.rfind('$') {
+                // Only strip after '$' in the last path component.
+                let slash = without_ext.rfind('/').map(|i| i + 1).unwrap_or(0);
+                if dollar >= slash {
+                    without_ext[..dollar].to_string()
+                } else {
+                    without_ext.to_string()
+                }
+            } else {
+                without_ext.to_string()
+            }
+        };
+
+        if !expected.contains(&stem) {
+            std::fs::remove_file(entry.path()).with_context(|| {
+                format!("failed to remove stale class {}", entry.path().display())
+            })?;
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
 }
 
 /// Returns `true` when the output JAR needs to be written: either it doesn't
@@ -1167,6 +1273,13 @@ pub fn clean(project_root: &Path) -> Result<()> {
 mod clean_tests {
     use super::*;
 
+    fn write_file(path: &Path, content: &[u8]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
     #[test]
     fn clean_removes_target_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -1245,5 +1358,151 @@ mod clean_tests {
     fn fold_manifest_header_empty_value() {
         let result = fold_manifest_header("Class-Path", "");
         assert_eq!(result, "Class-Path: \r\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Stale class detection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn remove_stale_classes_removes_orphaned_class() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src");
+        let classes_dir = dir.path().join("classes");
+        std::fs::create_dir_all(&classes_dir).unwrap();
+
+        // Only Foo.java exists as a source.
+        let foo_src = src_root.join("com").join("Foo.java");
+        std::fs::create_dir_all(foo_src.parent().unwrap()).unwrap();
+        std::fs::write(&foo_src, b"").unwrap();
+
+        // Both Foo.class and Bar.class exist — Bar is stale.
+        write_file(&classes_dir.join("com").join("Foo.class"), b"");
+        write_file(&classes_dir.join("com").join("Bar.class"), b"");
+
+        let sources = vec![foo_src];
+        let removed = remove_stale_classes(
+            &[(&src_root, &sources)],
+            &classes_dir,
+        ).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(classes_dir.join("com").join("Foo.class").exists());
+        assert!(!classes_dir.join("com").join("Bar.class").exists());
+    }
+
+    #[test]
+    fn remove_stale_classes_keeps_inner_classes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src");
+        let classes_dir = dir.path().join("classes");
+        std::fs::create_dir_all(&classes_dir).unwrap();
+
+        // Foo.java is the only source.
+        let foo_src = src_root.join("Foo.java");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::write(&foo_src, b"").unwrap();
+
+        // Foo.class, Foo$Inner.class, Foo$1.class — all should survive.
+        write_file(&classes_dir.join("Foo.class"), b"");
+        write_file(&classes_dir.join("Foo$Inner.class"), b"");
+        write_file(&classes_dir.join("Foo$1.class"), b"");
+
+        let sources = vec![foo_src];
+        let removed = remove_stale_classes(
+            &[(&src_root, &sources)],
+            &classes_dir,
+        ).unwrap();
+
+        assert_eq!(removed, 0);
+        assert!(classes_dir.join("Foo.class").exists());
+        assert!(classes_dir.join("Foo$Inner.class").exists());
+        assert!(classes_dir.join("Foo$1.class").exists());
+    }
+
+    #[test]
+    fn remove_stale_classes_removes_inner_of_deleted_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src");
+        let classes_dir = dir.path().join("classes");
+        std::fs::create_dir_all(&classes_dir).unwrap();
+
+        // Only Foo.java remains; Bar.java was deleted.
+        let foo_src = src_root.join("Foo.java");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::write(&foo_src, b"").unwrap();
+
+        write_file(&classes_dir.join("Foo.class"), b"");
+        // Bar and its inner classes are stale.
+        write_file(&classes_dir.join("Bar.class"), b"");
+        write_file(&classes_dir.join("Bar$Inner.class"), b"");
+        write_file(&classes_dir.join("Bar$1.class"), b"");
+
+        let sources = vec![foo_src];
+        let removed = remove_stale_classes(
+            &[(&src_root, &sources)],
+            &classes_dir,
+        ).unwrap();
+
+        assert_eq!(removed, 3);
+        assert!(classes_dir.join("Foo.class").exists());
+        assert!(!classes_dir.join("Bar.class").exists());
+        assert!(!classes_dir.join("Bar$Inner.class").exists());
+        assert!(!classes_dir.join("Bar$1.class").exists());
+    }
+
+    #[test]
+    fn remove_stale_classes_empty_classes_dir_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src");
+        let classes_dir = dir.path().join("classes");
+        // classes_dir does not exist at all.
+
+        let foo_src = src_root.join("Foo.java");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::write(&foo_src, b"").unwrap();
+
+        let sources = vec![foo_src];
+        let removed = remove_stale_classes(
+            &[(&src_root, &sources)],
+            &classes_dir,
+        ).unwrap();
+
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn remove_stale_classes_multiple_src_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_src = dir.path().join("src").join("main");
+        let test_src = dir.path().join("src").join("test");
+        let classes_dir = dir.path().join("classes");
+
+        let foo_src = main_src.join("Foo.java");
+        let bar_test_src = test_src.join("BarTest.java");
+        std::fs::create_dir_all(&main_src).unwrap();
+        std::fs::create_dir_all(&test_src).unwrap();
+        std::fs::write(&foo_src, b"").unwrap();
+        std::fs::write(&bar_test_src, b"").unwrap();
+
+        // Both Foo.class and BarTest.class are valid; Baz.class is stale.
+        write_file(&classes_dir.join("Foo.class"), b"");
+        write_file(&classes_dir.join("BarTest.class"), b"");
+        write_file(&classes_dir.join("Baz.class"), b"");
+
+        let main_sources = vec![foo_src];
+        let test_sources = vec![bar_test_src];
+        let removed = remove_stale_classes(
+            &[
+                (main_src.as_path(), &main_sources),
+                (test_src.as_path(), &test_sources),
+            ],
+            &classes_dir,
+        ).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(classes_dir.join("Foo.class").exists());
+        assert!(classes_dir.join("BarTest.class").exists());
+        assert!(!classes_dir.join("Baz.class").exists());
     }
 }
