@@ -80,61 +80,46 @@ pub fn docker_run(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Ask Docker when the local image was last created.
-/// Returns `None` when the image doesn't exist locally or Docker is unavailable.
-fn docker_image_created(image_ref: &str) -> Option<SystemTime> {
-    let out = Command::new("docker")
-        .args(["inspect", "--format", "{{.Created}}", image_ref])
-        .output()
-        .ok()?;
-
-    if !out.status.success() {
-        return None;
-    }
-
-    let ts = std::str::from_utf8(&out.stdout).ok()?.trim();
-    // Parse RFC 3339 / ISO 8601.
-    // humantime only accepts UTC ("Z") but Docker may emit a local-timezone offset
-    // like "2026-05-15T10:23:45.123456789+02:00".  Normalise to UTC first.
-    parse_rfc3339_to_system_time(ts)
+/// Path of the stamp file written after every successful `docker build`.
+/// Its mtime is the authoritative "last built" time for skip checks.
+///
+/// # Why a stamp file — and not the alternatives
+///
+/// ## `docker inspect --format '{{.Created}}'` (image creation timestamp)
+/// The `Created` field reflects when the image was *first* assembled, not
+/// when `docker build` last ran.  When all layers are cache-hits Docker
+/// reuses the existing image object and never updates `Created`.  So after
+/// the first build the timestamp is permanently frozen, and inputs written
+/// later (e.g. a recompiled JAR) are always "newer" — the skip never fires.
+///
+/// ## Parsing `{{.Created}}` with `humantime`
+/// Even if the timestamp were reliable, `humantime::parse_rfc3339` only
+/// accepts a `Z` (UTC) suffix.  Docker emits the daemon's local timezone
+/// offset (`+02:00`, `-05:00`, …), so the parse returns `None` and the
+/// skip is again never reached.  We could normalise the offset to UTC
+/// before parsing, but this is moot given the frozen-timestamp problem.
+///
+/// ## `docker inspect --format '{{.Metadata.LastTagTime.Unix}}'`
+/// This is the time the tag (`name:version`) was last applied, not the
+/// time the image content was built.  Re-tagging an old image would make
+/// it appear fresh even though its layers are stale.
+///
+/// ## Stamp file (chosen approach)
+/// We write `target/.docker-stamp` (empty file) immediately after every
+/// successful `docker build`.  Its filesystem mtime is updated on every
+/// real build, including cache-hit runs, so it accurately represents "the
+/// last time we ran docker build for this project".  Skip iff:
+///
+///   newest_input_mtime(target/) <= mtime(target/.docker-stamp)
+fn stamp_path(target_dir: &Path) -> PathBuf {
+    target_dir.join(".docker-stamp")
 }
 
-/// Parse an RFC 3339 timestamp that may have a `±HH:MM` timezone offset.
-/// Converts to UTC by subtracting the offset, then delegates to `humantime`.
-fn parse_rfc3339_to_system_time(ts: &str) -> Option<SystemTime> {
-    // humantime handles "Z" suffix natively — fast path.
-    if ts.ends_with('Z') {
-        return humantime::parse_rfc3339(ts).ok();
-    }
-
-    // Look for a `+HH:MM` or `-HH:MM` suffix (last 6 chars, e.g. "+02:00").
-    if ts.len() < 6 {
-        return None;
-    }
-    let (body, offset_str) = ts.split_at(ts.len() - 6);
-    let sign = offset_str.chars().next()?;
-    if sign != '+' && sign != '-' {
-        return None;
-    }
-    let parts: Vec<&str> = offset_str[1..].splitn(2, ':').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let offset_hours: i64 = parts[0].parse().ok()?;
-    let offset_mins: i64 = parts[1].parse().ok()?;
-    let offset_secs: i64 = (offset_hours * 60 + offset_mins) * 60;
-    let offset_secs = if sign == '+' { offset_secs } else { -offset_secs };
-
-    // Build a UTC string that humantime can parse.
-    let utc_ts = format!("{}Z", body);
-    let t = humantime::parse_rfc3339(&utc_ts).ok()?;
-
-    // Subtract the UTC offset to get actual UTC time.
-    if offset_secs >= 0 {
-        t.checked_sub(std::time::Duration::from_secs(offset_secs as u64))
-    } else {
-        t.checked_add(std::time::Duration::from_secs((-offset_secs) as u64))
-    }
+/// Touch (create/update) the stamp file to record that a build just succeeded.
+fn touch_stamp(target_dir: &Path) -> Result<()> {
+    let path = stamp_path(target_dir);
+    // Write empty content — we only care about the mtime.
+    std::fs::write(&path, b"").with_context(|| format!("failed to write {}", path.display()))
 }
 
 /// Return the newest mtime among all Docker build inputs in `target/`:
@@ -179,18 +164,19 @@ fn build_with_user_dockerfile(
 ) -> Result<()> {
     println!("  Dockerfile      using project root Dockerfile");
 
-    // Skip if the image is newer than both the Dockerfile and the app JAR.
+    let target_dir = project_root.join("target");
+    std::fs::create_dir_all(&target_dir).context("failed to create target/")?;
+
+    // Skip if the stamp is newer than both the Dockerfile and the app JAR.
     let newest_input = {
         let mut t = mtime(&project_root.join("Dockerfile"));
         let jar_t = mtime(jar);
         if jar_t > t { t = jar_t; }
         t
     };
-    if let Some(image_time) = docker_image_created(image_ref) {
-        if newest_input <= image_time {
-            println!("  Docker image    up to date");
-            return Ok(());
-        }
+    if newest_input <= mtime(&stamp_path(&target_dir)) {
+        println!("  Docker image    up to date");
+        return Ok(());
     }
 
     println!("  Docker image    building {}", image_ref);
@@ -215,6 +201,7 @@ fn build_with_user_dockerfile(
         bail!("docker build failed");
     }
 
+    touch_stamp(&target_dir)?;
     println!("  Docker image    {}", image_ref);
     Ok(())
 }
@@ -297,12 +284,14 @@ fn build_with_generated_dockerfile(
 
     let has_libs = !dep_jars.is_empty();
 
-    // Skip docker build if the image is newer than all inputs.
-    if let Some(image_time) = docker_image_created(image_ref) {
-        if newest_input_mtime(&target_dir, &jar_filename, has_libs) <= image_time {
-            println!("  Docker image    up to date");
-            return Ok(());
-        }
+    // Skip docker build if the stamp is newer than all inputs.
+    // We use a stamp file (target/.docker-stamp) rather than the Docker image's
+    // Created timestamp, because Docker does not update Created when all layers
+    // are cached — making the image appear older than it really is.
+    let stamp = stamp_path(&target_dir);
+    if newest_input_mtime(&target_dir, &jar_filename, has_libs) <= mtime(&stamp) {
+        println!("  Docker image    up to date");
+        return Ok(());
     }
 
     println!("  Docker image    building {}", image_ref);
@@ -318,6 +307,7 @@ fn build_with_generated_dockerfile(
         bail!("docker build failed");
     }
 
+    touch_stamp(&target_dir)?;
     println!("  Docker image    {}", image_ref);
     Ok(())
 }
@@ -385,35 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_ts_utc_z() {
-        // Plain UTC with Z suffix — humantime fast path.
-        let t = parse_rfc3339_to_system_time("2026-05-15T08:44:03.776995931Z");
-        assert!(t.is_some());
-    }
-
-    #[test]
-    fn parse_ts_positive_offset() {
-        // +02:00 means the wall clock was 2 h ahead of UTC.
-        // Both strings should resolve to the same UTC instant.
-        let utc = parse_rfc3339_to_system_time("2026-05-15T08:44:03Z").unwrap();
-        let local = parse_rfc3339_to_system_time("2026-05-15T10:44:03+02:00").unwrap();
-        assert_eq!(utc, local);
-    }
-
-    #[test]
-    fn parse_ts_negative_offset() {
-        // -05:00 means wall clock was 5 h behind UTC.
-        let utc = parse_rfc3339_to_system_time("2026-05-15T13:00:00Z").unwrap();
-        let local = parse_rfc3339_to_system_time("2026-05-15T08:00:00-05:00").unwrap();
-        assert_eq!(utc, local);
-    }
-
-    #[test]
-    fn parse_ts_invalid_returns_none() {
-        assert!(parse_rfc3339_to_system_time("not-a-timestamp").is_none());
-    }
-
-    #[test]
     fn dockerfile_with_deps() {
         let content = generate_dockerfile("eclipse-temurin:21-jre", "myapp-1.0.jar", true);
         assert_eq!(
@@ -424,5 +385,41 @@ mod tests {
              COPY myapp-1.0.jar app.jar\n\
              ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]\n"
         );
+    }
+
+    #[test]
+    fn stamp_skip_logic() {
+        // newest_input_mtime <= stamp mtime  →  skip
+        // newest_input_mtime >  stamp mtime  →  build
+        use filetime::{set_file_mtime, FileTime};
+        use std::fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path();
+
+        let jar = target.join("app-1.0.jar");
+        let dockerfile = target.join("Dockerfile");
+        let dockerignore = target.join(".dockerignore");
+        let stamp = stamp_path(target);
+
+        let t0 = FileTime::from_unix_time(1_000_000, 0);
+        let t1 = FileTime::from_unix_time(1_000_001, 0);
+
+        for path in &[&jar, &dockerfile, &dockerignore] {
+            fs::write(path, b"").unwrap();
+            set_file_mtime(path, t0).unwrap();
+        }
+
+        // No stamp yet → always build (mtime returns EPOCH, inputs are newer).
+        assert!(newest_input_mtime(target, "app-1.0.jar", false) > mtime(&stamp));
+
+        // Write stamp with mtime AFTER all inputs → skip.
+        fs::write(&stamp, b"").unwrap();
+        set_file_mtime(&stamp, t1).unwrap();
+        assert!(newest_input_mtime(target, "app-1.0.jar", false) <= mtime(&stamp));
+
+        // Update the jar to be newer than the stamp → build again.
+        set_file_mtime(&jar, FileTime::from_unix_time(1_000_002, 0)).unwrap();
+        assert!(newest_input_mtime(target, "app-1.0.jar", false) > mtime(&stamp));
     }
 }

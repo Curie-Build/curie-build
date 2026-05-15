@@ -14,7 +14,6 @@ walkdir = "2"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
-humantime = "2"
 curie-deps = { path = "../curie-deps" }
 
 [dev-dependencies]
