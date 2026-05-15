@@ -1,0 +1,6 @@
+[library]
+name    = "string-utils"
+version = "0.1.0"
+
+[java]
+sourceCompatibility = "21"

@@ -33,8 +33,15 @@ pub fn build(project_root: &Path, opts: BuildOptions) -> Result<()> {
 
     println!(
         "Building {} v{}",
-        desc.application.name, desc.application.version
+        desc.project_name(), desc.project_version()
     );
+
+    // Library projects must not have a Dockerfile at the project root.
+    if desc.is_library() && project_root.join("Dockerfile").exists() {
+        anyhow::bail!(
+            "library projects do not support Docker: remove the Dockerfile from the project root"
+        );
+    }
 
     let output = do_build(project_root, &desc)?;
 
@@ -47,7 +54,7 @@ pub fn build(project_root: &Path, opts: BuildOptions) -> Result<()> {
             .display()
     );
 
-    if !opts.no_docker && descriptor::docker_enabled(project_root, &desc) {
+    if !desc.is_library() && !opts.no_docker && descriptor::docker_enabled(project_root, &desc) {
         docker::docker_build(project_root, &desc, &output.jar, &output.dep_jars)?;
     }
 
@@ -139,6 +146,7 @@ pub fn do_build(
         javac
             .arg("--release")
             .arg(&desc.java.source_compatibility)
+            .arg("-g")
             .arg("-d")
             .arg(&classes_dir);
 
@@ -165,13 +173,14 @@ pub fn do_build(
     // --- package (deterministic JAR, incremental) ----------------------------
     let jar_name = format!(
         "{}-{}.jar",
-        desc.application.name, desc.application.version
+        desc.project_name(), desc.project_version()
     );
     let jar_path = output_dir.join(&jar_name);
 
     if needs_repackage(&jar_path, &classes_dir) {
         println!("  Package         {}", jar_name);
-        write_deterministic_jar(&jar_path, &classes_dir, &desc.application.main_class, &dep_jars)
+        let main_class = desc.application.as_ref().map(|a| a.main_class.as_str());
+        write_deterministic_jar(&jar_path, &classes_dir, main_class, &dep_jars)
             .context("failed to write JAR")?;
     } else {
         println!("  Package         up to date");
@@ -306,7 +315,7 @@ fn manifest_class_path(dep_jars: &[PathBuf]) -> String {
 fn write_deterministic_jar(
     jar_path: &Path,
     classes_dir: &Path,
-    main_class: &str,
+    main_class: Option<&str>,
     dep_jars: &[PathBuf],
 ) -> Result<()> {
     let file = std::fs::File::create(jar_path)
@@ -328,10 +337,10 @@ fn write_deterministic_jar(
     zip.start_file("META-INF/", dir_options)
         .context("failed to write META-INF/ directory entry")?;
 
-    let mut manifest = format!(
-        "Manifest-Version: 1.0\r\nMain-Class: {}\r\n",
-        main_class
-    );
+    let mut manifest = "Manifest-Version: 1.0\r\n".to_string();
+    if let Some(mc) = main_class {
+        manifest.push_str(&format!("Main-Class: {}\r\n", mc));
+    }
     if !dep_jars.is_empty() {
         // The JAR spec requires the Class-Path value to be folded at 72 bytes.
         // For simplicity we write the full value and rely on the JVM's leniency.
@@ -646,7 +655,7 @@ pub fn clean(project_root: &Path) -> Result<()> {
 
     println!(
         "Cleaning {} v{}",
-        desc.application.name, desc.application.version
+        desc.project_name(), desc.project_version()
     );
 
     let target_dir = project_root.join("target");

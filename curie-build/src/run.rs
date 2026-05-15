@@ -1,5 +1,5 @@
 use crate::{build, descriptor, docker};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
 
@@ -9,11 +9,18 @@ pub struct RunOptions {
 
 pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Result<()> {
     let desc = descriptor::load(project_root)?;
+
+    if desc.is_library() {
+        bail!("`curie run` is not supported for library projects");
+    }
+
+    let app = desc.application.as_ref().expect("non-library has application");
+
     let output = build::do_build(project_root, &desc)?;
 
     println!(
         "Running {} v{}",
-        desc.application.name, desc.application.version
+        app.name, app.version
     );
     println!();
 
@@ -36,7 +43,7 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
                 cp
             ));
             // Main class must be specified explicitly when using -cp (not -jar).
-            java.arg(&desc.application.main_class);
+            java.arg(&app.main_class);
         } else {
             java.arg("-jar").arg(&output.jar);
         }

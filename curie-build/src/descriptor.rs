@@ -5,7 +5,8 @@ use std::path::Path;
 
 #[derive(Debug, Deserialize)]
 pub struct Descriptor {
-    pub application: Application,
+    pub application: Option<Application>,
+    pub library: Option<Library>,
     #[serde(default)]
     pub java: Java,
     #[serde(default)]
@@ -24,6 +25,12 @@ pub struct Application {
     pub version: String,
     #[serde(rename = "mainClass")]
     pub main_class: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Library {
+    pub name: String,
+    pub version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,12 +88,39 @@ pub struct RepositoryEntry {
 }
 
 impl Descriptor {
+    /// Returns true when this is a library project (has `[library]` section).
+    pub fn is_library(&self) -> bool {
+        self.library.is_some()
+    }
+
+    /// Project name regardless of kind.
+    pub fn project_name(&self) -> &str {
+        if let Some(lib) = &self.library {
+            &lib.name
+        } else if let Some(app) = &self.application {
+            &app.name
+        } else {
+            unreachable!("descriptor validation guarantees one of library/application is set")
+        }
+    }
+
+    /// Project version regardless of kind.
+    pub fn project_version(&self) -> &str {
+        if let Some(lib) = &self.library {
+            &lib.version
+        } else if let Some(app) = &self.application {
+            &app.version
+        } else {
+            unreachable!("descriptor validation guarantees one of library/application is set")
+        }
+    }
+
     /// Resolved Docker image name: descriptor override or application name.
     pub fn image_name(&self) -> &str {
         self.docker
             .image_name
             .as_deref()
-            .unwrap_or(&self.application.name)
+            .unwrap_or_else(|| self.project_name())
     }
 
     /// Resolved Docker image tag: descriptor override or application version.
@@ -94,7 +128,7 @@ impl Descriptor {
         self.docker
             .image_tag
             .as_deref()
-            .unwrap_or(&self.application.version)
+            .unwrap_or_else(|| self.project_version())
     }
 
     /// Full image reference, e.g. "hello-world:0.1.0".
@@ -125,11 +159,39 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         .map(|t| t.contains_key("docker"))
         .unwrap_or(false);
 
+    let library_section_present = raw
+        .as_table()
+        .map(|t| t.contains_key("library"))
+        .unwrap_or(false);
+
+    let application_section_present = raw
+        .as_table()
+        .map(|t| t.contains_key("application"))
+        .unwrap_or(false);
+
     let mut descriptor: Descriptor = raw
         .try_into()
         .with_context(|| format!("failed to parse {}", path.display()))?;
 
     descriptor.docker.section_present = docker_section_present;
+
+    // Validate: exactly one of [application] or [library] must be present.
+    match (application_section_present, library_section_present) {
+        (false, false) => bail!(
+            "curie.toml must contain either an [application] or [library] section"
+        ),
+        (true, true) => bail!(
+            "curie.toml must not contain both [application] and [library] sections"
+        ),
+        _ => {}
+    }
+
+    // Validate: library projects cannot use Docker.
+    if library_section_present && docker_section_present {
+        bail!(
+            "library projects do not support Docker: remove the [docker] section from curie.toml"
+        );
+    }
 
     Ok(descriptor)
 }
