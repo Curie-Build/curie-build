@@ -8,7 +8,7 @@ use std::process::Command;
 enum DockerfileSource {
     /// User provided a Dockerfile at the project root. Build context = project root.
     UserProvided,
-    /// Curie generates a Dockerfile in target/docker/. Build context = target/docker/.
+    /// Curie generates a Dockerfile in target/. Build context = target/.
     Generated,
 }
 
@@ -118,30 +118,20 @@ fn build_with_generated_dockerfile(
     dep_jars: &[PathBuf],
     image_ref: &str,
 ) -> Result<()> {
-    let docker_dir = project_root.join("target").join("docker");
-    std::fs::create_dir_all(&docker_dir).context("failed to create target/docker")?;
+    let target_dir = project_root.join("target");
+    std::fs::create_dir_all(&target_dir).context("failed to create target/")?;
 
-    // Copy the JAR into the build context directory (skip if already current).
     let jar_filename = jar
         .file_name()
         .context("JAR path has no filename")?
         .to_string_lossy()
         .to_string();
 
-    let jar_dest = docker_dir.join(&jar_filename);
-    if mtime(jar) > mtime(&jar_dest) {
-        std::fs::copy(jar, &jar_dest)
-            .with_context(|| format!("failed to copy JAR to {}", jar_dest.display()))?;
-        println!("  Docker app JAR  copied");
-    } else {
-        println!("  Docker app JAR  up to date");
-    }
-
-    // Copy dependency JARs into target/docker/libs/ (skip up-to-date files).
+    // Copy dependency JARs into target/libs/ (skip up-to-date files).
     let mut dep_filenames: Vec<String> = Vec::new();
     if !dep_jars.is_empty() {
-        let libs_dir = docker_dir.join("libs");
-        std::fs::create_dir_all(&libs_dir).context("failed to create target/docker/libs")?;
+        let libs_dir = target_dir.join("libs");
+        std::fs::create_dir_all(&libs_dir).context("failed to create target/libs")?;
 
         let mut copied = 0usize;
         let mut skipped = 0usize;
@@ -153,8 +143,13 @@ fn build_with_generated_dockerfile(
                 .to_string();
             let dest = libs_dir.join(&fname);
             if mtime(dep) > mtime(&dest) {
-                std::fs::copy(dep, &dest)
-                    .with_context(|| format!("failed to copy dep JAR {} to {}", dep.display(), dest.display()))?;
+                std::fs::copy(dep, &dest).with_context(|| {
+                    format!(
+                        "failed to copy dep JAR {} to {}",
+                        dep.display(),
+                        dest.display()
+                    )
+                })?;
                 copied += 1;
             } else {
                 skipped += 1;
@@ -169,30 +164,36 @@ fn build_with_generated_dockerfile(
         }
     }
 
-    // Generate the Dockerfile — skip write if content is unchanged.
+    // Generate Dockerfile in target/ — skip write if content is unchanged.
     let dockerfile_content =
         generate_dockerfile(&desc.docker.base_image, &jar_filename, &dep_filenames);
-    let dockerfile_path = docker_dir.join("Dockerfile");
+    let dockerfile_path = target_dir.join("Dockerfile");
     let existing = std::fs::read_to_string(&dockerfile_path).unwrap_or_default();
     if existing == dockerfile_content {
         println!("  Dockerfile      up to date");
     } else {
         std::fs::write(&dockerfile_path, &dockerfile_content)
             .context("failed to write generated Dockerfile")?;
-        println!(
-            "  Dockerfile      generated  ({})",
-            dockerfile_path
-                .strip_prefix(project_root)
-                .unwrap_or(&dockerfile_path)
-                .display()
-        );
+        println!("  Dockerfile      generated  (target/Dockerfile)");
+    }
+
+    // Generate .dockerignore in target/ — skip write if content is unchanged.
+    let dockerignore_content = generate_dockerignore(&jar_filename, !dep_jars.is_empty());
+    let dockerignore_path = target_dir.join(".dockerignore");
+    let existing_ignore = std::fs::read_to_string(&dockerignore_path).unwrap_or_default();
+    if existing_ignore == dockerignore_content {
+        println!("  .dockerignore   up to date");
+    } else {
+        std::fs::write(&dockerignore_path, &dockerignore_content)
+            .context("failed to write .dockerignore")?;
+        println!("  .dockerignore   generated  (target/.dockerignore)");
     }
 
     let status = Command::new("docker")
         .arg("build")
         .arg("-t")
         .arg(image_ref)
-        .arg(&docker_dir)
+        .arg(&target_dir)
         .status()
         .context("failed to invoke docker build — is Docker installed?")?;
 
@@ -202,6 +203,18 @@ fn build_with_generated_dockerfile(
 
     println!("  Docker image    {}", image_ref);
     Ok(())
+}
+
+/// Generate the content of `target/.dockerignore`.
+///
+/// Starts with `*` to exclude everything, then whitelists only the app JAR
+/// and (when present) the `libs/` directory.
+fn generate_dockerignore(jar_filename: &str, has_libs: bool) -> String {
+    let mut lines = vec!["*".to_string(), format!("!{}", jar_filename)];
+    if has_libs {
+        lines.push("!libs/".to_string());
+    }
+    lines.join("\n") + "\n"
 }
 
 fn generate_dockerfile(
@@ -229,11 +242,56 @@ fn generate_dockerfile(
         let classpath = cp_parts.join(":");
 
         lines.push(format!("ENV CLASSPATH={}", classpath));
-        // Use -cp $CLASSPATH so the JVM honours our explicit classpath.
-        // The main class is embedded in app.jar's MANIFEST.MF but we must
-        // specify it explicitly when -cp overrides -jar class loading.
         lines.push("ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]".to_string());
     }
 
     lines.join("\n") + "\n"
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dockerignore_no_libs() {
+        let content = generate_dockerignore("myapp-1.0.jar", false);
+        assert_eq!(content, "*\n!myapp-1.0.jar\n");
+    }
+
+    #[test]
+    fn dockerignore_with_libs() {
+        let content = generate_dockerignore("myapp-1.0.jar", true);
+        assert_eq!(content, "*\n!myapp-1.0.jar\n!libs/\n");
+    }
+
+    #[test]
+    fn dockerfile_no_deps() {
+        let content = generate_dockerfile("eclipse-temurin:21-jre", "myapp-1.0.jar", &[]);
+        assert_eq!(
+            content,
+            "FROM eclipse-temurin:21-jre\n\
+             WORKDIR /app\n\
+             COPY myapp-1.0.jar app.jar\n\
+             ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]\n"
+        );
+    }
+
+    #[test]
+    fn dockerfile_with_deps() {
+        let deps = vec!["jackson-core-2.15.jar".to_string()];
+        let content = generate_dockerfile("eclipse-temurin:21-jre", "myapp-1.0.jar", &deps);
+        assert_eq!(
+            content,
+            "FROM eclipse-temurin:21-jre\n\
+             WORKDIR /app\n\
+             COPY myapp-1.0.jar app.jar\n\
+             COPY libs/ libs/\n\
+             ENV CLASSPATH=app.jar:libs/jackson-core-2.15.jar\n\
+             ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]\n"
+        );
+    }
 }
