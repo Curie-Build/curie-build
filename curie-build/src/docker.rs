@@ -128,7 +128,6 @@ fn build_with_generated_dockerfile(
         .to_string();
 
     // Copy dependency JARs into target/libs/ (skip up-to-date files).
-    let mut dep_filenames: Vec<String> = Vec::new();
     if !dep_jars.is_empty() {
         let libs_dir = target_dir.join("libs");
         std::fs::create_dir_all(&libs_dir).context("failed to create target/libs")?;
@@ -154,7 +153,6 @@ fn build_with_generated_dockerfile(
             } else {
                 skipped += 1;
             }
-            dep_filenames.push(fname);
         }
 
         match (copied, skipped) {
@@ -166,7 +164,7 @@ fn build_with_generated_dockerfile(
 
     // Generate Dockerfile in target/ — skip write if content is unchanged.
     let dockerfile_content =
-        generate_dockerfile(&desc.docker.base_image, &jar_filename, &dep_filenames);
+        generate_dockerfile(&desc.docker.base_image, &jar_filename, !dep_jars.is_empty());
     let dockerfile_path = target_dir.join("Dockerfile");
     let existing = std::fs::read_to_string(&dockerfile_path).unwrap_or_default();
     if existing == dockerfile_content {
@@ -217,33 +215,20 @@ fn generate_dockerignore(jar_filename: &str, has_libs: bool) -> String {
     lines.join("\n") + "\n"
 }
 
-fn generate_dockerfile(
-    base_image: &str,
-    jar_filename: &str,
-    dep_filenames: &[String],
-) -> String {
+fn generate_dockerfile(base_image: &str, jar_filename: &str, has_libs: bool) -> String {
     let mut lines = vec![
         format!("FROM {}", base_image),
         "WORKDIR /app".to_string(),
-        format!("COPY {} app.jar", jar_filename),
     ];
 
-    if dep_filenames.is_empty() {
-        lines.push("ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]".to_string());
-    } else {
+    if has_libs {
         // Copy dep JARs before the app JAR so this layer is cached across app-code changes.
-        lines.insert(2, "COPY libs/ libs/".to_string());
-
-        // Build CLASSPATH: app.jar + libs/<dep>.jar entries, separated by ":"
-        let mut cp_parts = vec!["app.jar".to_string()];
-        for fname in dep_filenames {
-            cp_parts.push(format!("libs/{}", fname));
-        }
-        let classpath = cp_parts.join(":");
-
-        lines.push(format!("ENV CLASSPATH={}", classpath));
-        lines.push("ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]".to_string());
+        // Class-Path in MANIFEST.MF points to libs/, so java -jar resolves them automatically.
+        lines.push("COPY libs/ libs/".to_string());
     }
+
+    lines.push(format!("COPY {} app.jar", jar_filename));
+    lines.push("ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]".to_string());
 
     lines.join("\n") + "\n"
 }
@@ -270,7 +255,7 @@ mod tests {
 
     #[test]
     fn dockerfile_no_deps() {
-        let content = generate_dockerfile("eclipse-temurin:21-jre", "myapp-1.0.jar", &[]);
+        let content = generate_dockerfile("eclipse-temurin:21-jre", "myapp-1.0.jar", false);
         assert_eq!(
             content,
             "FROM eclipse-temurin:21-jre\n\
@@ -282,15 +267,13 @@ mod tests {
 
     #[test]
     fn dockerfile_with_deps() {
-        let deps = vec!["jackson-core-2.15.jar".to_string()];
-        let content = generate_dockerfile("eclipse-temurin:21-jre", "myapp-1.0.jar", &deps);
+        let content = generate_dockerfile("eclipse-temurin:21-jre", "myapp-1.0.jar", true);
         assert_eq!(
             content,
             "FROM eclipse-temurin:21-jre\n\
              WORKDIR /app\n\
              COPY libs/ libs/\n\
              COPY myapp-1.0.jar app.jar\n\
-             ENV CLASSPATH=app.jar:libs/jackson-core-2.15.jar\n\
              ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]\n"
         );
     }
