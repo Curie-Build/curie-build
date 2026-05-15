@@ -109,6 +109,17 @@ pub fn run_tests(
         println!("  Compile tests   up to date");
     }
 
+    // --- skip if stamp is newer than all inputs ------------------------------
+    // When no filter is active, check whether the test-stamp is newer than
+    // every input that could invalidate results.  A filter run always executes
+    // (it is a partial run and must not mark the full suite as passing).
+    let stamp_path = project_root.join("target").join(".test-stamp");
+
+    if filter.is_none() && !needs_test_run(&test_sources, classes_dir, &toml_path, &stamp_path) {
+        println!("  Tests           up to date");
+        return Ok(());
+    }
+
     // --- run tests -----------------------------------------------------------
     // Classpath for running tests:
     //   test classes + production classes + prod deps + test deps
@@ -142,6 +153,12 @@ pub fn run_tests(
     if !status.success() {
         bail!("tests failed");
     }
+
+    // --- write stamp on success ----------------------------------------------
+    // Only written when no filter was active (a partial run must not mark the
+    // full suite as passing).
+    std::fs::write(&stamp_path, b"")
+        .with_context(|| format!("failed to write test stamp {}", stamp_path.display()))?;
 
     Ok(())
 }
@@ -241,6 +258,53 @@ fn resolve_standalone(extra_repos: &[curie_deps::repo::Repository]) -> Result<Pa
 // ---------------------------------------------------------------------------
 // Incremental compilation check for test sources
 // ---------------------------------------------------------------------------
+
+/// Returns true when tests need to be executed:
+/// - No stamp file exists (tests have never passed), OR
+/// - Any test source file is newer than the stamp, OR
+/// - Any production source file (compiled class) is newer than the stamp, OR
+/// - curie.toml is newer than the stamp.
+///
+/// The stamp (`target/.test-stamp`) is written after every successful
+/// full test run.  A filtered run (`curie test --filter`) never writes the
+/// stamp and always bypasses this check so that a partial run cannot mask
+/// failures in the untested portion.
+fn needs_test_run(
+    test_sources: &[PathBuf],
+    classes_dir: &Path,
+    toml_path: &Path,
+    stamp_path: &Path,
+) -> bool {
+    let stamp = build::mtime(stamp_path);
+    if stamp == SystemTime::UNIX_EPOCH {
+        return true; // no stamp yet
+    }
+    if build::newest_mtime(test_sources) > stamp {
+        return true;
+    }
+    if build::mtime(toml_path) > stamp {
+        return true;
+    }
+    // Any change to production classes (recompile happened) invalidates the stamp.
+    if build::oldest_mtime_in_dir(classes_dir) == SystemTime::UNIX_EPOCH {
+        return true; // no classes — shouldn't happen here, but be safe
+    }
+    if newest_mtime_in_dir(classes_dir) > stamp {
+        return true;
+    }
+    false
+}
+
+/// Return the newest `modified` time among all files under `dir`.
+fn newest_mtime_in_dir(dir: &Path) -> SystemTime {
+    WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| std::fs::metadata(e.path()).and_then(|m| m.modified()).ok())
+        .max()
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+}
 
 /// Returns true when test sources need to be recompiled:
 /// - No test class files exist yet, OR
