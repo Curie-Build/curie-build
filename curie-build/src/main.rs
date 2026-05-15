@@ -35,6 +35,8 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Remove the target/ build directory
+    Clean {},
 }
 
 fn main() {
@@ -47,6 +49,7 @@ fn main() {
         Cmd::Run { no_docker, args } => {
             run::run(&cli.project, run::RunOptions { no_docker }, &args)
         }
+        Cmd::Clean {} => build::clean(&cli.project),
     };
 
     if let Err(e) = result {

@@ -636,3 +636,72 @@ mod tests {
         assert!(needs_repackage(&jar, &classes_dir));
     }
 }
+
+// ---------------------------------------------------------------------------
+// clean
+// ---------------------------------------------------------------------------
+
+pub fn clean(project_root: &Path) -> Result<()> {
+    let desc = descriptor::load(project_root)?;
+
+    println!(
+        "Cleaning {} v{}",
+        desc.application.name, desc.application.version
+    );
+
+    let target_dir = project_root.join("target");
+
+    if target_dir.exists() {
+        std::fs::remove_dir_all(&target_dir).with_context(|| {
+            format!("failed to remove {}", target_dir.display())
+        })?;
+        println!("  Target dir      removed");
+    } else {
+        println!("  Target dir      nothing to clean");
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod clean_tests {
+    use super::*;
+
+    #[test]
+    fn clean_removes_target_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Write a minimal curie.toml so descriptor::load succeeds.
+        std::fs::write(
+            root.join("curie.toml"),
+            "[application]\nname = \"test\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
+             [java]\nsourceCompatibility = \"21\"\n",
+        )
+        .unwrap();
+
+        let target = root.join("target");
+        std::fs::create_dir_all(target.join("classes")).unwrap();
+        std::fs::write(target.join("app.jar"), b"jar").unwrap();
+
+        clean(root).unwrap();
+
+        assert!(!root.join("target").exists());
+    }
+
+    #[test]
+    fn clean_no_target_dir_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        std::fs::write(
+            root.join("curie.toml"),
+            "[application]\nname = \"test\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
+             [java]\nsourceCompatibility = \"21\"\n",
+        )
+        .unwrap();
+
+        // No target/ directory — should succeed without error.
+        clean(root).unwrap();
+    }
+}
