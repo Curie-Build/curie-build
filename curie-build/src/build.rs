@@ -203,47 +203,50 @@ pub fn do_build(
 ) -> Result<BuildOutput> {
     let compiled = compile(project_root, desc)?;
 
-    // --- resolve / detect / validate mainClass (application projects only) ---
-    let resolved_main_class: Option<String> = if let Some(app) = &desc.application {
-        let main_class = match &app.main_class {
-            Some(declared) => {
-                // Declared — validate it exists and has a real main method.
-                validate_main_class(declared, &compiled.classes_dir, &compiled.dep_jars)?;
-                declared.clone()
-            }
-            None => {
-                // Not declared — auto-detect from sources + bytecode.
-                let detected = detect_main_class(
-                    &compiled.src_root,
-                    &compiled.sources,
-                    &compiled.classes_dir,
-                    &compiled.dep_jars,
-                )?;
-                println!("  Detected        mainClass = {}", detected);
-                detected
-            }
-        };
-        Some(main_class)
-    } else {
-        None // library
-    };
-
     // --- run tests before packaging ------------------------------------------
     test::run_tests(project_root, desc, &compiled.classes_dir, &compiled.dep_jars, None)?;
 
     // --- package (deterministic JAR, incremental) ----------------------------
-    if needs_repackage(&compiled.jar_path, &compiled.classes_dir) {
+    // mainClass detection/validation is deferred to here: it is only needed to
+    // write the JAR manifest, so we skip it entirely when packaging is up to date.
+    let resolved_main_class: Option<String> = if needs_repackage(&compiled.jar_path, &compiled.classes_dir) {
+        let main_class = if let Some(app) = &desc.application {
+            let mc = match &app.main_class {
+                Some(declared) => {
+                    validate_main_class(declared, &compiled.classes_dir, &compiled.dep_jars)?;
+                    declared.clone()
+                }
+                None => {
+                    let detected = detect_main_class(
+                        &compiled.src_root,
+                        &compiled.sources,
+                        &compiled.classes_dir,
+                        &compiled.dep_jars,
+                    )?;
+                    println!("  Detected        mainClass = {}", detected);
+                    detected
+                }
+            };
+            Some(mc)
+        } else {
+            None // library
+        };
+
         println!("  Package         {}", compiled.jar_name);
         write_deterministic_jar(
             &compiled.jar_path,
             &compiled.classes_dir,
-            resolved_main_class.as_deref(),
+            main_class.as_deref(),
             &compiled.dep_jars,
         )
         .context("failed to write JAR")?;
+
+        main_class
     } else {
         println!("  Package         up to date");
-    }
+        // mainClass not needed — JAR already has the correct manifest.
+        desc.application.as_ref().and_then(|a| a.main_class.clone())
+    };
 
     Ok(BuildOutput {
         jar: compiled.jar_path,
