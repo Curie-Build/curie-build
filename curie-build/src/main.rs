@@ -72,6 +72,8 @@ fn main() {
                     &desc,
                     &compiled.classes_dir,
                     &compiled.dep_jars,
+                    compiled.resources_dir.as_deref(),
+                    compiled.test_resources_dir.as_deref(),
                     filter.as_deref(),
                 )?;
                 Ok(())

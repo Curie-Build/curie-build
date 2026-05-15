@@ -14,9 +14,11 @@ const JUNIT_STANDALONE_COORD: &str =
 /// Compile test sources and run all tests via the JUnit Platform Console
 /// Standalone launcher.
 ///
-/// `classes_dir`  — directory containing already-compiled production classes.
-/// `dep_jars`     — resolved production dependency JARs.
-/// `filter`       — optional class-name pattern passed to `--include-classname`.
+/// `classes_dir`        — directory containing already-compiled production classes.
+/// `dep_jars`           — resolved production dependency JARs.
+/// `resources_dir`      — `src/main/resources` if it exists, otherwise `None`.
+/// `test_resources_dir` — `src/test/resources` if it exists, otherwise `None`.
+/// `filter`             — optional class-name pattern passed to `--include-classname`.
 ///
 /// Returns `Ok(())` when all tests pass (or when no test sources exist).
 /// Returns `Err` when compilation fails or any test fails.
@@ -25,6 +27,8 @@ pub fn run_tests(
     desc: &descriptor::Descriptor,
     classes_dir: &Path,
     dep_jars: &[PathBuf],
+    resources_dir: Option<&Path>,
+    test_resources_dir: Option<&Path>,
     filter: Option<&str>,
 ) -> Result<()> {
     // --- discover test sources -----------------------------------------------
@@ -77,9 +81,12 @@ pub fn run_tests(
         );
 
         // Classpath for compiling tests:
-        //   production classes + prod deps + test deps + standalone launcher
+        //   production classes + src/main/resources + prod deps + test deps + standalone launcher
         let mut compile_cp: Vec<PathBuf> = Vec::new();
         compile_cp.push(classes_dir.to_path_buf());
+        if let Some(rd) = resources_dir {
+            compile_cp.push(rd.to_path_buf());
+        }
         compile_cp.extend_from_slice(dep_jars);
         compile_cp.extend_from_slice(&test_dep_jars);
         compile_cp.push(standalone_jar.clone());
@@ -115,18 +122,25 @@ pub fn run_tests(
     // (it is a partial run and must not mark the full suite as passing).
     let stamp_path = project_root.join("target").join(".test-stamp");
 
-    if filter.is_none() && !needs_test_run(&test_sources, classes_dir, &toml_path, &stamp_path) {
+    if filter.is_none() && !needs_test_run(&test_sources, classes_dir, &toml_path, &stamp_path, resources_dir, test_resources_dir) {
         println!("  Tests           up to date");
         return Ok(());
     }
 
     // --- run tests -----------------------------------------------------------
     // Classpath for running tests:
-    //   test classes + production classes + prod deps + test deps
+    //   test classes + production classes + src/main/resources + src/test/resources
+    //   + prod deps + test deps
     // (standalone is provided as -jar, not on -cp)
     let mut run_cp: Vec<PathBuf> = Vec::new();
     run_cp.push(test_classes_dir.clone());
     run_cp.push(classes_dir.to_path_buf());
+    if let Some(rd) = resources_dir {
+        run_cp.push(rd.to_path_buf());
+    }
+    if let Some(trd) = test_resources_dir {
+        run_cp.push(trd.to_path_buf());
+    }
     run_cp.extend_from_slice(dep_jars);
     run_cp.extend_from_slice(&test_dep_jars);
 
@@ -263,6 +277,7 @@ fn resolve_standalone(extra_repos: &[curie_deps::repo::Repository]) -> Result<Pa
 /// - No stamp file exists (tests have never passed), OR
 /// - Any test source file is newer than the stamp, OR
 /// - Any production source file (compiled class) is newer than the stamp, OR
+/// - Any file in `src/main/resources` or `src/test/resources` is newer than the stamp, OR
 /// - curie.toml is newer than the stamp.
 ///
 /// The stamp (`target/.test-stamp`) is written after every successful
@@ -274,6 +289,8 @@ fn needs_test_run(
     classes_dir: &Path,
     toml_path: &Path,
     stamp_path: &Path,
+    resources_dir: Option<&Path>,
+    test_resources_dir: Option<&Path>,
 ) -> bool {
     let stamp = build::mtime(stamp_path);
     if stamp == SystemTime::UNIX_EPOCH {
@@ -291,6 +308,17 @@ fn needs_test_run(
     }
     if newest_mtime_in_dir(classes_dir) > stamp {
         return true;
+    }
+    // Changes to resource directories invalidate the stamp.
+    if let Some(rd) = resources_dir {
+        if newest_mtime_in_dir(rd) > stamp {
+            return true;
+        }
+    }
+    if let Some(trd) = test_resources_dir {
+        if newest_mtime_in_dir(trd) > stamp {
+            return true;
+        }
     }
     false
 }

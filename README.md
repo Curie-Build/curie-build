@@ -2,7 +2,7 @@
 
 > **Research project** — exploring whether a Rust-based build tool for Java is feasible as a drop-in replacement for Maven and Gradle.
 
-The Java build tooling landscape has been largely static for two decades. Maven arrived in 2004 and brought convention over configuration and a centralized repository — genuinely transformative at the time. Gradle followed in 2008 and replaced XML with a programmable DSL. Both tools have since accumulated layers of abstraction, plugins, and workarounds to accommodate workflows that simply did not exist when they were designed: containerised deployments, reproducible supply chains, polyglot monorepos, sub-second feedback loops in CI. The result is that a new Java project in 2025 routinely ships with hundreds of lines of build configuration, a Gradle daemon that needs occasional killing, and a dependency on a JVM just to compile another JVM project.
+The Java build tooling landscape has been largely static for two decades. Maven arrived in 2004 and brought convention over configuration and a centralized repository — genuinely transformative at the time. Gradle followed in 2008 and replaced XML with a programmable DSL. Both tools have since accumulated layers of abstraction, plugins, and workarounds to accommodate workflows that simply did not exist when they were designed: containerised deployments, reproducible supply chains, polyglot monorepos, sub-second feedback loops in CI. The result is that a new Java project in 2026 routinely ships with hundreds of lines of build configuration, a Gradle daemon that needs occasional killing, and additional scripts.
 
 There is space here for a tool that starts from the workflows that have become standard rather than grafting them on as plugins.
 

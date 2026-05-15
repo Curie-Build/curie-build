@@ -37,14 +37,22 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
     } else {
         let mut java = Command::new("java");
 
-        if !output.dep_jars.is_empty() {
-            let cp = build::classpath_string(&output.dep_jars);
-            java.arg("-cp").arg(format!(
-                "{}{}{}",
-                output.jar.to_string_lossy(),
-                if cfg!(windows) { ";" } else { ":" },
-                cp
-            ));
+        // When running with deps (can't use -jar), build a full classpath.
+        // Also include src/main/resources so resource loading via getResourceAsStream works.
+        let resources_dir = output.resources_dir.as_deref();
+        let has_deps = !output.dep_jars.is_empty();
+        let has_resources = resources_dir.map(|p| p.exists()).unwrap_or(false);
+
+        if has_deps || has_resources {
+            let mut cp_entries = Vec::new();
+            cp_entries.push(output.jar.clone());
+            if let Some(rd) = resources_dir {
+                if rd.exists() {
+                    cp_entries.push(rd.to_path_buf());
+                }
+            }
+            cp_entries.extend_from_slice(&output.dep_jars);
+            java.arg("-cp").arg(build::classpath_string(&cp_entries));
             java.arg(main_class);
         } else {
             java.arg("-jar").arg(&output.jar);

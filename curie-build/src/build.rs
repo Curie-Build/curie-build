@@ -28,6 +28,8 @@ pub struct BuildOutput {
     pub dep_jars: Vec<PathBuf>,
     /// Resolved (declared or auto-detected) main class; `None` for library projects.
     pub main_class: Option<String>,
+    /// `src/main/resources` if the directory exists, otherwise `None`.
+    pub resources_dir: Option<PathBuf>,
 }
 
 pub fn build(project_root: &Path, opts: BuildOptions) -> Result<()> {
@@ -84,6 +86,10 @@ pub struct CompileOutput {
     pub sources: Vec<PathBuf>,
     /// Resolved production dependency JARs (empty when no [dependencies] declared).
     pub dep_jars: Vec<PathBuf>,
+    /// `src/main/resources` if the directory exists, otherwise `None`.
+    pub resources_dir: Option<PathBuf>,
+    /// `src/test/resources` if the directory exists, otherwise `None`.
+    pub test_resources_dir: Option<PathBuf>,
 }
 
 /// Phase 1: resolve production deps and compile production sources.
@@ -149,6 +155,16 @@ pub fn compile(
 
     sources.sort();
 
+    // --- resource directories ------------------------------------------------
+    let resources_dir = {
+        let d = project_root.join("src").join("main").join("resources");
+        if d.exists() { Some(d) } else { None }
+    };
+    let test_resources_dir = {
+        let d = project_root.join("src").join("test").join("resources");
+        if d.exists() { Some(d) } else { None }
+    };
+
     // --- compile (incremental) -----------------------------------------------
     let toml_path = project_root.join("curie.toml");
     let compile_status = needs_recompile(&sources, &classes_dir, &toml_path);
@@ -167,9 +183,14 @@ pub fn compile(
             .arg("-d")
             .arg(&classes_dir);
 
-        if !dep_jars.is_empty() {
-            let cp = classpath_string(&dep_jars);
-            javac.arg("-cp").arg(&cp);
+        // Build compile classpath: src/main/resources + production deps.
+        let mut cp_entries: Vec<PathBuf> = Vec::new();
+        if let Some(ref rd) = resources_dir {
+            cp_entries.push(rd.clone());
+        }
+        cp_entries.extend_from_slice(&dep_jars);
+        if !cp_entries.is_empty() {
+            javac.arg("-cp").arg(classpath_string(&cp_entries));
         }
 
         for src in &sources {
@@ -193,7 +214,7 @@ pub fn compile(
     );
     let jar_path = output_dir.join(&jar_name);
 
-    Ok(CompileOutput { jar_path, jar_name, classes_dir, src_root, sources, dep_jars })
+    Ok(CompileOutput { jar_path, jar_name, classes_dir, src_root, sources, dep_jars, resources_dir, test_resources_dir })
 }
 
 /// Phase 2: compile production sources, run tests, then package JAR.
@@ -204,12 +225,21 @@ pub fn do_build(
     let compiled = compile(project_root, desc)?;
 
     // --- run tests before packaging ------------------------------------------
-    test::run_tests(project_root, desc, &compiled.classes_dir, &compiled.dep_jars, None)?;
+    test::run_tests(
+        project_root,
+        desc,
+        &compiled.classes_dir,
+        &compiled.dep_jars,
+        compiled.resources_dir.as_deref(),
+        compiled.test_resources_dir.as_deref(),
+        None,
+    )?;
 
     // --- package (deterministic JAR, incremental) ----------------------------
     // mainClass detection/validation is deferred to here: it is only needed to
     // write the JAR manifest, so we skip it entirely when packaging is up to date.
-    let resolved_main_class: Option<String> = if needs_repackage(&compiled.jar_path, &compiled.classes_dir) {
+    let resources_dir = compiled.resources_dir.as_deref();
+    let resolved_main_class: Option<String> = if needs_repackage(&compiled.jar_path, &compiled.classes_dir, resources_dir) {
         let main_class = if let Some(app) = &desc.application {
             let mc = match &app.main_class {
                 Some(declared) => {
@@ -236,6 +266,7 @@ pub fn do_build(
         write_deterministic_jar(
             &compiled.jar_path,
             &compiled.classes_dir,
+            resources_dir,
             main_class.as_deref(),
             &compiled.dep_jars,
         )
@@ -252,6 +283,7 @@ pub fn do_build(
         jar: compiled.jar_path,
         dep_jars: compiled.dep_jars,
         main_class: resolved_main_class,
+        resources_dir: compiled.resources_dir,
     })
 }
 
@@ -339,13 +371,18 @@ pub(crate) fn needs_recompile(
 }
 
 /// Returns `true` when the output JAR needs to be written: either it doesn't
-/// exist yet, or at least one class file is newer than the JAR.
-pub(crate) fn needs_repackage(jar_path: &Path, classes_dir: &Path) -> bool {
+/// exist yet, a class file is newer than the JAR, or a resource file is newer
+/// than the JAR.
+pub(crate) fn needs_repackage(
+    jar_path: &Path,
+    classes_dir: &Path,
+    resources_dir: Option<&Path>,
+) -> bool {
     let jar_mtime = mtime(jar_path);
     if jar_mtime == SystemTime::UNIX_EPOCH {
         return true;
     }
-    // The newest class must not be newer than the jar.
+    // Check class files.
     let newest_class = WalkDir::new(classes_dir)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -353,7 +390,23 @@ pub(crate) fn needs_repackage(jar_path: &Path, classes_dir: &Path) -> bool {
         .filter_map(|e| std::fs::metadata(e.path()).and_then(|m| m.modified()).ok())
         .max()
         .unwrap_or(SystemTime::UNIX_EPOCH);
-    newest_class > jar_mtime
+    if newest_class > jar_mtime {
+        return true;
+    }
+    // Check resource files (only when directory exists).
+    if let Some(rd) = resources_dir {
+        let newest_resource = WalkDir::new(rd)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter_map(|e| std::fs::metadata(e.path()).and_then(|m| m.modified()).ok())
+            .max()
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        if newest_resource > jar_mtime {
+            return true;
+        }
+    }
+    false
 }
 
 /// Build an OS-appropriate classpath string from a list of JAR paths.
@@ -377,10 +430,13 @@ fn manifest_class_path(dep_jars: &[PathBuf]) -> String {
 ///   • all timestamps set to EPOCH (2024-01-01 00:00:00 UTC)
 ///   • MANIFEST.MF written first (JAR spec requirement)
 ///   • Class-Path header added when dep_jars is non-empty
+///   • files from `resources_dir` (src/main/resources) embedded at their
+///     path relative to that directory, alongside the class files
 ///   • no extra tool-specific metadata that embeds build time
 fn write_deterministic_jar(
     jar_path: &Path,
     classes_dir: &Path,
+    resources_dir: Option<&Path>,
     main_class: Option<&str>,
     dep_jars: &[PathBuf],
 ) -> Result<()> {
@@ -422,33 +478,49 @@ fn write_deterministic_jar(
     zip.write_all(manifest.as_bytes())
         .context("failed to write MANIFEST.MF")?;
 
-    // --- collect all class-file entries, sort them --------------------------
-    let mut entries: Vec<(String, PathBuf)> = WalkDir::new(classes_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file() || e.file_type().is_dir())
-        .filter_map(|e| {
-            let rel = e
+    // --- collect entries from classes_dir and resources_dir -----------------
+    // We gather (zip_path, fs_path) pairs from both roots, deduplicate by
+    // zip_path (class files win over resources for the same path, matching
+    // Maven's behaviour), then sort and write.
+    let mut entries: std::collections::BTreeMap<String, PathBuf> = std::collections::BTreeMap::new();
+
+    for (root, label) in [
+        (Some(classes_dir), "classes"),
+        (resources_dir, "resources"),
+    ] {
+        let Some(root) = root else { continue };
+        for entry in WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file() || e.file_type().is_dir())
+        {
+            let rel = entry
                 .path()
-                .strip_prefix(classes_dir)
-                .ok()?
-                .to_string_lossy()
-                .replace('\\', "/"); // normalise on Windows
+                .strip_prefix(root)
+                .ok()
+                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
             if rel.is_empty() {
-                return None; // skip classes_dir root itself
+                continue; // skip the root dir itself
             }
-            let zip_path = if e.file_type().is_dir() {
+            let zip_path = if entry.file_type().is_dir() {
                 format!("{}/", rel)
             } else {
                 rel
             };
-            Some((zip_path, e.into_path()))
-        })
-        .collect();
+            // Skip META-INF from resources — we already wrote the manifest.
+            if zip_path.starts_with("META-INF") {
+                continue;
+            }
+            // Class files take precedence; skip if already inserted from classes.
+            if label == "resources" && entries.contains_key(&zip_path) {
+                continue;
+            }
+            entries.insert(zip_path, entry.into_path());
+        }
+    }
 
-    // Stable sort: directories before their contents, then lexicographic.
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-
+    // BTreeMap is already sorted lexicographically.
     for (zip_path, fs_path) in &entries {
         if zip_path.ends_with('/') {
             zip.start_file(zip_path, dir_options)
@@ -674,7 +746,7 @@ mod tests {
         let class_file = classes_dir.join("Foo.class");
         write_file(&class_file, b"bytecode");
 
-        assert!(needs_repackage(&jar, &classes_dir));
+        assert!(needs_repackage(&jar, &classes_dir, None));
     }
 
     #[test]
@@ -691,7 +763,7 @@ mod tests {
         write_file(&jar, b"jar");
         set_mtime(&jar, base + Duration::from_secs(5));
 
-        assert!(!needs_repackage(&jar, &classes_dir));
+        assert!(!needs_repackage(&jar, &classes_dir, None));
     }
 
     #[test]
@@ -708,7 +780,52 @@ mod tests {
         write_file(&class_file, b"bytecode");
         set_mtime(&class_file, base + Duration::from_secs(5));
 
-        assert!(needs_repackage(&jar, &classes_dir));
+        assert!(needs_repackage(&jar, &classes_dir, None));
+    }
+
+    #[test]
+    fn needs_repackage_true_when_resource_newer_than_jar() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(4_000_000);
+
+        let jar = dir.path().join("app.jar");
+        write_file(&jar, b"jar");
+        set_mtime(&jar, base);
+
+        let classes_dir = dir.path().join("classes");
+        let class_file = classes_dir.join("Foo.class");
+        write_file(&class_file, b"bytecode");
+        set_mtime(&class_file, base - Duration::from_secs(10));
+
+        let resources_dir = dir.path().join("resources");
+        let res_file = resources_dir.join("data.txt");
+        write_file(&res_file, b"resource");
+        // resource is newer than the jar
+        set_mtime(&res_file, base + Duration::from_secs(5));
+
+        assert!(needs_repackage(&jar, &classes_dir, Some(&resources_dir)));
+    }
+
+    #[test]
+    fn needs_repackage_false_when_jar_newer_than_classes_and_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(4_000_000);
+
+        let classes_dir = dir.path().join("classes");
+        let class_file = classes_dir.join("Foo.class");
+        write_file(&class_file, b"bytecode");
+        set_mtime(&class_file, base);
+
+        let resources_dir = dir.path().join("resources");
+        let res_file = resources_dir.join("data.txt");
+        write_file(&res_file, b"resource");
+        set_mtime(&res_file, base);
+
+        let jar = dir.path().join("app.jar");
+        write_file(&jar, b"jar");
+        set_mtime(&jar, base + Duration::from_secs(5));
+
+        assert!(!needs_repackage(&jar, &classes_dir, Some(&resources_dir)));
     }
 }
 
