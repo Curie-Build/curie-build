@@ -26,6 +26,8 @@ pub struct BuildOutput {
     pub jar: PathBuf,
     /// Resolved dependency JARs (empty when no [dependencies] declared).
     pub dep_jars: Vec<PathBuf>,
+    /// Resolved (declared or auto-detected) main class; `None` for library projects.
+    pub main_class: Option<String>,
 }
 
 pub fn build(project_root: &Path, opts: BuildOptions) -> Result<()> {
@@ -77,6 +79,9 @@ pub struct CompileOutput {
     pub jar_path: PathBuf,
     pub jar_name: String,
     pub classes_dir: PathBuf,
+    pub src_root: PathBuf,
+    /// All non-test production source files (sorted).
+    pub sources: Vec<PathBuf>,
     /// Resolved production dependency JARs (empty when no [dependencies] declared).
     pub dep_jars: Vec<PathBuf>,
 }
@@ -188,7 +193,7 @@ pub fn compile(
     );
     let jar_path = output_dir.join(&jar_name);
 
-    Ok(CompileOutput { jar_path, jar_name, classes_dir, dep_jars })
+    Ok(CompileOutput { jar_path, jar_name, classes_dir, src_root, sources, dep_jars })
 }
 
 /// Phase 2: compile production sources, run tests, then package JAR.
@@ -198,20 +203,53 @@ pub fn do_build(
 ) -> Result<BuildOutput> {
     let compiled = compile(project_root, desc)?;
 
+    // --- resolve / detect / validate mainClass (application projects only) ---
+    let resolved_main_class: Option<String> = if let Some(app) = &desc.application {
+        let main_class = match &app.main_class {
+            Some(declared) => {
+                // Declared — validate it exists and has a real main method.
+                validate_main_class(declared, &compiled.classes_dir, &compiled.dep_jars)?;
+                declared.clone()
+            }
+            None => {
+                // Not declared — auto-detect from sources + bytecode.
+                let detected = detect_main_class(
+                    &compiled.src_root,
+                    &compiled.sources,
+                    &compiled.classes_dir,
+                    &compiled.dep_jars,
+                )?;
+                println!("  Detected        mainClass = {}", detected);
+                detected
+            }
+        };
+        Some(main_class)
+    } else {
+        None // library
+    };
+
     // --- run tests before packaging ------------------------------------------
     test::run_tests(project_root, desc, &compiled.classes_dir, &compiled.dep_jars, None)?;
 
     // --- package (deterministic JAR, incremental) ----------------------------
     if needs_repackage(&compiled.jar_path, &compiled.classes_dir) {
         println!("  Package         {}", compiled.jar_name);
-        let main_class = desc.application.as_ref().map(|a| a.main_class.as_str());
-        write_deterministic_jar(&compiled.jar_path, &compiled.classes_dir, main_class, &compiled.dep_jars)
-            .context("failed to write JAR")?;
+        write_deterministic_jar(
+            &compiled.jar_path,
+            &compiled.classes_dir,
+            resolved_main_class.as_deref(),
+            &compiled.dep_jars,
+        )
+        .context("failed to write JAR")?;
     } else {
         println!("  Package         up to date");
     }
 
-    Ok(BuildOutput { jar: compiled.jar_path, dep_jars: compiled.dep_jars })
+    Ok(BuildOutput {
+        jar: compiled.jar_path,
+        dep_jars: compiled.dep_jars,
+        main_class: resolved_main_class,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -668,6 +706,223 @@ mod tests {
         set_mtime(&class_file, base + Duration::from_secs(5));
 
         assert!(needs_repackage(&jar, &classes_dir));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main-class detection and validation
+// ---------------------------------------------------------------------------
+
+/// Derive the fully-qualified class name from a `.java` source path relative
+/// to `src_root`.  For unnamed/compact source files (no top-level type
+/// declaration) the class name equals the file stem.
+fn fqcn_from_source(src_root: &Path, source: &Path) -> Option<String> {
+    let rel = source.strip_prefix(src_root).ok()?;
+    let without_ext = rel.with_extension("");
+    let fqcn = without_ext
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(".");
+    if fqcn.is_empty() { None } else { Some(fqcn) }
+}
+
+/// Returns `true` when the source text looks like a compact (unnamed-class)
+/// source file — heuristically: no top-level `class`, `interface`, `enum`, or
+/// `record` keyword outside comments.
+fn is_compact_source(text: &str) -> bool {
+    // Strip line comments then block comments.
+    let no_line: String = text
+        .lines()
+        .map(|l| if let Some(i) = l.find("//") { &l[..i] } else { l })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut stripped = String::with_capacity(no_line.len());
+    let mut chars = no_line.chars().peekable();
+    let mut in_block = false;
+    while let Some(ch) = chars.next() {
+        if in_block {
+            if ch == '*' && chars.peek() == Some(&'/') { chars.next(); in_block = false; }
+        } else if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next(); in_block = true;
+        } else {
+            stripped.push(ch);
+        }
+    }
+
+    for kw in ["class", "interface", "enum", "record"] {
+        let mut s = stripped.as_str();
+        while let Some(idx) = s.find(kw) {
+            let before = if idx == 0 { ' ' } else { s.as_bytes()[idx - 1] as char };
+            let after_idx = idx + kw.len();
+            let after = if after_idx >= s.len() { ' ' } else { s.as_bytes()[after_idx] as char };
+            if !before.is_alphanumeric() && before != '_' && !after.is_alphanumeric() && after != '_' {
+                return false;
+            }
+            s = &s[idx + kw.len()..];
+        }
+    }
+    true
+}
+
+/// Returns `true` when the source text contains any recognisable main-method
+/// signature under Java 21's flexible launch protocol.
+fn source_has_main(text: &str) -> bool {
+    // Compact / unnamed class: any `void main` is enough.
+    if is_compact_source(text) && text.contains("void main") {
+        return true;
+    }
+    // Static main (patterns 1 & 2).
+    let flat = text.replace(['\n', '\r'], " ");
+    if flat.contains("static") && flat.contains("void main") {
+        return true;
+    }
+    // Instance main (patterns 3 & 4): any remaining `void main`.
+    if flat.contains("void main") {
+        return true;
+    }
+    false
+}
+
+/// Returns `true` when `javap` output contains a recognisable main-method
+/// signature under Java 21's launch protocol.
+fn javap_output_has_main(javap_out: &str) -> bool {
+    for line in javap_out.lines() {
+        let l = line.trim();
+        // static void main(...) — with or without `public`
+        if l.contains("static") && l.contains("void main(") {
+            return true;
+        }
+        // instance void main(...) — non-private
+        if l.contains("void main(") && !l.contains("private") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Validate a declared or detected class name against compiled bytecode via
+/// `javap`.  Returns `Ok(())` if the class has a launchable main method.
+pub fn validate_main_class(
+    class_name: &str,
+    classes_dir: &Path,
+    dep_jars: &[PathBuf],
+) -> Result<()> {
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let mut cp = classes_dir.to_string_lossy().into_owned();
+    for jar in dep_jars {
+        cp.push_str(sep);
+        cp.push_str(&jar.to_string_lossy());
+    }
+
+    let output = Command::new("javap")
+        .arg("-p")
+        .arg("-classpath")
+        .arg(&cp)
+        .arg(class_name)
+        .output()
+        .context("failed to invoke javap — is a JDK installed?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "mainClass `{}` was not found in compiled output\n  {}",
+            class_name,
+            stderr.trim()
+        );
+    }
+
+    let javap_out = String::from_utf8_lossy(&output.stdout);
+    if !javap_output_has_main(&javap_out) {
+        anyhow::bail!(
+            "mainClass `{}` does not declare a launchable main method\n\
+             \n\
+             Expected one of:\n\
+               public static void main(String[] args)\n\
+               static void main()\n\
+               void main(String[] args)   (instance, non-private)\n\
+               void main()                (instance, non-private)",
+            class_name
+        );
+    }
+    Ok(())
+}
+
+/// Scan production sources for candidates then validate each against compiled
+/// bytecode.  Returns the single detected class name, or an error.
+pub fn detect_main_class(
+    src_root: &Path,
+    sources: &[PathBuf],
+    classes_dir: &Path,
+    dep_jars: &[PathBuf],
+) -> Result<String> {
+    // Phase 1: fast source heuristic.
+    let mut source_candidates: Vec<(String, PathBuf)> = Vec::new();
+    for source in sources {
+        let text = match std::fs::read_to_string(source) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if source_has_main(&text) {
+            if let Some(fqcn) = fqcn_from_source(src_root, source) {
+                source_candidates.push((fqcn, source.clone()));
+            }
+        }
+    }
+
+    if source_candidates.is_empty() {
+        anyhow::bail!(
+            "no main method found in any production source file\n\
+             \n\
+             Add a main method to one of your classes, or declare it explicitly:\n\
+             \n\
+               # curie.toml\n\
+               [application]\n\
+               mainClass = \"com.example.YourMainClass\""
+        );
+    }
+
+    // Phase 2: bytecode validation.
+    let mut valid: Vec<String> = Vec::new();
+    for (fqcn, _) in &source_candidates {
+        if validate_main_class(fqcn, classes_dir, dep_jars).is_ok() {
+            valid.push(fqcn.clone());
+        }
+    }
+
+    match valid.len() {
+        0 => anyhow::bail!(
+            "no launchable main method found after bytecode inspection\n\
+             \n\
+             Source candidates that did not pass bytecode validation:\n\
+             {}\n\
+             \n\
+             Declare the main class explicitly in curie.toml:\n\
+             \n\
+               [application]\n\
+               mainClass = \"com.example.YourMainClass\"",
+            source_candidates
+                .iter()
+                .map(|(n, _)| format!("  {}", n))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+        1 => Ok(valid.remove(0)),
+        _ => anyhow::bail!(
+            "multiple classes with a main method found — declare one explicitly in curie.toml:\n\
+             \n\
+             {}\n\
+             \n\
+               # curie.toml\n\
+               [application]\n\
+               mainClass = \"com.example.YourChosenMainClass\"",
+            valid
+                .iter()
+                .map(|n| format!("  {}", n))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
     }
 }
 

@@ -26,8 +26,10 @@ pub struct Descriptor {
 pub struct Application {
     pub name: String,
     pub version: String,
+    /// The fully-qualified main class name.  When omitted, curie will scan
+    /// production sources and compiled bytecode to detect it automatically.
     #[serde(rename = "mainClass")]
-    pub main_class: String,
+    pub main_class: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,22 +278,7 @@ fn format_parse_error(err: toml::de::Error, _source: &str, path: &Path) -> anyho
 
 /// Return a hint string for well-known error messages, or `None` if the
 /// error is already self-explanatory from the caret context alone.
-fn hint_for(message: &str, file_name: &str) -> Option<String> {
-    // missing field `mainClass`
-    if message.contains("missing field") && message.contains("mainClass") {
-        return Some(format!(
-            "[application] requires a `mainClass` field.\n\
-             \n\
-             \t  If this project has no main class, use [library] instead:\n\
-             \n\
-             \t    # {file_name}\n\
-             \t    [library]\n\
-             \t    name    = \"...\"\n\
-             \t    version = \"...\"",
-            file_name = file_name
-        ));
-    }
-
+fn hint_for(message: &str, _file_name: &str) -> Option<String> {
     // missing field `name` or `version` — could be in [application] or [library]
     if message.contains("missing field") && message.contains("name") {
         return Some(

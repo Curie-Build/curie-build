@@ -18,6 +18,12 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
 
     let output = build::do_build(project_root, &desc)?;
 
+    // main_class is always Some for application projects after do_build succeeds.
+    let main_class = output
+        .main_class
+        .as_deref()
+        .expect("do_build guarantees a resolved main_class for application projects");
+
     println!(
         "Running {} v{}",
         app.name, app.version
@@ -31,9 +37,6 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
     } else {
         let mut java = Command::new("java");
 
-        // When deps are present the JAR has a Class-Path manifest header that
-        // references libs/<name>.jar relative to the JAR location.  At dev-run
-        // time those libs live in ~/.m2, so we supply an explicit -cp instead.
         if !output.dep_jars.is_empty() {
             let cp = build::classpath_string(&output.dep_jars);
             java.arg("-cp").arg(format!(
@@ -42,8 +45,7 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
                 if cfg!(windows) { ";" } else { ":" },
                 cp
             ));
-            // Main class must be specified explicitly when using -cp (not -jar).
-            java.arg(&app.main_class);
+            java.arg(main_class);
         } else {
             java.arg("-jar").arg(&output.jar);
         }
