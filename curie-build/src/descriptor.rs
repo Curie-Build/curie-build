@@ -155,7 +155,7 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
 
     // Parse raw table first so we can detect optional section presence.
     let raw: toml::Value = toml::from_str(&content)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
+        .map_err(|e| format_parse_error(e, &content, &path))?;
 
     let docker_section_present = raw
         .as_table()
@@ -172,9 +172,10 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         .map(|t| t.contains_key("application"))
         .unwrap_or(false);
 
-    let mut descriptor: Descriptor = raw
-        .try_into()
-        .with_context(|| format!("failed to parse {}", path.display()))?;
+    // Deserialize directly from the source string so that toml retains span
+    // information and can produce contextual line/column error messages.
+    let mut descriptor: Descriptor = toml::from_str(&content)
+        .map_err(|e| format_parse_error(e, &content, &path))?;
 
     descriptor.docker.section_present = docker_section_present;
 
@@ -205,4 +206,110 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
 /// project root.
 pub fn docker_enabled(project_root: &Path, desc: &Descriptor) -> bool {
     desc.docker.section_present || project_root.join("Dockerfile").exists()
+}
+
+// ---------------------------------------------------------------------------
+// Parse error formatting
+// ---------------------------------------------------------------------------
+
+/// Reformat a `toml::de::Error` into a contextual error with:
+///   • a `failed to parse <path>` header
+///   • the TOML source line with a caret pointing at the problem
+///   • an optional actionable hint for common mistakes
+///
+/// `toml 0.8` already produces a multi-line display in the form:
+///
+///   TOML parse error at line N, column M
+///     |
+///   N | <source line>
+///     | ^^^^^^^^^^^^
+///   <message>
+///
+/// We keep that display but swap the generic first line for one that names
+/// the file, and append a hint where the error message matches a known
+/// pattern.
+fn format_parse_error(err: toml::de::Error, _source: &str, path: &Path) -> anyhow::Error {
+    let file_name = path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+
+    // toml's Display always starts with "TOML parse error at line N, column M".
+    // Replace that prefix with one that names the file, keeping the rest of
+    // the contextual block (the source line + caret) unchanged.
+    let raw_display = err.to_string();
+    let contextual = if let Some(rest) = raw_display.strip_prefix("TOML parse error at ") {
+        // `rest` is now "line N, column M\n  |\nN | <src>\n  | ^^^^\n<msg>"
+        // Reformat as "  --> <file>:N:M\n   |\n ..."
+        let reformatted = rest
+            .replacen("line ", "", 1)
+            .replacen(", column ", ":", 1);
+        format!(
+            "failed to parse {}\n\n  --> {}:{}",
+            path.display(),
+            file_name,
+            reformatted
+        )
+    } else {
+        format!("failed to parse {}\n\n{}", path.display(), raw_display)
+    };
+
+    // Extract the bare error message (last non-empty line of toml's output).
+    let message = raw_display
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+
+    // Append a hint for known, actionable error patterns.
+    let hint = hint_for(message, &file_name);
+
+    let full = if let Some(h) = hint {
+        format!("{}\n\n  hint: {}", contextual, h)
+    } else {
+        contextual
+    };
+
+    anyhow::anyhow!("{}", full)
+}
+
+/// Return a hint string for well-known error messages, or `None` if the
+/// error is already self-explanatory from the caret context alone.
+fn hint_for(message: &str, file_name: &str) -> Option<String> {
+    // missing field `mainClass`
+    if message.contains("missing field") && message.contains("mainClass") {
+        return Some(format!(
+            "[application] requires a `mainClass` field.\n\
+             \n\
+             \t  If this project has no main class, use [library] instead:\n\
+             \n\
+             \t    # {file_name}\n\
+             \t    [library]\n\
+             \t    name    = \"...\"\n\
+             \t    version = \"...\"",
+            file_name = file_name
+        ));
+    }
+
+    // missing field `name` or `version` — could be in [application] or [library]
+    if message.contains("missing field") && message.contains("name") {
+        return Some(
+            "both [application] and [library] require a `name` field.".to_string(),
+        );
+    }
+    if message.contains("missing field") && message.contains("version") {
+        return Some(
+            "both [application] and [library] require a `version` field.".to_string(),
+        );
+    }
+
+    // unknown field — suggest checking for typos
+    if message.contains("unknown field") {
+        return Some(
+            "check for typos in field names; see the README for all supported fields.".to_string(),
+        );
+    }
+
+    None
 }
