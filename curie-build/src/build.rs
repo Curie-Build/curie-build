@@ -210,7 +210,7 @@ pub fn compile(
 
     let jar_name = format!(
         "{}-{}.jar",
-        desc.project_name(), desc.project_version()
+        desc.project_name().replace(':', "-"), desc.project_version()
     );
     let jar_path = output_dir.join(&jar_name);
 
@@ -278,6 +278,16 @@ pub fn do_build(
         // mainClass not needed — JAR already has the correct manifest.
         desc.application.as_ref().and_then(|a| a.main_class.clone())
     };
+
+    // --- populate target/libs/ with dep JARs (hardlink preferred) ------------
+    // Always done for application projects so that `java -jar` works.
+    // target/libs/ is wiped and repopulated on every build to stay in sync
+    // with the current dep set (handles version bumps cleanly).
+    if !compiled.dep_jars.is_empty() && desc.application.is_some() {
+        let libs_dir = project_root.join("target").join("libs");
+        populate_libs_dir(&libs_dir, &compiled.dep_jars)
+            .context("failed to populate target/libs")?;
+    }
 
     Ok(BuildOutput {
         jar: compiled.jar_path,
@@ -414,15 +424,99 @@ pub fn classpath_string(jars: &[PathBuf]) -> String {
     join_classpath(jars)
 }
 
-/// Build the `Class-Path` manifest value: space-separated list of JAR
-/// filenames relative to the application JAR (they will sit in `libs/`).
+/// Build a properly folded `Class-Path` manifest header per the JAR spec.
+///
+/// The JAR/manifest spec (JVMS §5.3.4, java.util.jar.Manifest) requires:
+///   - No line in MANIFEST.MF may exceed 72 bytes (including the `\r\n`).
+///   - Continuation lines begin with a single space (which does not count
+///     as content); each continuation line is also limited to 72 bytes total.
+///
+/// So the first line holds 72 - len("Class-Path: ") - 2 = 58 bytes of value,
+/// and each subsequent line holds 72 - 1 (space) - 2 (\r\n) = 69 bytes.
 fn manifest_class_path(dep_jars: &[PathBuf]) -> String {
-    dep_jars
+    let value = dep_jars
         .iter()
         .filter_map(|p| p.file_name())
         .map(|f| format!("libs/{}", f.to_string_lossy()))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+
+    fold_manifest_header("Class-Path", &value)
+}
+
+/// Fold a manifest header value to lines of at most 72 bytes (including \r\n).
+/// Returns the complete header block including the trailing \r\n.
+fn fold_manifest_header(name: &str, value: &str) -> String {
+    // Bytes available on the first line: 72 total - name - ": " - "\r\n"
+    let first_capacity = 72usize.saturating_sub(name.len() + 2 + 2);
+    // Bytes available on continuation lines: 72 total - " " prefix - "\r\n"
+    let cont_capacity = 69usize;
+
+    let mut out = String::new();
+    let bytes = value.as_bytes();
+    let mut pos = 0usize;
+    let mut first = true;
+
+    while pos < bytes.len() {
+        let capacity = if first { first_capacity } else { cont_capacity };
+        // Advance by at most `capacity` bytes, but don't split a multi-byte
+        // UTF-8 sequence (walk back to a char boundary).
+        let mut end = (pos + capacity).min(bytes.len());
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        let chunk = &value[pos..end];
+        if first {
+            out.push_str(name);
+            out.push_str(": ");
+            first = false;
+        } else {
+            out.push(' '); // continuation line prefix
+        }
+        out.push_str(chunk);
+        out.push_str("\r\n");
+        pos = end;
+    }
+
+    // Edge case: empty value.
+    if first {
+        out.push_str(name);
+        out.push_str(": \r\n");
+    }
+
+    out
+}
+
+/// Populate `libs_dir` with all `dep_jars`, using hardlinks where possible
+/// and falling back to a full copy otherwise (e.g. cross-device).
+///
+/// The directory is wiped before population so that stale JARs from previous
+/// builds (version bumps, removed dependencies) are removed.
+fn populate_libs_dir(libs_dir: &Path, dep_jars: &[PathBuf]) -> Result<()> {
+    // Wipe and recreate for a clean slate.
+    if libs_dir.exists() {
+        std::fs::remove_dir_all(libs_dir)
+            .with_context(|| format!("failed to remove {}", libs_dir.display()))?;
+    }
+    std::fs::create_dir_all(libs_dir)
+        .with_context(|| format!("failed to create {}", libs_dir.display()))?;
+
+    for src in dep_jars {
+        let file_name = src
+            .file_name()
+            .with_context(|| format!("dep JAR has no filename: {}", src.display()))?;
+        let dst = libs_dir.join(file_name);
+
+        // Try hardlink first; fall back to copy on any error (cross-device,
+        // unsupported filesystem, permissions, etc.).
+        if std::fs::hard_link(src, &dst).is_err() {
+            std::fs::copy(src, &dst)
+                .with_context(|| format!("failed to copy {} to {}", src.display(), dst.display()))?;
+        }
+    }
+
+    println!("  Libs            {} JAR(s) → target/libs/", dep_jars.len());
+    Ok(())
 }
 
 /// Write a reproducible JAR:
@@ -464,12 +558,9 @@ fn write_deterministic_jar(
         manifest.push_str(&format!("Main-Class: {}\r\n", mc));
     }
     if !dep_jars.is_empty() {
-        // The JAR spec requires the Class-Path value to be folded at 72 bytes.
-        // For simplicity we write the full value and rely on the JVM's leniency.
-        manifest.push_str(&format!(
-            "Class-Path: {}\r\n",
-            manifest_class_path(dep_jars)
-        ));
+        // manifest_class_path() returns the fully-folded header block
+        // (including the trailing \r\n) per the JAR spec 72-byte line limit.
+        manifest.push_str(&manifest_class_path(dep_jars));
     }
     manifest.push_str("\r\n");
 
@@ -1112,5 +1203,47 @@ mod clean_tests {
 
         // No target/ directory — should succeed without error.
         clean(root).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Manifest folding tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fold_manifest_header_short_value_fits_on_one_line() {
+        // "Class-Path: libs/foo.jar\r\n" is 26 bytes — well under 72.
+        let result = fold_manifest_header("Class-Path", "libs/foo.jar");
+        assert_eq!(result, "Class-Path: libs/foo.jar\r\n");
+    }
+
+    #[test]
+    fn fold_manifest_header_long_value_is_folded() {
+        // Build a value that definitely exceeds 72 bytes on the first line.
+        let value = "libs/aaaa.jar libs/bbbb.jar libs/cccc.jar libs/dddd.jar libs/eeee.jar libs/ffff.jar";
+        let result = fold_manifest_header("Class-Path", value);
+        for line in result.split("\r\n").filter(|l| !l.is_empty()) {
+            assert!(
+                line.len() <= 70, // 70 bytes of content + \r\n = 72
+                "line exceeds 70 bytes: {:?} ({} bytes)",
+                line,
+                line.len()
+            );
+        }
+        // The folded result must round-trip: strip header name, join
+        // continuation lines, and get back the original value.
+        let reconstructed = result
+            .split("\r\n")
+            .filter(|l| !l.is_empty())
+            .enumerate()
+            .map(|(i, l)| if i == 0 { l["Class-Path: ".len()..].to_string() } else { l[1..].to_string() })
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(reconstructed, value);
+    }
+
+    #[test]
+    fn fold_manifest_header_empty_value() {
+        let result = fold_manifest_header("Class-Path", "");
+        assert_eq!(result, "Class-Path: \r\n");
     }
 }
