@@ -231,8 +231,8 @@ fn generate_dockerfile(
     if dep_filenames.is_empty() {
         lines.push("ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]".to_string());
     } else {
-        // Copy all dep JARs into /app/libs/ inside the image.
-        lines.push("COPY libs/ libs/".to_string());
+        // Copy dep JARs before the app JAR so this layer is cached across app-code changes.
+        lines.insert(2, "COPY libs/ libs/".to_string());
 
         // Build CLASSPATH: app.jar + libs/<dep>.jar entries, separated by ":"
         let mut cp_parts = vec!["app.jar".to_string()];
@@ -288,8 +288,8 @@ mod tests {
             content,
             "FROM eclipse-temurin:21-jre\n\
              WORKDIR /app\n\
-             COPY myapp-1.0.jar app.jar\n\
              COPY libs/ libs/\n\
+             COPY myapp-1.0.jar app.jar\n\
              ENV CLASSPATH=app.jar:libs/jackson-core-2.15.jar\n\
              ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]\n"
         );
