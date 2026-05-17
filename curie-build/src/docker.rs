@@ -1,4 +1,4 @@
-use crate::build::mtime;
+use crate::incremental::mtime;
 use crate::descriptor::Descriptor;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};

@@ -1,3 +1,4 @@
+use crate::jar::classpath_string;
 use crate::{build, descriptor, docker};
 use anyhow::{bail, Context, Result};
 use std::path::Path;
@@ -52,7 +53,7 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
                 }
             }
             cp_entries.extend_from_slice(&output.dep_jars);
-            java.arg("-cp").arg(build::classpath_string(&cp_entries));
+            java.arg("-cp").arg(classpath_string(&cp_entries));
             java.arg(main_class);
         } else {
             java.arg("-jar").arg(&output.jar);

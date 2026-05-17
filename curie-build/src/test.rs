@@ -1,3 +1,9 @@
+use crate::compile::{flat_package_src_dirs, flat_package_test_dirs, remove_stale_classes};
+use crate::incremental::{
+    javac_version, javac_version_stamp_path, mtime, newest_mtime, newest_mtime_in_dir,
+    oldest_mtime_in_dir, write_javac_version_stamp,
+};
+use crate::jar::classpath_string;
 use crate::{build, descriptor};
 use anyhow::{bail, Context, Result};
 use curie_deps::resolver::{resolve, ResolveOptions};
@@ -101,8 +107,8 @@ pub fn run_tests(
     // (root, sources_in_that_root) pairs for remove_stale_classes.
     let main_src = project_root.join("src").join("main").join("java");
     let test_src = project_root.join("src").join("test").join("java");
-    let flat_src_dirs = build::flat_package_src_dirs(project_root);
-    let flat_test_dirs = build::flat_package_test_dirs(project_root);
+    let flat_src_dirs = flat_package_src_dirs(project_root);
+    let flat_test_dirs = flat_package_test_dirs(project_root);
 
     // Collect sources belonging to each root.
     let mut root_source_pairs: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
@@ -127,7 +133,7 @@ pub fn run_tests(
         .map(|(r, s)| (r.as_path(), s.as_slice()))
         .collect();
 
-    let stale_removed = build::remove_stale_classes(&pairs_ref, &test_classes_dir)?;
+    let stale_removed = remove_stale_classes(&pairs_ref, &test_classes_dir)?;
 
     let needs_recompile = stale_removed > 0
         || needs_test_recompile(&test_sources, &test_classes_dir, &toml_path, &project_root.join("target"));
@@ -159,7 +165,7 @@ pub fn run_tests(
             .arg("-d")
             .arg(&test_classes_dir)
             .arg("-cp")
-            .arg(build::classpath_string(&compile_cp));
+            .arg(classpath_string(&compile_cp));
 
         for src in &test_sources {
             javac.arg(src);
@@ -174,8 +180,8 @@ pub fn run_tests(
         }
 
         // Record the JDK version used so that a future upgrade triggers a rebuild.
-        if let Ok(version) = build::javac_version() {
-            build::write_javac_version_stamp(&project_root.join("target"), &version)?;
+        if let Ok(version) = javac_version() {
+            write_javac_version_stamp(&project_root.join("target"), &version)?;
         }
     } else {
         println!("  Compile tests   up to date");
@@ -216,7 +222,7 @@ pub fn run_tests(
         .arg(&standalone_jar)
         .arg("execute")
         .arg("-cp")
-        .arg(build::classpath_string(&run_cp))
+        .arg(classpath_string(&run_cp))
         .arg("--scan-class-path");
 
     if let Some(f) = filter {
@@ -294,7 +300,7 @@ fn discover_test_sources(project_root: &Path) -> Vec<PathBuf> {
     }
 
     // --- Flat-package: co-located unit tests in src/<dot.pkg>/ ---------------
-    for pkg_dir in build::flat_package_src_dirs(project_root) {
+    for pkg_dir in flat_package_src_dirs(project_root) {
         let colocated: Vec<PathBuf> = WalkDir::new(&pkg_dir)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -310,7 +316,7 @@ fn discover_test_sources(project_root: &Path) -> Vec<PathBuf> {
     }
 
     // --- Flat-package: integration tests in tests/<dot.pkg>/ -----------------
-    for pkg_dir in build::flat_package_test_dirs(project_root) {
+    for pkg_dir in flat_package_test_dirs(project_root) {
         let integration: Vec<PathBuf> = WalkDir::new(&pkg_dir)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -391,18 +397,18 @@ fn needs_test_run(
     resources_dir: Option<&Path>,
     test_resources_dir: Option<&Path>,
 ) -> bool {
-    let stamp = build::mtime(stamp_path);
+    let stamp = mtime(stamp_path);
     if stamp == SystemTime::UNIX_EPOCH {
         return true; // no stamp yet
     }
-    if build::newest_mtime(test_sources) > stamp {
+    if newest_mtime(test_sources) > stamp {
         return true;
     }
-    if build::mtime(toml_path) > stamp {
+    if mtime(toml_path) > stamp {
         return true;
     }
     // Any change to production classes (recompile happened) invalidates the stamp.
-    if build::oldest_mtime_in_dir(classes_dir) == SystemTime::UNIX_EPOCH {
+    if oldest_mtime_in_dir(classes_dir) == SystemTime::UNIX_EPOCH {
         return true; // no classes — shouldn't happen here, but be safe
     }
     if newest_mtime_in_dir(classes_dir) > stamp {
@@ -422,17 +428,6 @@ fn needs_test_run(
     false
 }
 
-/// Return the newest `modified` time among all files under `dir`.
-fn newest_mtime_in_dir(dir: &Path) -> SystemTime {
-    WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter_map(|e| std::fs::metadata(e.path()).and_then(|m| m.modified()).ok())
-        .max()
-        .unwrap_or(SystemTime::UNIX_EPOCH)
-}
-
 /// Returns true when test sources need to be recompiled:
 /// - No test class files exist yet, OR
 /// - Any test source file is newer than the oldest test class file, OR
@@ -449,29 +444,19 @@ fn needs_test_recompile(
         return true;
     }
     // Check JDK fingerprint — a JDK upgrade should always trigger a recompile.
-    if let Ok(current) = build::javac_version() {
-        let stamp = build::javac_version_stamp_path(target_dir);
+    if let Ok(current) = javac_version() {
+        let stamp = javac_version_stamp_path(target_dir);
         let stored = std::fs::read_to_string(&stamp).unwrap_or_default();
         if stored.trim() != current.trim() {
             return true;
         }
     }
-    if build::newest_mtime(test_sources) > oldest_class {
+    if newest_mtime(test_sources) > oldest_class {
         return true;
     }
-    if build::mtime(toml_path) > oldest_class {
+    if mtime(toml_path) > oldest_class {
         return true;
     }
     false
 }
 
-/// Return the oldest `modified` time among all files under `dir`.
-fn oldest_mtime_in_dir(dir: &Path) -> SystemTime {
-    WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter_map(|e| std::fs::metadata(e.path()).and_then(|m| m.modified()).ok())
-        .min()
-        .unwrap_or(SystemTime::UNIX_EPOCH)
-}

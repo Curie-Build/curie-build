@@ -1,6 +1,10 @@
 mod build;
+mod compile;
 mod descriptor;
 mod docker;
+mod incremental;
+mod jar;
+mod main_class;
 mod run;
 mod test;
 
@@ -66,7 +70,7 @@ fn main() {
                 desc.project_name(),
                 desc.project_version()
             );
-            let compiled = build::compile(&cli.project, &desc).and_then(|compiled| {
+            let compiled = compile::compile(&cli.project, &desc).and_then(|compiled| {
                 test::run_tests(
                     &cli.project,
                     &desc,
