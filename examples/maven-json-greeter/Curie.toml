@@ -1,0 +1,13 @@
+[application]
+name    = "json-greeter"
+version = "0.1.0"
+mainClass = "com.example.JsonGreeter"
+
+[java]
+sourceCompatibility = "21"
+
+[dependencies]
+"com.fasterxml.jackson.core:jackson-databind" = "2.17.2"
+
+[docker]
+baseImage = "eclipse-temurin:21-jre-alpine"
