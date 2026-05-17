@@ -1,6 +1,6 @@
 use crate::compile::{flat_package_src_dirs, flat_package_test_dirs, remove_stale_classes};
 use crate::incremental::{
-    javac_version, javac_version_stamp_path, mtime, newest_mtime, oldest_mtime_in_dir,
+    javac_version, javac_version_stamp_path, mtime, newest_mtime, oldest_class_mtime_in_dir,
     write_javac_version_stamp, Inputs, Stamp,
 };
 use crate::jar::classpath_string;
@@ -421,7 +421,11 @@ fn needs_test_recompile(
     toml_path: &Path,
     target_dir: &Path,
 ) -> bool {
-    let oldest_class = oldest_mtime_in_dir(test_classes_dir);
+    // Use only .class files as the baseline — annotation processors (e.g. JMH)
+    // may write non-class resources (BenchmarkList, CompilerHints, …) into the
+    // same directory with older mtimes, which would otherwise make the oldest
+    // file appear older than the sources and force a recompile every time.
+    let oldest_class = oldest_class_mtime_in_dir(test_classes_dir);
     if oldest_class == SystemTime::UNIX_EPOCH {
         return true;
     }

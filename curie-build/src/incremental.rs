@@ -49,6 +49,28 @@ pub(crate) fn oldest_mtime_in_dir(dir: &Path) -> SystemTime {
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
+/// Return the oldest `modified` time among `.class` files under `dir`, or
+/// `SystemTime::UNIX_EPOCH` when no `.class` files exist or the directory
+/// doesn't exist.
+///
+/// Restricting to `.class` files avoids false positives when annotation
+/// processors (e.g. JMH) write non-class resources (BenchmarkList,
+/// CompilerHints, …) into the classes directory: those resource files may
+/// have an older mtime than the source files, causing the incremental check
+/// to always conclude that recompilation is needed.
+pub(crate) fn oldest_class_mtime_in_dir(dir: &Path) -> SystemTime {
+    WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_type().is_file()
+                && e.file_name().to_string_lossy().ends_with(".class")
+        })
+        .filter_map(|e| std::fs::metadata(e.path()).and_then(|m| m.modified()).ok())
+        .min()
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
 /// Return the newest `modified` time among all files under `dir`, or
 /// `SystemTime::UNIX_EPOCH` when the directory is empty or doesn't exist.
 pub(crate) fn newest_mtime_in_dir(dir: &Path) -> SystemTime {
@@ -341,6 +363,46 @@ mod tests {
         set_mtime(&new, base + Duration::from_secs(60));
 
         assert_eq!(oldest_mtime_in_dir(dir.path()), base);
+    }
+
+    // -- oldest_class_mtime_in_dir --------------------------------------------
+
+    #[test]
+    fn oldest_class_mtime_ignores_non_class_files() {
+        // Regression: annotation processors (e.g. JMH) place resource files
+        // such as META-INF/BenchmarkList into the classes directory.  If those
+        // files have an older mtime than the source files, the incremental
+        // check would always trigger a recompile.  oldest_class_mtime_in_dir
+        // must ignore non-.class files.
+        let dir = tempfile::tempdir().unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+
+        // A resource file written long before the source edit.
+        let resource = dir.path().join("BenchmarkList");
+        write_file(&resource, b"resource");
+        set_mtime(&resource, base);
+
+        // A .class file that is newer than the resource but whose mtime we
+        // want returned as the baseline.
+        let class = dir.path().join("Foo.class");
+        write_file(&class, b"class");
+        set_mtime(&class, base + Duration::from_secs(120));
+
+        // oldest_class_mtime_in_dir must return the .class mtime, not the
+        // resource mtime.
+        assert_eq!(
+            oldest_class_mtime_in_dir(dir.path()),
+            base + Duration::from_secs(120),
+        );
+    }
+
+    #[test]
+    fn oldest_class_mtime_no_classes_returns_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let resource = dir.path().join("BenchmarkList");
+        write_file(&resource, b"resource");
+        // No .class files — should behave as if the directory is empty.
+        assert_eq!(oldest_class_mtime_in_dir(dir.path()), SystemTime::UNIX_EPOCH);
     }
 
     // -- newest_mtime ---------------------------------------------------------
