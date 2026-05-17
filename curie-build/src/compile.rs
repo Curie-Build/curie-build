@@ -126,12 +126,7 @@ pub fn compile(
 
     // --- resolve production dependencies -------------------------------------
     // Parse [bom-imports] into GAVs once — reused for both prod and test.
-    let bom_gavs: Vec<curie_deps::Gav> = desc
-        .bom_imports
-        .iter()
-        .map(|(k, v)| curie_deps::Gav::from_key_version(k, v))
-        .collect::<anyhow::Result<_>>()
-        .context("invalid coordinate in [bom-imports]")?;
+    let bom_gavs = desc.prod_bom_gavs()?;
 
     let dep_jars = if desc.dependencies.is_empty() {
         // No deps to resolve. (BOMs without deps is a no-op for this phase.)

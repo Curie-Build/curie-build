@@ -156,6 +156,34 @@ impl Descriptor {
     pub fn image_ref(&self) -> String {
         format!("{}:{}", self.image_name(), self.image_tag())
     }
+
+    /// Parse `[bom-imports]` into a `Vec<curie_deps::Gav>`.
+    ///
+    /// These are the production BOM constraints used for both production and
+    /// (as a lower-priority base) test dependency resolution.
+    pub fn prod_bom_gavs(&self) -> anyhow::Result<Vec<curie_deps::Gav>> {
+        self.bom_imports
+            .iter()
+            .map(|(k, v)| curie_deps::Gav::from_key_version(k, v))
+            .collect::<anyhow::Result<_>>()
+            .context("invalid coordinate in [bom-imports]")
+    }
+
+    /// Parse `[bom-imports]` + `[test-bom-imports]` into a merged `Vec<curie_deps::Gav>`.
+    ///
+    /// Production BOMs come first (lower priority); test-only BOMs follow and
+    /// therefore win when two BOMs manage the same artifact.
+    pub fn test_bom_gavs(&self) -> anyhow::Result<Vec<curie_deps::Gav>> {
+        let mut v = self.prod_bom_gavs()?;
+        let test_only: Vec<curie_deps::Gav> = self
+            .test_bom_imports
+            .iter()
+            .map(|(k, ver)| curie_deps::Gav::from_key_version(k, ver))
+            .collect::<anyhow::Result<_>>()
+            .context("invalid coordinate in [test-bom-imports]")?;
+        v.extend(test_only);
+        Ok(v)
+    }
 }
 
 pub fn load(project_root: &Path) -> Result<Descriptor> {

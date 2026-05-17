@@ -1,7 +1,6 @@
 use crate::compile::{flat_package_src_dirs, flat_package_test_dirs, remove_stale_classes};
 use crate::incremental::{
-    javac_version, javac_version_stamp_path, mtime, newest_mtime, oldest_class_mtime_in_dir,
-    write_javac_version_stamp, Inputs, Stamp,
+    javac_version, needs_recompile, write_javac_version_stamp, Inputs, Stamp,
 };
 use crate::jar::classpath_string;
 use crate::{build, descriptor};
@@ -9,7 +8,6 @@ use anyhow::{bail, Context, Result};
 use curie_deps::resolver::{resolve, ResolveOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
 use walkdir::WalkDir;
 /// Version of JUnit Platform Console Standalone resolved from Maven Central.
 const JUNIT_STANDALONE_VERSION: &str = "6.0.3";
@@ -57,22 +55,7 @@ pub fn run_tests(
     // Build effective BOM list for test resolution:
     //   [bom-imports] (lower priority) + [test-bom-imports] (higher priority).
     // Later entries in the list win, so prod BOMs come first.
-    let test_bom_gavs: Vec<curie_deps::Gav> = {
-        let mut v: Vec<curie_deps::Gav> = desc
-            .bom_imports
-            .iter()
-            .map(|(k, ver)| curie_deps::Gav::from_key_version(k, ver))
-            .collect::<anyhow::Result<_>>()
-            .context("invalid coordinate in [bom-imports]")?;
-        let test_only: Vec<curie_deps::Gav> = desc
-            .test_bom_imports
-            .iter()
-            .map(|(k, ver)| curie_deps::Gav::from_key_version(k, ver))
-            .collect::<anyhow::Result<_>>()
-            .context("invalid coordinate in [test-bom-imports]")?;
-        v.extend(test_only);
-        v
-    };
+    let test_bom_gavs = desc.test_bom_gavs()?;
 
     let test_dep_jars = if desc.test_dependencies.is_empty() {
         vec![]
@@ -135,10 +118,10 @@ pub fn run_tests(
 
     let stale_removed = remove_stale_classes(&pairs_ref, &test_classes_dir)?;
 
-    let needs_recompile = stale_removed > 0
-        || needs_test_recompile(&test_sources, &test_classes_dir, &toml_path, &project_root.join("target"));
+    let needs_recompile_tests = stale_removed > 0
+        || needs_recompile(&test_sources, &test_classes_dir, &toml_path, &project_root.join("target")).needs_recompile();
 
-    if needs_recompile {
+    if needs_recompile_tests {
         let reason = if stale_removed > 0 { "  [stale classes removed]" } else { "" };
         println!(
             "  Compile tests   {} source file(s){}",
@@ -376,7 +359,7 @@ fn resolve_standalone(extra_repos: &[curie_deps::repo::Repository], offline: boo
 }
 
 // ---------------------------------------------------------------------------
-// Incremental compilation check for test sources
+// Incremental run check
 // ---------------------------------------------------------------------------
 
 /// Returns true when tests need to be executed.
@@ -407,40 +390,5 @@ fn needs_test_run(
         .add_dir_opt(resources_dir)
         .add_dir_opt(test_resources_dir);
     !Stamp::of(stamp_path).covers(&inputs)
-}
-
-/// Returns true when test sources need to be recompiled.
-///
-/// Uses `>=` so a same-second edit (on second-resolution filesystems)
-/// counts as out-of-date.  See the tie-breaking note in `incremental.rs`.
-fn needs_test_recompile(
-    test_sources: &[PathBuf],
-    test_classes_dir: &Path,
-    toml_path: &Path,
-    target_dir: &Path,
-) -> bool {
-    // Use only .class files as the baseline — annotation processors (e.g. JMH)
-    // may write non-class resources (BenchmarkList, CompilerHints, …) into the
-    // same directory with older mtimes, which would otherwise make the oldest
-    // file appear older than the sources and force a recompile every time.
-    let oldest_class = oldest_class_mtime_in_dir(test_classes_dir);
-    if oldest_class == SystemTime::UNIX_EPOCH {
-        return true;
-    }
-    // Check JDK fingerprint — a JDK upgrade should always trigger a recompile.
-    if let Ok(current) = javac_version() {
-        let stamp = javac_version_stamp_path(target_dir);
-        let stored = std::fs::read_to_string(&stamp).unwrap_or_default();
-        if stored.trim() != current.trim() {
-            return true;
-        }
-    }
-    if newest_mtime(test_sources) >= oldest_class {
-        return true;
-    }
-    if mtime(toml_path) >= oldest_class {
-        return true;
-    }
-    false
 }
 

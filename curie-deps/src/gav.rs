@@ -97,10 +97,7 @@ impl fmt::Display for Gav {
 }
 
 fn home_dir() -> Result<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))
+    dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))
 }
 
 #[cfg(test)]

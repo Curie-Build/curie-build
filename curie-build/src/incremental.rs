@@ -244,7 +244,7 @@ pub(crate) fn write_javac_version_stamp(target_dir: &Path, version: &str) -> Res
 
 /// Returns the reason a recompile is (or is not) required.
 ///
-/// Uses `>=` against `oldest_mtime_in_dir(classes_dir)` so a source edited
+/// Uses `>=` against `oldest_class_mtime_in_dir(classes_dir)` so a source edited
 /// in the same filesystem-second as the oldest class file is still treated
 /// as "changed".  See the module-level tie-breaking note.
 pub(crate) fn needs_recompile(
@@ -253,7 +253,11 @@ pub(crate) fn needs_recompile(
     toml_path: &Path,
     target_dir: &Path,
 ) -> CompileStatus {
-    let oldest_class = oldest_mtime_in_dir(classes_dir);
+    // Use only .class files as the baseline — annotation processors (e.g. JMH)
+    // may write non-class resources (BenchmarkList, CompilerHints, …) into the
+    // classes directory with older mtimes, which would otherwise make the oldest
+    // file appear older than the sources and force a recompile every time.
+    let oldest_class = oldest_class_mtime_in_dir(classes_dir);
     if oldest_class == SystemTime::UNIX_EPOCH {
         return CompileStatus::NoClassFiles;
     }
