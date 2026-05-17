@@ -29,9 +29,24 @@ pub struct BuildOutput {
     pub resources_dir: Option<PathBuf>,
 }
 
+/// Single-module entry point used by `curie build` outside a workspace.
+/// Loads the descriptor, then defers to [`build_with_desc`] with an empty
+/// extra-classpath.
 pub fn build(project_root: &Path, opts: BuildOptions) -> Result<()> {
     let desc = descriptor::load(project_root)?;
+    build_with_desc(project_root, &desc, opts, &[]).map(|_| ())
+}
 
+/// Run the full single-module pipeline for a project whose descriptor has
+/// already been loaded, with extra classpath entries appended to compile
+/// and test.  Used by [`build`] (with `&[]`) and by `workspace::build_all`
+/// (which threads each member's workspace-dep classpath here).
+pub fn build_with_desc(
+    project_root: &Path,
+    desc: &descriptor::Descriptor,
+    opts: BuildOptions,
+    extra_cp: &[PathBuf],
+) -> Result<BuildOutput> {
     println!(
         "Building {} v{}",
         desc.project_name(), desc.project_version()
@@ -44,7 +59,7 @@ pub fn build(project_root: &Path, opts: BuildOptions) -> Result<()> {
         );
     }
 
-    let output = do_build(project_root, &desc, opts.offline)?;
+    let output = do_build(project_root, desc, opts.offline, extra_cp)?;
 
     println!(
         "  Done            {}",
@@ -55,11 +70,11 @@ pub fn build(project_root: &Path, opts: BuildOptions) -> Result<()> {
             .display()
     );
 
-    if !desc.is_library() && !opts.no_docker && descriptor::docker_enabled(project_root, &desc) {
-        docker::docker_build(project_root, &desc, &output.jar, &output.dep_jars)?;
+    if !desc.is_library() && !opts.no_docker && descriptor::docker_enabled(project_root, desc) {
+        docker::docker_build(project_root, desc, &output.jar, &output.dep_jars)?;
     }
 
-    Ok(())
+    Ok(output)
 }
 
 /// Build the list of extra Maven repositories from the descriptor.
@@ -79,8 +94,9 @@ pub fn do_build(
     project_root: &Path,
     desc: &descriptor::Descriptor,
     offline: bool,
+    extra_cp: &[PathBuf],
 ) -> Result<BuildOutput> {
-    let compiled = compile(project_root, desc, offline)?;
+    let compiled = compile(project_root, desc, offline, extra_cp)?;
 
     // --- run tests before packaging ------------------------------------------
     test::run_tests(
@@ -92,6 +108,7 @@ pub fn do_build(
         compiled.test_resources_dir.as_deref(),
         None,
         offline,
+        extra_cp,
     )?;
 
     // --- package (deterministic JAR, incremental) ----------------------------

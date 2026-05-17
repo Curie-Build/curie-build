@@ -40,6 +40,32 @@ pub struct Descriptor {
     /// Keys are `"group:artifact"`, values are version strings.
     #[serde(rename = "test-bom-imports", default)]
     pub test_bom_imports: BTreeMap<String, String>,
+    /// `[workspace-dependencies]` table: intra-workspace references to other
+    /// members of the surrounding workspace.  Keys are arbitrary labels (the
+    /// declared member name is conventional); values point at the member
+    /// directory via `path = "..."` relative to *this* member's `Curie.toml`.
+    ///
+    /// Versions are deliberately not accepted here — the depended-on
+    /// member's own `[application]`/`[library]` version is authoritative.
+    /// A version field is rejected at load time.
+    #[serde(rename = "workspace-dependencies", default)]
+    pub workspace_dependencies: BTreeMap<String, WorkspaceDep>,
+}
+
+/// One entry in `[workspace-dependencies]`.
+///
+/// Today only `path` is supported.  In future this may grow `features`,
+/// optional flags, or scope hints — the struct shape leaves room for that
+/// without breaking the table key.
+#[derive(Debug, Deserialize, Clone)]
+pub struct WorkspaceDep {
+    pub path: String,
+    /// Catch-all so a user who tries `version = "1.0"` (a common Cargo
+    /// muscle-memory mistake) gets a precise rejection at load time.
+    /// Validated in [`load`]; never read after that.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,8 +313,29 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         if !descriptor.test_dependencies.is_empty() {
             bail!("workspace Curie.toml must not declare [test-dependencies] — declare them in each member");
         }
+        if !descriptor.workspace_dependencies.is_empty() {
+            bail!("workspace Curie.toml must not declare [workspace-dependencies] — declare them on each member");
+        }
         if docker_section_present {
             bail!("workspace Curie.toml must not declare [docker] — declare it on each application member");
+        }
+    }
+
+    // Validate: [workspace-dependencies] entries must be version-less.
+    // The depended-on member's own version is authoritative; declaring one
+    // here is almost certainly Cargo muscle-memory and would silently mask
+    // a version mismatch.
+    for (label, dep) in &descriptor.workspace_dependencies {
+        if dep.version.is_some() {
+            bail!(
+                "workspace-dependency \"{}\" must not declare a version — \
+                 the depended-on member's own version is used.  Remove the \
+                 `version` key from [workspace-dependencies.{}].",
+                label, label,
+            );
+        }
+        if dep.path.trim().is_empty() {
+            bail!("workspace-dependency \"{}\" has an empty `path`", label);
         }
     }
 
@@ -508,5 +555,66 @@ url = "https://example.com/m2"
     fn empty_descriptor_is_rejected() {
         let err = load_str("").unwrap_err().to_string();
         assert!(err.contains("must contain one of"), "got: {err}");
+    }
+
+    // -- workspace-dependencies ---------------------------------------------
+
+    #[test]
+    fn parse_workspace_dependencies_path_only() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+mainClass = "X"
+[workspace-dependencies]
+core = { path = "../core" }
+data = { path = "../sibling/data" }
+"#;
+        let d = load_str(toml).unwrap();
+        let core = d.workspace_dependencies.get("core").unwrap();
+        assert_eq!(core.path, "../core");
+        assert!(core.version.is_none());
+        assert_eq!(d.workspace_dependencies.len(), 2);
+    }
+
+    #[test]
+    fn workspace_dependency_with_version_is_rejected() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+mainClass = "X"
+[workspace-dependencies]
+core = { path = "../core", version = "1.0" }
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("must not declare a version"), "got: {err}");
+        assert!(err.contains("core"), "got: {err}");
+    }
+
+    #[test]
+    fn workspace_dependency_with_empty_path_is_rejected() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+mainClass = "X"
+[workspace-dependencies]
+core = { path = "" }
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("empty `path`"), "got: {err}");
+    }
+
+    #[test]
+    fn workspace_root_with_workspace_dependencies_is_rejected() {
+        let toml = r#"
+[workspace]
+members = ["a"]
+[workspace-dependencies]
+core = { path = "../core" }
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("[workspace-dependencies]"), "got: {err}");
     }
 }

@@ -1,0 +1,20 @@
+# string-utils-cli
+#
+# Demonstrates [workspace-dependencies]: a small CLI application that
+# depends on the sibling `string-utils` library member of this workspace.
+#
+# Because `string-utils = { path = "../string-utils" }` is a workspace
+# dep, no version is allowed here (and none is needed — the library's
+# own Curie.toml is authoritative).  Curie builds `string-utils` first,
+# then puts its compiled classes on this app's compile classpath.
+
+[application]
+name      = "string-utils-cli"
+version   = "0.1.0"
+mainClass = "com.example.cli.Main"
+
+[java]
+sourceCompatibility = "21"
+
+[workspace-dependencies]
+string-utils = { path = "../string-utils" }

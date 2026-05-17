@@ -35,6 +35,7 @@ pub fn run_tests(
     test_resources_dir: Option<&Path>,
     filter: Option<&str>,
     offline: bool,
+    extra_cp: &[PathBuf],
 ) -> Result<()> {
     // --- discover test sources -----------------------------------------------
     let test_sources = discover_test_sources(project_root);
@@ -137,6 +138,7 @@ pub fn run_tests(
         }
         compile_cp.extend_from_slice(dep_jars);
         compile_cp.extend_from_slice(&test_dep_jars);
+        compile_cp.extend_from_slice(extra_cp);
         compile_cp.push(standalone_jar.clone());
 
         let mut javac = Command::new("javac");
@@ -196,6 +198,7 @@ pub fn run_tests(
     }
     run_cp.extend_from_slice(dep_jars);
     run_cp.extend_from_slice(&test_dep_jars);
+    run_cp.extend_from_slice(extra_cp);
 
     println!();
 

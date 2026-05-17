@@ -91,10 +91,15 @@ pub fn pkg_prefix_for_src_root(src_root: &Path) -> String {
 
 /// Phase 1: resolve production deps and compile production sources.
 /// Does NOT run tests or package a JAR.
+///
+/// `extra_cp` carries additional classpath entries supplied by the caller
+/// (typically workspace-dep JARs + their transitive classpath in
+/// workspace builds).  Pass `&[]` for a self-contained single-module build.
 pub fn compile(
     project_root: &Path,
     desc: &descriptor::Descriptor,
     offline: bool,
+    extra_cp: &[PathBuf],
 ) -> Result<CompileOutput> {
     // --- source roots --------------------------------------------------------
     // Support two layouts simultaneously:
@@ -232,12 +237,15 @@ pub fn compile(
             .arg("-d")
             .arg(&classes_dir);
 
-        // Build compile classpath: src/main/resources + production deps.
+        // Build compile classpath: src/main/resources + production deps
+        // + caller-supplied entries (workspace-dep JARs and their
+        // transitive contributions).
         let mut cp_entries: Vec<PathBuf> = Vec::new();
         if let Some(ref rd) = resources_dir {
             cp_entries.push(rd.clone());
         }
         cp_entries.extend_from_slice(&dep_jars);
+        cp_entries.extend_from_slice(extra_cp);
         if !cp_entries.is_empty() {
             javac.arg("-cp").arg(classpath_string(&cp_entries));
         }

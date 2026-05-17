@@ -128,7 +128,7 @@ fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: 
         desc.project_name(),
         desc.project_version()
     );
-    let compiled = compile::compile(project, &desc, offline)?;
+    let compiled = compile::compile(project, &desc, offline, &[])?;
     test::run_tests(
         project,
         &desc,
@@ -138,6 +138,7 @@ fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: 
         compiled.test_resources_dir.as_deref(),
         filter,
         offline,
+        &[],
     )?;
     Ok(())
 }
