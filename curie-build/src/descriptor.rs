@@ -7,6 +7,10 @@ use std::path::Path;
 pub struct Descriptor {
     pub application: Option<Application>,
     pub library: Option<Library>,
+    /// `[workspace]` section — present in a workspace root `Curie.toml`.
+    /// Mutually exclusive with `[application]` / `[library]`: a workspace
+    /// root is not itself buildable; only its members are.
+    pub workspace: Option<Workspace>,
     #[serde(default)]
     pub java: Java,
     #[serde(default)]
@@ -52,6 +56,14 @@ pub struct Application {
 pub struct Library {
     pub name: String,
     pub version: String,
+}
+
+/// Workspace descriptor: lists member directories whose own `Curie.toml`
+/// files are buildable modules.  Member paths are relative to the workspace
+/// `Curie.toml` directory.
+#[derive(Debug, Deserialize)]
+pub struct Workspace {
+    pub members: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,25 +126,45 @@ impl Descriptor {
         self.library.is_some()
     }
 
-    /// Project name regardless of kind.
+    /// Returns true when this is a workspace root (has `[workspace]` section).
+    /// Workspace roots are not themselves buildable — they list member
+    /// directories whose own `Curie.toml` files are the buildable modules.
+    pub fn is_workspace(&self) -> bool {
+        self.workspace.is_some()
+    }
+
+    /// Short human-readable kind for `curie list` output and error messages.
+    pub fn kind(&self) -> &'static str {
+        if self.workspace.is_some() {
+            "workspace"
+        } else if self.library.is_some() {
+            "library"
+        } else {
+            "application"
+        }
+    }
+
+    /// Project name regardless of kind.  Panics on a workspace descriptor
+    /// (workspaces have no top-level name; callers must check
+    /// [`is_workspace`](Self::is_workspace) first).
     pub fn project_name(&self) -> &str {
         if let Some(lib) = &self.library {
             &lib.name
         } else if let Some(app) = &self.application {
             &app.name
         } else {
-            unreachable!("descriptor validation guarantees one of library/application is set")
+            unreachable!("descriptor validation guarantees one of library/application/workspace is set; project_name() must not be called on a workspace")
         }
     }
 
-    /// Project version regardless of kind.
+    /// Project version regardless of kind.  Panics on a workspace descriptor.
     pub fn project_version(&self) -> &str {
         if let Some(lib) = &self.library {
             &lib.version
         } else if let Some(app) = &self.application {
             &app.version
         } else {
-            unreachable!("descriptor validation guarantees one of library/application is set")
+            unreachable!("descriptor validation guarantees one of library/application/workspace is set; project_version() must not be called on a workspace")
         }
     }
 
@@ -218,6 +250,11 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         .map(|t| t.contains_key("application"))
         .unwrap_or(false);
 
+    let workspace_section_present = raw
+        .as_table()
+        .map(|t| t.contains_key("workspace"))
+        .unwrap_or(false);
+
     // Deserialize directly from the source string so that toml retains span
     // information and can produce contextual line/column error messages.
     let mut descriptor: Descriptor = toml::from_str(&content)
@@ -225,15 +262,34 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
 
     descriptor.docker.section_present = docker_section_present;
 
-    // Validate: exactly one of [application] or [library] must be present.
-    match (application_section_present, library_section_present) {
-        (false, false) => bail!(
-            "Curie.toml must contain either an [application] or [library] section"
-        ),
-        (true, true) => bail!(
-            "Curie.toml must not contain both [application] and [library] sections"
-        ),
-        _ => {}
+    // Validate: exactly one of [application], [library], or [workspace] must
+    // be present.  Mixing any two is meaningless: a workspace isn't itself
+    // buildable, and an application is not a library.
+    let kinds_present =
+        application_section_present as u8 + library_section_present as u8 + workspace_section_present as u8;
+    if kinds_present == 0 {
+        bail!(
+            "Curie.toml must contain one of [application], [library], or [workspace]"
+        );
+    }
+    if kinds_present > 1 {
+        bail!(
+            "Curie.toml must contain only one of [application], [library], or [workspace]"
+        );
+    }
+
+    // Validate: workspaces don't carry per-module config that has no clear
+    // inheritance story today.  These are deferred until inheritance lands.
+    if workspace_section_present {
+        if !descriptor.dependencies.is_empty() {
+            bail!("workspace Curie.toml must not declare [dependencies] — declare them in each member");
+        }
+        if !descriptor.test_dependencies.is_empty() {
+            bail!("workspace Curie.toml must not declare [test-dependencies] — declare them in each member");
+        }
+        if docker_section_present {
+            bail!("workspace Curie.toml must not declare [docker] — declare it on each application member");
+        }
     }
 
     // Validate: library projects cannot use Docker.
@@ -343,4 +399,114 @@ fn hint_for(message: &str, _file_name: &str) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write `content` as Curie.toml under a fresh tempdir and call `load`.
+    fn load_str(content: &str) -> Result<Descriptor> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Curie.toml"), content).unwrap();
+        load(dir.path())
+    }
+
+    #[test]
+    fn parse_workspace_with_members() {
+        let toml = r#"
+[workspace]
+members = ["a", "b", "nested/c"]
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.is_workspace());
+        assert_eq!(d.kind(), "workspace");
+        let ws = d.workspace.unwrap();
+        assert_eq!(ws.members, vec!["a", "b", "nested/c"]);
+    }
+
+    #[test]
+    fn parse_application_still_works() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(!d.is_workspace());
+        assert_eq!(d.kind(), "application");
+        assert_eq!(d.project_name(), "x");
+    }
+
+    #[test]
+    fn workspace_with_application_is_rejected() {
+        let toml = r#"
+[workspace]
+members = ["a"]
+[application]
+name = "x"
+version = "1.0"
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("only one"), "got: {err}");
+    }
+
+    #[test]
+    fn workspace_with_library_is_rejected() {
+        let toml = r#"
+[workspace]
+members = ["a"]
+[library]
+name = "x"
+version = "1.0"
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("only one"), "got: {err}");
+    }
+
+    #[test]
+    fn workspace_with_dependencies_is_rejected() {
+        let toml = r#"
+[workspace]
+members = ["a"]
+[dependencies]
+"com.example:foo" = "1.0"
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("[dependencies]"), "got: {err}");
+    }
+
+    #[test]
+    fn workspace_with_docker_is_rejected() {
+        let toml = r#"
+[workspace]
+members = ["a"]
+[docker]
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("[docker]"), "got: {err}");
+    }
+
+    #[test]
+    fn workspace_allows_shared_java_and_repositories() {
+        // These are inheritable config; workspace may carry them.
+        let toml = r#"
+[workspace]
+members = ["a"]
+[java]
+sourceCompatibility = "17"
+[[repositories]]
+name = "Nexus"
+url = "https://example.com/m2"
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.java.source_compatibility, "17");
+        assert_eq!(d.repositories.len(), 1);
+    }
+
+    #[test]
+    fn empty_descriptor_is_rejected() {
+        let err = load_str("").unwrap_err().to_string();
+        assert!(err.contains("must contain one of"), "got: {err}");
+    }
 }

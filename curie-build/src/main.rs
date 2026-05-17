@@ -7,6 +7,7 @@ mod jar;
 mod main_class;
 mod run;
 mod test;
+mod workspace;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -60,6 +61,8 @@ enum Cmd {
     },
     /// Remove the target/ build directory
     Clean {},
+    /// List the members of a workspace (project must be a workspace root)
+    List {},
 }
 
 fn main() {
@@ -101,6 +104,7 @@ fn main() {
             run::run(&cli.project, run::RunOptions { no_docker, offline }, &args)
         }
         Cmd::Clean {} => build::clean(&cli.project),
+        Cmd::List {} => workspace::list(&cli.project),
     };
 
     if let Err(e) = result {

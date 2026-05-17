@@ -1,0 +1,21 @@
+# Examples workspace.
+#
+# Each member directory is an independent Curie project (application or
+# library) with its own Curie.toml.  Run `curie list` here to enumerate
+# them; later steps will add `curie build` and `curie test` that fan out
+# across every member in dependency order.
+#
+# The pairs `<name>` / `maven-<name>` demonstrate the two source layouts
+# (flat-package vs Maven src/main/java/) side by side.
+
+[workspace]
+members = [
+    "hello-world",
+    "jackson-bom-greeter",
+    "json-greeter",
+    "string-utils",
+    "maven-hello-world",
+    "maven-jackson-bom-greeter",
+    "maven-json-greeter",
+    "maven-string-utils",
+]
