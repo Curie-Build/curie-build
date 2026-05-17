@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use curie_deps::repo::Repository;
 use std::path::{Path, PathBuf};
 
+#[derive(Copy, Clone)]
 pub struct BuildOptions {
     pub no_docker: bool,
     pub offline: bool,

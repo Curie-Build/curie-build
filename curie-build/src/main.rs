@@ -70,40 +70,37 @@ fn main() {
 
     let result = match cli.command {
         Cmd::Build { no_docker, offline } => {
-            build::build(&cli.project, build::BuildOptions { no_docker, offline })
+            let opts = build::BuildOptions { no_docker, offline };
+            if is_workspace(&cli.project) {
+                workspace::build_all(&cli.project, opts)
+            } else {
+                build::build(&cli.project, opts)
+            }
         }
         Cmd::Test { filter, offline } => {
-            let desc = match descriptor::load(&cli.project) {
-                Ok(d) => d,
-                Err(e) => {
-                    eprintln!("error: {:#}", e);
-                    std::process::exit(1);
-                }
-            };
-            println!(
-                "Testing {} v{}",
-                desc.project_name(),
-                desc.project_version()
-            );
-            let compiled = compile::compile(&cli.project, &desc, offline).and_then(|compiled| {
-                test::run_tests(
-                    &cli.project,
-                    &desc,
-                    &compiled.classes_dir,
-                    &compiled.dep_jars,
-                    compiled.resources_dir.as_deref(),
-                    compiled.test_resources_dir.as_deref(),
-                    filter.as_deref(),
-                    offline,
-                )?;
-                Ok(())
-            });
-            compiled
+            if is_workspace(&cli.project) {
+                workspace::test_all(&cli.project, filter.as_deref(), offline)
+            } else {
+                test_single_module(&cli.project, filter.as_deref(), offline)
+            }
         }
         Cmd::Run { no_docker, offline, args } => {
-            run::run(&cli.project, run::RunOptions { no_docker, offline }, &args)
+            if is_workspace(&cli.project) {
+                Err(anyhow::anyhow!(
+                    "`curie run` is ambiguous in a workspace.  Re-run with \
+                     --project <member> to choose one, e.g.\n  curie --project examples/hello-world run"
+                ))
+            } else {
+                run::run(&cli.project, run::RunOptions { no_docker, offline }, &args)
+            }
         }
-        Cmd::Clean {} => build::clean(&cli.project),
+        Cmd::Clean {} => {
+            if is_workspace(&cli.project) {
+                workspace::clean_all(&cli.project)
+            } else {
+                build::clean(&cli.project)
+            }
+        }
         Cmd::List {} => workspace::list(&cli.project),
     };
 
@@ -111,4 +108,36 @@ fn main() {
         eprintln!("error: {:#}", e);
         std::process::exit(1);
     }
+}
+
+/// True when `project` is a workspace root (its `Curie.toml` has
+/// `[workspace]`).  Returns false when the descriptor is missing or
+/// malformed — those errors are surfaced later by the command-specific
+/// path, with a more useful context message.
+fn is_workspace(project: &std::path::Path) -> bool {
+    descriptor::load(project).is_ok_and(|d| d.is_workspace())
+}
+
+/// Single-module variant of the test pipeline.  Lifted out of the inline
+/// match arm so the workspace fan-out can reuse the same conceptual flow
+/// (see `workspace::run_member_tests`) without duplicating the printf.
+fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: bool) -> anyhow::Result<()> {
+    let desc = descriptor::load(project)?;
+    println!(
+        "Testing {} v{}",
+        desc.project_name(),
+        desc.project_version()
+    );
+    let compiled = compile::compile(project, &desc, offline)?;
+    test::run_tests(
+        project,
+        &desc,
+        &compiled.classes_dir,
+        &compiled.dep_jars,
+        compiled.resources_dir.as_deref(),
+        compiled.test_resources_dir.as_deref(),
+        filter,
+        offline,
+    )?;
+    Ok(())
 }
