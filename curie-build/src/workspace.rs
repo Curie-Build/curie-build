@@ -11,10 +11,11 @@
 //! dependencies yet — those arrive in step 3 along with topo sort.
 
 use crate::descriptor::{self, Descriptor};
-use crate::{build, compile, test};
+use crate::{build, compile, jar, run, test};
 use anyhow::{bail, Context, Result};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// A single member of a workspace: its path on disk plus its loaded descriptor.
 #[derive(Debug)]
@@ -520,6 +521,144 @@ fn test_one_member(
         extra_cp,
     )?;
     Ok(compiled.dep_jars)
+}
+
+/// Build the target member + its transitive workspace-deps, then run the
+/// target's `main` with a runtime classpath that includes every upstream
+/// member's JAR and Maven deps.
+///
+/// This is what `curie run` becomes when the user invokes it inside a
+/// workspace member that has `[workspace-dependencies]`.  Members without
+/// any workspace-deps can still use the standalone `run::run` path.
+///
+/// Docker is intentionally not supported here yet — the generated
+/// Dockerfile only knows about `target/libs/`, which contains the
+/// member's own Maven deps but not its workspace-dep JARs.  Callers
+/// should fall through to the standalone run path for members without
+/// workspace-deps when Docker is enabled.
+pub fn run_one(
+    workspace_root: &Path,
+    member_index: usize,
+    opts: run::RunOptions,
+    args: &[String],
+) -> Result<()> {
+    let ws = load(workspace_root)?;
+    let target = &ws.members[member_index];
+
+    if target.descriptor.is_library() {
+        bail!("`curie run` is not supported for library projects");
+    }
+    if !opts.no_docker && descriptor::docker_enabled(&target.path, &target.descriptor) {
+        bail!(
+            "Docker support for `curie run` on a workspace member with \
+             [workspace-dependencies] is not yet implemented.  Re-run \
+             with --no-docker, or remove [workspace-dependencies] and \
+             use the standalone path."
+        );
+    }
+
+    // ---- build phase ------------------------------------------------------
+    let subset = transitive_closure(&ws, member_index);
+    let build_opts = build::BuildOptions { no_docker: opts.no_docker, offline: opts.offline };
+
+    let n = subset.len();
+    println!(
+        "Workspace {} run ({} member{} to build)",
+        ws.root.display(),
+        n,
+        if n == 1 { "" } else { "s" },
+    );
+    println!();
+
+    let mut artifacts: std::collections::HashMap<usize, MemberArtifact> =
+        std::collections::HashMap::with_capacity(n);
+    // BuildOutput per built member, keyed by topo index.  Needed in the
+    // run phase to assemble the runtime classpath (jar + dep_jars +
+    // resources_dir) without re-walking the descriptors.
+    let mut outputs: std::collections::HashMap<usize, build::BuildOutput> =
+        std::collections::HashMap::with_capacity(n);
+
+    for (pos, &idx) in subset.iter().enumerate() {
+        let m = &ws.members[idx];
+        println!("[{}/{}] {}", pos + 1, n, m.declared);
+        let extra_cp = collect_dep_classpath(&m.workspace_deps, &artifacts);
+        let output = build::build_with_desc(&m.path, &m.descriptor, build_opts, &extra_cp)
+            .with_context(|| format!("workspace member \"{}\" failed", m.declared))?;
+
+        let classes_dir = m.path.join("target").join("classes");
+        let mut contribution = extra_cp;
+        for j in output.dep_jars.iter().cloned() {
+            contribution.push(j);
+        }
+        artifacts.insert(idx, MemberArtifact { classes_dir, classpath_contribution: contribution });
+        outputs.insert(idx, output);
+        println!();
+    }
+
+    // ---- run phase --------------------------------------------------------
+    let target_output = &outputs[&member_index];
+    let main_class = target_output
+        .main_class
+        .as_deref()
+        .expect("application member should have resolved main_class after build");
+
+    println!(
+        "Running {} v{}",
+        target.descriptor.project_name(),
+        target.descriptor.project_version(),
+    );
+    println!();
+
+    // Assemble the runtime classpath.  Use JARs (not classes_dir) for
+    // upstream members so their packaged resources are visible.  Order
+    // mirrors a Java person's mental model: target first, then its own
+    // deps, then upstream members in topo order with their deps.  Path
+    // dedup is order-preserving.
+    let mut runtime_cp: Vec<PathBuf> = Vec::new();
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let push = |cp: &mut Vec<PathBuf>, seen: &mut std::collections::HashSet<PathBuf>, p: PathBuf| {
+        if seen.insert(p.clone()) {
+            cp.push(p);
+        }
+    };
+
+    // Target's own JAR + resources + Maven deps.
+    push(&mut runtime_cp, &mut seen, target_output.jar.clone());
+    if let Some(rd) = &target_output.resources_dir {
+        if rd.exists() {
+            push(&mut runtime_cp, &mut seen, rd.clone());
+        }
+    }
+    for j in &target_output.dep_jars {
+        push(&mut runtime_cp, &mut seen, j.clone());
+    }
+
+    // Every transitive upstream member (subset minus the target itself).
+    for &idx in &subset {
+        if idx == member_index {
+            continue;
+        }
+        let out = &outputs[&idx];
+        push(&mut runtime_cp, &mut seen, out.jar.clone());
+        for j in &out.dep_jars {
+            push(&mut runtime_cp, &mut seen, j.clone());
+        }
+    }
+
+    let mut java = Command::new("java");
+    java.arg("-cp").arg(jar::classpath_string(&runtime_cp));
+    java.arg(main_class);
+    for a in args {
+        java.arg(a);
+    }
+    let status = java
+        .status()
+        .context("failed to invoke java — is a JRE installed?")?;
+    if !status.success() {
+        let code = status.code().unwrap_or(1);
+        std::process::exit(code);
+    }
+    Ok(())
 }
 
 /// Fan `curie clean` out over every member.  Order doesn't matter for

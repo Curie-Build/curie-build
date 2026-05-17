@@ -112,25 +112,21 @@ fn main() {
                  --project <member> to choose one, e.g.\n  \
                  curie --project examples/hello-world run"
             )),
-            workspace::WorkspaceContext::WorkspaceMember { .. } => {
-                // Runtime classpath threading for workspace-deps is not
-                // implemented yet.  A member without workspace-deps can
-                // still run via the standalone path; a member with them
-                // would need this code to assemble the dep JARs.
+            workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+                let opts = run::RunOptions { no_docker, offline };
+                // Members without [workspace-dependencies] don't need
+                // the workspace-aware runtime classpath; the standalone
+                // path also keeps Docker working for them.  Members WITH
+                // workspace-deps go through run_one so their upstream
+                // members' JARs land on -cp.
                 let has_ws_deps = match descriptor::load(&cli.project) {
                     Ok(d) => !d.workspace_dependencies.is_empty(),
                     Err(_) => false,
                 };
                 if has_ws_deps {
-                    Err(anyhow::anyhow!(
-                        "`curie run` inside a workspace member that has \
-                         [workspace-dependencies] is not yet supported — \
-                         the runtime classpath wiring is on the roadmap.  \
-                         For now, run via `java -cp` with the dep classes \
-                         dirs after building."
-                    ))
+                    workspace::run_one(workspace_root, *member_index, opts, &args)
                 } else {
-                    run::run(&cli.project, run::RunOptions { no_docker, offline }, &args)
+                    run::run(&cli.project, opts, &args)
                 }
             }
             workspace::WorkspaceContext::Standalone(project) => {
