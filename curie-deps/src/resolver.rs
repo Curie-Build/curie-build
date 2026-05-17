@@ -35,6 +35,7 @@ use crate::gav::Gav;
 use crate::pom::{self, BomRef, Pom};
 use crate::repo::{default_repositories, Repository};
 use anyhow::{bail, Context, Result};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -43,8 +44,8 @@ use std::time::Duration;
 pub struct ResolveOptions {
     /// Additional repositories to check after Maven Central.
     pub extra_repos: Vec<Repository>,
-    /// When `true`, print progress to stdout.
-    pub verbose: bool,
+    /// When `true`, show a progress bar on stderr while downloading JARs.
+    pub progress: bool,
     /// BOMs to import, in ascending priority order (later index wins).
     /// Each entry is a GAV for a POM-packaged artifact whose
     /// `<dependencyManagement>` block provides version constraints.
@@ -58,7 +59,7 @@ impl Default for ResolveOptions {
     fn default() -> Self {
         ResolveOptions {
             extra_repos: vec![],
-            verbose: true,
+            progress: true,
             bom_imports: vec![],
             offline: false,
         }
@@ -88,7 +89,7 @@ fn merge_parent_chain(
             version: parent_ref.version.clone(),
         };
 
-        let pom_path = match ensure_artifact(&parent_gav, repos, client, ArtifactKind::Pom, offline) {
+        let pom_path = match ensure_artifact(&parent_gav, repos, client, ArtifactKind::Pom, offline, None) {
             Ok(p) => p,
             Err(_) => break,
         };
@@ -169,7 +170,7 @@ fn resolve_boms(
                     continue; // already processed — prevent cycles
                 }
 
-                let pom_path = ensure_artifact(&gav, repos, client, ArtifactKind::Pom, offline)
+                let pom_path = ensure_artifact(&gav, repos, client, ArtifactKind::Pom, offline, None)
                     .with_context(|| format!("failed to fetch BOM POM for {}", gav))?;
                 let xml = std::fs::read_to_string(&pom_path)
                     .with_context(|| format!("failed to read BOM POM {}", pom_path.display()))?;
@@ -310,7 +311,7 @@ pub fn resolve(
         ordered_gavs.push(gav.clone());
 
         // Fetch POM to expand transitive dependencies.
-        match ensure_artifact(&gav, &repos, &client, ArtifactKind::Pom, opts.offline) {
+        match ensure_artifact(&gav, &repos, &client, ArtifactKind::Pom, opts.offline, None) {
             Ok(pom_path) => {
                 let xml = std::fs::read_to_string(&pom_path)
                     .with_context(|| format!("failed to read POM {}", pom_path.display()))?;
@@ -370,9 +371,32 @@ pub fn resolve(
         return Ok(vec![]);
     }
 
-    if opts.verbose {
-        println!("  Resolving {} artifact(s) ...", n);
-    }
+    // Count how many JARs are not yet in the local cache — only those will
+    // be downloaded and shown on the progress bar.
+    let missing: u64 = ordered_gavs
+        .iter()
+        .filter(|g| {
+            g.local_cache_path()
+                .map(|p| !p.exists())
+                .unwrap_or(false)
+        })
+        .count() as u64;
+
+    // Build a progress bar only when there is something to download and the
+    // caller opted in to progress reporting.
+    let pb: Option<ProgressBar> = if opts.progress && missing > 0 {
+        let bar = ProgressBar::new(missing);
+        bar.set_style(
+            ProgressStyle::with_template(
+                "  Downloading     [{bar:40.cyan/blue}] {pos}/{len}  {msg}",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
+        );
+        Some(bar)
+    } else {
+        None
+    };
 
     // Shared atomic index into `ordered_gavs`.
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -384,19 +408,30 @@ pub fn resolve(
     let thread_count = PARALLEL_DOWNLOADS.min(n);
     let mut per_thread: Vec<Vec<(usize, Result<PathBuf>)>> = Vec::new();
 
+    // Borrow shared data as refs so each spawned closure can capture them
+    // without moving.  `thread::scope` guarantees these refs are valid for
+    // the lifetime of all spawned threads.
+    let next_ref = &next;
+    let gavs_ref = &ordered_gavs;
+    let repos_ref = &repos;
+    let client_ref = &client;
+    let offline = opts.offline;
+
     std::thread::scope(|s| -> Result<()> {
         let handles: Vec<_> = (0..thread_count)
             .map(|_| {
-                s.spawn(|| -> Vec<(usize, Result<PathBuf>)> {
+                // Clone the ProgressBar handle — all clones refer to the same bar.
+                let pb = pb.clone();
+                s.spawn(move || -> Vec<(usize, Result<PathBuf>)> {
                     let mut local = Vec::new();
                     loop {
-                        let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let idx = next_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if idx >= n {
                             break;
                         }
-                        let gav = &ordered_gavs[idx];
+                        let gav = &gavs_ref[idx];
                         let result =
-                            ensure_artifact(gav, &repos, &client, ArtifactKind::Jar, opts.offline);
+                            ensure_artifact(gav, repos_ref, client_ref, ArtifactKind::Jar, offline, pb.as_ref());
                         local.push((idx, result));
                     }
                     local
@@ -410,6 +445,11 @@ pub fn resolve(
         Ok(())
     })?;
 
+    // Downloads complete — clear the progress bar so the line disappears.
+    if let Some(bar) = pb {
+        bar.finish_and_clear();
+    }
+
     for thread_results in per_thread {
         for (idx, result) in thread_results {
             jar_results[idx] = Some(result);
@@ -421,7 +461,7 @@ pub fn resolve(
     for (idx, slot) in jar_results.into_iter().enumerate() {
         let path = slot
             .unwrap_or_else(|| bail!("internal: no result for index {}", idx))
-            .with_context(|| format!("failed to download JAR for {}", ordered_gavs[idx]))?;
+            .with_context(|| format!("failed to download JAR for {}", gavs_ref[idx]))?;
         ordered_jars.push(path);
     }
 
@@ -505,12 +545,18 @@ enum ArtifactKind {
 ///
 /// When `offline` is `true`, any cache miss is an immediate error — no HTTP
 /// call is attempted.
+///
+/// `pb` is an optional progress bar handle.  When provided and the artifact
+/// is not already cached (i.e., a real download happens), the bar's message
+/// is updated to the artifact coordinate before the download starts, and the
+/// bar is incremented by one on success.
 fn ensure_artifact(
     gav: &Gav,
     repos: &[Repository],
     client: &reqwest::blocking::Client,
     kind: ArtifactKind,
     offline: bool,
+    pb: Option<&ProgressBar>,
 ) -> Result<PathBuf> {
     let local_path = match kind {
         ArtifactKind::Jar => gav.local_cache_path()?,
@@ -538,12 +584,22 @@ fn ensure_artifact(
             .with_context(|| format!("failed to create cache dir {}", parent.display()))?;
     }
 
+    // Show which artifact is being fetched.
+    if let Some(bar) = pb {
+        bar.set_message(gav.notation());
+    }
+
     // Try each repository in order.
     let mut last_err: Option<anyhow::Error> = None;
     for repo in repos {
         let url = repo.artifact_url(&relative);
         match download(client, &url, &local_path) {
-            Ok(()) => return Ok(local_path),
+            Ok(()) => {
+                if let Some(bar) = pb {
+                    bar.inc(1);
+                }
+                return Ok(local_path);
+            }
             Err(e) => {
                 last_err = Some(e);
             }
@@ -863,7 +919,7 @@ mod tests {
         // cache miss produces an immediate error rather than a network attempt.
         let opts = ResolveOptions {
             extra_repos: vec![],
-            verbose: false,
+            progress: false,
             bom_imports,
             offline: true,
         };

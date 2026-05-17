@@ -147,7 +147,7 @@ pub fn compile(
             &pairs,
             &ResolveOptions {
                 extra_repos: extra_repos(desc),
-                verbose: false,
+                progress: true,
                 bom_imports: bom_gavs.clone(),
                 offline,
             },

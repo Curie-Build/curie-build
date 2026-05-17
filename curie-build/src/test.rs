@@ -89,7 +89,7 @@ pub fn run_tests(
             &pairs,
             &ResolveOptions {
                 extra_repos: extra_repos.clone(),
-                verbose: false,
+                progress: true,
                 bom_imports: test_bom_gavs,
                 offline,
             },
@@ -350,7 +350,7 @@ fn resolve_standalone(extra_repos: &[curie_deps::repo::Repository], offline: boo
         &[(JUNIT_STANDALONE_COORD, JUNIT_STANDALONE_VERSION)],
         &ResolveOptions {
             extra_repos: extra_repos.to_vec(),
-            verbose: false,
+            progress: false,
             bom_imports: vec![],
             offline,
         },
