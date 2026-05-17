@@ -1,7 +1,7 @@
 use crate::compile::{flat_package_src_dirs, flat_package_test_dirs, remove_stale_classes};
 use crate::incremental::{
-    javac_version, javac_version_stamp_path, mtime, newest_mtime, newest_mtime_in_dir,
-    oldest_mtime_in_dir, write_javac_version_stamp,
+    javac_version, javac_version_stamp_path, mtime, newest_mtime, oldest_mtime_in_dir,
+    write_javac_version_stamp, Inputs, Stamp,
 };
 use crate::jar::classpath_string;
 use crate::{build, descriptor};
@@ -378,12 +378,13 @@ fn resolve_standalone(extra_repos: &[curie_deps::repo::Repository]) -> Result<Pa
 // Incremental compilation check for test sources
 // ---------------------------------------------------------------------------
 
-/// Returns true when tests need to be executed:
-/// - No stamp file exists (tests have never passed), OR
-/// - Any test source file is newer than the stamp, OR
-/// - Any production source file (compiled class) is newer than the stamp, OR
-/// - Any file in `src/main/resources` or `src/test/resources` is newer than the stamp, OR
-/// - curie.toml is newer than the stamp.
+/// Returns true when tests need to be executed.
+///
+/// Inputs that invalidate the stamp:
+///   - test sources
+///   - curie.toml
+///   - any file under `target/classes` (production recompile happened)
+///   - any file under `src/main/resources` or `src/test/resources`
 ///
 /// The stamp (`target/.test-stamp`) is written after every successful
 /// full test run.  A filtered run (`curie test --filter`) never writes the
@@ -397,42 +398,20 @@ fn needs_test_run(
     resources_dir: Option<&Path>,
     test_resources_dir: Option<&Path>,
 ) -> bool {
-    let stamp = mtime(stamp_path);
-    if stamp == SystemTime::UNIX_EPOCH {
-        return true; // no stamp yet
-    }
-    if newest_mtime(test_sources) > stamp {
-        return true;
-    }
-    if mtime(toml_path) > stamp {
-        return true;
-    }
-    // Any change to production classes (recompile happened) invalidates the stamp.
-    if oldest_mtime_in_dir(classes_dir) == SystemTime::UNIX_EPOCH {
-        return true; // no classes — shouldn't happen here, but be safe
-    }
-    if newest_mtime_in_dir(classes_dir) > stamp {
-        return true;
-    }
-    // Changes to resource directories invalidate the stamp.
-    if let Some(rd) = resources_dir {
-        if newest_mtime_in_dir(rd) > stamp {
-            return true;
-        }
-    }
-    if let Some(trd) = test_resources_dir {
-        if newest_mtime_in_dir(trd) > stamp {
-            return true;
-        }
-    }
-    false
+    let mut inputs = Inputs::new();
+    inputs
+        .add_paths(test_sources)
+        .add_file(toml_path)
+        .add_dir(classes_dir)
+        .add_dir_opt(resources_dir)
+        .add_dir_opt(test_resources_dir);
+    !Stamp::of(stamp_path).covers(&inputs)
 }
 
-/// Returns true when test sources need to be recompiled:
-/// - No test class files exist yet, OR
-/// - Any test source file is newer than the oldest test class file, OR
-/// - curie.toml is newer than the oldest test class file, OR
-/// - The JDK version has changed since the last test compilation.
+/// Returns true when test sources need to be recompiled.
+///
+/// Uses `>=` so a same-second edit (on second-resolution filesystems)
+/// counts as out-of-date.  See the tie-breaking note in `incremental.rs`.
 fn needs_test_recompile(
     test_sources: &[PathBuf],
     test_classes_dir: &Path,
@@ -451,10 +430,10 @@ fn needs_test_recompile(
             return true;
         }
     }
-    if newest_mtime(test_sources) > oldest_class {
+    if newest_mtime(test_sources) >= oldest_class {
         return true;
     }
-    if mtime(toml_path) > oldest_class {
+    if mtime(toml_path) >= oldest_class {
         return true;
     }
     false

@@ -94,7 +94,8 @@ pub fn do_build(
     // mainClass detection/validation is deferred to here: it is only needed to
     // write the JAR manifest, so we skip it entirely when packaging is up to date.
     let resources_dir = compiled.resources_dir.as_deref();
-    let resolved_main_class: Option<String> = if needs_repackage(&compiled.jar_path, &compiled.classes_dir, resources_dir) {
+    let toml_path = project_root.join("curie.toml");
+    let resolved_main_class: Option<String> = if needs_repackage(&compiled.jar_path, &compiled.classes_dir, resources_dir, &toml_path) {
         let main_class = if let Some(app) = &desc.application {
             let mc = match &app.main_class {
                 Some(declared) => {

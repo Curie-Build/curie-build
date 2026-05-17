@@ -1,10 +1,8 @@
-use crate::incremental::mtime;
 use crate::descriptor::Descriptor;
+use crate::incremental::{mtime, Inputs, Stamp};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
-use walkdir::WalkDir;
 
 /// Determines which Dockerfile strategy to use.
 enum DockerfileSource {
@@ -122,38 +120,40 @@ fn touch_stamp(target_dir: &Path) -> Result<()> {
     std::fs::write(&path, b"").with_context(|| format!("failed to write {}", path.display()))
 }
 
-/// Return the newest mtime among all Docker build inputs in `target/`:
-/// Dockerfile, .dockerignore, the app JAR, and every file under libs/.
-fn newest_input_mtime(target_dir: &Path, jar_filename: &str, has_libs: bool) -> SystemTime {
-    let mut newest = SystemTime::UNIX_EPOCH;
-
-    for name in &["Dockerfile", ".dockerignore"] {
-        let t = mtime(&target_dir.join(name));
-        if t > newest {
-            newest = t;
-        }
-    }
-
-    let t = mtime(&target_dir.join(jar_filename));
-    if t > newest {
-        newest = t;
-    }
-
+/// Inputs that invalidate the generated-Dockerfile build's stamp:
+/// the generated Dockerfile, the generated .dockerignore, the app JAR,
+/// and every file copied into `target/libs/`.
+fn generated_dockerfile_inputs(target_dir: &Path, jar_filename: &str, has_libs: bool) -> Inputs {
+    let mut inputs = Inputs::new();
+    inputs
+        .add_file(&target_dir.join("Dockerfile"))
+        .add_file(&target_dir.join(".dockerignore"))
+        .add_file(&target_dir.join(jar_filename));
     if has_libs {
-        let libs_dir = target_dir.join("libs");
-        for entry in WalkDir::new(&libs_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            let t = mtime(entry.path());
-            if t > newest {
-                newest = t;
-            }
-        }
+        inputs.add_dir(&target_dir.join("libs"));
     }
+    inputs
+}
 
-    newest
+/// Inputs that invalidate the user-Dockerfile build's stamp.
+///
+/// We track the user's `Dockerfile`, their `.dockerignore` if present, the
+/// app JAR, and `target/libs/` (in case the user's Dockerfile COPYs from
+/// it).  We do NOT scan arbitrary project-root files referenced by other
+/// `COPY` instructions — that's an open-ended set and tracking it correctly
+/// would require parsing the Dockerfile.  Users with custom COPY sources
+/// outside this set may need `curie clean` to force a rebuild.
+fn user_dockerfile_inputs(project_root: &Path, jar: &Path) -> Inputs {
+    let mut inputs = Inputs::new();
+    inputs
+        .add_file(&project_root.join("Dockerfile"))
+        .add_file(&project_root.join(".dockerignore"))
+        .add_file(jar);
+    let libs_dir = project_root.join("target").join("libs");
+    if libs_dir.exists() {
+        inputs.add_dir(&libs_dir);
+    }
+    inputs
 }
 
 fn build_with_user_dockerfile(
@@ -167,14 +167,8 @@ fn build_with_user_dockerfile(
     let target_dir = project_root.join("target");
     std::fs::create_dir_all(&target_dir).context("failed to create target/")?;
 
-    // Skip if the stamp is newer than both the Dockerfile and the app JAR.
-    let newest_input = {
-        let mut t = mtime(&project_root.join("Dockerfile"));
-        let jar_t = mtime(jar);
-        if jar_t > t { t = jar_t; }
-        t
-    };
-    if newest_input <= mtime(&stamp_path(&target_dir)) {
+    let inputs = user_dockerfile_inputs(project_root, jar);
+    if Stamp::of(&stamp_path(&target_dir)).covers(&inputs) {
         println!("  Docker image    up to date");
         return Ok(());
     }
@@ -289,7 +283,8 @@ fn build_with_generated_dockerfile(
     // Created timestamp, because Docker does not update Created when all layers
     // are cached — making the image appear older than it really is.
     let stamp = stamp_path(&target_dir);
-    if newest_input_mtime(&target_dir, &jar_filename, has_libs) <= mtime(&stamp) {
+    let inputs = generated_dockerfile_inputs(&target_dir, &jar_filename, has_libs);
+    if Stamp::of(&stamp).covers(&inputs) {
         println!("  Docker image    up to date");
         return Ok(());
     }
@@ -389,8 +384,8 @@ mod tests {
 
     #[test]
     fn stamp_skip_logic() {
-        // newest_input_mtime <= stamp mtime  →  skip
-        // newest_input_mtime >  stamp mtime  →  build
+        // Stamp::covers semantics (via generated_dockerfile_inputs):
+        //   covers → skip; !covers → build
         use filetime::{set_file_mtime, FileTime};
         use std::fs;
 
@@ -410,16 +405,27 @@ mod tests {
             set_file_mtime(path, t0).unwrap();
         }
 
-        // No stamp yet → always build (mtime returns EPOCH, inputs are newer).
-        assert!(newest_input_mtime(target, "app-1.0.jar", false) > mtime(&stamp));
+        // No stamp yet → must build.
+        let inputs = generated_dockerfile_inputs(target, "app-1.0.jar", false);
+        assert!(!Stamp::of(&stamp).covers(&inputs));
 
-        // Write stamp with mtime AFTER all inputs → skip.
+        // Write stamp with mtime strictly after all inputs → skip.
         fs::write(&stamp, b"").unwrap();
         set_file_mtime(&stamp, t1).unwrap();
-        assert!(newest_input_mtime(target, "app-1.0.jar", false) <= mtime(&stamp));
+        assert!(Stamp::of(&stamp).covers(&inputs));
 
         // Update the jar to be newer than the stamp → build again.
         set_file_mtime(&jar, FileTime::from_unix_time(1_000_002, 0)).unwrap();
-        assert!(newest_input_mtime(target, "app-1.0.jar", false) > mtime(&stamp));
+        let inputs = generated_dockerfile_inputs(target, "app-1.0.jar", false);
+        assert!(!Stamp::of(&stamp).covers(&inputs));
+
+        // Layer-1 regression guard: a tied jar mtime (same second as the
+        // stamp) must also force a rebuild.
+        set_file_mtime(&jar, t1).unwrap(); // jar mtime == stamp mtime
+        let inputs = generated_dockerfile_inputs(target, "app-1.0.jar", false);
+        assert!(
+            !Stamp::of(&stamp).covers(&inputs),
+            "tied input mtime must not be considered covered",
+        );
     }
 }
