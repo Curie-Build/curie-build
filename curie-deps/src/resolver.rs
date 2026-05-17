@@ -35,7 +35,7 @@ use crate::gav::Gav;
 use crate::pom::{self, BomRef, Pom};
 use crate::repo::{default_repositories, Repository};
 use anyhow::{bail, Context, Result};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -89,7 +89,7 @@ fn merge_parent_chain(
             version: parent_ref.version.clone(),
         };
 
-        let pom_path = match ensure_artifact(&parent_gav, repos, client, ArtifactKind::Pom, offline, None) {
+        let pom_path = match ensure_artifact(&parent_gav, repos, client, ArtifactKind::Pom, offline, None, None) {
             Ok(p) => p,
             Err(_) => break,
         };
@@ -170,7 +170,7 @@ fn resolve_boms(
                     continue; // already processed — prevent cycles
                 }
 
-                let pom_path = ensure_artifact(&gav, repos, client, ArtifactKind::Pom, offline, None)
+                let pom_path = ensure_artifact(&gav, repos, client, ArtifactKind::Pom, offline, None, None)
                     .with_context(|| format!("failed to fetch BOM POM for {}", gav))?;
                 let xml = std::fs::read_to_string(&pom_path)
                     .with_context(|| format!("failed to read BOM POM {}", pom_path.display()))?;
@@ -311,7 +311,7 @@ pub fn resolve(
         ordered_gavs.push(gav.clone());
 
         // Fetch POM to expand transitive dependencies.
-        match ensure_artifact(&gav, &repos, &client, ArtifactKind::Pom, opts.offline, None) {
+        match ensure_artifact(&gav, &repos, &client, ArtifactKind::Pom, opts.offline, None, None) {
             Ok(pom_path) => {
                 let xml = std::fs::read_to_string(&pom_path)
                     .with_context(|| format!("failed to read POM {}", pom_path.display()))?;
@@ -382,20 +382,46 @@ pub fn resolve(
         })
         .count() as u64;
 
-    // Build a progress bar only when there is something to download and the
+    // Build a MultiProgress only when there is something to download and the
     // caller opted in to progress reporting.
-    let pb: Option<ProgressBar> = if opts.progress && missing > 0 {
-        let bar = ProgressBar::new(missing);
-        bar.set_style(
+    //
+    // Layout:
+    //   summary bar:  "  Downloading     [=========>---]  3/8"
+    //   per-thread:   "    ⠸ org.foo:bar:1.2.3"   (one line per active thread)
+    let thread_count = PARALLEL_DOWNLOADS.min(n);
+
+    let (mp, summary_pb, thread_pbs): (
+        Option<MultiProgress>,
+        Option<ProgressBar>,
+        Vec<Option<ProgressBar>>,
+    ) = if opts.progress && missing > 0 {
+        let mp = MultiProgress::new();
+
+        let summary = mp.add(ProgressBar::new(missing));
+        summary.set_style(
             ProgressStyle::with_template(
-                "  Downloading     [{bar:40.cyan/blue}] {pos}/{len}  {msg}",
+                "  Downloading     [{bar:40.cyan/blue}] {pos}/{len}",
             )
             .unwrap()
             .progress_chars("=>-"),
         );
-        Some(bar)
+
+        let spinner_style = ProgressStyle::with_template("    {spinner} {msg}")
+            .unwrap()
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ");
+
+        let thread_pbs: Vec<Option<ProgressBar>> = (0..thread_count)
+            .map(|_| {
+                let sp = mp.add(ProgressBar::new_spinner());
+                sp.set_style(spinner_style.clone());
+                Some(sp)
+            })
+            .collect();
+
+        (Some(mp), Some(summary), thread_pbs)
     } else {
-        None
+        let nones = (0..thread_count).map(|_| None).collect();
+        (None, None, nones)
     };
 
     // Shared atomic index into `ordered_gavs`.
@@ -405,7 +431,6 @@ pub fn resolve(
     // We need shared access to repos/client/gavs across threads.  Since all
     // are read-only after construction, wrap in references and use
     // std::thread::scope for safe borrowing.
-    let thread_count = PARALLEL_DOWNLOADS.min(n);
     let mut per_thread: Vec<Vec<(usize, Result<PathBuf>)>> = Vec::new();
 
     // Borrow shared data as refs so each spawned closure can capture them
@@ -418,10 +443,11 @@ pub fn resolve(
     let offline = opts.offline;
 
     std::thread::scope(|s| -> Result<()> {
-        let handles: Vec<_> = (0..thread_count)
-            .map(|_| {
-                // Clone the ProgressBar handle — all clones refer to the same bar.
-                let pb = pb.clone();
+        let handles: Vec<_> = thread_pbs
+            .iter()
+            .map(|thread_pb| {
+                let summary_pb = summary_pb.clone();
+                let thread_pb = thread_pb.clone();
                 s.spawn(move || -> Vec<(usize, Result<PathBuf>)> {
                     let mut local = Vec::new();
                     loop {
@@ -430,9 +456,20 @@ pub fn resolve(
                             break;
                         }
                         let gav = &gavs_ref[idx];
-                        let result =
-                            ensure_artifact(gav, repos_ref, client_ref, ArtifactKind::Jar, offline, pb.as_ref());
+                        let result = ensure_artifact(
+                            gav,
+                            repos_ref,
+                            client_ref,
+                            ArtifactKind::Jar,
+                            offline,
+                            summary_pb.as_ref(),
+                            thread_pb.as_ref(),
+                        );
                         local.push((idx, result));
+                    }
+                    // Thread is done — clear its spinner line.
+                    if let Some(sp) = &thread_pb {
+                        sp.finish_and_clear();
                     }
                     local
                 })
@@ -445,9 +482,12 @@ pub fn resolve(
         Ok(())
     })?;
 
-    // Downloads complete — clear the progress bar so the line disappears.
-    if let Some(bar) = pb {
+    // Downloads complete — clear all progress output.
+    if let Some(bar) = summary_pb {
         bar.finish_and_clear();
+    }
+    if let Some(mp) = mp {
+        let _ = mp.clear();
     }
 
     for thread_results in per_thread {
@@ -546,17 +586,17 @@ enum ArtifactKind {
 /// When `offline` is `true`, any cache miss is an immediate error — no HTTP
 /// call is attempted.
 ///
-/// `pb` is an optional progress bar handle.  When provided and the artifact
-/// is not already cached (i.e., a real download happens), the bar's message
-/// is updated to the artifact coordinate before the download starts, and the
-/// bar is incremented by one on success.
+/// `summary_pb` is the top-level counter bar (incremented on each successful
+/// download).  `thread_pb` is this thread's spinner line (message set to the
+/// GAV being fetched, cleared when the download finishes).
 fn ensure_artifact(
     gav: &Gav,
     repos: &[Repository],
     client: &reqwest::blocking::Client,
     kind: ArtifactKind,
     offline: bool,
-    pb: Option<&ProgressBar>,
+    summary_pb: Option<&ProgressBar>,
+    thread_pb: Option<&ProgressBar>,
 ) -> Result<PathBuf> {
     let local_path = match kind {
         ArtifactKind::Jar => gav.local_cache_path()?,
@@ -584,9 +624,10 @@ fn ensure_artifact(
             .with_context(|| format!("failed to create cache dir {}", parent.display()))?;
     }
 
-    // Show which artifact is being fetched.
-    if let Some(bar) = pb {
-        bar.set_message(gav.notation());
+    // Show which artifact is being fetched on this thread's spinner line.
+    if let Some(sp) = thread_pb {
+        sp.set_message(gav.notation());
+        sp.enable_steady_tick(std::time::Duration::from_millis(80));
     }
 
     // Try each repository in order.
@@ -595,7 +636,7 @@ fn ensure_artifact(
         let url = repo.artifact_url(&relative);
         match download(client, &url, &local_path) {
             Ok(()) => {
-                if let Some(bar) = pb {
+                if let Some(bar) = summary_pb {
                     bar.inc(1);
                 }
                 return Ok(local_path);
