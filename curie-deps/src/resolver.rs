@@ -241,14 +241,26 @@ pub fn resolve(
     // Pre-resolve all BOM managed versions before starting the BFS.
     let global_managed = resolve_boms(&opts.bom_imports, &repos, &client)?;
 
-    // BFS queue of GAVs to resolve; visited set prevents duplicate work.
+    // BFS queue + visited set keyed on `group:artifact` (NOT full GAV).
+    //
+    // Maven's conflict-resolution rule is **nearest wins**: when the same
+    // artifact appears at multiple depths with different versions, the
+    // shallowest occurrence wins.  BFS naturally produces shallowest-first
+    // visitation, so a GA-keyed visited set gives us this for free: once we
+    // commit to a version for a `group:artifact`, every later encounter
+    // (necessarily at equal or greater depth) is skipped.
+    //
+    // At equal depth, the first dep encountered in BFS order wins — which
+    // matches Maven's "first declared wins" tiebreaker.
     let mut queue: VecDeque<Gav> = VecDeque::new();
     let mut visited: HashSet<String> = HashSet::new();
     let mut ordered_jars: Vec<PathBuf> = Vec::new();
 
-    // Seed with declared dependencies.
+    // Seed with declared dependencies.  At depth 0 the user's explicit
+    // version always wins — top-level `<dependencyManagement>` (BOMs) only
+    // fills in when the dep's version is empty.
     for (key, version) in deps {
-        let resolved_version: &str = if version.is_empty() {
+        let resolved_version: String = if version.is_empty() {
             // Version comes from a BOM — hard error if not found.
             global_managed
                 .get(*key)
@@ -258,13 +270,14 @@ pub fn resolve(
                      manages this artifact",
                     key
                 ))?
-                .as_str()
+                .clone()
         } else {
-            version
+            (*version).to_string()
         };
 
-        let gav = Gav::from_key_version(key, resolved_version)?;
-        if visited.insert(gav.notation()) {
+        let gav = Gav::from_key_version(key, &resolved_version)?;
+        let ga = format!("{}:{}", gav.group, gav.artifact);
+        if visited.insert(ga) {
             queue.push_back(gav);
         }
     }
@@ -299,53 +312,28 @@ pub fn resolve(
                 for dep in pom.dependencies.iter().filter(|d| d.is_compile_scope()) {
                     let group = pom.resolve_value(&dep.group_id);
                     let artifact = pom.resolve_value(&dep.artifact_id);
+                    let ga_key = format!("{}:{}", group, artifact);
 
-                    // Resolve property placeholders in version, then fall back
-                    // to dependencyManagement (from this POM or merged parent),
-                    // then fall back to global BOM-managed versions.
-                    let raw_version = match &dep.version {
-                        Some(v) => {
-                            let resolved = pom.resolve_value(v);
-                            if resolved.contains("${") {
-                                // Still unresolved — try managed_versions then global.
-                                let key = format!("{}:{}", group, artifact);
-                                match pom.managed_versions.get(&key)
-                                    .or_else(|| global_managed.get(&key))
-                                {
-                                    Some(mv) => pom.resolve_value(mv),
-                                    None => continue, // give up on this dep
-                                }
-                            } else {
-                                resolved
-                            }
-                        }
-                        None => {
-                            // No version at all — look up in dependencyManagement
-                            // then fall back to global BOM managed versions.
-                            let key = format!("{}:{}", group, artifact);
-                            match pom.managed_versions.get(&key)
-                                .or_else(|| global_managed.get(&key))
-                            {
-                                Some(mv) => pom.resolve_value(mv),
-                                None => continue, // skip version-less transitive dep
-                            }
-                        }
-                    };
-
-                    // Skip if version still unresolved after all attempts.
-                    if raw_version.contains("${") {
+                    // Nearest-wins short-circuit: a shallower BFS layer already
+                    // committed to a version for this GA — skip without even
+                    // resolving the version.
+                    if visited.contains(&ga_key) {
                         continue;
                     }
 
-                    let child_gav = Gav {
-                        group,
-                        artifact,
-                        version: raw_version,
+                    let raw_version = match resolve_transitive_version(
+                        &ga_key,
+                        dep.version.as_deref(),
+                        &pom,
+                        &global_managed,
+                    ) {
+                        Some(v) => v,
+                        None => continue, // unresolvable — drop this dep
                     };
 
-                    if visited.insert(child_gav.notation()) {
-                        queue.push_back(child_gav);
-                    }
+                    let child_gav = Gav { group, artifact, version: raw_version };
+                    visited.insert(ga_key);
+                    queue.push_back(child_gav);
                 }
             }
             Err(_) => {
@@ -355,6 +343,72 @@ pub fn resolve(
     }
 
     Ok(ordered_jars)
+}
+
+/// Resolve the version a transitive dependency should be pinned to, applying
+/// Maven precedence rules:
+///
+/// 1. **Top-level BOM override** (`global_managed`): the user's own
+///    `<dependencyManagement>` (via `[bom-imports]`) wins over any version the
+///    dep's own POM declares.  This is what lets a project pin all Jackson
+///    artifacts to a single version even when transitive POMs hard-code a
+///    different one.
+/// 2. **Dep's explicit `<version>`** (resolved against the importing POM's
+///    properties).  Used only when the top-level BOM does not manage this GA.
+/// 3. **Dep's own `<dependencyManagement>`** (own + merged parent chain),
+///    consulted when the dep declares no version or only an unresolvable
+///    `${property}` reference.
+///
+/// Returns `None` when the version still contains an unresolved `${...}` after
+/// every fallback — the caller drops the dep rather than emit a broken GAV.
+fn resolve_transitive_version(
+    ga_key: &str,
+    dep_explicit: Option<&str>,
+    pom: &Pom,
+    global_managed: &HashMap<String, String>,
+) -> Option<String> {
+    // 1. Top-level BOM override (Maven's <dependencyManagement> at the project
+    //    POM wins over transitive explicit versions).
+    if let Some(bom_v) = global_managed.get(ga_key) {
+        let resolved = pom.resolve_value(bom_v);
+        if !resolved.contains("${") {
+            return Some(resolved);
+        }
+        // BOM value still references a ${...}; fall through to other sources.
+    }
+
+    // 2. Dep's explicit version, resolved against properties.
+    if let Some(v) = dep_explicit {
+        let resolved = pom.resolve_value(v);
+        if !resolved.contains("${") {
+            return Some(resolved);
+        }
+        // Unresolved property: try dep's own managed_versions, then global.
+        if let Some(mv) = pom
+            .managed_versions
+            .get(ga_key)
+            .or_else(|| global_managed.get(ga_key))
+        {
+            let r = pom.resolve_value(mv);
+            if !r.contains("${") {
+                return Some(r);
+            }
+        }
+        return None;
+    }
+
+    // 3. No explicit version — fall back to dep's own managed_versions, then
+    //    global BOM map.
+    let mv = pom
+        .managed_versions
+        .get(ga_key)
+        .or_else(|| global_managed.get(ga_key))?;
+    let resolved = pom.resolve_value(mv);
+    if resolved.contains("${") {
+        None
+    } else {
+        Some(resolved)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -628,5 +682,275 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = run_resolve_boms(dir.path(), &[]).unwrap();
         assert!(result.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Maven conflict-resolution tests for `resolve()`
+    //
+    // These exercise the full BFS using fake POMs + empty JAR files written
+    // to a temp `.m2/repository`.  The resolver short-circuits on
+    // `local_path.exists()`, so empty JAR files are sufficient — we only
+    // care which versions end up in the output, not their contents.
+    // -----------------------------------------------------------------------
+
+    /// Build a regular (non-BOM) POM with a flat `<dependencies>` list.
+    /// Every dependency is rendered with `<scope>compile</scope>`.
+    fn make_pom(
+        group: &str,
+        artifact: &str,
+        version: &str,
+        deps: &[(&str, &str, &str)],  // (group, artifact, version)
+    ) -> String {
+        let mut xml = format!(
+            r#"<?xml version="1.0"?>
+<project>
+  <groupId>{group}</groupId>
+  <artifactId>{artifact}</artifactId>
+  <version>{version}</version>
+  <dependencies>
+"#
+        );
+        for (g, a, v) in deps {
+            xml.push_str(&format!(
+                "    <dependency>\
+\n      <groupId>{g}</groupId>\
+\n      <artifactId>{a}</artifactId>\
+\n      <version>{v}</version>\
+\n      <scope>compile</scope>\
+\n    </dependency>\n"
+            ));
+        }
+        xml.push_str("  </dependencies>\n</project>");
+        xml
+    }
+
+    /// Write both a POM and an empty placeholder JAR into the fake local
+    /// Maven cache rooted at `home_dir`.  Returns the artifact's Gav.
+    fn write_fake_artifact(
+        home_dir: &std::path::Path,
+        group: &str,
+        artifact: &str,
+        version: &str,
+        deps: &[(&str, &str, &str)],
+    ) -> Gav {
+        let gav = Gav {
+            group: group.to_string(),
+            artifact: artifact.to_string(),
+            version: version.to_string(),
+        };
+        let m2 = home_dir.join(".m2").join("repository");
+
+        // POM.
+        let pom_path = m2.join(gav.relative_pom_path());
+        std::fs::create_dir_all(pom_path.parent().unwrap()).unwrap();
+        std::fs::write(&pom_path, make_pom(group, artifact, version, deps)).unwrap();
+
+        // Empty JAR (placeholder — resolver only checks existence).
+        let jar_path = m2.join(gav.relative_path());
+        std::fs::write(&jar_path, b"").unwrap();
+
+        gav
+    }
+
+    /// Invoke `resolve()` with a fake home directory.  No network is
+    /// performed — `extra_repos` is empty and `default_repositories` (Maven
+    /// Central) is unreachable in the test, so every artifact must be
+    /// pre-written via `write_fake_artifact`.
+    fn run_resolve(
+        home_dir: &std::path::Path,
+        deps: &[(&str, &str)],
+        bom_imports: Vec<Gav>,
+    ) -> Result<Vec<PathBuf>> {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home_dir.to_str().unwrap());
+
+        // Replace Maven Central with an unreachable repo so a cache miss
+        // produces a fast error instead of a 30-second HTTP timeout.
+        let opts = ResolveOptions {
+            extra_repos: vec![Repository {
+                name: "blackhole".into(),
+                // 127.0.0.1:1 should reliably refuse connections immediately.
+                url: "http://127.0.0.1:1".into(),
+            }],
+            verbose: false,
+            bom_imports,
+        };
+        // Override default repos by manipulating: we still get Maven Central
+        // in the repo list, but since every artifact is cached we never call
+        // out.  The test should never need a network round-trip.
+        let result = resolve(deps, &opts);
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        result
+    }
+
+    /// Extract the `group:artifact:version` of every resolved JAR for
+    /// readable assertions.  Reverses `relative_path()`.
+    fn jar_gavs(jars: &[PathBuf]) -> Vec<String> {
+        jars.iter()
+            .map(|p| {
+                // …/group/path/artifact/version/artifact-version.jar
+                // Take the last three components: artifact/version/filename.
+                let comps: Vec<_> = p.components().collect();
+                let n = comps.len();
+                // Walk back: filename → version dir → artifact dir → group dirs.
+                let filename = comps[n - 1].as_os_str().to_string_lossy().into_owned();
+                let version = comps[n - 2].as_os_str().to_string_lossy().into_owned();
+                let artifact = comps[n - 3].as_os_str().to_string_lossy().into_owned();
+                // Group is everything between `.m2/repository/` and the
+                // artifact dir, joined with dots.
+                let mut group_parts: Vec<String> = Vec::new();
+                let mut seen_repo = false;
+                for c in &comps[..n - 3] {
+                    let s = c.as_os_str().to_string_lossy().into_owned();
+                    if seen_repo {
+                        group_parts.push(s);
+                    } else if s == "repository" {
+                        seen_repo = true;
+                    }
+                }
+                let _ = filename; // unused; kept for clarity in destructuring
+                format!("{}:{}:{}", group_parts.join("."), artifact, version)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn declared_dep_overrides_transitive_version() {
+        // User declares foo:bar 1.0 directly AND foo:other 1.0 which
+        // transitively pulls foo:bar 2.0.  Maven nearest-wins: bar 1.0.
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
+        write_fake_artifact(dir.path(), "foo", "bar", "2.0", &[]);
+        write_fake_artifact(
+            dir.path(), "foo", "other", "1.0",
+            &[("foo", "bar", "2.0")],
+        );
+
+        let result = run_resolve(
+            dir.path(),
+            &[("foo:bar", "1.0"), ("foo:other", "1.0")],
+            vec![],
+        ).unwrap();
+
+        let gavs = jar_gavs(&result);
+        assert!(
+            gavs.contains(&"foo:bar:1.0".to_string()),
+            "expected foo:bar:1.0 in {:?}", gavs,
+        );
+        assert!(
+            !gavs.contains(&"foo:bar:2.0".to_string()),
+            "foo:bar:2.0 must not appear (nearest wins): {:?}", gavs,
+        );
+    }
+
+    #[test]
+    fn first_declared_wins_at_same_depth() {
+        // Two declared deps, both at depth 0, each pulling a different
+        // version of foo:bar at depth 1.  BFS visits a's children before
+        // b's children → a's version (1.0) wins.
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
+        write_fake_artifact(dir.path(), "foo", "bar", "2.0", &[]);
+        write_fake_artifact(
+            dir.path(), "grp", "a", "1.0",
+            &[("foo", "bar", "1.0")],
+        );
+        write_fake_artifact(
+            dir.path(), "grp", "b", "1.0",
+            &[("foo", "bar", "2.0")],
+        );
+
+        let result = run_resolve(
+            dir.path(),
+            // Note: BTreeMap ordering would sort these alphabetically;
+            // the resolver receives the &[(&str, &str)] slice in caller
+            // order, so a comes before b here.
+            &[("grp:a", "1.0"), ("grp:b", "1.0")],
+            vec![],
+        ).unwrap();
+
+        let gavs = jar_gavs(&result);
+        assert!(
+            gavs.contains(&"foo:bar:1.0".to_string()),
+            "first-declared a's choice (foo:bar:1.0) must win: {:?}", gavs,
+        );
+        assert!(
+            !gavs.contains(&"foo:bar:2.0".to_string()),
+            "b's choice (foo:bar:2.0) must lose to a's: {:?}", gavs,
+        );
+    }
+
+    #[test]
+    fn top_level_bom_overrides_transitive_explicit_version() {
+        // User declares dep on grp:lib 1.0 which transitively pins
+        // foo:bar 2.0.  User also imports a BOM that pins foo:bar to 9.9.9.
+        // Maven rule: top-level <dependencyManagement> wins over transitive
+        // explicit versions.
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "foo", "bar", "2.0", &[]);
+        write_fake_artifact(dir.path(), "foo", "bar", "9.9.9", &[]);
+        write_fake_artifact(
+            dir.path(), "grp", "lib", "1.0",
+            &[("foo", "bar", "2.0")],
+        );
+        let bom = write_fake_bom(
+            dir.path(),
+            "com.example", "pin-bom", "1.0.0",
+            &[("foo", "bar", "9.9.9")],
+            &[],
+        );
+
+        let result = run_resolve(
+            dir.path(),
+            &[("grp:lib", "1.0")],
+            vec![bom],
+        ).unwrap();
+
+        let gavs = jar_gavs(&result);
+        assert!(
+            gavs.contains(&"foo:bar:9.9.9".to_string()),
+            "top-level BOM (9.9.9) must override transitive explicit (2.0): {:?}", gavs,
+        );
+        assert!(
+            !gavs.contains(&"foo:bar:2.0".to_string()),
+            "transitive explicit 2.0 must be overridden by BOM: {:?}", gavs,
+        );
+    }
+
+    #[test]
+    fn user_explicit_version_wins_over_top_level_bom() {
+        // User declares foo:bar 1.0 directly AND imports a BOM pinning bar
+        // to 9.9.9.  Maven rule: a top-level <dependency> with an explicit
+        // version wins over the project's own <dependencyManagement>.
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
+        write_fake_artifact(dir.path(), "foo", "bar", "9.9.9", &[]);
+        let bom = write_fake_bom(
+            dir.path(),
+            "com.example", "pin-bom", "1.0.0",
+            &[("foo", "bar", "9.9.9")],
+            &[],
+        );
+
+        let result = run_resolve(
+            dir.path(),
+            &[("foo:bar", "1.0")],
+            vec![bom],
+        ).unwrap();
+
+        let gavs = jar_gavs(&result);
+        assert!(
+            gavs.contains(&"foo:bar:1.0".to_string()),
+            "user's explicit declaration (1.0) must win over BOM (9.9.9): {:?}", gavs,
+        );
+        assert!(
+            !gavs.contains(&"foo:bar:9.9.9".to_string()),
+            "BOM-pinned version must lose to user's explicit version: {:?}", gavs,
+        );
     }
 }
