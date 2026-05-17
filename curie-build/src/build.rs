@@ -186,18 +186,19 @@ pub fn clean(project_root: &Path) -> Result<()> {
 mod clean_tests {
     use super::*;
 
+    /// Minimal valid `Curie.toml` content.  Used in multiple tests to satisfy
+    /// `descriptor::load` without duplicating the literal in each test body.
+    fn minimal_app_toml() -> &'static str {
+        "[application]\nname = \"test\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
+         [java]\nsourceCompatibility = \"21\"\n"
+    }
+
     #[test]
     fn clean_removes_target_dir() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        // Write a minimal Curie.toml so descriptor::load succeeds.
-        std::fs::write(
-            root.join("Curie.toml"),
-            "[application]\nname = \"test\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
-             [java]\nsourceCompatibility = \"21\"\n",
-        )
-        .unwrap();
+        std::fs::write(root.join("Curie.toml"), minimal_app_toml()).unwrap();
 
         let target = root.join("target");
         std::fs::create_dir_all(target.join("classes")).unwrap();
@@ -213,12 +214,7 @@ mod clean_tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        std::fs::write(
-            root.join("Curie.toml"),
-            "[application]\nname = \"test\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
-             [java]\nsourceCompatibility = \"21\"\n",
-        )
-        .unwrap();
+        std::fs::write(root.join("Curie.toml"), minimal_app_toml()).unwrap();
 
         // No target/ directory — should succeed without error.
         clean(root).unwrap();

@@ -7,6 +7,7 @@
 //!      confirm the compiled class actually declares a launchable `main`.
 
 use crate::compile::pkg_prefix_for_src_root;
+use crate::jar::classpath_string;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -130,12 +131,9 @@ pub fn validate_main_class(
     classes_dir: &Path,
     dep_jars: &[PathBuf],
 ) -> Result<()> {
-    let sep = if cfg!(windows) { ";" } else { ":" };
-    let mut cp = classes_dir.to_string_lossy().into_owned();
-    for jar in dep_jars {
-        cp.push_str(sep);
-        cp.push_str(&jar.to_string_lossy());
-    }
+    let mut cp_entries = vec![classes_dir.to_path_buf()];
+    cp_entries.extend_from_slice(dep_jars);
+    let cp = classpath_string(&cp_entries);
 
     let output = Command::new("javap")
         .arg("-p")

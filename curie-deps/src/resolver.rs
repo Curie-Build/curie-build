@@ -141,6 +141,30 @@ enum BomWork {
     Apply(HashMap<String, String>),
 }
 
+/// Fetch (or load from cache) the POM for `gav`, parse it, and merge its
+/// parent chain.  Returns the fully-resolved [`Pom`] ready for dependency
+/// expansion.
+///
+/// This is the scaffolding shared by [`resolve_boms`] and the main BFS in
+/// [`resolve`]: both need a POM, its properties resolved, and its parent-chain
+/// managed versions merged in before they can inspect dependencies or
+/// managed-version entries.
+fn fetch_and_parse_pom(
+    gav: &Gav,
+    repos: &[Repository],
+    client: &reqwest::blocking::Client,
+    offline: bool,
+) -> Result<Pom> {
+    let pom_path = ensure_artifact(gav, repos, client, ArtifactKind::Pom, offline, None, None)
+        .with_context(|| format!("failed to fetch POM for {}", gav))?;
+    let xml = std::fs::read_to_string(&pom_path)
+        .with_context(|| format!("failed to read POM {}", pom_path.display()))?;
+    let mut pom = pom::parse(&xml)
+        .with_context(|| format!("failed to parse POM for {}", gav))?;
+    merge_parent_chain(&mut pom, repos, client, offline);
+    Ok(pom)
+}
+
 fn resolve_boms(
     bom_gavs: &[Gav],
     repos: &[Repository],
@@ -170,16 +194,8 @@ fn resolve_boms(
                     continue; // already processed — prevent cycles
                 }
 
-                let pom_path = ensure_artifact(&gav, repos, client, ArtifactKind::Pom, offline, None, None)
+                let pom = fetch_and_parse_pom(&gav, repos, client, offline)
                     .with_context(|| format!("failed to fetch BOM POM for {}", gav))?;
-                let xml = std::fs::read_to_string(&pom_path)
-                    .with_context(|| format!("failed to read BOM POM {}", pom_path.display()))?;
-                let mut pom = pom::parse(&xml)
-                    .with_context(|| format!("failed to parse BOM POM for {}", gav))?;
-
-                // Merge parent chain so inherited managed versions and properties are
-                // available when resolving nested BOM import versions.
-                merge_parent_chain(&mut pom, repos, client, offline);
 
                 // Collect this BOM's own managed versions for deferred application.
                 let own_entries: HashMap<String, String> = pom
@@ -311,18 +327,8 @@ pub fn resolve(
         ordered_gavs.push(gav.clone());
 
         // Fetch POM to expand transitive dependencies.
-        match ensure_artifact(&gav, &repos, &client, ArtifactKind::Pom, opts.offline, None, None) {
-            Ok(pom_path) => {
-                let xml = std::fs::read_to_string(&pom_path)
-                    .with_context(|| format!("failed to read POM {}", pom_path.display()))?;
-                let mut pom = pom::parse(&xml)
-                    .with_context(|| format!("failed to parse POM for {}", gav))?;
-
-                // Walk the full parent chain, merging properties and
-                // dependencyManagement entries so that ${property} refs and
-                // version-less deps resolve correctly (e.g. jackson-bom).
-                merge_parent_chain(&mut pom, &repos, &client, opts.offline);
-
+        match fetch_and_parse_pom(&gav, &repos, &client, opts.offline) {
+            Ok(pom) => {
                 for dep in pom.dependencies.iter().filter(|d| d.is_compile_scope()) {
                     let group = pom.resolve_value(&dep.group_id);
                     let artifact = pom.resolve_value(&dep.artifact_id);
