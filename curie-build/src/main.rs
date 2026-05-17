@@ -29,18 +29,30 @@ enum Cmd {
         /// Skip Docker build even when Docker support is configured
         #[arg(long)]
         no_docker: bool,
+
+        /// Do not access the network; use only locally cached artifacts
+        #[arg(long)]
+        offline: bool,
     },
     /// Compile the project and run its tests (no JAR or Docker build)
     Test {
         /// Only run tests whose fully-qualified class name matches this pattern
         #[arg(long)]
         filter: Option<String>,
+
+        /// Do not access the network; use only locally cached artifacts
+        #[arg(long)]
+        offline: bool,
     },
     /// Build the project and run it (via Docker or java -jar)
     Run {
         /// Skip Docker; run directly with java -jar
         #[arg(long)]
         no_docker: bool,
+
+        /// Do not access the network; use only locally cached artifacts
+        #[arg(long)]
+        offline: bool,
 
         /// Arguments to pass to the application (after --)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -54,10 +66,10 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Cmd::Build { no_docker } => {
-            build::build(&cli.project, build::BuildOptions { no_docker })
+        Cmd::Build { no_docker, offline } => {
+            build::build(&cli.project, build::BuildOptions { no_docker, offline })
         }
-        Cmd::Test { filter } => {
+        Cmd::Test { filter, offline } => {
             let desc = match descriptor::load(&cli.project) {
                 Ok(d) => d,
                 Err(e) => {
@@ -70,7 +82,7 @@ fn main() {
                 desc.project_name(),
                 desc.project_version()
             );
-            let compiled = compile::compile(&cli.project, &desc).and_then(|compiled| {
+            let compiled = compile::compile(&cli.project, &desc, offline).and_then(|compiled| {
                 test::run_tests(
                     &cli.project,
                     &desc,
@@ -79,13 +91,14 @@ fn main() {
                     compiled.resources_dir.as_deref(),
                     compiled.test_resources_dir.as_deref(),
                     filter.as_deref(),
+                    offline,
                 )?;
                 Ok(())
             });
             compiled
         }
-        Cmd::Run { no_docker, args } => {
-            run::run(&cli.project, run::RunOptions { no_docker }, &args)
+        Cmd::Run { no_docker, offline, args } => {
+            run::run(&cli.project, run::RunOptions { no_docker, offline }, &args)
         }
         Cmd::Clean {} => build::clean(&cli.project),
     };

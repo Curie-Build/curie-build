@@ -95,6 +95,7 @@ pub fn pkg_prefix_for_src_root(src_root: &Path) -> String {
 pub fn compile(
     project_root: &Path,
     desc: &descriptor::Descriptor,
+    offline: bool,
 ) -> Result<CompileOutput> {
     // --- source roots --------------------------------------------------------
     // Support two layouts simultaneously:
@@ -148,6 +149,7 @@ pub fn compile(
                 extra_repos: extra_repos(desc),
                 verbose: false,
                 bom_imports: bom_gavs.clone(),
+                offline,
             },
         )
         .context("dependency resolution failed")?;

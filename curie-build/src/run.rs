@@ -6,6 +6,7 @@ use std::process::Command;
 
 pub struct RunOptions {
     pub no_docker: bool,
+    pub offline: bool,
 }
 
 pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Result<()> {
@@ -17,7 +18,7 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
 
     let app = desc.application.as_ref().expect("non-library has application");
 
-    let output = build::do_build(project_root, &desc)?;
+    let output = build::do_build(project_root, &desc, opts.offline)?;
 
     // main_class is always Some for application projects after do_build succeeds.
     let main_class = output

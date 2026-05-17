@@ -5,8 +5,11 @@
 //! 2. On cache miss, try each configured repository in order; download to a
 //!    `.part` file, rename atomically on success.
 //! 3. Parse the POM to discover compile-scoped transitive dependencies.
-//! 4. Recurse (BFS) until the full closure is resolved.
-//! 5. Return all resolved JAR paths in stable topological order
+//! 4. Recurse (BFS) until the full closure is resolved.  Only POMs are
+//!    fetched during BFS — this is Phase 1.
+//! 5. **Phase 2**: download all JARs in parallel (up to 8 concurrent threads)
+//!    once the full transitive closure is known.
+//! 6. Return all resolved JAR paths in stable topological order
 //!    (declared deps first, then their transitive deps breadth-first).
 //!
 //! # BOM imports
@@ -22,6 +25,11 @@
 //! `<scope>import</scope><type>pom</type>` in their own `<dependencyManagement>`)
 //! are resolved recursively; the importing BOM's own entries win over the
 //! entries from BOMs it imports.
+//!
+//! # Offline mode
+//! When [`ResolveOptions::offline`] is `true`, network calls are skipped
+//! entirely.  Any artifact not already present in `~/.m2/repository` is an
+//! immediate error.
 
 use crate::gav::Gav;
 use crate::pom::{self, BomRef, Pom};
@@ -29,6 +37,7 @@ use crate::repo::{default_repositories, Repository};
 use anyhow::{bail, Context, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Options for the resolver.
 pub struct ResolveOptions {
@@ -40,6 +49,9 @@ pub struct ResolveOptions {
     /// Each entry is a GAV for a POM-packaged artifact whose
     /// `<dependencyManagement>` block provides version constraints.
     pub bom_imports: Vec<Gav>,
+    /// When `true`, skip all network calls.  Any artifact that is not already
+    /// present in the local `~/.m2/repository` cache causes an immediate error.
+    pub offline: bool,
 }
 
 impl Default for ResolveOptions {
@@ -48,6 +60,7 @@ impl Default for ResolveOptions {
             extra_repos: vec![],
             verbose: true,
             bom_imports: vec![],
+            offline: false,
         }
     }
 }
@@ -58,6 +71,7 @@ fn merge_parent_chain(
     pom: &mut Pom,
     repos: &[Repository],
     client: &reqwest::blocking::Client,
+    offline: bool,
 ) {
     let mut depth = 0;
     let mut current_parent = pom.parent.clone();
@@ -74,7 +88,7 @@ fn merge_parent_chain(
             version: parent_ref.version.clone(),
         };
 
-        let pom_path = match ensure_artifact(&parent_gav, repos, client, ArtifactKind::Pom) {
+        let pom_path = match ensure_artifact(&parent_gav, repos, client, ArtifactKind::Pom, offline) {
             Ok(p) => p,
             Err(_) => break,
         };
@@ -130,6 +144,7 @@ fn resolve_boms(
     bom_gavs: &[Gav],
     repos: &[Repository],
     client: &reqwest::blocking::Client,
+    offline: bool,
 ) -> Result<HashMap<String, String>> {
     let mut managed: HashMap<String, String> = HashMap::new();
     let mut visited: HashSet<String> = HashSet::new();
@@ -154,7 +169,7 @@ fn resolve_boms(
                     continue; // already processed — prevent cycles
                 }
 
-                let pom_path = ensure_artifact(&gav, repos, client, ArtifactKind::Pom)
+                let pom_path = ensure_artifact(&gav, repos, client, ArtifactKind::Pom, offline)
                     .with_context(|| format!("failed to fetch BOM POM for {}", gav))?;
                 let xml = std::fs::read_to_string(&pom_path)
                     .with_context(|| format!("failed to read BOM POM {}", pom_path.display()))?;
@@ -163,7 +178,7 @@ fn resolve_boms(
 
                 // Merge parent chain so inherited managed versions and properties are
                 // available when resolving nested BOM import versions.
-                merge_parent_chain(&mut pom, repos, client);
+                merge_parent_chain(&mut pom, repos, client, offline);
 
                 // Collect this BOM's own managed versions for deferred application.
                 let own_entries: HashMap<String, String> = pom
@@ -235,12 +250,20 @@ pub fn resolve(
 
     let client = reqwest::blocking::Client::builder()
         .user_agent("curie-build/0.1")
+        .timeout(Duration::from_secs(30))
         .build()
         .context("failed to build HTTP client")?;
 
     // Pre-resolve all BOM managed versions before starting the BFS.
-    let global_managed = resolve_boms(&opts.bom_imports, &repos, &client)?;
+    let global_managed = resolve_boms(&opts.bom_imports, &repos, &client, opts.offline)?;
 
+    // -----------------------------------------------------------------------
+    // Phase 1: serial BFS over POMs to discover the full transitive closure.
+    //
+    // We only fetch POMs here (small, fast) and record the ordered list of
+    // GAVs.  JARs are downloaded in Phase 2 in parallel.
+    // -----------------------------------------------------------------------
+    //
     // BFS queue + visited set keyed on `group:artifact` (NOT full GAV).
     //
     // Maven's conflict-resolution rule is **nearest wins**: when the same
@@ -254,7 +277,8 @@ pub fn resolve(
     // matches Maven's "first declared wins" tiebreaker.
     let mut queue: VecDeque<Gav> = VecDeque::new();
     let mut visited: HashSet<String> = HashSet::new();
-    let mut ordered_jars: Vec<PathBuf> = Vec::new();
+    // Ordered list of GAVs in BFS discovery order — used in Phase 2.
+    let mut ordered_gavs: Vec<Gav> = Vec::new();
 
     // Seed with declared dependencies.  At depth 0 the user's explicit
     // version always wins — top-level `<dependencyManagement>` (BOMs) only
@@ -283,21 +307,10 @@ pub fn resolve(
     }
 
     while let Some(gav) = queue.pop_front() {
-        if opts.verbose {
-            print!("  Resolving {} ... ", gav);
-        }
+        ordered_gavs.push(gav.clone());
 
-        // --- JAR ----------------------------------------------------------------
-        let jar_path = ensure_artifact(&gav, &repos, &client, ArtifactKind::Jar)?;
-
-        if opts.verbose {
-            println!("OK");
-        }
-
-        ordered_jars.push(jar_path);
-
-        // --- POM (for transitive deps) ------------------------------------------
-        match ensure_artifact(&gav, &repos, &client, ArtifactKind::Pom) {
+        // Fetch POM to expand transitive dependencies.
+        match ensure_artifact(&gav, &repos, &client, ArtifactKind::Pom, opts.offline) {
             Ok(pom_path) => {
                 let xml = std::fs::read_to_string(&pom_path)
                     .with_context(|| format!("failed to read POM {}", pom_path.display()))?;
@@ -307,7 +320,7 @@ pub fn resolve(
                 // Walk the full parent chain, merging properties and
                 // dependencyManagement entries so that ${property} refs and
                 // version-less deps resolve correctly (e.g. jackson-bom).
-                merge_parent_chain(&mut pom, &repos, &client);
+                merge_parent_chain(&mut pom, &repos, &client, opts.offline);
 
                 for dep in pom.dependencies.iter().filter(|d| d.is_compile_scope()) {
                     let group = pom.resolve_value(&dep.group_id);
@@ -340,6 +353,76 @@ pub fn resolve(
                 // POM unavailable — continue without transitive expansion.
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: download JARs in parallel.
+    //
+    // We spawn up to PARALLEL_DOWNLOADS threads, each pulling one JAR at a
+    // time from the shared work queue.  Results are collected into a
+    // pre-allocated Vec<Result<PathBuf>> indexed by the original BFS order so
+    // the returned classpath is deterministic.
+    // -----------------------------------------------------------------------
+    const PARALLEL_DOWNLOADS: usize = 8;
+
+    let n = ordered_gavs.len();
+    if n == 0 {
+        return Ok(vec![]);
+    }
+
+    if opts.verbose {
+        println!("  Resolving {} artifact(s) ...", n);
+    }
+
+    // Shared atomic index into `ordered_gavs`.
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut jar_results: Vec<Option<Result<PathBuf>>> = (0..n).map(|_| None).collect();
+
+    // We need shared access to repos/client/gavs across threads.  Since all
+    // are read-only after construction, wrap in references and use
+    // std::thread::scope for safe borrowing.
+    let thread_count = PARALLEL_DOWNLOADS.min(n);
+    let mut per_thread: Vec<Vec<(usize, Result<PathBuf>)>> = Vec::new();
+
+    std::thread::scope(|s| -> Result<()> {
+        let handles: Vec<_> = (0..thread_count)
+            .map(|_| {
+                s.spawn(|| -> Vec<(usize, Result<PathBuf>)> {
+                    let mut local = Vec::new();
+                    loop {
+                        let idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if idx >= n {
+                            break;
+                        }
+                        let gav = &ordered_gavs[idx];
+                        let result =
+                            ensure_artifact(gav, &repos, &client, ArtifactKind::Jar, opts.offline);
+                        local.push((idx, result));
+                    }
+                    local
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            per_thread.push(handle.join().unwrap_or_default());
+        }
+        Ok(())
+    })?;
+
+    for thread_results in per_thread {
+        for (idx, result) in thread_results {
+            jar_results[idx] = Some(result);
+        }
+    }
+
+    // Collect in BFS order, propagating any download errors.
+    let mut ordered_jars = Vec::with_capacity(n);
+    for (idx, slot) in jar_results.into_iter().enumerate() {
+        let path = slot
+            .unwrap_or_else(|| bail!("internal: no result for index {}", idx))
+            .with_context(|| format!("failed to download JAR for {}", ordered_gavs[idx]))?;
+        ordered_jars.push(path);
     }
 
     Ok(ordered_jars)
@@ -419,11 +502,15 @@ enum ArtifactKind {
 }
 
 /// Return the local path for an artifact, downloading it if necessary.
+///
+/// When `offline` is `true`, any cache miss is an immediate error — no HTTP
+/// call is attempted.
 fn ensure_artifact(
     gav: &Gav,
     repos: &[Repository],
     client: &reqwest::blocking::Client,
     kind: ArtifactKind,
+    offline: bool,
 ) -> Result<PathBuf> {
     let local_path = match kind {
         ArtifactKind::Jar => gav.local_cache_path()?,
@@ -436,6 +523,13 @@ fn ensure_artifact(
 
     if local_path.exists() {
         return Ok(local_path);
+    }
+
+    if offline {
+        bail!(
+            "artifact {} is not in the local cache and --offline was specified",
+            gav
+        );
     }
 
     // Ensure parent directory exists.
@@ -590,7 +684,7 @@ mod tests {
             .user_agent("test")
             .build()
             .unwrap();
-        let result = resolve_boms(bom_gavs, &repos, &client);
+        let result = resolve_boms(bom_gavs, &repos, &client, true);
         // Restore HOME.
         match prev_home {
             Some(h) => std::env::set_var("HOME", h),
@@ -765,20 +859,14 @@ mod tests {
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", home_dir.to_str().unwrap());
 
-        // Replace Maven Central with an unreachable repo so a cache miss
-        // produces a fast error instead of a 30-second HTTP timeout.
+        // All artifacts are pre-cached; use offline mode so any accidental
+        // cache miss produces an immediate error rather than a network attempt.
         let opts = ResolveOptions {
-            extra_repos: vec![Repository {
-                name: "blackhole".into(),
-                // 127.0.0.1:1 should reliably refuse connections immediately.
-                url: "http://127.0.0.1:1".into(),
-            }],
+            extra_repos: vec![],
             verbose: false,
             bom_imports,
+            offline: true,
         };
-        // Override default repos by manipulating: we still get Maven Central
-        // in the repo list, but since every artifact is cached we never call
-        // out.  The test should never need a network round-trip.
         let result = resolve(deps, &opts);
 
         match prev_home {

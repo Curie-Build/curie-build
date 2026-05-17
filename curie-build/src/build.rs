@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 pub struct BuildOptions {
     pub no_docker: bool,
+    pub offline: bool,
 }
 
 /// Output paths produced by a successful build.
@@ -42,7 +43,7 @@ pub fn build(project_root: &Path, opts: BuildOptions) -> Result<()> {
         );
     }
 
-    let output = do_build(project_root, &desc)?;
+    let output = do_build(project_root, &desc, opts.offline)?;
 
     println!(
         "  Done            {}",
@@ -76,8 +77,9 @@ pub fn extra_repos(desc: &descriptor::Descriptor) -> Vec<Repository> {
 pub fn do_build(
     project_root: &Path,
     desc: &descriptor::Descriptor,
+    offline: bool,
 ) -> Result<BuildOutput> {
-    let compiled = compile(project_root, desc)?;
+    let compiled = compile(project_root, desc, offline)?;
 
     // --- run tests before packaging ------------------------------------------
     test::run_tests(
@@ -88,6 +90,7 @@ pub fn do_build(
         compiled.resources_dir.as_deref(),
         compiled.test_resources_dir.as_deref(),
         None,
+        offline,
     )?;
 
     // --- package (deterministic JAR, incremental) ----------------------------

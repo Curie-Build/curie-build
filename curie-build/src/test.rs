@@ -37,6 +37,7 @@ pub fn run_tests(
     resources_dir: Option<&Path>,
     test_resources_dir: Option<&Path>,
     filter: Option<&str>,
+    offline: bool,
 ) -> Result<()> {
     // --- discover test sources -----------------------------------------------
     let test_sources = discover_test_sources(project_root);
@@ -51,7 +52,7 @@ pub fn run_tests(
     // --- resolve JUnit standalone launcher -----------------------------------
     let extra_repos = build::extra_repos(desc);
 
-    let standalone_jar = resolve_standalone(&extra_repos)
+    let standalone_jar = resolve_standalone(&extra_repos, offline)
         .context("failed to resolve JUnit Platform Console Standalone")?;
 
     // --- resolve test-scoped dependencies ------------------------------------
@@ -90,6 +91,7 @@ pub fn run_tests(
                 extra_repos: extra_repos.clone(),
                 verbose: false,
                 bom_imports: test_bom_gavs,
+                offline,
             },
         )
         .context("test dependency resolution failed")?
@@ -337,7 +339,7 @@ fn discover_test_sources(project_root: &Path) -> Vec<PathBuf> {
 // JUnit standalone resolution
 // ---------------------------------------------------------------------------
 
-fn resolve_standalone(extra_repos: &[curie_deps::repo::Repository]) -> Result<PathBuf> {
+fn resolve_standalone(extra_repos: &[curie_deps::repo::Repository], offline: bool) -> Result<PathBuf> {
     let coord = format!(
         "{}:{}",
         JUNIT_STANDALONE_COORD, JUNIT_STANDALONE_VERSION
@@ -350,6 +352,7 @@ fn resolve_standalone(extra_repos: &[curie_deps::repo::Repository]) -> Result<Pa
             extra_repos: extra_repos.to_vec(),
             verbose: false,
             bom_imports: vec![],
+            offline,
         },
     )
     .with_context(|| format!("failed to resolve {}", coord))?;
