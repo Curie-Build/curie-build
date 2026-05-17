@@ -40,6 +40,17 @@ pub struct Descriptor {
     /// Keys are `"group:artifact"`, values are version strings.
     #[serde(rename = "test-bom-imports", default)]
     pub test_bom_imports: BTreeMap<String, String>,
+    /// BOMs inherited from the surrounding workspace's `[bom-imports]`,
+    /// populated by `workspace::load` during inheritance merge.  Empty in
+    /// single-module mode.  Lower priority than the member's own
+    /// [`bom_imports`]: in `prod_bom_gavs()` these are emitted first so the
+    /// resolver's later-wins semantics let the member override the workspace.
+    #[serde(skip)]
+    pub inherited_bom_imports: BTreeMap<String, String>,
+    /// Same as [`inherited_bom_imports`] for `[test-bom-imports]`.  Lower
+    /// priority than the member's own [`test_bom_imports`].
+    #[serde(skip)]
+    pub inherited_test_bom_imports: BTreeMap<String, String>,
     /// `[workspace-dependencies]` table: intra-workspace references to other
     /// members of the surrounding workspace.  Keys are arbitrary labels (the
     /// declared member name is conventional); values point at the member
@@ -92,21 +103,24 @@ pub struct Workspace {
     pub members: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct Java {
-    #[serde(rename = "sourceCompatibility", default = "default_source_compat")]
-    pub source_compatibility: String,
+    /// `[java].sourceCompatibility` as the user wrote it, or `None` when
+    /// the key was absent.  Use [`Self::effective`] to get the
+    /// resolved value (default `"21"`) — never read this field directly
+    /// from compile/test paths, because `None` is meaningful: it signals
+    /// "inherit from the workspace if any, else use the default".
+    #[serde(rename = "sourceCompatibility")]
+    pub source_compatibility: Option<String>,
 }
 
-fn default_source_compat() -> String {
-    "21".to_string()
-}
-
-impl Default for Java {
-    fn default() -> Self {
-        Java {
-            source_compatibility: default_source_compat(),
-        }
+impl Java {
+    /// Resolved `--release` argument for `javac`.  Workspace inheritance
+    /// happens upstream of this call (in `workspace::load`), so by the
+    /// time the build pipeline reads it the member's `source_compatibility`
+    /// has already been populated with the workspace value if applicable.
+    pub fn effective(&self) -> &str {
+        self.source_compatibility.as_deref().unwrap_or("21")
     }
 }
 
@@ -215,31 +229,53 @@ impl Descriptor {
         format!("{}:{}", self.image_name(), self.image_tag())
     }
 
-    /// Parse `[bom-imports]` into a `Vec<curie_deps::Gav>`.
+    /// Parse `[bom-imports]` into a `Vec<curie_deps::Gav>` for the
+    /// resolver, in priority-ascending order (later wins).
     ///
-    /// These are the production BOM constraints used for both production and
-    /// (as a lower-priority base) test dependency resolution.
+    /// Order:
+    ///   1. workspace-inherited prod BOMs (lowest)
+    ///   2. member's own prod BOMs (override 1)
     pub fn prod_bom_gavs(&self) -> anyhow::Result<Vec<curie_deps::Gav>> {
-        self.bom_imports
+        let mut v: Vec<curie_deps::Gav> = self
+            .inherited_bom_imports
             .iter()
-            .map(|(k, v)| curie_deps::Gav::from_key_version(k, v))
+            .map(|(k, ver)| curie_deps::Gav::from_key_version(k, ver))
             .collect::<anyhow::Result<_>>()
-            .context("invalid coordinate in [bom-imports]")
+            .context("invalid coordinate in workspace [bom-imports]")?;
+        let own: Vec<curie_deps::Gav> = self
+            .bom_imports
+            .iter()
+            .map(|(k, ver)| curie_deps::Gav::from_key_version(k, ver))
+            .collect::<anyhow::Result<_>>()
+            .context("invalid coordinate in [bom-imports]")?;
+        v.extend(own);
+        Ok(v)
     }
 
-    /// Parse `[bom-imports]` + `[test-bom-imports]` into a merged `Vec<curie_deps::Gav>`.
+    /// Parse `[bom-imports]` + `[test-bom-imports]` into a merged
+    /// `Vec<curie_deps::Gav>` for the test resolver, priority-ascending.
     ///
-    /// Production BOMs come first (lower priority); test-only BOMs follow and
-    /// therefore win when two BOMs manage the same artifact.
+    /// Order:
+    ///   1. workspace-inherited prod BOMs (lowest)
+    ///   2. member's own prod BOMs
+    ///   3. workspace-inherited test BOMs
+    ///   4. member's own test BOMs (highest)
     pub fn test_bom_gavs(&self) -> anyhow::Result<Vec<curie_deps::Gav>> {
         let mut v = self.prod_bom_gavs()?;
-        let test_only: Vec<curie_deps::Gav> = self
+        let inherited_test: Vec<curie_deps::Gav> = self
+            .inherited_test_bom_imports
+            .iter()
+            .map(|(k, ver)| curie_deps::Gav::from_key_version(k, ver))
+            .collect::<anyhow::Result<_>>()
+            .context("invalid coordinate in workspace [test-bom-imports]")?;
+        v.extend(inherited_test);
+        let own_test: Vec<curie_deps::Gav> = self
             .test_bom_imports
             .iter()
             .map(|(k, ver)| curie_deps::Gav::from_key_version(k, ver))
             .collect::<anyhow::Result<_>>()
             .context("invalid coordinate in [test-bom-imports]")?;
-        v.extend(test_only);
+        v.extend(own_test);
         Ok(v)
     }
 }
@@ -547,7 +583,7 @@ name = "Nexus"
 url = "https://example.com/m2"
 "#;
         let d = load_str(toml).unwrap();
-        assert_eq!(d.java.source_compatibility, "17");
+        assert_eq!(d.java.effective(), "17");
         assert_eq!(d.repositories.len(), 1);
     }
 

@@ -59,7 +59,8 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
             workspace_root.display(),
         ))?;
 
-    // Phase 1: load every member descriptor (sans workspace_deps).
+    // Phase 1: load every member descriptor (sans workspace_deps) and
+    // merge in inherited workspace-level config.
     let mut raw_members: Vec<Member> = Vec::with_capacity(ws.members.len());
     for declared in &ws.members {
         let path = workspace_root.join(declared);
@@ -70,7 +71,7 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
                 path.display(),
             );
         }
-        let descriptor = descriptor::load(&path)
+        let mut descriptor = descriptor::load(&path)
             .with_context(|| format!("failed to load workspace member \"{}\"", declared))?;
         if descriptor.is_workspace() {
             bail!(
@@ -78,6 +79,7 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
                 declared,
             );
         }
+        inherit_from_workspace(&mut descriptor, &root_desc);
         raw_members.push(Member {
             path,
             declared: declared.clone(),
@@ -149,6 +151,36 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
         root: workspace_root.to_path_buf(),
         members,
     })
+}
+
+/// Merge workspace-level inheritable config into a member descriptor.
+/// Called once per member during [`load`] so the build pipeline always sees
+/// a fully-resolved descriptor; in single-module mode this never runs and
+/// no behaviour changes.
+///
+/// Inheritance rules (intentionally minimal — covers the cases that
+/// actually let users DRY up `[bom-imports]` and `[java]` across siblings):
+///
+///   - **[java].sourceCompatibility**: member-explicit wins.  Only inherits
+///     when the member's value is `None` (the key was absent in its toml).
+///   - **[[repositories]]**: workspace's are prepended.  Both lists are
+///     searched by the resolver — order matters only for which mirror is
+///     tried first.
+///   - **[bom-imports]** and **[test-bom-imports]**: workspace's go into
+///     the member's `inherited_*_bom_imports` so the resolver sees them
+///     before the member's own (later-wins in the resolver gives member
+///     priority for any artifact both BOMs manage).
+fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
+    if member.java.source_compatibility.is_none() {
+        member.java.source_compatibility = ws.java.source_compatibility.clone();
+    }
+    if !ws.repositories.is_empty() {
+        let mut combined = ws.repositories.clone();
+        combined.append(&mut member.repositories);
+        member.repositories = combined;
+    }
+    member.inherited_bom_imports = ws.bom_imports.clone();
+    member.inherited_test_bom_imports = ws.test_bom_imports.clone();
 }
 
 /// Kahn's algorithm.  `edges[v]` is the set of nodes `v` depends on.
@@ -548,5 +580,118 @@ mod tests {
         ]);
         let err = load(dir.path()).unwrap_err().to_string();
         assert!(err.contains("cycle"), "got: {err}");
+    }
+
+    // -- inheritance --------------------------------------------------------
+
+    /// Helper that writes a workspace `Curie.toml` with arbitrary content
+    /// and members with arbitrary content, then calls `load`.
+    fn load_ws_with_content(ws_toml: &str, members: &[(&str, &str)]) -> Result<Workspace> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Curie.toml"), ws_toml).unwrap();
+        for (name, content) in members {
+            let mpath = dir.path().join(name);
+            std::fs::create_dir_all(&mpath).unwrap();
+            std::fs::write(mpath.join("Curie.toml"), content).unwrap();
+        }
+        let result = load(dir.path());
+        // Keep tempdir alive past load() by leaking; tests are short-lived.
+        std::mem::forget(dir);
+        result
+    }
+
+    #[test]
+    fn java_inherits_from_workspace_when_member_silent() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n[java]\nsourceCompatibility = \"17\"\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
+        ).unwrap();
+        assert_eq!(ws.members[0].descriptor.java.effective(), "17");
+    }
+
+    #[test]
+    fn java_member_value_overrides_workspace() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n[java]\nsourceCompatibility = \"17\"\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n[java]\nsourceCompatibility = \"21\"\n")],
+        ).unwrap();
+        assert_eq!(ws.members[0].descriptor.java.effective(), "21");
+    }
+
+    #[test]
+    fn java_falls_back_to_default_when_neither_sets_it() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
+        ).unwrap();
+        assert_eq!(ws.members[0].descriptor.java.effective(), "21");
+    }
+
+    #[test]
+    fn bom_imports_inherit_into_inherited_field() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\
+             [bom-imports]\n\"org.x:bom\" = \"1.0\"\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
+        ).unwrap();
+        let d = &ws.members[0].descriptor;
+        assert_eq!(d.inherited_bom_imports.get("org.x:bom").map(String::as_str), Some("1.0"));
+        assert!(d.bom_imports.is_empty());
+        // GAV iteration order: inherited first.
+        let gavs = d.prod_bom_gavs().unwrap();
+        assert_eq!(gavs.len(), 1);
+        assert_eq!(gavs[0].to_string(), "org.x:bom:1.0");
+    }
+
+    #[test]
+    fn member_bom_appears_after_workspace_bom_in_gav_order() {
+        // Workspace BOM (lower priority) must be emitted before member's
+        // own (higher priority) so the resolver's later-wins gives member
+        // precedence for any artifact both manage.
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\
+             [bom-imports]\n\"org.x:bom\" = \"1.0\"\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                    [bom-imports]\n\"org.x:bom\" = \"2.0\"\n")],
+        ).unwrap();
+        let gavs = ws.members[0].descriptor.prod_bom_gavs().unwrap();
+        assert_eq!(gavs.len(), 2);
+        assert_eq!(gavs[0].to_string(), "org.x:bom:1.0", "inherited (ws) first");
+        assert_eq!(gavs[1].to_string(), "org.x:bom:2.0", "member's own second");
+    }
+
+    #[test]
+    fn test_bom_gavs_layer_inherited_and_own() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\
+             [bom-imports]\n\"ws:prod\" = \"1\"\n\
+             [test-bom-imports]\n\"ws:test\" = \"1\"\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                    [bom-imports]\n\"own:prod\" = \"1\"\n\
+                    [test-bom-imports]\n\"own:test\" = \"1\"\n")],
+        ).unwrap();
+        let gavs: Vec<String> = ws.members[0]
+            .descriptor
+            .test_bom_gavs()
+            .unwrap()
+            .iter()
+            .map(|g| g.to_string())
+            .collect();
+        // Priority-ascending: ws-prod, own-prod, ws-test, own-test.
+        assert_eq!(gavs, vec!["ws:prod:1", "own:prod:1", "ws:test:1", "own:test:1"]);
+    }
+
+    #[test]
+    fn repositories_inherit_prepended() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\
+             [[repositories]]\nname = \"ws-repo\"\nurl = \"https://ws.example.com\"\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                    [[repositories]]\nname = \"own-repo\"\nurl = \"https://own.example.com\"\n")],
+        ).unwrap();
+        let repos = &ws.members[0].descriptor.repositories;
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0].name, "ws-repo");
+        assert_eq!(repos[1].name, "own-repo");
     }
 }

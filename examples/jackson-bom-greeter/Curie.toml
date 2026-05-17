@@ -1,44 +1,25 @@
 # jackson-bom-greeter-flat
 #
-# Demonstrates BOM imports with the flat-package source layout:
+# Demonstrates BOM imports inherited from the workspace
+# (examples/Curie.toml).  This member declares only what's unique to it:
 #
 #   src/com.example/JacksonBomGreeter.java          — production source
 #   tests/com.example/JacksonBomGreeterTest.java    — integration tests
 #
-# Versions for [dependencies] and [test-dependencies] entries whose value is ""
-# are resolved from the imported BOMs.
+# Versions for [dependencies] and [test-dependencies] entries whose value
+# is "" are resolved from the workspace-inherited BOMs (jackson-bom for
+# Jackson coordinates, junit-bom for org.junit.*).
 
 [application]
 name = "jackson-bom-greeter-flat"
 version = "0.1.0"
 mainClass = "com.example.JacksonBomGreeter"
 
-[java]
-sourceCompatibility = "21"
-
 [docker]
 baseImage = "eclipse-temurin:21-jre-alpine"
 
-# ---------------------------------------------------------------------------
-# BOM imports
-# ---------------------------------------------------------------------------
-
-[bom-imports]
-"com.fasterxml.jackson:jackson-bom" = "2.17.2"
-
-[test-bom-imports]
-"org.junit:junit-bom" = "5.11.0"
-
-# ---------------------------------------------------------------------------
-# Production dependencies
-# ---------------------------------------------------------------------------
-
 [dependencies]
 "com.fasterxml.jackson.core:jackson-databind" = ""
-
-# ---------------------------------------------------------------------------
-# Test dependencies
-# ---------------------------------------------------------------------------
 
 [test-dependencies]
 "org.junit.jupiter:junit-jupiter"        = ""

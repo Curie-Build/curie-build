@@ -1,9 +1,13 @@
 # Examples workspace.
 #
 # Each member directory is an independent Curie project (application or
-# library) with its own Curie.toml.  Run `curie list` here to enumerate
-# them; later steps will add `curie build` and `curie test` that fan out
-# across every member in dependency order.
+# library) with its own Curie.toml.
+#
+# Workspace-level config (below) is inherited by every member:
+#   - [java] sourceCompatibility is the default for members that don't
+#     declare their own.
+#   - [bom-imports] / [test-bom-imports] are merged with each member's
+#     own BOM imports; member entries take precedence on a name collision.
 #
 # The pairs `<name>` / `maven-<name>` demonstrate the two source layouts
 # (flat-package vs Maven src/main/java/) side by side.
@@ -20,3 +24,12 @@ members = [
     "maven-json-greeter",
     "maven-string-utils",
 ]
+
+[java]
+sourceCompatibility = "21"
+
+[bom-imports]
+"com.fasterxml.jackson:jackson-bom" = "2.17.2"
+
+[test-bom-imports]
+"org.junit:junit-bom" = "5.11.0"

@@ -13,8 +13,5 @@ name      = "string-utils-cli"
 version   = "0.1.0"
 mainClass = "com.example.cli.Main"
 
-[java]
-sourceCompatibility = "21"
-
 [workspace-dependencies]
 string-utils = { path = "../string-utils" }

@@ -144,7 +144,7 @@ pub fn run_tests(
         let mut javac = Command::new("javac");
         javac
             .arg("--release")
-            .arg(&desc.java.source_compatibility)
+            .arg(desc.java.effective())
             .arg("-g")
             .arg("-d")
             .arg(&test_classes_dir)

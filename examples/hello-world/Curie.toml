@@ -11,5 +11,3 @@ name = "hello-world-flat"
 version = "0.1.0"
 mainClass = "com.example.HelloWorld"
 
-[java]
-sourceCompatibility = "21"

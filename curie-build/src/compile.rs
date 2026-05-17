@@ -232,7 +232,7 @@ pub fn compile(
         let mut javac = Command::new("javac");
         javac
             .arg("--release")
-            .arg(&desc.java.source_compatibility)
+            .arg(desc.java.effective())
             .arg("-g")
             .arg("-d")
             .arg(&classes_dir);

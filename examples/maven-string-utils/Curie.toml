@@ -8,8 +8,5 @@
 name    = "maven-string-utils"
 version = "0.1.0"
 
-[java]
-sourceCompatibility = "21"
-
 [test-dependencies]
 "org.junit.jupiter:junit-jupiter" = "6.0.3"
