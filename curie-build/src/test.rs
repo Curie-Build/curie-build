@@ -47,8 +47,6 @@ pub fn run_tests(
         return Ok(());
     }
 
-    println!("  Tests           {} test source file(s)", test_sources.len());
-
     // --- resolve JUnit standalone launcher -----------------------------------
     let extra_repos = build::extra_repos(desc);
 
