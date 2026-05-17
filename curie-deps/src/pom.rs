@@ -125,205 +125,176 @@ impl Pom {
     }
 }
 
+/// Where we are inside the POM document.
+///
+/// One state per container we care about, plus `Root` for "before `<project>`".
+/// Unrecognized child elements stay in the parent's context — that matches the
+/// behaviour of the previous `path.contains(...)` dispatch and is good enough
+/// for real-world POMs, which don't put `<dependencies>` or `<dependency>` in
+/// custom wrapper elements.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Ctx {
+    Root,
+    Project,
+    Parent,
+    Properties,
+    Dependencies,
+    Dependency,
+    DepMgmt,
+    DepMgmtDependencies,
+    ManagedDependency,
+}
+
+/// Transition function: given the current container and a child tag, return
+/// the child's container.  Unrecognized tags inherit the parent's context so
+/// nested leaf elements (like `<groupId>` inside `<project>`) still dispatch
+/// against the right parent on End.
+fn next_ctx(parent: Ctx, tag: &str) -> Ctx {
+    match (parent, tag) {
+        (Ctx::Root, "project") => Ctx::Project,
+        (Ctx::Project, "parent") => Ctx::Parent,
+        (Ctx::Project, "properties") => Ctx::Properties,
+        (Ctx::Project, "dependencies") => Ctx::Dependencies,
+        (Ctx::Project, "dependencyManagement") => Ctx::DepMgmt,
+        (Ctx::Dependencies, "dependency") => Ctx::Dependency,
+        (Ctx::DepMgmt, "dependencies") => Ctx::DepMgmtDependencies,
+        (Ctx::DepMgmtDependencies, "dependency") => Ctx::ManagedDependency,
+        _ => parent,
+    }
+}
+
+/// Apply a known dependency-field value (`groupId`, `version`, …) to the
+/// scratch `PomDep` being assembled inside `<dependency>` / managed
+/// `<dependency>`.  Unknown fields are silently ignored, matching POM
+/// schema permissiveness.
+fn assign_dep_field(dep: &mut PomDep, field: &str, text: &str) {
+    match field {
+        "groupId" => dep.group_id = text.to_string(),
+        "artifactId" => dep.artifact_id = text.to_string(),
+        "version" => dep.version = Some(text.to_string()),
+        "scope" => dep.scope = Some(text.to_string()),
+        "type" => dep.type_ = Some(text.to_string()),
+        "optional" => dep.optional = text.trim() == "true",
+        _ => {}
+    }
+}
+
+/// Mutator that lazily creates a `ParentRef` so each of the three nested
+/// fields (`groupId` / `artifactId` / `version`) can assign without
+/// repeating the `get_or_insert_with` boilerplate.
+fn parent_ref_mut(p: &mut Option<ParentRef>) -> &mut ParentRef {
+    p.get_or_insert_with(|| ParentRef {
+        group_id: String::new(),
+        artifact_id: String::new(),
+        version: String::new(),
+    })
+}
+
 /// Parse POM XML from a string, returning a [`Pom`].
+///
+/// Dispatch is driven by a small state machine ([`Ctx`]) instead of joined
+/// path strings, so the parser is allocation-free per event and the
+/// dispatch table is exhaustive enough that the compiler will flag a stale
+/// branch if a context is renamed.
 pub fn parse(xml: &str) -> Result<Pom> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
     let mut pom = Pom::default();
 
-    // tag stack for tracking position
-    let mut stack: Vec<String> = Vec::new();
-
-    // scratch buffers for current dependency being parsed
+    // `stack[i]` is the Ctx we entered at depth `i+1`.  `stack.last()` is
+    // the "current container".
+    let mut stack: Vec<Ctx> = Vec::new();
     let mut cur_dep: Option<PomDep> = None;
-    // scratch buffer for current dependencyManagement entry
     let mut cur_mgd: Option<PomDep> = None;
-    // current text accumulator
     let mut text_buf = String::new();
 
     loop {
         match reader.read_event().context("XML read error")? {
             Event::Start(e) => {
-                let tag = std::str::from_utf8(e.name().as_ref())
-                    .unwrap_or("")
+                let tag = std::str::from_utf8(e.local_name().as_ref())
+                    .context("invalid UTF-8 in POM tag name")?
                     .to_string();
+                let parent_ctx = stack.last().copied().unwrap_or(Ctx::Root);
+                let new_ctx = next_ctx(parent_ctx, &tag);
 
-                if tag == "dependency" && in_direct_dependencies(&stack) {
-                    cur_dep = Some(PomDep {
-                        group_id: String::new(),
-                        artifact_id: String::new(),
-                        version: None,
-                        scope: None,
-                        type_: None,
-                        optional: false,
-                    });
+                // Only initialize scratch buffers when we're entering a new
+                // *container* — not when an unrecognized leaf inherits the
+                // parent's context (which would also appear as new_ctx ==
+                // Dependency/ManagedDependency but with parent_ctx ==
+                // new_ctx).
+                if new_ctx == Ctx::Dependency && parent_ctx != Ctx::Dependency {
+                    cur_dep = Some(PomDep::empty());
+                } else if new_ctx == Ctx::ManagedDependency && parent_ctx != Ctx::ManagedDependency {
+                    cur_mgd = Some(PomDep::empty());
                 }
 
-                if tag == "dependency" && in_dependency_management(&stack) {
-                    cur_mgd = Some(PomDep {
-                        group_id: String::new(),
-                        artifact_id: String::new(),
-                        version: None,
-                        scope: None,
-                        type_: None,
-                        optional: false,
-                    });
-                }
-
-                stack.push(tag);
+                stack.push(new_ctx);
                 text_buf.clear();
             }
             Event::Text(e) => {
-                text_buf = e.unescape().unwrap_or_default().to_string();
+                // Append rather than replace so values split across multiple
+                // Text events (e.g. with an embedded CDATA section) survive.
+                let s = e.unescape().context("invalid XML escape in POM")?;
+                text_buf.push_str(&s);
             }
             Event::End(e) => {
-                let tag = std::str::from_utf8(e.name().as_ref())
-                    .unwrap_or("")
+                let tag = std::str::from_utf8(e.local_name().as_ref())
+                    .context("invalid UTF-8 in POM tag name")?
                     .to_string();
+                let leaving_ctx = stack.pop().unwrap_or(Ctx::Root);
+                let parent_ctx = stack.last().copied().unwrap_or(Ctx::Root);
 
-                let path = stack.join("/");
+                // Leaf assignments: we're closing a value tag whose parent
+                // is a recognized container.
+                match (parent_ctx, tag.as_str()) {
+                    (Ctx::Project, "groupId") => pom.group_id = Some(text_buf.clone()),
+                    (Ctx::Project, "artifactId") => pom.artifact_id = Some(text_buf.clone()),
+                    (Ctx::Project, "version") => pom.version = Some(text_buf.clone()),
 
-                match path.as_str() {
-                    // --- top-level fields ----------------------------------------
-                    "project/groupId" => pom.group_id = Some(text_buf.clone()),
-                    "project/artifactId" => pom.artifact_id = Some(text_buf.clone()),
-                    "project/version" => pom.version = Some(text_buf.clone()),
+                    (Ctx::Parent, "groupId") => parent_ref_mut(&mut pom.parent).group_id = text_buf.clone(),
+                    (Ctx::Parent, "artifactId") => parent_ref_mut(&mut pom.parent).artifact_id = text_buf.clone(),
+                    (Ctx::Parent, "version") => parent_ref_mut(&mut pom.parent).version = text_buf.clone(),
 
-                    // --- parent --------------------------------------------------
-                    "project/parent/groupId" => {
-                        pom.parent.get_or_insert_with(|| ParentRef {
-                            group_id: String::new(),
-                            artifact_id: String::new(),
-                            version: String::new(),
-                        }).group_id = text_buf.clone();
-                    }
-                    "project/parent/artifactId" => {
-                        pom.parent.get_or_insert_with(|| ParentRef {
-                            group_id: String::new(),
-                            artifact_id: String::new(),
-                            version: String::new(),
-                        }).artifact_id = text_buf.clone();
-                    }
-                    "project/parent/version" => {
-                        pom.parent.get_or_insert_with(|| ParentRef {
-                            group_id: String::new(),
-                            artifact_id: String::new(),
-                            version: String::new(),
-                        }).version = text_buf.clone();
+                    (Ctx::Properties, key) => {
+                        pom.properties.insert(key.to_string(), text_buf.clone());
                     }
 
-                    // --- properties ----------------------------------------------
-                    _ if path.starts_with("project/properties/") => {
-                        if let Some(key) = path.strip_prefix("project/properties/") {
-                            pom.properties.insert(key.to_string(), text_buf.clone());
+                    (Ctx::Dependency, field) => {
+                        if let Some(d) = cur_dep.as_mut() {
+                            assign_dep_field(d, field, &text_buf);
                         }
                     }
+                    (Ctx::ManagedDependency, field) => {
+                        if let Some(d) = cur_mgd.as_mut() {
+                            assign_dep_field(d, field, &text_buf);
+                        }
+                    }
+                    _ => {}
+                }
 
-                    // --- dependency fields ---------------------------------------
-                    _ if path.ends_with("/dependency/groupId")
-                        && in_direct_dependencies_path(&path) =>
-                    {
-                        if let Some(d) = cur_dep.as_mut() {
-                            d.group_id = text_buf.clone();
-                        }
-                    }
-                    _ if path.ends_with("/dependency/artifactId")
-                        && in_direct_dependencies_path(&path) =>
-                    {
-                        if let Some(d) = cur_dep.as_mut() {
-                            d.artifact_id = text_buf.clone();
-                        }
-                    }
-                    _ if path.ends_with("/dependency/version")
-                        && in_direct_dependencies_path(&path) =>
-                    {
-                        if let Some(d) = cur_dep.as_mut() {
-                            d.version = Some(text_buf.clone());
-                        }
-                    }
-                    _ if path.ends_with("/dependency/scope")
-                        && in_direct_dependencies_path(&path) =>
-                    {
-                        if let Some(d) = cur_dep.as_mut() {
-                            d.scope = Some(text_buf.clone());
-                        }
-                    }
-                    _ if path.ends_with("/dependency/optional")
-                        && in_direct_dependencies_path(&path) =>
-                    {
-                        if let Some(d) = cur_dep.as_mut() {
-                            d.optional = text_buf.trim() == "true";
-                        }
-                    }
-                    _ if tag == "dependency" && in_direct_dependencies_path(&path) => {
+                // Container finalization: closing the actual `<dependency>`
+                // element (rather than a leaf inside it) pushes its scratch
+                // struct into the right list on `pom`.
+                //
+                // We distinguish via (leaving_ctx, parent_ctx): a leaf inside
+                // a Dependency leaves Ctx=Dependency and returns to Ctx=Dependency
+                // (unrecognized child inherits parent ctx).  The real container
+                // close leaves Ctx=Dependency and returns to Ctx=Dependencies.
+                match (leaving_ctx, parent_ctx) {
+                    (Ctx::Dependency, Ctx::Dependencies) => {
                         if let Some(d) = cur_dep.take() {
                             pom.dependencies.push(d);
                         }
                     }
-
-                    // --- dependencyManagement fields -----------------------------
-                    _ if path.ends_with("/dependency/groupId")
-                        && path.contains("dependencyManagement") =>
-                    {
-                        if let Some(d) = cur_mgd.as_mut() {
-                            d.group_id = text_buf.clone();
-                        }
-                    }
-                    _ if path.ends_with("/dependency/artifactId")
-                        && path.contains("dependencyManagement") =>
-                    {
-                        if let Some(d) = cur_mgd.as_mut() {
-                            d.artifact_id = text_buf.clone();
-                        }
-                    }
-                    _ if path.ends_with("/dependency/version")
-                        && path.contains("dependencyManagement") =>
-                    {
-                        if let Some(d) = cur_mgd.as_mut() {
-                            d.version = Some(text_buf.clone());
-                        }
-                    }
-                    _ if path.ends_with("/dependency/scope")
-                        && path.contains("dependencyManagement") =>
-                    {
-                        if let Some(d) = cur_mgd.as_mut() {
-                            d.scope = Some(text_buf.clone());
-                        }
-                    }
-                    _ if path.ends_with("/dependency/type")
-                        && path.contains("dependencyManagement") =>
-                    {
-                        if let Some(d) = cur_mgd.as_mut() {
-                            d.type_ = Some(text_buf.clone());
-                        }
-                    }
-                    _ if tag == "dependency" && path.contains("dependencyManagement") => {
+                    (Ctx::ManagedDependency, Ctx::DepMgmtDependencies) => {
                         if let Some(d) = cur_mgd.take() {
-                            let is_bom_import =
-                                d.scope.as_deref() == Some("import")
-                                && d.type_.as_deref() == Some("pom");
-                            if is_bom_import {
-                                // Route to bom_imports — the resolver will fetch this
-                                // POM and merge its managed versions.
-                                if let Some(v) = d.version {
-                                    pom.bom_imports.push(BomRef {
-                                        group_id: d.group_id,
-                                        artifact_id: d.artifact_id,
-                                        version: v,
-                                    });
-                                }
-                            } else if let Some(v) = d.version {
-                                let key = format!("{}:{}", d.group_id, d.artifact_id);
-                                pom.managed_versions.insert(key, v);
-                            }
+                            finalize_managed_dep(d, &mut pom);
                         }
                     }
-
                     _ => {}
                 }
 
-                stack.pop();
                 text_buf.clear();
             }
             Event::Eof => break,
@@ -334,21 +305,37 @@ pub fn parse(xml: &str) -> Result<Pom> {
     Ok(pom)
 }
 
-/// `stack` currently points *inside* `project/dependencies` (not `dependencyManagement`).
-fn in_direct_dependencies(stack: &[String]) -> bool {
-    let path = stack.join("/");
-    path == "project/dependencies"
-        || path.ends_with("/project/dependencies")
+/// Route a completed `<dependencyManagement>/<dependency>` entry to the
+/// right field on `pom`: `bom_imports` when scope=import + type=pom,
+/// otherwise `managed_versions` (keyed `group:artifact`).
+fn finalize_managed_dep(d: PomDep, pom: &mut Pom) {
+    let is_bom_import =
+        d.scope.as_deref() == Some("import") && d.type_.as_deref() == Some("pom");
+    if is_bom_import {
+        if let Some(v) = d.version {
+            pom.bom_imports.push(BomRef {
+                group_id: d.group_id,
+                artifact_id: d.artifact_id,
+                version: v,
+            });
+        }
+    } else if let Some(v) = d.version {
+        let key = format!("{}:{}", d.group_id, d.artifact_id);
+        pom.managed_versions.insert(key, v);
+    }
 }
 
-fn in_dependency_management(stack: &[String]) -> bool {
-    let path = stack.join("/");
-    path.contains("dependencyManagement") && path.ends_with("/dependencies")
-}
-
-fn in_direct_dependencies_path(path: &str) -> bool {
-    // must contain /dependencies/ but NOT /dependencyManagement/
-    path.contains("/dependencies/") && !path.contains("dependencyManagement")
+impl PomDep {
+    fn empty() -> Self {
+        PomDep {
+            group_id: String::new(),
+            artifact_id: String::new(),
+            version: None,
+            scope: None,
+            type_: None,
+            optional: false,
+        }
+    }
 }
 
 #[cfg(test)]
