@@ -140,9 +140,13 @@ enum Ctx {
     Properties,
     Dependencies,
     Dependency,
+    Exclusions,
+    Exclusion,
     DepMgmt,
     DepMgmtDependencies,
     ManagedDependency,
+    ManagedExclusions,
+    ManagedExclusion,
 }
 
 /// Transition function: given the current container and a child tag, return
@@ -157,8 +161,12 @@ fn next_ctx(parent: Ctx, tag: &str) -> Ctx {
         (Ctx::Project, "dependencies") => Ctx::Dependencies,
         (Ctx::Project, "dependencyManagement") => Ctx::DepMgmt,
         (Ctx::Dependencies, "dependency") => Ctx::Dependency,
+        (Ctx::Dependency, "exclusions") => Ctx::Exclusions,
+        (Ctx::Exclusions, "exclusion") => Ctx::Exclusion,
         (Ctx::DepMgmt, "dependencies") => Ctx::DepMgmtDependencies,
         (Ctx::DepMgmtDependencies, "dependency") => Ctx::ManagedDependency,
+        (Ctx::ManagedDependency, "exclusions") => Ctx::ManagedExclusions,
+        (Ctx::ManagedExclusions, "exclusion") => Ctx::ManagedExclusion,
         _ => parent,
     }
 }
@@ -572,6 +580,38 @@ mod tests {
         let compile: Vec<_> = pom.dependencies.iter().filter(|d| d.is_compile_scope()).collect();
         assert_eq!(compile.len(), 1, "runtime-scope dep should be included");
         assert_eq!(compile[0].artifact_id, "postgresql");
+    }
+
+    // --- exclusions do not corrupt groupId/artifactId --------------------------
+
+    #[test]
+    fn exclusions_do_not_overwrite_dep_fields() {
+        // Regression test: <exclusions><exclusion><groupId> was incorrectly
+        // overwriting the parent dependency's groupId/artifactId because
+        // those tags were dispatched against the Dependency context.
+        let xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>com.example</groupId><artifactId>x</artifactId><version>1.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.codehaus.woodstox</groupId>
+      <artifactId>stax2-api</artifactId>
+      <version>4.2.2</version>
+      <exclusions>
+        <exclusion>
+          <groupId>javax.xml.stream</groupId>
+          <artifactId>stax-api</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+  </dependencies>
+</project>"#;
+        let pom = parse(xml).unwrap();
+        assert_eq!(pom.dependencies.len(), 1);
+        let dep = &pom.dependencies[0];
+        assert_eq!(dep.group_id, "org.codehaus.woodstox", "exclusion groupId must not overwrite dep groupId");
+        assert_eq!(dep.artifact_id, "stax2-api", "exclusion artifactId must not overwrite dep artifactId");
+        assert_eq!(dep.version.as_deref(), Some("4.2.2"));
     }
 
     #[test]
