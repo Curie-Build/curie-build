@@ -3,6 +3,8 @@
 //! Parses only what curie-deps needs:
 //!   - `<groupId>`, `<artifactId>`, `<version>` (own + parent)
 //!   - `<dependencies>` with scope filtering (compile/runtime only; skip test/provided/optional)
+//!   - `<dependencyManagement>` entries, including BOM imports
+//!     (`<scope>import</scope>` + `<type>pom</type>`)
 //!
 //! Property interpolation (`${...}`) is handled for the common `${project.version}`
 //! and `${project.parent.version}` patterns.  Full property resolution is left
@@ -23,11 +25,27 @@ pub struct Pom {
     pub properties: HashMap<String, String>,
     pub dependencies: Vec<PomDep>,
     /// Versions declared in `<dependencyManagement>`, keyed by `"group:artifact"`.
+    /// Does NOT include BOM imports (`scope=import` + `type=pom`) — those go to
+    /// [`bom_imports`].
     pub managed_versions: HashMap<String, String>,
+    /// BOM imports found in `<dependencyManagement>`: entries with
+    /// `<scope>import</scope>` and `<type>pom</type>`.  These must be fetched
+    /// and their managed versions merged into the resolution context.
+    pub bom_imports: Vec<BomRef>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ParentRef {
+    pub group_id: String,
+    pub artifact_id: String,
+    pub version: String,
+}
+
+/// A BOM referenced via `<scope>import</scope>` + `<type>pom</type>` inside a
+/// `<dependencyManagement>` block.  The resolver must fetch this POM and merge
+/// its managed versions into the resolution context.
+#[derive(Debug, Clone)]
+pub struct BomRef {
     pub group_id: String,
     pub artifact_id: String,
     pub version: String,
@@ -39,6 +57,8 @@ pub struct PomDep {
     pub artifact_id: String,
     pub version: Option<String>,
     pub scope: Option<String>,
+    /// The `<type>` element value (e.g. `"pom"` for BOM imports).
+    pub type_: Option<String>,
     pub optional: bool,
 }
 
@@ -135,6 +155,7 @@ pub fn parse(xml: &str) -> Result<Pom> {
                         artifact_id: String::new(),
                         version: None,
                         scope: None,
+                        type_: None,
                         optional: false,
                     });
                 }
@@ -145,6 +166,7 @@ pub fn parse(xml: &str) -> Result<Pom> {
                         artifact_id: String::new(),
                         version: None,
                         scope: None,
+                        type_: None,
                         optional: false,
                     });
                 }
@@ -262,9 +284,36 @@ pub fn parse(xml: &str) -> Result<Pom> {
                             d.version = Some(text_buf.clone());
                         }
                     }
+                    _ if path.ends_with("/dependency/scope")
+                        && path.contains("dependencyManagement") =>
+                    {
+                        if let Some(d) = cur_mgd.as_mut() {
+                            d.scope = Some(text_buf.clone());
+                        }
+                    }
+                    _ if path.ends_with("/dependency/type")
+                        && path.contains("dependencyManagement") =>
+                    {
+                        if let Some(d) = cur_mgd.as_mut() {
+                            d.type_ = Some(text_buf.clone());
+                        }
+                    }
                     _ if tag == "dependency" && path.contains("dependencyManagement") => {
                         if let Some(d) = cur_mgd.take() {
-                            if let Some(v) = d.version {
+                            let is_bom_import =
+                                d.scope.as_deref() == Some("import")
+                                && d.type_.as_deref() == Some("pom");
+                            if is_bom_import {
+                                // Route to bom_imports — the resolver will fetch this
+                                // POM and merge its managed versions.
+                                if let Some(v) = d.version {
+                                    pom.bom_imports.push(BomRef {
+                                        group_id: d.group_id,
+                                        artifact_id: d.artifact_id,
+                                        version: v,
+                                    });
+                                }
+                            } else if let Some(v) = d.version {
                                 let key = format!("{}:{}", d.group_id, d.artifact_id);
                                 pom.managed_versions.insert(key, v);
                             }
@@ -408,6 +457,74 @@ mod tests {
         );
         // dependencyManagement entries are NOT in pom.dependencies
         assert!(pom.dependencies.is_empty());
+        // No BOM imports
+        assert!(pom.bom_imports.is_empty());
+    }
+
+    #[test]
+    fn parse_bom_import_goes_to_bom_imports_not_managed_versions() {
+        let xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>parent</artifactId>
+  <version>1.0.0</version>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>com.fasterxml.jackson</groupId>
+        <artifactId>jackson-bom</artifactId>
+        <version>2.17.2</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.slf4j</groupId>
+        <artifactId>slf4j-api</artifactId>
+        <version>2.0.9</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>"#;
+        let pom = parse(xml).unwrap();
+        // BOM import goes to bom_imports, not managed_versions
+        assert_eq!(pom.bom_imports.len(), 1);
+        let bom = &pom.bom_imports[0];
+        assert_eq!(bom.group_id, "com.fasterxml.jackson");
+        assert_eq!(bom.artifact_id, "jackson-bom");
+        assert_eq!(bom.version, "2.17.2");
+        assert!(!pom.managed_versions.contains_key("com.fasterxml.jackson:jackson-bom"));
+        // Regular managed dep is still captured
+        assert_eq!(
+            pom.managed_versions.get("org.slf4j:slf4j-api").map(String::as_str),
+            Some("2.0.9")
+        );
+    }
+
+    #[test]
+    fn parse_managed_dep_with_scope_not_treated_as_bom_import() {
+        // A managed dep with scope=compile should NOT go to bom_imports
+        let xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>com.example</groupId>
+  <artifactId>parent</artifactId>
+  <version>1.0.0</version>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.example</groupId>
+        <artifactId>some-lib</artifactId>
+        <version>3.0.0</version>
+        <scope>compile</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>"#;
+        let pom = parse(xml).unwrap();
+        assert!(pom.bom_imports.is_empty());
+        assert_eq!(
+            pom.managed_versions.get("org.example:some-lib").map(String::as_str),
+            Some("3.0.0")
+        );
     }
 
     // --- scope / optional filtering --------------------------------------------
