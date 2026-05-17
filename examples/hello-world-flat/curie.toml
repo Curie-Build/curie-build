@@ -1,0 +1,15 @@
+# hello-world-flat
+#
+# Demonstrates the flat-package source layout:
+#
+#   src/com.example/HelloWorld.java   — production source
+#
+# Package name is the directory name under src/; no deep nesting needed.
+
+[application]
+name = "hello-world-flat"
+version = "0.1.0"
+mainClass = "com.example.HelloWorld"
+
+[java]
+sourceCompatibility = "21"

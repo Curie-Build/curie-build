@@ -1,0 +1,53 @@
+# jackson-bom-greeter
+#
+# Demonstrates BOM imports in curie.toml:
+#
+#   [bom-imports]      – BOMs that apply to both production and test dependencies.
+#   [test-bom-imports] – Additional BOMs that apply to test dependencies only,
+#                        with higher priority than [bom-imports].
+#
+# Versions for [dependencies] and [test-dependencies] entries whose value is ""
+# are resolved from the imported BOMs.  Later entries in [bom-imports] win when
+# two BOMs manage the same artifact.
+
+[application]
+name    = "jackson-bom-greeter"
+version = "0.1.0"
+mainClass = "com.example.JacksonBomGreeter"
+
+[java]
+sourceCompatibility = "21"
+
+[docker]
+baseImage = "eclipse-temurin:21-jre-alpine"
+
+# ---------------------------------------------------------------------------
+# BOM imports
+# ---------------------------------------------------------------------------
+
+# jackson-bom manages all com.fasterxml.jackson.* coordinates.
+# The version here is the BOM artifact's own version.
+[bom-imports]
+"com.fasterxml.jackson:jackson-bom" = "2.17.2"
+
+# junit-bom manages all org.junit.* coordinates.
+# Declared under [test-bom-imports] so it only affects test dependencies.
+[test-bom-imports]
+"org.junit:junit-bom" = "5.11.0"
+
+# ---------------------------------------------------------------------------
+# Production dependencies
+# ---------------------------------------------------------------------------
+#
+# Version is "" — resolved from jackson-bom above.
+[dependencies]
+"com.fasterxml.jackson.core:jackson-databind" = ""
+
+# ---------------------------------------------------------------------------
+# Test dependencies
+# ---------------------------------------------------------------------------
+#
+# Versions are "" — resolved from junit-bom (via [test-bom-imports]).
+[test-dependencies]
+"org.junit.jupiter:junit-jupiter"        = ""
+"org.junit.jupiter:junit-jupiter-engine" = ""

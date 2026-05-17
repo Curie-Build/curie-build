@@ -1,0 +1,22 @@
+# string-utils-flat
+#
+# Demonstrates the flat-package source layout with both unit tests and
+# integration tests:
+#
+#   src/com.example.stringutils/StringUtils.java       — production source
+#   src/com.example.stringutils/StringUtilsTest.java   — co-located unit tests
+#   src/com.example.stringutils/StringUtilsSpec.java   — co-located spec tests
+#   tests/com.example.stringutils/StringUtilsIT.java   — integration tests
+#
+# Unit tests (*Test.java / *Spec.java) live next to the production code.
+# Integration tests live in the separate top-level tests/ directory.
+
+[library]
+name    = "string-utils-flat"
+version = "0.1.0"
+
+[java]
+sourceCompatibility = "21"
+
+[test-dependencies]
+"org.junit.jupiter:junit-jupiter" = "6.0.3"

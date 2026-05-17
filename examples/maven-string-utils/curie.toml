@@ -1,0 +1,15 @@
+# maven-string-utils
+#
+# Backward-compatibility example: verifies that the original Maven-style
+# source layout (src/main/java/ + src/test/java/) still works unchanged
+# alongside the new flat-package layout support.
+
+[library]
+name    = "maven-string-utils"
+version = "0.1.0"
+
+[java]
+sourceCompatibility = "21"
+
+[test-dependencies]
+"org.junit.jupiter:junit-jupiter" = "6.0.3"

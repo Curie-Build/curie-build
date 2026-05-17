@@ -1,0 +1,16 @@
+# maven-hello-world
+#
+# Backward-compatibility example: verifies that the original Maven-style
+# source layout (src/main/java/) still works unchanged alongside the new
+# flat-package layout support.
+
+[application]
+name = "maven-hello-world"
+version = "0.1.0"
+mainClass = "com.example.HelloWorld"
+
+[java]
+sourceCompatibility = "21"
+
+[docker]
+baseImage = "eclipse-temurin:21-jre-alpine"
