@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 use walkdir::WalkDir;
-
 /// Version of JUnit Platform Console Standalone resolved from Maven Central.
 const JUNIT_STANDALONE_VERSION: &str = "6.0.3";
 const JUNIT_STANDALONE_COORD: &str =
@@ -16,8 +15,10 @@ const JUNIT_STANDALONE_COORD: &str =
 ///
 /// `classes_dir`        — directory containing already-compiled production classes.
 /// `dep_jars`           — resolved production dependency JARs.
-/// `resources_dir`      — `src/main/resources` if it exists, otherwise `None`.
-/// `test_resources_dir` — `src/test/resources` if it exists, otherwise `None`.
+/// `resources_dir`      — production resources dir if it exists (`src/main/resources`
+///                        or top-level `resources/`), otherwise `None`.
+/// `test_resources_dir` — test resources dir if it exists (`src/test/resources` or
+///                        top-level `test-resources/`), otherwise `None`.
 /// `filter`             — optional class-name pattern passed to `--include-classname`.
 ///
 /// Returns `Ok(())` when all tests pass (or when no test sources exist).
@@ -48,6 +49,26 @@ pub fn run_tests(
         .context("failed to resolve JUnit Platform Console Standalone")?;
 
     // --- resolve test-scoped dependencies ------------------------------------
+    // Build effective BOM list for test resolution:
+    //   [bom-imports] (lower priority) + [test-bom-imports] (higher priority).
+    // Later entries in the list win, so prod BOMs come first.
+    let test_bom_gavs: Vec<curie_deps::Gav> = {
+        let mut v: Vec<curie_deps::Gav> = desc
+            .bom_imports
+            .iter()
+            .map(|(k, ver)| curie_deps::Gav::from_key_version(k, ver))
+            .collect::<anyhow::Result<_>>()
+            .context("invalid coordinate in [bom-imports]")?;
+        let test_only: Vec<curie_deps::Gav> = desc
+            .test_bom_imports
+            .iter()
+            .map(|(k, ver)| curie_deps::Gav::from_key_version(k, ver))
+            .collect::<anyhow::Result<_>>()
+            .context("invalid coordinate in [test-bom-imports]")?;
+        v.extend(test_only);
+        v
+    };
+
     let test_dep_jars = if desc.test_dependencies.is_empty() {
         vec![]
     } else {
@@ -62,6 +83,7 @@ pub fn run_tests(
             &ResolveOptions {
                 extra_repos: extra_repos.clone(),
                 verbose: false,
+                bom_imports: test_bom_gavs,
             },
         )
         .context("test dependency resolution failed")?
@@ -75,33 +97,40 @@ pub fn run_tests(
     let toml_path = project_root.join("curie.toml");
 
     // Remove stale test class files before checking whether recompilation is
-    // needed.  Test sources may come from two roots (co-located in
-    // src/main/java, or separate-tree in src/test/java), so we supply both.
+    // needed.  Test sources may come from multiple roots; collect all
+    // (root, sources_in_that_root) pairs for remove_stale_classes.
     let main_src = project_root.join("src").join("main").join("java");
     let test_src = project_root.join("src").join("test").join("java");
+    let flat_src_dirs = build::flat_package_src_dirs(project_root);
+    let flat_test_dirs = build::flat_package_test_dirs(project_root);
 
-    // Partition test_sources by which root they belong to.
-    let main_src_tests: Vec<PathBuf> = test_sources
+    // Collect sources belonging to each root.
+    let mut root_source_pairs: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
+
+    for root in std::iter::once(&main_src)
+        .chain(std::iter::once(&test_src))
+        .chain(flat_src_dirs.iter())
+        .chain(flat_test_dirs.iter())
+    {
+        let belonging: Vec<PathBuf> = test_sources
+            .iter()
+            .filter(|p| p.starts_with(root))
+            .cloned()
+            .collect();
+        if !belonging.is_empty() || root.exists() {
+            root_source_pairs.push((root.clone(), belonging));
+        }
+    }
+
+    let pairs_ref: Vec<(&Path, &[PathBuf])> = root_source_pairs
         .iter()
-        .filter(|p| p.starts_with(&main_src))
-        .cloned()
-        .collect();
-    let test_src_tests: Vec<PathBuf> = test_sources
-        .iter()
-        .filter(|p| p.starts_with(&test_src))
-        .cloned()
+        .map(|(r, s)| (r.as_path(), s.as_slice()))
         .collect();
 
-    let stale_removed = build::remove_stale_classes(
-        &[
-            (main_src.as_path(), &main_src_tests),
-            (test_src.as_path(), &test_src_tests),
-        ],
-        &test_classes_dir,
-    )?;
+    let stale_removed = build::remove_stale_classes(&pairs_ref, &test_classes_dir)?;
 
     let needs_recompile = stale_removed > 0
-        || needs_test_recompile(&test_sources, &test_classes_dir, &toml_path);
+        || needs_test_recompile(&test_sources, &test_classes_dir, &toml_path, &project_root.join("target"));
 
     if needs_recompile {
         let reason = if stale_removed > 0 { "  [stale classes removed]" } else { "" };
@@ -142,6 +171,11 @@ pub fn run_tests(
 
         if !status.success() {
             bail!("test compilation failed");
+        }
+
+        // Record the JDK version used so that a future upgrade triggers a rebuild.
+        if let Ok(version) = build::javac_version() {
+            build::write_javac_version_stamp(&project_root.join("target"), &version)?;
         }
     } else {
         println!("  Compile tests   up to date");
@@ -212,19 +246,25 @@ pub fn run_tests(
 // Source discovery
 // ---------------------------------------------------------------------------
 
-/// Collect test source files from both co-located and separate-tree locations.
+/// Collect test source files from all supported layout roots.
 ///
-/// Co-located: `src/main/java` — files ending in `Test.java`, `Tests.java`,
-/// or `Spec.java`.
+/// **Existing Maven-style layouts (unchanged):**
+/// - Co-located: `src/main/java` — files ending in `Test.java`, `Tests.java`,
+///   or `Spec.java`.
+/// - Separate tree: `src/test/java` — all `*.java` files.
 ///
-/// Separate tree: `src/test/java` — all `*.java` files.
+/// **New flat-package layouts:**
+/// - Co-located unit tests: each dot-named directory under `src/` — files ending
+///   in `Test.java`, `Tests.java`, or `Spec.java`.
+/// - Integration tests: each dot-named directory under `tests/` — all `*.java`
+///   files.
 ///
 /// Results are merged, deduplicated by canonical path, and sorted
 /// lexicographically for a deterministic `javac` invocation.
 fn discover_test_sources(project_root: &Path) -> Vec<PathBuf> {
     let mut sources: Vec<PathBuf> = Vec::new();
 
-    // Co-located tests in src/main/java
+    // --- Maven-style: co-located tests in src/main/java ----------------------
     let main_src = project_root.join("src").join("main").join("java");
     if main_src.exists() {
         let colocated: Vec<PathBuf> = WalkDir::new(&main_src)
@@ -241,7 +281,7 @@ fn discover_test_sources(project_root: &Path) -> Vec<PathBuf> {
         sources.extend(colocated);
     }
 
-    // Separate test tree: src/test/java
+    // --- Maven-style: separate test tree src/test/java -----------------------
     let test_src = project_root.join("src").join("test").join("java");
     if test_src.exists() {
         let separate: Vec<PathBuf> = WalkDir::new(&test_src)
@@ -253,8 +293,35 @@ fn discover_test_sources(project_root: &Path) -> Vec<PathBuf> {
         sources.extend(separate);
     }
 
-    // Deduplicate by canonical path (in case a path appears via both roots,
-    // which shouldn't happen in practice but is cheap to guard against).
+    // --- Flat-package: co-located unit tests in src/<dot.pkg>/ ---------------
+    for pkg_dir in build::flat_package_src_dirs(project_root) {
+        let colocated: Vec<PathBuf> = WalkDir::new(&pkg_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy();
+                name.ends_with("Test.java")
+                    || name.ends_with("Tests.java")
+                    || name.ends_with("Spec.java")
+            })
+            .map(|e| e.into_path())
+            .collect();
+        sources.extend(colocated);
+    }
+
+    // --- Flat-package: integration tests in tests/<dot.pkg>/ -----------------
+    for pkg_dir in build::flat_package_test_dirs(project_root) {
+        let integration: Vec<PathBuf> = WalkDir::new(&pkg_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".java"))
+            .map(|e| e.into_path())
+            .collect();
+        sources.extend(integration);
+    }
+
+    // Deduplicate by canonical path (in case a path appears via multiple roots)
+    // and sort for determinism.
     sources.sort();
     sources.dedup();
     sources
@@ -276,6 +343,7 @@ fn resolve_standalone(extra_repos: &[curie_deps::repo::Repository]) -> Result<Pa
         &ResolveOptions {
             extra_repos: extra_repos.to_vec(),
             verbose: false,
+            bom_imports: vec![],
         },
     )
     .with_context(|| format!("failed to resolve {}", coord))?;
@@ -368,15 +436,25 @@ fn newest_mtime_in_dir(dir: &Path) -> SystemTime {
 /// Returns true when test sources need to be recompiled:
 /// - No test class files exist yet, OR
 /// - Any test source file is newer than the oldest test class file, OR
-/// - curie.toml is newer than the oldest test class file.
+/// - curie.toml is newer than the oldest test class file, OR
+/// - The JDK version has changed since the last test compilation.
 fn needs_test_recompile(
     test_sources: &[PathBuf],
     test_classes_dir: &Path,
     toml_path: &Path,
+    target_dir: &Path,
 ) -> bool {
     let oldest_class = oldest_mtime_in_dir(test_classes_dir);
     if oldest_class == SystemTime::UNIX_EPOCH {
         return true;
+    }
+    // Check JDK fingerprint — a JDK upgrade should always trigger a recompile.
+    if let Ok(current) = build::javac_version() {
+        let stamp = build::javac_version_stamp_path(target_dir);
+        let stored = std::fs::read_to_string(&stamp).unwrap_or_default();
+        if stored.trim() != current.trim() {
+            return true;
+        }
     }
     if build::newest_mtime(test_sources) > oldest_class {
         return true;

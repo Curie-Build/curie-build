@@ -81,15 +81,80 @@ pub struct CompileOutput {
     pub jar_path: PathBuf,
     pub jar_name: String,
     pub classes_dir: PathBuf,
-    pub src_root: PathBuf,
+    /// All active source roots (Maven-style and/or flat-package dirs).
+    pub src_roots: Vec<PathBuf>,
     /// All non-test production source files (sorted).
     pub sources: Vec<PathBuf>,
     /// Resolved production dependency JARs (empty when no [dependencies] declared).
     pub dep_jars: Vec<PathBuf>,
-    /// `src/main/resources` if the directory exists, otherwise `None`.
+    /// Production resources directory (`src/main/resources` or top-level `resources/`), if it exists.
     pub resources_dir: Option<PathBuf>,
-    /// `src/test/resources` if the directory exists, otherwise `None`.
+    /// Test resources directory (`src/test/resources` or top-level `test-resources/`), if it exists.
     pub test_resources_dir: Option<PathBuf>,
+}
+
+/// Returns all immediate subdirectories of `<project_root>/src/` whose names
+/// contain a dot — these are flat-package source roots (e.g. `com.example.myapp`).
+///
+/// Sub-packages are siblings under `src/`, not nested inside their parent package
+/// directory.  For example, `src/com.example.myapp/` and
+/// `src/com.example.myapp.service/` are both returned.
+pub fn flat_package_src_dirs(project_root: &Path) -> Vec<PathBuf> {
+    let src = project_root.join("src");
+    if !src.exists() {
+        return vec![];
+    }
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&src)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy();
+            s.contains('.') && e.path().is_dir()
+        })
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// For a flat-package source root such as `src/com.example.foo`, returns
+/// the directory name (`"com.example.foo"`) — which is also the Java package
+/// declared by all files inside it.  Returns `""` for Maven-style roots
+/// (`src/main/java`, `src/test/java`) whose final component contains no dot.
+///
+/// This prefix is what `javac` will emit class files under (relative to
+/// `target/classes`) and what callers prepend when deriving fully-qualified
+/// class names from a source file's path.
+pub fn pkg_prefix_for_src_root(src_root: &Path) -> String {
+    src_root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| n.contains('.'))
+        .unwrap_or_default()
+}
+
+/// Returns all immediate subdirectories of `<project_root>/tests/` whose names
+/// contain a dot — these are flat-package integration-test roots.
+pub fn flat_package_test_dirs(project_root: &Path) -> Vec<PathBuf> {
+    let tests = project_root.join("tests");
+    if !tests.exists() {
+        return vec![];
+    }
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&tests)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy();
+            s.contains('.') && e.path().is_dir()
+        })
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    dirs
 }
 
 /// Phase 1: resolve production deps and compile production sources.
@@ -98,10 +163,25 @@ pub fn compile(
     project_root: &Path,
     desc: &descriptor::Descriptor,
 ) -> Result<CompileOutput> {
-    // --- directories ---------------------------------------------------------
-    let src_root = project_root.join("src").join("main").join("java");
-    if !src_root.exists() {
-        bail!("source directory not found: {}", src_root.display());
+    // --- source roots --------------------------------------------------------
+    // Support two layouts simultaneously:
+    //   A) Maven-style:   src/main/java/
+    //   B) Flat-package:  src/com.example.myapp/  (any dot-named sibling under src/)
+    let maven_src = project_root.join("src").join("main").join("java");
+    let flat_src_dirs = flat_package_src_dirs(project_root);
+
+    let mut src_roots: Vec<PathBuf> = Vec::new();
+    if maven_src.exists() {
+        src_roots.push(maven_src.clone());
+    }
+    src_roots.extend(flat_src_dirs);
+
+    if src_roots.is_empty() {
+        bail!(
+            "no source directory found: expected src/main/java/ \
+             or at least one dot-named directory under src/ \
+             (e.g. src/com.example.myapp/)"
+        );
     }
 
     let classes_dir = project_root.join("target").join("classes");
@@ -111,7 +191,18 @@ pub fn compile(
         .context("failed to create target/classes")?;
 
     // --- resolve production dependencies -------------------------------------
-    let dep_jars = if desc.dependencies.is_empty() {
+    // Parse [bom-imports] into GAVs once — reused for both prod and test.
+    let bom_gavs: Vec<curie_deps::Gav> = desc
+        .bom_imports
+        .iter()
+        .map(|(k, v)| curie_deps::Gav::from_key_version(k, v))
+        .collect::<anyhow::Result<_>>()
+        .context("invalid coordinate in [bom-imports]")?;
+
+    let dep_jars = if desc.dependencies.is_empty() && desc.bom_imports.is_empty() {
+        vec![]
+    } else if desc.dependencies.is_empty() {
+        // BOMs declared but no deps — nothing to resolve yet.
         vec![]
     } else {
         let pairs: Vec<(&str, &str)> = desc
@@ -127,6 +218,7 @@ pub fn compile(
             &ResolveOptions {
                 extra_repos,
                 verbose: false,
+                bom_imports: bom_gavs.clone(),
             },
         )
         .context("dependency resolution failed")?;
@@ -136,33 +228,46 @@ pub fn compile(
     };
 
     // --- discover production sources (exclude test files) --------------------
-    let mut sources: Vec<_> = WalkDir::new(&src_root)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy();
-            name.ends_with(".java")
-                && !name.ends_with("Test.java")
-                && !name.ends_with("Tests.java")
-                && !name.ends_with("Spec.java")
-        })
-        .map(|e| e.into_path())
-        .collect();
+    let mut sources: Vec<PathBuf> = Vec::new();
+    for src_root in &src_roots {
+        let root_sources: Vec<_> = WalkDir::new(src_root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy();
+                name.ends_with(".java")
+                    && !name.ends_with("Test.java")
+                    && !name.ends_with("Tests.java")
+                    && !name.ends_with("Spec.java")
+            })
+            .map(|e| e.into_path())
+            .collect();
+        sources.extend(root_sources);
+    }
 
     if sources.is_empty() {
-        bail!("no Java source files found under {}", src_root.display());
+        bail!(
+            "no Java source files found under {}",
+            src_roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+        );
     }
 
     sources.sort();
+    sources.dedup();
 
     // --- resource directories ------------------------------------------------
+    // Maven-style: src/main/resources  /  src/test/resources
+    // Flat-package style: resources/   /  test-resources/   (top-level)
+    // Whichever exists is used; Maven-style takes precedence when both present.
     let resources_dir = {
-        let d = project_root.join("src").join("main").join("resources");
-        if d.exists() { Some(d) } else { None }
+        let maven = project_root.join("src").join("main").join("resources");
+        let flat  = project_root.join("resources");
+        if maven.exists() { Some(maven) } else if flat.exists() { Some(flat) } else { None }
     };
     let test_resources_dir = {
-        let d = project_root.join("src").join("test").join("resources");
-        if d.exists() { Some(d) } else { None }
+        let maven = project_root.join("src").join("test").join("resources");
+        let flat  = project_root.join("test-resources");
+        if maven.exists() { Some(maven) } else if flat.exists() { Some(flat) } else { None }
     };
 
     // --- compile (incremental) -----------------------------------------------
@@ -171,15 +276,22 @@ pub fn compile(
     // Remove stale class files before checking whether recompilation is needed.
     // If any are removed we must recompile even if no source is newer than the
     // oldest surviving class file.
+    let root_source_pairs: Vec<(&Path, &[PathBuf])> = src_roots
+        .iter()
+        .map(|r| {
+            let slice: &[PathBuf] = &sources;
+            (r.as_path(), slice)
+        })
+        .collect();
     let stale_removed = remove_stale_classes(
-        &[(&src_root, &sources)],
+        &root_source_pairs,
         &classes_dir,
     )?;
 
     let compile_status = if stale_removed > 0 {
         CompileStatus::StaleClasses
     } else {
-        needs_recompile(&sources, &classes_dir, &toml_path)
+        needs_recompile(&sources, &classes_dir, &toml_path, &output_dir)
     };
 
     if compile_status.needs_recompile() {
@@ -218,6 +330,11 @@ pub fn compile(
         if !status.success() {
             bail!("compilation failed");
         }
+
+        // Record the JDK version used so that a future upgrade triggers a rebuild.
+        if let Ok(version) = javac_version() {
+            write_javac_version_stamp(&output_dir, &version)?;
+        }
     } else {
         println!("  Compile         up to date");
     }
@@ -228,7 +345,7 @@ pub fn compile(
     );
     let jar_path = output_dir.join(&jar_name);
 
-    Ok(CompileOutput { jar_path, jar_name, classes_dir, src_root, sources, dep_jars, resources_dir, test_resources_dir })
+    Ok(CompileOutput { jar_path, jar_name, classes_dir, src_roots, sources, dep_jars, resources_dir, test_resources_dir })
 }
 
 /// Phase 2: compile production sources, run tests, then package JAR.
@@ -261,12 +378,12 @@ pub fn do_build(
                     declared.clone()
                 }
                 None => {
-                    let detected = detect_main_class(
-                        &compiled.src_root,
-                        &compiled.sources,
-                        &compiled.classes_dir,
-                        &compiled.dep_jars,
-                    )?;
+                                    let detected = detect_main_class(
+                                        &compiled.src_roots,
+                                        &compiled.sources,
+                                        &compiled.classes_dir,
+                                        &compiled.dep_jars,
+                                    )?;
                     println!("  Detected        mainClass = {}", detected);
                     detected
                 }
@@ -357,6 +474,8 @@ pub(crate) enum CompileStatus {
     TomlChanged,
     /// Stale `.class` files were found (sources deleted since last compile).
     StaleClasses,
+    /// The JDK version used to compile has changed since the last build.
+    JdkChanged,
     /// All outputs are up to date — no recompile needed.
     UpToDate,
 }
@@ -373,9 +492,46 @@ impl CompileStatus {
             CompileStatus::SourceChanged => "source changed",
             CompileStatus::TomlChanged => "curie.toml changed",
             CompileStatus::StaleClasses => "stale classes removed",
+            CompileStatus::JdkChanged => "JDK version changed",
             CompileStatus::UpToDate => "up to date",
         }
     }
+}
+
+/// Returns the version string reported by `javac -version` (e.g. `"javac 21.0.3"`).
+///
+/// `javac` writes its version to **stderr** (not stdout).
+pub(crate) fn javac_version() -> Result<String> {
+    let out = Command::new("javac")
+        .arg("-version")
+        .output()
+        .context("failed to invoke javac — is a JDK installed?")?;
+    // javac writes its version to stderr.
+    let raw = String::from_utf8_lossy(&out.stderr);
+    let version = raw.trim().to_string();
+    if version.is_empty() {
+        // Fall back to stdout in case a non-standard JDK writes there.
+        let raw_out = String::from_utf8_lossy(&out.stdout);
+        let version_out = raw_out.trim().to_string();
+        if version_out.is_empty() {
+            bail!("javac -version produced no output");
+        }
+        return Ok(version_out);
+    }
+    Ok(version)
+}
+
+/// Path of the file that records the `javac` version used for the last
+/// successful compilation.  Lives next to `.test-stamp` and `.docker-stamp`.
+pub(crate) fn javac_version_stamp_path(target_dir: &Path) -> PathBuf {
+    target_dir.join(".javac-version")
+}
+
+/// Write the current `javac` version to the stamp file in `target_dir`.
+pub(crate) fn write_javac_version_stamp(target_dir: &Path, version: &str) -> Result<()> {
+    let path = javac_version_stamp_path(target_dir);
+    std::fs::write(&path, version)
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 /// Returns the reason a recompile is (or is not) required.
@@ -383,10 +539,20 @@ pub(crate) fn needs_recompile(
     sources: &[PathBuf],
     classes_dir: &Path,
     toml_path: &Path,
+    target_dir: &Path,
 ) -> CompileStatus {
     let oldest_class = oldest_mtime_in_dir(classes_dir);
     if oldest_class == SystemTime::UNIX_EPOCH {
         return CompileStatus::NoClassFiles;
+    }
+    // Check JDK fingerprint before mtime comparisons — a JDK upgrade should
+    // always trigger a full recompile regardless of source timestamps.
+    if let Ok(current) = javac_version() {
+        let stamp = javac_version_stamp_path(target_dir);
+        let stored = std::fs::read_to_string(&stamp).unwrap_or_default();
+        if stored.trim() != current.trim() {
+            return CompileStatus::JdkChanged;
+        }
     }
     if newest_mtime(sources) > oldest_class {
         return CompileStatus::SourceChanged;
@@ -414,21 +580,29 @@ pub(crate) fn remove_stale_classes(
     src_roots_and_sources: &[(&Path, &[PathBuf])],
     classes_dir: &Path,
 ) -> Result<usize> {
-    // Build a set of expected stems: relative path without extension.
-    // e.g. src_root=src/main/java, source=src/main/java/com/foo/Bar.java
-    //   -> stem = "com/foo/Bar"
+    // Build a set of expected stems: relative path without extension,
+    // prefixed by the src_root's package (empty for Maven-style roots,
+    // the directory name for flat-package roots such as `src/com.example/`).
+    //
+    // e.g.
+    //   src_root=src/main/java, source=src/main/java/com/foo/Bar.java
+    //     -> stem = "com/foo/Bar"
+    //   src_root=src/com.example, source=src/com.example/Foo.java
+    //     -> stem = "com/example/Foo"  (the dir name IS the package)
     let mut expected: std::collections::HashSet<String> =
         std::collections::HashSet::new();
 
     for (src_root, sources) in src_roots_and_sources {
+        let pkg_prefix = pkg_prefix_for_src_root(src_root);
+        let pkg_path = pkg_prefix.replace('.', "/");
         for src in *sources {
             if let Ok(rel) = src.strip_prefix(src_root) {
                 let s = rel.to_string_lossy();
-                // Strip the ".java" extension to get the stem.
-                let stem = if s.ends_with(".java") {
-                    s[..s.len() - 5].replace('\\', "/")
+                let rel_stem = s.trim_end_matches(".java").replace('\\', "/");
+                let stem = if pkg_path.is_empty() {
+                    rel_stem
                 } else {
-                    s.replace('\\', "/")
+                    format!("{}/{}", pkg_path, rel_stem)
                 };
                 expected.insert(stem);
             }
@@ -851,7 +1025,7 @@ mod tests {
         let toml = dir.path().join("curie.toml");
         write_file(&toml, b"[application]");
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml), CompileStatus::NoClassFiles);
+        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path()), CompileStatus::NoClassFiles);
     }
 
     #[test]
@@ -864,7 +1038,7 @@ mod tests {
         let toml = dir.path().join("curie.toml");
         write_file(&toml, b"[application]");
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml), CompileStatus::NoClassFiles);
+        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path()), CompileStatus::NoClassFiles);
     }
 
     #[test]
@@ -886,7 +1060,12 @@ mod tests {
         // class is newer than both src and toml
         set_mtime(&class_file, base + Duration::from_secs(10));
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml), CompileStatus::UpToDate);
+        // Write the current javac version stamp so the JDK check passes.
+        if let Ok(v) = javac_version() {
+            write_javac_version_stamp(dir.path(), &v).unwrap();
+        }
+
+        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path()), CompileStatus::UpToDate);
     }
 
     #[test]
@@ -908,7 +1087,12 @@ mod tests {
         write_file(&toml, b"[application]");
         set_mtime(&toml, base - Duration::from_secs(10));
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml), CompileStatus::SourceChanged);
+        // Write the current javac version stamp so the JDK check passes.
+        if let Ok(v) = javac_version() {
+            write_javac_version_stamp(dir.path(), &v).unwrap();
+        }
+
+        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path()), CompileStatus::SourceChanged);
     }
 
     #[test]
@@ -930,7 +1114,36 @@ mod tests {
         write_file(&toml, b"[application]");
         set_mtime(&toml, base + Duration::from_secs(5));
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml), CompileStatus::TomlChanged);
+        // Write the current javac version stamp so the JDK check passes.
+        if let Ok(v) = javac_version() {
+            write_javac_version_stamp(dir.path(), &v).unwrap();
+        }
+
+        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path()), CompileStatus::TomlChanged);
+    }
+
+    #[test]
+    fn needs_recompile_true_when_jdk_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(3_000_000);
+
+        let classes_dir = dir.path().join("classes");
+        let class_file = classes_dir.join("Foo.class");
+        write_file(&class_file, b"bytecode");
+        set_mtime(&class_file, base + Duration::from_secs(10));
+
+        let src = dir.path().join("Foo.java");
+        write_file(&src, b"class Foo {}");
+        set_mtime(&src, base);
+
+        let toml = dir.path().join("curie.toml");
+        write_file(&toml, b"[application]");
+        set_mtime(&toml, base);
+
+        // Write a *different* javac version to simulate a JDK upgrade.
+        write_javac_version_stamp(dir.path(), "javac 99.0.0").unwrap();
+
+        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path()), CompileStatus::JdkChanged);
     }
 
     // -- needs_repackage ------------------------------------------------------
@@ -1030,18 +1243,41 @@ mod tests {
 // Main-class detection and validation
 // ---------------------------------------------------------------------------
 
-/// Derive the fully-qualified class name from a `.java` source path relative
-/// to `src_root`.  For unnamed/compact source files (no top-level type
-/// declaration) the class name equals the file stem.
-fn fqcn_from_source(src_root: &Path, source: &Path) -> Option<String> {
-    let rel = source.strip_prefix(src_root).ok()?;
-    let without_ext = rel.with_extension("");
-    let fqcn = without_ext
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join(".");
-    if fqcn.is_empty() { None } else { Some(fqcn) }
+/// Derive the fully-qualified class name from a `.java` source path, trying
+/// each `src_root` in order and using the first successful strip.
+///
+/// For Maven-style roots (`src/main/java`), the FQCN is the path under the
+/// root with separators replaced by dots.
+///
+/// For flat-package roots (`src/com.example.foo`), the directory name IS the
+/// package, so it is prepended to the FQCN.  Example: source
+/// `src/com.example.foo/Bar.java` under root `src/com.example.foo` yields
+/// FQCN `com.example.foo.Bar`.
+///
+/// For unnamed/compact source files (no top-level type declaration) the class
+/// name equals the file stem.
+fn fqcn_from_source(src_roots: &[PathBuf], source: &Path) -> Option<String> {
+    for src_root in src_roots {
+        if let Ok(rel) = source.strip_prefix(src_root) {
+            let without_ext = rel.with_extension("");
+            let rel_fqcn = without_ext
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(".");
+            if rel_fqcn.is_empty() {
+                continue;
+            }
+            let pkg_prefix = pkg_prefix_for_src_root(src_root);
+            let fqcn = if pkg_prefix.is_empty() {
+                rel_fqcn
+            } else {
+                format!("{}.{}", pkg_prefix, rel_fqcn)
+            };
+            return Some(fqcn);
+        }
+    }
+    None
 }
 
 /// Returns `true` when the source text looks like a compact (unnamed-class)
@@ -1169,7 +1405,7 @@ pub fn validate_main_class(
 /// Scan production sources for candidates then validate each against compiled
 /// bytecode.  Returns the single detected class name, or an error.
 pub fn detect_main_class(
-    src_root: &Path,
+    src_roots: &[PathBuf],
     sources: &[PathBuf],
     classes_dir: &Path,
     dep_jars: &[PathBuf],
@@ -1182,7 +1418,7 @@ pub fn detect_main_class(
             Err(_) => continue,
         };
         if source_has_main(&text) {
-            if let Some(fqcn) = fqcn_from_source(src_root, source) {
+            if let Some(fqcn) = fqcn_from_source(src_roots, source) {
                 source_candidates.push((fqcn, source.clone()));
             }
         }
@@ -1504,5 +1740,62 @@ mod clean_tests {
         assert!(classes_dir.join("Foo.class").exists());
         assert!(classes_dir.join("BarTest.class").exists());
         assert!(!classes_dir.join("Baz.class").exists());
+    }
+
+    // Regression: flat-package src roots (e.g. `src/com.example/`) encode the
+    // package in the directory name.  javac emits class files under the
+    // declared package (e.g. `com/example/Foo.class`), so the stale-class
+    // computation must prepend the dir-name-as-package when matching.  Without
+    // this, every build deletes the valid class file as "orphaned" and forces
+    // a full recompile.
+    #[test]
+    fn remove_stale_classes_flat_package_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src").join("com.example");
+        let classes_dir = dir.path().join("classes");
+        std::fs::create_dir_all(&classes_dir).unwrap();
+
+        // src/com.example/Foo.java declares `package com.example;`
+        // → javac emits classes/com/example/Foo.class
+        let foo_src = src_root.join("Foo.java");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::write(&foo_src, b"package com.example; class Foo {}").unwrap();
+        write_file(&classes_dir.join("com").join("example").join("Foo.class"), b"");
+
+        let sources = vec![foo_src];
+        let removed = remove_stale_classes(
+            &[(&src_root, &sources)],
+            &classes_dir,
+        ).unwrap();
+
+        // Must NOT delete the valid class file.
+        assert_eq!(removed, 0);
+        assert!(classes_dir.join("com").join("example").join("Foo.class").exists());
+    }
+
+    #[test]
+    fn remove_stale_classes_flat_package_root_removes_truly_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src").join("com.example");
+        let classes_dir = dir.path().join("classes");
+        std::fs::create_dir_all(&classes_dir).unwrap();
+
+        let foo_src = src_root.join("Foo.java");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::write(&foo_src, b"").unwrap();
+
+        // Foo.class is valid; Bar.class is from a deleted source — must go.
+        write_file(&classes_dir.join("com").join("example").join("Foo.class"), b"");
+        write_file(&classes_dir.join("com").join("example").join("Bar.class"), b"");
+
+        let sources = vec![foo_src];
+        let removed = remove_stale_classes(
+            &[(&src_root, &sources)],
+            &classes_dir,
+        ).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(classes_dir.join("com").join("example").join("Foo.class").exists());
+        assert!(!classes_dir.join("com").join("example").join("Bar.class").exists());
     }
 }

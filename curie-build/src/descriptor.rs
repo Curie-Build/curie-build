@@ -12,14 +12,30 @@ pub struct Descriptor {
     #[serde(default)]
     pub docker: Docker,
     /// `[dependencies]` table: keys are `"group:artifact"`, values are version strings.
+    /// An empty version string (`""`) means the version is supplied by a BOM in
+    /// `[bom-imports]`.
     #[serde(default)]
     pub dependencies: BTreeMap<String, String>,
     /// `[test-dependencies]` table: test-scoped deps not included in the production JAR.
+    /// An empty version string (`""`) means the version is supplied by a BOM in
+    /// `[bom-imports]` or `[test-bom-imports]`.
     #[serde(rename = "test-dependencies", default)]
     pub test_dependencies: BTreeMap<String, String>,
     /// `[[repositories]]` array for additional Maven repositories.
     #[serde(default)]
     pub repositories: Vec<RepositoryEntry>,
+    /// `[bom-imports]` table: BOMs whose `<dependencyManagement>` sections provide
+    /// version constraints for `[dependencies]` and `[test-dependencies]`.
+    /// Keys are `"group:artifact"`, values are version strings.
+    /// Later entries win when two BOMs manage the same artifact.
+    #[serde(rename = "bom-imports", default)]
+    pub bom_imports: BTreeMap<String, String>,
+    /// `[test-bom-imports]` table: BOMs that additionally apply to test dependencies
+    /// only.  Combined with `[bom-imports]` during test dependency resolution, with
+    /// `[test-bom-imports]` taking higher priority.
+    /// Keys are `"group:artifact"`, values are version strings.
+    #[serde(rename = "test-bom-imports", default)]
+    pub test_bom_imports: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
