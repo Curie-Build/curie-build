@@ -156,7 +156,7 @@ pub(crate) enum CompileStatus {
     NoClassFiles,
     /// At least one source file is newer than the oldest `.class` file.
     SourceChanged,
-    /// `curie.toml` is newer than the oldest `.class` file.
+    /// `Curie.toml` is newer than the oldest `.class` file.
     TomlChanged,
     /// Stale `.class` files were found (sources deleted since last compile).
     StaleClasses,
@@ -176,7 +176,7 @@ impl CompileStatus {
         match self {
             CompileStatus::NoClassFiles => "no class files",
             CompileStatus::SourceChanged => "source changed",
-            CompileStatus::TomlChanged => "curie.toml changed",
+            CompileStatus::TomlChanged => "Curie.toml changed",
             CompileStatus::StaleClasses => "stale classes removed",
             CompileStatus::JdkChanged => "JDK version changed",
             CompileStatus::UpToDate => "up to date",
@@ -254,7 +254,7 @@ pub(crate) fn needs_recompile(
 }
 
 /// Returns `true` when the output JAR needs to be written: either it doesn't
-/// exist yet, or any input (class file, resource file, or `curie.toml` —
+/// exist yet, or any input (class file, resource file, or `Curie.toml` —
 /// which influences the JAR manifest via mainClass) is newer than the JAR.
 pub(crate) fn needs_repackage(
     jar_path: &Path,
@@ -373,7 +373,7 @@ mod tests {
         let src = dir.path().join("Foo.java");
         write_file(&src, b"class Foo {}");
         let classes_dir = dir.path().join("classes"); // does not exist
-        let toml = dir.path().join("curie.toml");
+        let toml = dir.path().join("Curie.toml");
         write_file(&toml, b"[application]");
 
         assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path()), CompileStatus::NoClassFiles);
@@ -386,7 +386,7 @@ mod tests {
         write_file(&src, b"class Foo {}");
         let classes_dir = dir.path().join("classes");
         std::fs::create_dir_all(&classes_dir).unwrap();
-        let toml = dir.path().join("curie.toml");
+        let toml = dir.path().join("Curie.toml");
         write_file(&toml, b"[application]");
 
         assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path()), CompileStatus::NoClassFiles);
@@ -401,7 +401,7 @@ mod tests {
         write_file(&src, b"class Foo {}");
         set_mtime(&src, base);
 
-        let toml = dir.path().join("curie.toml");
+        let toml = dir.path().join("Curie.toml");
         write_file(&toml, b"[application]");
         set_mtime(&toml, base);
 
@@ -434,7 +434,7 @@ mod tests {
         write_file(&src, b"class Foo {}");
         set_mtime(&src, base + Duration::from_secs(5));
 
-        let toml = dir.path().join("curie.toml");
+        let toml = dir.path().join("Curie.toml");
         write_file(&toml, b"[application]");
         set_mtime(&toml, base - Duration::from_secs(10));
 
@@ -460,8 +460,8 @@ mod tests {
         write_file(&src, b"class Foo {}");
         set_mtime(&src, base - Duration::from_secs(10));
 
-        // curie.toml changed after last compile
-        let toml = dir.path().join("curie.toml");
+        // Curie.toml changed after last compile
+        let toml = dir.path().join("Curie.toml");
         write_file(&toml, b"[application]");
         set_mtime(&toml, base + Duration::from_secs(5));
 
@@ -487,7 +487,7 @@ mod tests {
         write_file(&src, b"class Foo {}");
         set_mtime(&src, base);
 
-        let toml = dir.path().join("curie.toml");
+        let toml = dir.path().join("Curie.toml");
         write_file(&toml, b"[application]");
         set_mtime(&toml, base);
 
@@ -499,7 +499,7 @@ mod tests {
 
     // -- needs_repackage ------------------------------------------------------
 
-    /// `needs_repackage` requires a curie.toml path. Most tests only exercise
+    /// `needs_repackage` requires a Curie.toml path. Most tests only exercise
     /// the class/resource paths; a non-existent placeholder contributes
     /// nothing to `Inputs` (mtime returns UNIX_EPOCH).
     fn placeholder_toml(dir: &Path) -> PathBuf {
@@ -601,7 +601,7 @@ mod tests {
         assert!(!needs_repackage(&jar, &classes_dir, Some(&resources_dir), &missing_toml));
     }
 
-    /// B4: a change to curie.toml (e.g. `[application] mainClass`) must
+    /// B4: a change to Curie.toml (e.g. `[application] mainClass`) must
     /// invalidate the JAR even when no class file changed.
     #[test]
     fn needs_repackage_true_when_toml_newer_than_jar() {
@@ -617,7 +617,7 @@ mod tests {
         write_file(&jar, b"jar");
         set_mtime(&jar, base);
 
-        let toml = dir.path().join("curie.toml");
+        let toml = dir.path().join("Curie.toml");
         write_file(&toml, b"[application]");
         // toml edited after the JAR was packaged
         set_mtime(&toml, base + Duration::from_secs(5));

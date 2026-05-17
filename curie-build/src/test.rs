@@ -100,7 +100,7 @@ pub fn run_tests(
     std::fs::create_dir_all(&test_classes_dir)
         .context("failed to create target/test-classes")?;
 
-    let toml_path = project_root.join("curie.toml");
+    let toml_path = project_root.join("Curie.toml");
 
     // Remove stale test class files before checking whether recompilation is
     // needed.  Test sources may come from multiple roots; collect all
@@ -382,7 +382,7 @@ fn resolve_standalone(extra_repos: &[curie_deps::repo::Repository]) -> Result<Pa
 ///
 /// Inputs that invalidate the stamp:
 ///   - test sources
-///   - curie.toml
+///   - Curie.toml
 ///   - any file under `target/classes` (production recompile happened)
 ///   - any file under `src/main/resources` or `src/test/resources`
 ///

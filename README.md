@@ -6,7 +6,7 @@ The Java build tooling landscape has been largely static for two decades. Maven 
 
 There is space here for a tool that starts from the workflows that have become standard rather than grafting them on as plugins.
 
-Curie is a fast, minimal build tool for Java projects written in Rust. It handles dependency resolution from Maven Central, incremental compilation, [reproducible builds](https://reproducible-builds.org), test execution, and optional Docker image building — driven by a single `curie.toml` configuration file.
+Curie is a fast, minimal build tool for Java projects written in Rust. It handles dependency resolution from Maven Central, incremental compilation, [reproducible builds](https://reproducible-builds.org), test execution, and optional Docker image building — driven by a single `Curie.toml` configuration file.
 
 This is a work in progress. The current implementation covers the core build pipeline.
 
@@ -18,7 +18,7 @@ Maven and Gradle are powerful but carry significant complexity and overhead. Cur
 
 | | Curie | Maven | Gradle |
 |---|---|---|---|
-| **Configuration** | `curie.toml` (20 lines for a typical project) | `pom.xml` (100+ lines of XML boilerplate) | `build.gradle` (Groovy/Kotlin DSL, complex) |
+| **Configuration** | `Curie.toml` (20 lines for a typical project) | `pom.xml` (100+ lines of XML boilerplate) | `build.gradle` (Groovy/Kotlin DSL, complex) |
 | **Startup time** | Near-instant (native binary) | JVM startup (~1–2 s) | JVM startup + daemon overhead |
 | **Incremental builds** | Built-in, mtime-based | Plugin-dependent | Built-in but complex |
 | **[Reproducible builds](https://reproducible-builds.org)** | Yes, timestamps clamped to epoch | Requires extra plugin config | Requires extra plugin config |
@@ -33,7 +33,7 @@ Curie will never match the plugin ecosystem of Maven or Gradle. The goal is a fo
 ## Current capabilities
 
 - **Dependency resolution** — resolves Maven dependencies transitively from Maven Central (or custom repositories), caches JARs and POMs to `~/.m2/repository` using the standard Maven layout.
-- **Incremental compilation** — skips `javac` when sources and `curie.toml` are unchanged relative to the existing class files.
+- **Incremental compilation** — skips `javac` when sources and `Curie.toml` are unchanged relative to the existing class files.
 - **[Reproducible builds](https://reproducible-builds.org)** — all ZIP entry timestamps are clamped to a fixed epoch (2024-01-01 UTC); entries are sorted lexicographically, producing byte-identical JARs for identical inputs.
 - **Test execution** — discovers and runs JUnit 5 tests automatically, with incremental skip when nothing has changed.
 - **Docker support** — builds and optionally runs a Docker image. Curie auto-generates a cache-optimised `Dockerfile` that layers dependency JARs before the application JAR, so a code-only change does not invalidate the dependency layer.
@@ -48,7 +48,7 @@ curie test              # compile and run tests only — no JAR or Docker build
 curie run               # build, then run via java -jar (or Docker)
 curie clean             # remove target/
 
-curie build --no-docker # suppress Docker even if curie.toml enables it
+curie build --no-docker # suppress Docker even if Curie.toml enables it
 curie run   --no-docker
 curie run   -- --my-arg # extra arguments are forwarded to the application
 curie test  --filter com.example.MyTest  # run only tests matching a class-name pattern
@@ -58,7 +58,7 @@ curie test  --filter com.example.MyTest  # run only tests matching a class-name 
 
 ## Configuration
 
-Projects are described by a `curie.toml` file in the project root.
+Projects are described by a `Curie.toml` file in the project root.
 
 ### Application project
 
@@ -139,7 +139,7 @@ Add `target/release` to your `PATH`, or copy the binary somewhere on your `PATH`
 ```
 curie build
   │
-  ├─ Parse curie.toml
+  ├─ Parse Curie.toml
   │
   ├─ Resolve production dependencies (curie-deps)
   │    └─ BFS transitive resolution:
@@ -190,10 +190,10 @@ curie build
   │    Skip everything below if the stamp is newer than:
   │      • all test source files
   │      • all production class files (target/classes/)
-  │      • curie.toml
+  │      • Curie.toml
   │    → print "Tests  up to date" and stop
   │
-  ├─ Resolve test dependencies ([test-dependencies] in curie.toml)
+  ├─ Resolve test dependencies ([test-dependencies] in Curie.toml)
   │    └─ Same BFS resolver as production deps; kept separate from the
   │         production JAR classpath
   │
@@ -214,7 +214,7 @@ curie build
        A partial (filtered) run must not mark the full suite as passing.
 ```
 
-**Incremental test skipping** — after a successful full test run, Curie writes a stamp file (`target/.test-stamp`). Subsequent builds skip test execution entirely if the stamp is newer than all test sources, all production class files, and `curie.toml`. Any change to production or test code invalidates the stamp and forces a re-run.
+**Incremental test skipping** — after a successful full test run, Curie writes a stamp file (`target/.test-stamp`). Subsequent builds skip test execution entirely if the stamp is newer than all test sources, all production class files, and `Curie.toml`. Any change to production or test code invalidates the stamp and forces a re-run.
 
 **Test failure aborts the build** — when running via `curie build`, a test failure stops the pipeline before the JAR is written. The JAR will only be produced if all tests pass.
 

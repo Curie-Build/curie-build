@@ -1,6 +1,6 @@
 # jackson-bom-greeter
 #
-# Demonstrates BOM imports in curie.toml:
+# Demonstrates BOM imports in Curie.toml:
 #
 #   [bom-imports]      – BOMs that apply to both production and test dependencies.
 #   [test-bom-imports] – Additional BOMs that apply to test dependencies only,

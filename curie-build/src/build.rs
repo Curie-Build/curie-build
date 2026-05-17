@@ -94,7 +94,7 @@ pub fn do_build(
     // mainClass detection/validation is deferred to here: it is only needed to
     // write the JAR manifest, so we skip it entirely when packaging is up to date.
     let resources_dir = compiled.resources_dir.as_deref();
-    let toml_path = project_root.join("curie.toml");
+    let toml_path = project_root.join("Curie.toml");
     let resolved_main_class: Option<String> = if needs_repackage(&compiled.jar_path, &compiled.classes_dir, resources_dir, &toml_path) {
         let main_class = if let Some(app) = &desc.application {
             let mc = match &app.main_class {
@@ -188,9 +188,9 @@ mod clean_tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
-        // Write a minimal curie.toml so descriptor::load succeeds.
+        // Write a minimal Curie.toml so descriptor::load succeeds.
         std::fs::write(
-            root.join("curie.toml"),
+            root.join("Curie.toml"),
             "[application]\nname = \"test\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
              [java]\nsourceCompatibility = \"21\"\n",
         )
@@ -211,7 +211,7 @@ mod clean_tests {
         let root = dir.path();
 
         std::fs::write(
-            root.join("curie.toml"),
+            root.join("Curie.toml"),
             "[application]\nname = \"test\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
              [java]\nsourceCompatibility = \"21\"\n",
         )

@@ -216,11 +216,11 @@ fn resolve_bom_ref_version(bom_ref: &BomRef, importing_pom: &Pom) -> Option<Stri
     }
 }
 
-/// Resolve a list of `(key, version)` pairs from `curie.toml` into a list of
+/// Resolve a list of `(key, version)` pairs from `Curie.toml` into a list of
 /// local JAR paths (including transitive dependencies).
 ///
 /// `deps` is a slice of `("group:artifact", "version")` pairs as declared
-/// in the `[dependencies]` table of `curie.toml`.  An empty version string
+/// in the `[dependencies]` table of `Curie.toml`.  An empty version string
 /// (`""`) means the version must be supplied by one of the BOMs in
 /// `opts.bom_imports`; it is a hard error if no BOM provides it.
 pub fn resolve(

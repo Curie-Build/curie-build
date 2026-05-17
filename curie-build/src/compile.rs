@@ -200,7 +200,7 @@ pub fn compile(
     };
 
     // --- compile (incremental) -----------------------------------------------
-    let toml_path = project_root.join("curie.toml");
+    let toml_path = project_root.join("Curie.toml");
 
     // Remove stale class files before checking whether recompilation is needed.
     // If any are removed we must recompile even if no source is newer than the

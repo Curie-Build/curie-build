@@ -80,7 +80,7 @@ pub struct Docker {
     pub image_name: Option<String>,
     #[serde(rename = "imageTag")]
     pub image_tag: Option<String>,
-    /// Tracks whether the [docker] section was explicitly present in curie.toml.
+    /// Tracks whether the [docker] section was explicitly present in Curie.toml.
     /// Set by Descriptor::load after deserialisation via a raw TOML check.
     #[serde(skip)]
     pub section_present: bool,
@@ -159,11 +159,11 @@ impl Descriptor {
 }
 
 pub fn load(project_root: &Path) -> Result<Descriptor> {
-    let path = project_root.join("curie.toml");
+    let path = project_root.join("Curie.toml");
 
     if !path.exists() {
         bail!(
-            "no curie.toml found in {}",
+            "no Curie.toml found in {}",
             project_root.display()
         );
     }
@@ -200,10 +200,10 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     // Validate: exactly one of [application] or [library] must be present.
     match (application_section_present, library_section_present) {
         (false, false) => bail!(
-            "curie.toml must contain either an [application] or [library] section"
+            "Curie.toml must contain either an [application] or [library] section"
         ),
         (true, true) => bail!(
-            "curie.toml must not contain both [application] and [library] sections"
+            "Curie.toml must not contain both [application] and [library] sections"
         ),
         _ => {}
     }
@@ -211,7 +211,7 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     // Validate: library projects cannot use Docker.
     if library_section_present && docker_section_present {
         bail!(
-            "library projects do not support Docker: remove the [docker] section from curie.toml"
+            "library projects do not support Docker: remove the [docker] section from Curie.toml"
         );
     }
 
@@ -219,7 +219,7 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
 }
 
 /// Returns true when Docker support is active:
-/// either a [docker] section exists in curie.toml (non-default base image or
+/// either a [docker] section exists in Curie.toml (non-default base image or
 /// explicit name/tag counts as intentional) OR a Dockerfile is present at the
 /// project root.
 pub fn docker_enabled(project_root: &Path, desc: &Descriptor) -> bool {

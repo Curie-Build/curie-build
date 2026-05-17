@@ -198,7 +198,7 @@ pub fn detect_main_class(
              \n\
              Add a main method to one of your classes, or declare it explicitly:\n\
              \n\
-               # curie.toml\n\
+               # Curie.toml\n\
                [application]\n\
                mainClass = \"com.example.YourMainClass\""
         );
@@ -219,7 +219,7 @@ pub fn detect_main_class(
              Source candidates that did not pass bytecode validation:\n\
              {}\n\
              \n\
-             Declare the main class explicitly in curie.toml:\n\
+             Declare the main class explicitly in Curie.toml:\n\
              \n\
                [application]\n\
                mainClass = \"com.example.YourMainClass\"",
@@ -231,11 +231,11 @@ pub fn detect_main_class(
         ),
         1 => Ok(valid.remove(0)),
         _ => anyhow::bail!(
-            "multiple classes with a main method found — declare one explicitly in curie.toml:\n\
+            "multiple classes with a main method found — declare one explicitly in Curie.toml:\n\
              \n\
              {}\n\
              \n\
-               # curie.toml\n\
+               # Curie.toml\n\
                [application]\n\
                mainClass = \"com.example.YourChosenMainClass\"",
             valid
