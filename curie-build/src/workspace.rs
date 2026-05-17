@@ -42,6 +42,83 @@ pub struct Workspace {
     pub members: Vec<Member>,
 }
 
+/// Result of [`discover`]: the relationship between a `--project` path and
+/// any surrounding workspace.
+#[derive(Debug)]
+pub enum WorkspaceContext {
+    /// `project` IS a workspace root (its `Curie.toml` has `[workspace]`).
+    WorkspaceRoot(PathBuf),
+    /// `project` is a member of an enclosing workspace found by walking
+    /// upward.  Carries the workspace root path and the member's index in
+    /// the loaded `Workspace::members` (post-topo-sort).
+    WorkspaceMember {
+        workspace_root: PathBuf,
+        member_index: usize,
+    },
+    /// No workspace context — single-module mode.
+    Standalone(PathBuf),
+}
+
+/// Resolve a `--project` path to its workspace context.
+///
+/// Rules:
+///   1. If `project/Curie.toml` is itself a workspace → `WorkspaceRoot`.
+///   2. Otherwise walk upward: for each ancestor that contains a parseable
+///      workspace `Curie.toml`, check whether `project` (by canonical path)
+///      matches any of that workspace's declared members.  First match wins.
+///   3. No enclosing workspace found → `Standalone`.
+///
+/// Ancestor `Curie.toml`s that fail to parse are tolerated and walked past:
+/// they may belong to an unrelated project that just happens to live above
+/// us in the filesystem.  A parse error inside `project`'s own `Curie.toml`
+/// is still surfaced (the user explicitly targeted it).
+pub fn discover(project: &Path) -> Result<WorkspaceContext> {
+    let desc = descriptor::load(project)?;
+    if desc.is_workspace() {
+        return Ok(WorkspaceContext::WorkspaceRoot(project.to_path_buf()));
+    }
+
+    let project_canon = project
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", project.display()))?;
+
+    let mut cur = project.parent();
+    while let Some(dir) = cur {
+        if dir.join("Curie.toml").exists() {
+            if let Ok(d) = descriptor::load(dir) {
+                if let Some(ws) = &d.workspace {
+                    // Match by canonical path so `members = ["./foo"]` and
+                    // a member at `./foo/` both resolve to the same place.
+                    for declared in &ws.members {
+                        if let Ok(canon) = dir.join(declared).canonicalize() {
+                            if canon == project_canon {
+                                // Re-resolve via the topo-sorted `load`
+                                // because the index in the raw declaration
+                                // list may differ from the post-sort index.
+                                let ws_loaded = load(dir)?;
+                                let topo_idx = ws_loaded
+                                    .members
+                                    .iter()
+                                    .position(|m| {
+                                        m.path.canonicalize().ok() == Some(canon.clone())
+                                    })
+                                    .expect("member existed at raw-list time, must exist post-sort");
+                                return Ok(WorkspaceContext::WorkspaceMember {
+                                    workspace_root: dir.to_path_buf(),
+                                    member_index: topo_idx,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        cur = dir.parent();
+    }
+
+    Ok(WorkspaceContext::Standalone(project.to_path_buf()))
+}
+
 /// Load the workspace rooted at `workspace_root`.  Fails if the directory's
 /// `Curie.toml` is missing or does not contain `[workspace]`.
 ///
@@ -263,11 +340,20 @@ struct MemberArtifact {
 /// the depending member should append to its own deps.  Order-preserving
 /// dedup (paths already pulled in by an earlier upstream dep aren't
 /// repeated).
-fn collect_dep_classpath(deps: &[usize], artifacts: &[MemberArtifact]) -> Vec<PathBuf> {
+///
+/// Uses a HashMap rather than Vec for `artifacts` so a subset run (where
+/// some indices are skipped) still works — the deps slice only references
+/// indices that the subset includes.
+fn collect_dep_classpath(
+    deps: &[usize],
+    artifacts: &std::collections::HashMap<usize, MemberArtifact>,
+) -> Vec<PathBuf> {
     let mut cp: Vec<PathBuf> = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for &i in deps {
-        let a = &artifacts[i];
+        let a = artifacts
+            .get(&i)
+            .expect("subset must include all transitive workspace_deps of every member it builds");
         if seen.insert(a.classes_dir.clone()) {
             cp.push(a.classes_dir.clone());
         }
@@ -280,16 +366,37 @@ fn collect_dep_classpath(deps: &[usize], artifacts: &[MemberArtifact]) -> Vec<Pa
     cp
 }
 
-/// Iterate workspace members in topo order, prefix each with a "[i/n] name"
-/// banner, invoke `run` (which returns the member's own Maven dep JARs so
-/// the contribution can be assembled), and accumulate artifacts so later
-/// members see their workspace-deps' classpaths.
-fn fan_out<F>(workspace_root: &Path, action: &str, mut run: F) -> Result<()>
+/// Compute the transitive closure of `target`'s workspace dependencies,
+/// returned in topo-build order (deps first, target last).  Used by
+/// `build_one` / `test_one` to know which members must be built so the
+/// target can compile.
+fn transitive_closure(ws: &Workspace, target: usize) -> Vec<usize> {
+    let mut included: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut stack: Vec<usize> = vec![target];
+    while let Some(i) = stack.pop() {
+        if included.insert(i) {
+            for &dep in &ws.members[i].workspace_deps {
+                stack.push(dep);
+            }
+        }
+    }
+    // `ws.members` is already in topo order — filter preserves that.
+    (0..ws.members.len()).filter(|i| included.contains(i)).collect()
+}
+
+/// Iterate (a subset of) the workspace's members in topo order, print a
+/// "[i/n] name" banner, invoke `run` (which returns the member's own
+/// Maven dep JARs so the contribution can be assembled), and accumulate
+/// artifacts so later members see their workspace-deps' classpaths.
+///
+/// `subset` is the list of member indices to process, in iteration order.
+/// Each member's `workspace_deps` indices must all appear before it in
+/// `subset` (`transitive_closure` guarantees this).
+fn fan_out<F>(ws: &Workspace, action: &str, subset: &[usize], mut run: F) -> Result<()>
 where
     F: FnMut(&Member, &[PathBuf]) -> Result<Vec<PathBuf>>,
 {
-    let ws = load(workspace_root)?;
-    let n = ws.members.len();
+    let n = subset.len();
     println!(
         "Workspace {} {} ({} member{})",
         ws.root.display(),
@@ -299,9 +406,11 @@ where
     );
     println!();
 
-    let mut artifacts: Vec<MemberArtifact> = Vec::with_capacity(n);
-    for (i, m) in ws.members.iter().enumerate() {
-        println!("[{}/{}] {}", i + 1, n, m.declared);
+    let mut artifacts: std::collections::HashMap<usize, MemberArtifact> =
+        std::collections::HashMap::with_capacity(n);
+    for (pos, &idx) in subset.iter().enumerate() {
+        let m = &ws.members[idx];
+        println!("[{}/{}] {}", pos + 1, n, m.declared);
         let extra_cp = collect_dep_classpath(&m.workspace_deps, &artifacts);
         let own_dep_jars = run(m, &extra_cp)
             .with_context(|| format!("workspace member \"{}\" failed", m.declared))?;
@@ -311,17 +420,52 @@ where
         for j in own_dep_jars {
             contribution.push(j);
         }
-        artifacts.push(MemberArtifact { classes_dir, classpath_contribution: contribution });
+        artifacts.insert(idx, MemberArtifact { classes_dir, classpath_contribution: contribution });
         println!();
     }
     Ok(())
+}
+
+/// Convenience: load + fan_out over every member, in topo order.
+fn fan_out_all<F>(workspace_root: &Path, action: &str, run: F) -> Result<()>
+where
+    F: FnMut(&Member, &[PathBuf]) -> Result<Vec<PathBuf>>,
+{
+    let ws = load(workspace_root)?;
+    let all: Vec<usize> = (0..ws.members.len()).collect();
+    fan_out(&ws, action, &all, run)
+}
+
+/// Convenience: load + fan_out over `target` plus its transitive
+/// workspace-deps, in topo order.  Used when the user invokes a command
+/// from inside a workspace member directory.
+fn fan_out_one<F>(workspace_root: &Path, target: usize, action: &str, run: F) -> Result<()>
+where
+    F: FnMut(&Member, &[PathBuf]) -> Result<Vec<PathBuf>>,
+{
+    let ws = load(workspace_root)?;
+    let subset = transitive_closure(&ws, target);
+    fan_out(&ws, action, &subset, run)
 }
 
 /// Fan `curie build` out over every member in topo order.  Each member's
 /// build receives its workspace-deps' classes_dir + transitive Maven JARs
 /// on the compile/test classpath; produces a JAR; stops at first failure.
 pub fn build_all(workspace_root: &Path, opts: build::BuildOptions) -> Result<()> {
-    fan_out(workspace_root, "build", |m, extra_cp| {
+    fan_out_all(workspace_root, "build", |m, extra_cp| {
+        let output = build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp)?;
+        Ok(output.dep_jars)
+    })
+}
+
+/// Build only `member_index` + its transitive workspace-deps (in topo
+/// order).  Used by `curie build` invoked inside a workspace member.
+pub fn build_one(
+    workspace_root: &Path,
+    member_index: usize,
+    opts: build::BuildOptions,
+) -> Result<()> {
+    fan_out_one(workspace_root, member_index, "build", |m, extra_cp| {
         let output = build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp)?;
         Ok(output.dep_jars)
     })
@@ -332,32 +476,56 @@ pub fn build_all(workspace_root: &Path, opts: build::BuildOptions) -> Result<()>
 /// as the workspace-dep entry means downstream tests don't need the
 /// upstream JAR to exist.
 pub fn test_all(workspace_root: &Path, filter: Option<&str>, offline: bool) -> Result<()> {
-    fan_out(workspace_root, "test", |m, extra_cp| {
-        println!(
-            "Testing {} v{}",
-            m.descriptor.project_name(),
-            m.descriptor.project_version(),
-        );
-        let compiled = compile::compile(&m.path, &m.descriptor, offline, extra_cp)?;
-        test::run_tests(
-            &m.path,
-            &m.descriptor,
-            &compiled.classes_dir,
-            &compiled.dep_jars,
-            compiled.resources_dir.as_deref(),
-            compiled.test_resources_dir.as_deref(),
-            filter,
-            offline,
-            extra_cp,
-        )?;
-        Ok(compiled.dep_jars)
+    fan_out_all(workspace_root, "test", |m, extra_cp| {
+        test_one_member(m, filter, offline, extra_cp)
     })
 }
 
+/// Test only `member_index` + its transitive workspace-deps' tests.
+pub fn test_one(
+    workspace_root: &Path,
+    member_index: usize,
+    filter: Option<&str>,
+    offline: bool,
+) -> Result<()> {
+    fan_out_one(workspace_root, member_index, "test", |m, extra_cp| {
+        test_one_member(m, filter, offline, extra_cp)
+    })
+}
+
+/// Compile + run tests for a single member with the given extra classpath.
+/// Returns the member's own Maven dep JARs for `fan_out`'s artifact
+/// accumulation.  Shared by `test_all` and `test_one`.
+fn test_one_member(
+    m: &Member,
+    filter: Option<&str>,
+    offline: bool,
+    extra_cp: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    println!(
+        "Testing {} v{}",
+        m.descriptor.project_name(),
+        m.descriptor.project_version(),
+    );
+    let compiled = compile::compile(&m.path, &m.descriptor, offline, extra_cp)?;
+    test::run_tests(
+        &m.path,
+        &m.descriptor,
+        &compiled.classes_dir,
+        &compiled.dep_jars,
+        compiled.resources_dir.as_deref(),
+        compiled.test_resources_dir.as_deref(),
+        filter,
+        offline,
+        extra_cp,
+    )?;
+    Ok(compiled.dep_jars)
+}
+
 /// Fan `curie clean` out over every member.  Order doesn't matter for
-/// clean, but reusing `fan_out` keeps banner output consistent.
+/// clean, but reusing `fan_out_all` keeps banner output consistent.
 pub fn clean_all(workspace_root: &Path) -> Result<()> {
-    fan_out(workspace_root, "clean", |m, _extra_cp| {
+    fan_out_all(workspace_root, "clean", |m, _extra_cp| {
         build::clean(&m.path)?;
         Ok(Vec::new())
     })
@@ -679,6 +847,83 @@ mod tests {
             .collect();
         // Priority-ascending: ws-prod, own-prod, ws-test, own-test.
         assert_eq!(gavs, vec!["ws:prod:1", "own:prod:1", "ws:test:1", "own:test:1"]);
+    }
+
+    // -- discover -----------------------------------------------------------
+
+    #[test]
+    fn discover_workspace_root() {
+        let dir = make_ws_with_deps(&[("a", &[])]);
+        match discover(dir.path()).unwrap() {
+            WorkspaceContext::WorkspaceRoot(p) => {
+                assert_eq!(p.canonicalize().unwrap(), dir.path().canonicalize().unwrap());
+            }
+            other => panic!("expected WorkspaceRoot, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn discover_workspace_member_from_child_dir() {
+        let dir = make_ws_with_deps(&[("a", &[]), ("b", &[("a", "../a")])]);
+        let b = dir.path().join("b");
+        match discover(&b).unwrap() {
+            WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+                assert_eq!(
+                    workspace_root.canonicalize().unwrap(),
+                    dir.path().canonicalize().unwrap(),
+                );
+                // Post topo-sort: a is index 0, b is index 1 (b depends on a).
+                assert_eq!(member_index, 1);
+            }
+            other => panic!("expected WorkspaceMember, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn discover_standalone_when_no_workspace_above() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"alone\"\nversion = \"1.0\"\nmainClass = \"X\"\n",
+        )
+        .unwrap();
+        match discover(dir.path()).unwrap() {
+            WorkspaceContext::Standalone(p) => {
+                assert_eq!(p.canonicalize().unwrap(), dir.path().canonicalize().unwrap());
+            }
+            other => panic!("expected Standalone, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn discover_standalone_when_sibling_workspace_does_not_list_us() {
+        // Workspace at /root with member "a"; we ask about /root/b which
+        // isn't listed.  Should be Standalone, not silently picking up
+        // /root's workspace.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[workspace]\nmembers = [\"a\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("a")).unwrap();
+        std::fs::write(
+            dir.path().join("a").join("Curie.toml"),
+            "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n",
+        )
+        .unwrap();
+        // Unrelated sibling
+        let b = dir.path().join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(
+            b.join("Curie.toml"),
+            "[application]\nname = \"b\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n",
+        )
+        .unwrap();
+        match discover(&b).unwrap() {
+            WorkspaceContext::Standalone(_) => {}
+            other => panic!("expected Standalone for unlisted sibling, got {:?}", other),
+        }
     }
 
     #[test]

@@ -68,54 +68,102 @@ enum Cmd {
 fn main() {
     let cli = Cli::parse();
 
+    // Discovery is done once per invocation so every command sees a
+    // consistent view of (project, surrounding workspace) — and so a
+    // failure to discover surfaces before the command-specific logic
+    // gets a chance to throw a less-useful error.
+    let ctx = match workspace::discover(&cli.project) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {:#}", e);
+            std::process::exit(1);
+        }
+    };
+
     let result = match cli.command {
         Cmd::Build { no_docker, offline } => {
             let opts = build::BuildOptions { no_docker, offline };
-            if is_workspace(&cli.project) {
-                workspace::build_all(&cli.project, opts)
-            } else {
-                build::build(&cli.project, opts)
+            match &ctx {
+                workspace::WorkspaceContext::WorkspaceRoot(root) => {
+                    workspace::build_all(root, opts)
+                }
+                workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+                    workspace::build_one(workspace_root, *member_index, opts)
+                }
+                workspace::WorkspaceContext::Standalone(project) => {
+                    build::build(project, opts)
+                }
             }
         }
-        Cmd::Test { filter, offline } => {
-            if is_workspace(&cli.project) {
-                workspace::test_all(&cli.project, filter.as_deref(), offline)
-            } else {
-                test_single_module(&cli.project, filter.as_deref(), offline)
+        Cmd::Test { filter, offline } => match &ctx {
+            workspace::WorkspaceContext::WorkspaceRoot(root) => {
+                workspace::test_all(root, filter.as_deref(), offline)
             }
-        }
-        Cmd::Run { no_docker, offline, args } => {
-            if is_workspace(&cli.project) {
-                Err(anyhow::anyhow!(
-                    "`curie run` is ambiguous in a workspace.  Re-run with \
-                     --project <member> to choose one, e.g.\n  curie --project examples/hello-world run"
-                ))
-            } else {
-                run::run(&cli.project, run::RunOptions { no_docker, offline }, &args)
+            workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+                workspace::test_one(workspace_root, *member_index, filter.as_deref(), offline)
             }
-        }
-        Cmd::Clean {} => {
-            if is_workspace(&cli.project) {
-                workspace::clean_all(&cli.project)
-            } else {
+            workspace::WorkspaceContext::Standalone(project) => {
+                test_single_module(project, filter.as_deref(), offline)
+            }
+        },
+        Cmd::Run { no_docker, offline, args } => match &ctx {
+            workspace::WorkspaceContext::WorkspaceRoot(_) => Err(anyhow::anyhow!(
+                "`curie run` is ambiguous in a workspace.  Re-run with \
+                 --project <member> to choose one, e.g.\n  \
+                 curie --project examples/hello-world run"
+            )),
+            workspace::WorkspaceContext::WorkspaceMember { .. } => {
+                // Runtime classpath threading for workspace-deps is not
+                // implemented yet.  A member without workspace-deps can
+                // still run via the standalone path; a member with them
+                // would need this code to assemble the dep JARs.
+                let has_ws_deps = match descriptor::load(&cli.project) {
+                    Ok(d) => !d.workspace_dependencies.is_empty(),
+                    Err(_) => false,
+                };
+                if has_ws_deps {
+                    Err(anyhow::anyhow!(
+                        "`curie run` inside a workspace member that has \
+                         [workspace-dependencies] is not yet supported — \
+                         the runtime classpath wiring is on the roadmap.  \
+                         For now, run via `java -cp` with the dep classes \
+                         dirs after building."
+                    ))
+                } else {
+                    run::run(&cli.project, run::RunOptions { no_docker, offline }, &args)
+                }
+            }
+            workspace::WorkspaceContext::Standalone(project) => {
+                run::run(project, run::RunOptions { no_docker, offline }, &args)
+            }
+        },
+        Cmd::Clean {} => match &ctx {
+            workspace::WorkspaceContext::WorkspaceRoot(root) => workspace::clean_all(root),
+            workspace::WorkspaceContext::WorkspaceMember { .. } => {
+                // Per-member `clean` matches Cargo's semantics: it wipes
+                // just the targeted member's `target/`, not the whole
+                // workspace's.
                 build::clean(&cli.project)
             }
-        }
-        Cmd::List {} => workspace::list(&cli.project),
+            workspace::WorkspaceContext::Standalone(project) => build::clean(project),
+        },
+        Cmd::List {} => match &ctx {
+            workspace::WorkspaceContext::WorkspaceRoot(root)
+            | workspace::WorkspaceContext::WorkspaceMember { workspace_root: root, .. } => {
+                workspace::list(root)
+            }
+            workspace::WorkspaceContext::Standalone(_) => Err(anyhow::anyhow!(
+                "`curie list` only makes sense inside a workspace.  Add a \
+                 [workspace] Curie.toml at the project root, or invoke \
+                 from a workspace member's directory."
+            )),
+        },
     };
 
     if let Err(e) = result {
         eprintln!("error: {:#}", e);
         std::process::exit(1);
     }
-}
-
-/// True when `project` is a workspace root (its `Curie.toml` has
-/// `[workspace]`).  Returns false when the descriptor is missing or
-/// malformed — those errors are surfaced later by the command-specific
-/// path, with a more useful context message.
-fn is_workspace(project: &std::path::Path) -> bool {
-    descriptor::load(project).is_ok_and(|d| d.is_workspace())
 }
 
 /// Single-module variant of the test pipeline.  Lifted out of the inline
