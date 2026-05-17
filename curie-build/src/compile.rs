@@ -11,14 +11,13 @@
 use crate::build::extra_repos;
 use crate::descriptor;
 use crate::incremental::{
-    javac_version, needs_recompile, write_javac_version_stamp, CompileStatus,
+    javac_version, needs_recompile, walk_files, write_javac_version_stamp, CompileStatus,
 };
 use crate::jar::classpath_string;
 use anyhow::{bail, Context, Result};
 use curie_deps::resolver::{resolve, ResolveOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use walkdir::WalkDir;
 
 /// Intermediate output from the compile phase.
 pub struct CompileOutput {
@@ -156,9 +155,7 @@ pub fn compile(
     // --- discover production sources (exclude test files) --------------------
     let mut sources: Vec<PathBuf> = Vec::new();
     for src_root in &src_roots {
-        let root_sources: Vec<_> = WalkDir::new(src_root)
-            .into_iter()
-            .filter_map(|e| e.ok())
+        let root_sources: Vec<_> = walk_files(src_root)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
                 name.ends_with(".java")
@@ -330,13 +327,8 @@ pub(crate) fn remove_stale_classes(
 
     let mut removed = 0usize;
 
-    for entry in WalkDir::new(classes_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_type().is_file()
-                && e.file_name().to_string_lossy().ends_with(".class")
-        })
+    for entry in walk_files(classes_dir)
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".class"))
     {
         let rel = entry
             .path()

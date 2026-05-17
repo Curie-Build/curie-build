@@ -26,7 +26,19 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
+
+/// Walk `dir` recursively and yield every regular file as a [`DirEntry`].
+///
+/// Errors from [`WalkDir`] (e.g. permission denied on a sub-entry) are
+/// silently skipped — callers that need error visibility should use
+/// [`WalkDir`] directly.  Missing or empty directories yield no entries.
+pub(crate) fn walk_files(dir: &Path) -> impl Iterator<Item = DirEntry> + '_ {
+    WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+}
 
 /// Return the `modified` time of `path`, or `SystemTime::UNIX_EPOCH` on any
 /// error (missing file, unsupported platform). Treating errors as epoch means
@@ -40,10 +52,7 @@ pub(crate) fn mtime(path: &Path) -> SystemTime {
 /// Return the oldest `modified` time among all files under `dir`, or
 /// `SystemTime::UNIX_EPOCH` when the directory is empty or doesn't exist.
 pub(crate) fn oldest_mtime_in_dir(dir: &Path) -> SystemTime {
-    WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
+    walk_files(dir)
         .filter_map(|e| std::fs::metadata(e.path()).and_then(|m| m.modified()).ok())
         .min()
         .unwrap_or(SystemTime::UNIX_EPOCH)
@@ -59,13 +68,8 @@ pub(crate) fn oldest_mtime_in_dir(dir: &Path) -> SystemTime {
 /// have an older mtime than the source files, causing the incremental check
 /// to always conclude that recompilation is needed.
 pub(crate) fn oldest_class_mtime_in_dir(dir: &Path) -> SystemTime {
-    WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_type().is_file()
-                && e.file_name().to_string_lossy().ends_with(".class")
-        })
+    walk_files(dir)
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".class"))
         .filter_map(|e| std::fs::metadata(e.path()).and_then(|m| m.modified()).ok())
         .min()
         .unwrap_or(SystemTime::UNIX_EPOCH)
@@ -74,10 +78,7 @@ pub(crate) fn oldest_class_mtime_in_dir(dir: &Path) -> SystemTime {
 /// Return the newest `modified` time among all files under `dir`, or
 /// `SystemTime::UNIX_EPOCH` when the directory is empty or doesn't exist.
 pub(crate) fn newest_mtime_in_dir(dir: &Path) -> SystemTime {
-    WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
+    walk_files(dir)
         .filter_map(|e| std::fs::metadata(e.path()).and_then(|m| m.modified()).ok())
         .max()
         .unwrap_or(SystemTime::UNIX_EPOCH)

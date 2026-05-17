@@ -1,6 +1,6 @@
 use crate::compile::{flat_package_src_dirs, flat_package_test_dirs, remove_stale_classes};
 use crate::incremental::{
-    javac_version, needs_recompile, write_javac_version_stamp, Inputs, Stamp,
+    javac_version, needs_recompile, walk_files, write_javac_version_stamp, Inputs, Stamp,
 };
 use crate::jar::classpath_string;
 use crate::{build, descriptor};
@@ -8,7 +8,6 @@ use anyhow::{bail, Context, Result};
 use curie_deps::resolver::{resolve, ResolveOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use walkdir::WalkDir;
 /// Version of JUnit Platform Console Standalone resolved from Maven Central.
 const JUNIT_STANDALONE_VERSION: &str = "6.0.3";
 const JUNIT_STANDALONE_COORD: &str =
@@ -256,9 +255,7 @@ fn discover_test_sources(project_root: &Path) -> Vec<PathBuf> {
     // --- Maven-style: co-located tests in src/main/java ----------------------
     let main_src = project_root.join("src").join("main").join("java");
     if main_src.exists() {
-        let colocated: Vec<PathBuf> = WalkDir::new(&main_src)
-            .into_iter()
-            .filter_map(|e| e.ok())
+        let colocated: Vec<PathBuf> = walk_files(&main_src)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
                 name.ends_with("Test.java")
@@ -273,9 +270,7 @@ fn discover_test_sources(project_root: &Path) -> Vec<PathBuf> {
     // --- Maven-style: separate test tree src/test/java -----------------------
     let test_src = project_root.join("src").join("test").join("java");
     if test_src.exists() {
-        let separate: Vec<PathBuf> = WalkDir::new(&test_src)
-            .into_iter()
-            .filter_map(|e| e.ok())
+        let separate: Vec<PathBuf> = walk_files(&test_src)
             .filter(|e| e.file_name().to_string_lossy().ends_with(".java"))
             .map(|e| e.into_path())
             .collect();
@@ -284,9 +279,7 @@ fn discover_test_sources(project_root: &Path) -> Vec<PathBuf> {
 
     // --- Flat-package: co-located unit tests in src/<dot.pkg>/ ---------------
     for pkg_dir in flat_package_src_dirs(project_root) {
-        let colocated: Vec<PathBuf> = WalkDir::new(&pkg_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
+        let colocated: Vec<PathBuf> = walk_files(&pkg_dir)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
                 name.ends_with("Test.java")
@@ -300,9 +293,7 @@ fn discover_test_sources(project_root: &Path) -> Vec<PathBuf> {
 
     // --- Flat-package: integration tests in tests/<dot.pkg>/ -----------------
     for pkg_dir in flat_package_test_dirs(project_root) {
-        let integration: Vec<PathBuf> = WalkDir::new(&pkg_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
+        let integration: Vec<PathBuf> = walk_files(&pkg_dir)
             .filter(|e| e.file_name().to_string_lossy().ends_with(".java"))
             .map(|e| e.into_path())
             .collect();
