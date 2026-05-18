@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
 
-/// PJF coordinate pinned to the latest version on Maven Central (2.68.0).
+/// PJF coordinate pinned to the latest version on Maven Central.
 const PJF_COORD: &str = "com.palantir.javaformat:palantir-java-format";
 const PJF_VERSION: &str = "2.90.0";
 
@@ -44,8 +44,9 @@ const PJF_MAIN: &str = "com.palantir.javaformat.java.Main";
 
 /// Run palantir-java-format on all Java sources in `project_root`.
 ///
-/// * `check_only` — pass `--check` to PJF; exit non-zero if any file would
-///   change (useful in CI).  No files are modified.
+/// * `check_only` — use `--dry-run --set-exit-if-changed`; prints only the
+///   paths of files that would change and exits non-zero if any would (CI).
+///   No files are modified.
 /// * `offline` — refuse to download JARs from Maven Central; fail if the
 ///   PJF JARs are not already in the local `~/.m2` cache.
 pub fn run_fmt(project_root: &Path, check_only: bool, offline: bool) -> Result<()> {
@@ -93,7 +94,12 @@ pub fn run_fmt(project_root: &Path, check_only: bool, offline: bool) -> Result<(
     cmd.arg("-cp").arg(&cp).arg(PJF_MAIN);
 
     if check_only {
-        cmd.arg("--check");
+        // --dry-run prints only the paths of files that would change.
+        // --set-exit-if-changed makes the process exit 1 when any would.
+        cmd.args(["--dry-run", "--set-exit-if-changed"]);
+    } else {
+        // --replace writes formatted output back to each file in place.
+        cmd.arg("--replace");
     }
 
     for f in &java_files {
@@ -107,9 +113,8 @@ pub fn run_fmt(project_root: &Path, check_only: bool, offline: bool) -> Result<(
     if !status.success() {
         if check_only {
             bail!(
-                "fmt: {} file(s) are not formatted correctly. \
-                 Run `curie fmt` (without --check) to fix them.",
-                java_files.len()
+                "fmt: one or more files are not correctly formatted. \
+                 Run `curie fmt` (without --check) to fix them."
             );
         } else {
             bail!("palantir-java-format exited with status {}", status);
