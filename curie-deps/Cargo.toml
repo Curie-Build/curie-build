@@ -6,10 +6,10 @@ description = "Maven dependency resolution for the Curie build tool"
 
 [dependencies]
 anyhow = "1"
-dirs = "5"
-indicatif = "0.17"
-quick-xml = { version = "0.37", features = ["serialize"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+dirs = "6"
+indicatif = "0.18"
+quick-xml = { version = "0.40", features = ["serialize"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

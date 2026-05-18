@@ -243,7 +243,12 @@ pub fn parse(xml: &str) -> Result<Pom> {
             Event::Text(e) => {
                 // Append rather than replace so values split across multiple
                 // Text events (e.g. with an embedded CDATA section) survive.
-                let s = e.unescape().context("invalid XML escape in POM")?;
+                // quick-xml 0.40+ split decode/unescape: decode() returns a
+                // `Cow<str>` from the raw bytes; escape::unescape resolves
+                // `&lt;`, `&amp;`, &#…; sequences.
+                let decoded = e.decode().context("invalid encoding in POM text")?;
+                let s = quick_xml::escape::unescape(&decoded)
+                    .context("invalid XML escape in POM")?;
                 text_buf.push_str(&s);
             }
             Event::End(e) => {
