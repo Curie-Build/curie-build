@@ -42,23 +42,14 @@ const PJF_MAIN: &str = "com.palantir.javaformat.java.Main";
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Run palantir-java-format on all Java sources in `project_root`.
+/// Resolve palantir-java-format and its transitive dependencies once.
 ///
-/// * `check_only` — use `--dry-run --set-exit-if-changed`; prints only the
-///   paths of files that would change and exits non-zero if any would (CI).
-///   No files are modified.
-/// * `offline` — refuse to download JARs from Maven Central; fail if the
-///   PJF JARs are not already in the local `~/.m2` cache.
-pub fn run_fmt(project_root: &Path, check_only: bool, offline: bool) -> Result<()> {
-    // --- discover source files ----------------------------------------------
-    let java_files = collect_java_files(project_root);
-
-    if java_files.is_empty() {
-        return Ok(());
-    }
-
-    // --- resolve PJF from Maven Central (or ~/.m2 cache) --------------------
-    let pjf_jars = resolve(
+/// Callers that format more than one project in a single invocation
+/// (e.g. `fmt_all` over a workspace) MUST call this once and reuse the
+/// resulting classpath via [`run_fmt_with_jars`] — concurrent identical
+/// `resolve()` calls would otherwise race on the same `~/.m2/.part` files.
+pub fn resolve_pjf(offline: bool) -> Result<Vec<PathBuf>> {
+    resolve(
         &[(PJF_COORD, PJF_VERSION)],
         &ResolveOptions {
             extra_repos: vec![],
@@ -67,7 +58,35 @@ pub fn run_fmt(project_root: &Path, check_only: bool, offline: bool) -> Result<(
             offline,
         },
     )
-    .context("failed to resolve palantir-java-format from Maven Central")?;
+    .context("failed to resolve palantir-java-format from Maven Central")
+}
+
+/// Run palantir-java-format on all Java sources in `project_root`.
+///
+/// * `check_only` — use `--dry-run --set-exit-if-changed`; prints only the
+///   paths of files that would change and exits non-zero if any would (CI).
+///   No files are modified.
+/// * `offline` — refuse to download JARs from Maven Central; fail if the
+///   PJF JARs are not already in the local `~/.m2` cache.
+pub fn run_fmt(project_root: &Path, check_only: bool, offline: bool) -> Result<()> {
+    let pjf_jars = resolve_pjf(offline)?;
+    run_fmt_with_jars(project_root, check_only, &pjf_jars)
+}
+
+/// Format-in-place against an already-resolved palantir-java-format
+/// classpath.  Splitting resolution out of the runner lets `fmt_all` resolve
+/// PJF exactly once and reuse the JAR list across every workspace member.
+pub fn run_fmt_with_jars(
+    project_root: &Path,
+    check_only: bool,
+    pjf_jars: &[PathBuf],
+) -> Result<()> {
+    // --- discover source files ----------------------------------------------
+    let java_files = collect_java_files(project_root);
+
+    if java_files.is_empty() {
+        return Ok(());
+    }
 
     // --- build classpath ----------------------------------------------------
     let cp = pjf_jars

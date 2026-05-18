@@ -689,6 +689,12 @@ pub fn fmt_all(workspace_root: &Path, check_only: bool, offline: bool) -> Result
     let ws = load(workspace_root)?;
     let n = ws.members.len();
 
+    // Resolve palantir-java-format exactly once for the whole workspace.
+    // The per-member workers (below) share this classpath; if each one
+    // resolved independently, the parallel resolve() calls would race on
+    // the same ~/.m2 staging files for any shared transitive dep.
+    let pjf_jars = fmt::resolve_pjf(offline)?;
+
     // --- progress bars (same style as artifact downloading) -----------------
     let mp = MultiProgress::new();
 
@@ -719,6 +725,7 @@ pub fn fmt_all(workspace_root: &Path, check_only: bool, offline: bool) -> Result
     // --- parallel fan-out ---------------------------------------------------
     // Run one `java` process per member concurrently.  Collect every error
     // so that `--check` in CI reports all unformatted members in one pass.
+    let pjf_jars_ref = &pjf_jars;
     let errors: Vec<String> = std::thread::scope(|s| {
         let handles: Vec<_> = ws
             .members
@@ -729,7 +736,7 @@ pub fn fmt_all(workspace_root: &Path, check_only: bool, offline: bool) -> Result
                 let summary = summary.clone();
                 s.spawn(move || {
                     sp.enable_steady_tick(std::time::Duration::from_millis(80));
-                    let result = fmt::run_fmt(path, check_only, offline);
+                    let result = fmt::run_fmt_with_jars(path, check_only, pjf_jars_ref);
                     match &result {
                         Ok(_) => sp.finish_and_clear(),
                         Err(_) => {
