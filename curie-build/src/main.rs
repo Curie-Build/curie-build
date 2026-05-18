@@ -169,7 +169,17 @@ fn main() {
                  from a workspace member's directory."
             )),
         },
-        Cmd::Fmt { check, offline } => fmt::run_fmt(&cli.project, check, offline),
+        Cmd::Fmt { check, offline } => match &ctx {
+            workspace::WorkspaceContext::WorkspaceRoot(root) => {
+                workspace::fmt_all(root, check, offline)
+            }
+            workspace::WorkspaceContext::WorkspaceMember { .. } => {
+                fmt::run_fmt(&cli.project, check, offline)
+            }
+            workspace::WorkspaceContext::Standalone(project) => {
+                fmt::run_fmt(project, check, offline)
+            }
+        },
     };
 
     if let Err(e) = result {

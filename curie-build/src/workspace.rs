@@ -11,7 +11,7 @@
 //! dependencies yet — those arrive in step 3 along with topo sort.
 
 use crate::descriptor::{self, Descriptor};
-use crate::{build, compile, jar, run, test};
+use crate::{build, compile, fmt, jar, run, test};
 use anyhow::{bail, Context, Result};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -679,6 +679,13 @@ pub fn run_one(
 pub fn clean_all(workspace_root: &Path) -> Result<()> {
     fan_out_all(workspace_root, "clean", |m, _extra_cp| {
         build::clean(&m.path)?;
+        Ok(Vec::new())
+    })
+}
+
+pub fn fmt_all(workspace_root: &Path, check_only: bool, offline: bool) -> Result<()> {
+    fan_out_all(workspace_root, "fmt", |m, _extra_cp| {
+        fmt::run_fmt(&m.path, check_only, offline)?;
         Ok(Vec::new())
     })
 }
