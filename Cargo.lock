@@ -284,6 +284,7 @@ dependencies = [
  "curie-deps",
  "dirs",
  "filetime",
+ "indicatif",
  "serde",
  "sha2",
  "tempfile",

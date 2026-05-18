@@ -13,6 +13,7 @@
 use crate::descriptor::{self, Descriptor};
 use crate::{build, compile, fmt, jar, run, test};
 use anyhow::{bail, Context, Result};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -686,17 +687,64 @@ pub fn clean_all(workspace_root: &Path) -> Result<()> {
 
 pub fn fmt_all(workspace_root: &Path, check_only: bool, offline: bool) -> Result<()> {
     let ws = load(workspace_root)?;
+    let n = ws.members.len();
 
-    // Run one `java` process per member, all in parallel.  We collect every
-    // error instead of stopping at the first so that `--check` in CI reports
-    // all unformatted members in one pass.
+    // --- progress bars (same style as artifact downloading) -----------------
+    let mp = MultiProgress::new();
+
+    let summary = mp.add(ProgressBar::new(n as u64));
+    summary.set_style(
+        ProgressStyle::with_template(
+            "  Formatting      [{bar:40.cyan/blue}] {pos}/{len}",
+        )
+        .unwrap()
+        .progress_chars("=>-"),
+    );
+
+    let spinner_style = ProgressStyle::with_template("    {spinner} {msg}")
+        .unwrap()
+        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ");
+
+    let spinners: Vec<ProgressBar> = ws
+        .members
+        .iter()
+        .map(|m| {
+            let sp = mp.add(ProgressBar::new_spinner());
+            sp.set_style(spinner_style.clone());
+            sp.set_message(m.declared.clone());
+            sp
+        })
+        .collect();
+
+    // --- parallel fan-out ---------------------------------------------------
+    // Run one `java` process per member concurrently.  Collect every error
+    // so that `--check` in CI reports all unformatted members in one pass.
     let errors: Vec<String> = std::thread::scope(|s| {
         let handles: Vec<_> = ws
             .members
             .iter()
-            .map(|m| {
+            .zip(spinners.iter())
+            .map(|(m, sp)| {
                 let path = &m.path;
-                s.spawn(move || fmt::run_fmt(path, check_only, offline))
+                let summary = summary.clone();
+                s.spawn(move || {
+                    sp.enable_steady_tick(std::time::Duration::from_millis(80));
+                    let result = fmt::run_fmt(path, check_only, offline);
+                    match &result {
+                        Ok(_) => sp.finish_and_clear(),
+                        Err(_) => {
+                            sp.set_style(
+                                ProgressStyle::with_template("    {msg}")
+                                    .unwrap(),
+                            );
+                            sp.finish_with_message(
+                                format!("✗ {}", m.declared),
+                            );
+                        }
+                    }
+                    summary.inc(1);
+                    result
+                })
             })
             .collect();
 
@@ -706,6 +754,8 @@ pub fn fmt_all(workspace_root: &Path, check_only: bool, offline: bool) -> Result
             .map(|e| format!("{:#}", e))
             .collect()
     });
+
+    mp.clear().ok();
 
     if errors.is_empty() {
         Ok(())
