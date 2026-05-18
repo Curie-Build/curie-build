@@ -93,6 +93,9 @@ pub fn run_fmt(project_root: &Path, check_only: bool, offline: bool) -> Result<(
 
     cmd.arg("-cp").arg(&cp).arg(PJF_MAIN);
 
+    // AOSP style = 4-space indentation (Google style uses 2 spaces).
+    cmd.arg("--aosp");
+
     if check_only {
         // --dry-run prints only the paths of files that would change.
         // --set-exit-if-changed makes the process exit 1 when any would.
