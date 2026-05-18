@@ -130,12 +130,15 @@ pub(crate) fn populate_libs_dir(libs_dir: &Path, dep_jars: &[PathBuf]) -> Result
 ///   • files from `resources_dir` (src/main/resources) embedded at their
 ///     path relative to that directory, alongside the class files
 ///   • no extra tool-specific metadata that embeds build time
+///   • when `build_info` is `Some`, writes `META-INF/build-info.properties`
+///     right after the manifest
 pub(crate) fn write_deterministic_jar(
     jar_path: &Path,
     classes_dir: &Path,
     resources_dir: Option<&Path>,
     main_class: Option<&str>,
     dep_jars: &[PathBuf],
+    build_info: Option<&str>,
 ) -> Result<()> {
     let file = std::fs::File::create(jar_path)
         .with_context(|| format!("cannot create {}", jar_path.display()))?;
@@ -171,6 +174,14 @@ pub(crate) fn write_deterministic_jar(
         .context("failed to start MANIFEST.MF entry")?;
     zip.write_all(manifest.as_bytes())
         .context("failed to write MANIFEST.MF")?;
+
+    // --- build-info.properties (optional) -----------------------------------
+    if let Some(props) = build_info {
+        zip.start_file("META-INF/build-info.properties", options)
+            .context("failed to start META-INF/build-info.properties entry")?;
+        zip.write_all(props.as_bytes())
+            .context("failed to write META-INF/build-info.properties")?;
+    }
 
     // --- collect entries from classes_dir and resources_dir -----------------
     // We gather (zip_path, fs_path) pairs from both roots, deduplicate by
@@ -277,5 +288,92 @@ mod tests {
     fn fold_manifest_header_empty_value() {
         let result = fold_manifest_header("Class-Path", "");
         assert_eq!(result, "Class-Path: \r\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // build-info.properties
+    // -----------------------------------------------------------------------
+
+    /// Helper: write a minimal JAR with the given build_info and return the
+    /// raw bytes so we can inspect the ZIP entries.
+    fn jar_bytes_with_build_info(build_info: Option<&str>) -> Vec<u8> {
+        let tmp = tempfile::tempdir().unwrap();
+        let classes_dir = tmp.path().join("classes");
+        std::fs::create_dir_all(&classes_dir).unwrap();
+        // A dummy .class file so the JAR is non-trivial.
+        std::fs::write(classes_dir.join("Foo.class"), b"\xca\xfe\xba\xbe").unwrap();
+
+        let jar_path = tmp.path().join("out.jar");
+        write_deterministic_jar(
+            &jar_path,
+            &classes_dir,
+            None,
+            None,
+            &[],
+            build_info,
+        )
+        .unwrap();
+
+        std::fs::read(&jar_path).unwrap()
+    }
+
+    /// Parse ZIP central-directory entry names from raw bytes.
+    fn zip_entry_names(bytes: &[u8]) -> Vec<String> {
+        use std::io::Cursor;
+        let cursor = Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor).unwrap();
+        (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn no_build_info_when_none() {
+        let bytes = jar_bytes_with_build_info(None);
+        let names = zip_entry_names(&bytes);
+        assert!(
+            !names.iter().any(|n| n == "META-INF/build-info.properties"),
+            "build-info.properties must not appear when build_info is None; entries: {:?}",
+            names,
+        );
+    }
+
+    #[test]
+    fn build_info_entry_present_when_some() {
+        let bytes = jar_bytes_with_build_info(Some("git.commit.id=abc123\n"));
+        let names = zip_entry_names(&bytes);
+        assert!(
+            names.iter().any(|n| n == "META-INF/build-info.properties"),
+            "build-info.properties must be present when build_info is Some; entries: {:?}",
+            names,
+        );
+    }
+
+    #[test]
+    fn build_info_entry_has_correct_content() {
+        let content = "git.commit.id=abc123def456\n";
+        let bytes = jar_bytes_with_build_info(Some(content));
+        use std::io::{Cursor, Read};
+        let cursor = Cursor::new(&bytes);
+        let mut archive = zip::ZipArchive::new(cursor).unwrap();
+        let mut entry = archive.by_name("META-INF/build-info.properties").unwrap();
+        let mut actual = String::new();
+        entry.read_to_string(&mut actual).unwrap();
+        assert_eq!(actual, content);
+    }
+
+    #[test]
+    fn build_info_entry_is_after_manifest() {
+        let bytes = jar_bytes_with_build_info(Some("git.commit.id=abc\n"));
+        let names = zip_entry_names(&bytes);
+        let manifest_pos = names.iter().position(|n| n == "META-INF/MANIFEST.MF").unwrap();
+        let props_pos = names
+            .iter()
+            .position(|n| n == "META-INF/build-info.properties")
+            .unwrap();
+        assert!(
+            props_pos > manifest_pos,
+            "build-info.properties ({props_pos}) must come after MANIFEST.MF ({manifest_pos})",
+        );
     }
 }

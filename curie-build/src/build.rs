@@ -4,6 +4,7 @@
 use crate::compile::compile;
 use crate::descriptor;
 use crate::docker;
+use crate::git;
 use crate::incremental::needs_repackage;
 use crate::jar::{populate_libs_dir, write_deterministic_jar};
 use crate::main_class::{detect_main_class, validate_main_class};
@@ -116,6 +117,17 @@ pub fn do_build(
     // write the JAR manifest, so we skip it entirely when packaging is up to date.
     let resources_dir = compiled.resources_dir.as_deref();
     let toml_path = project_root.join("Curie.toml");
+
+    // Detect Git information once for the whole packaging step.
+    // `None` when git is unavailable or the project is not in a repo.
+    let build_info_content: Option<String> = if desc.build_info.enabled {
+        git::detect(project_root).map(|info| {
+            format!("git.commit.id={}\n", info.commit_id)
+        })
+    } else {
+        None
+    };
+
     let resolved_main_class: Option<String> = if needs_repackage(&compiled.jar_path, &compiled.classes_dir, resources_dir, &toml_path) {
         let main_class = if let Some(app) = desc.application() {
             let mc = match &app.main_class {
@@ -146,6 +158,7 @@ pub fn do_build(
             resources_dir,
             main_class.as_deref(),
             &compiled.dep_jars,
+            build_info_content.as_deref(),
         )
         .context("failed to write JAR")?;
 

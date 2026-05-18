@@ -47,6 +47,7 @@ Curie will never match the plugin ecosystem of Maven or Gradle. The goal is a fo
 - **Resources** — `src/main/resources` (Maven layout) or a top-level `resources/` directory (flat-package layout) are included in the JAR and classpath. Test resources (`src/test/resources` / `test-resources/`) are added to the test classpath.
 - **Workspace / multi-module projects** — a workspace `Curie.toml` lists member directories; Curie builds them in dependency order. Members can declare `[workspace-dependencies]` to depend on sibling members. Workspace-level `[java]`, `[[repositories]]`, `[bom-imports]`, and `[test-bom-imports]` are inherited by all members.
 - **Offline mode** — `--offline` prevents any network access; a cache miss is an immediate error.
+- **Build info** — when the project is inside a Git repository, Curie automatically embeds `META-INF/build-info.properties` in the JAR with the commit id of the build. If the working tree has local changes the id is suffixed with `-dirty`. Can be disabled per-project.
 
 ### Commands
 
@@ -101,6 +102,30 @@ imageTag  = "latest"    # default: application.version
 ```
 
 Docker is enabled when either the `[docker]` section is present or a `Dockerfile` exists at the project root. Omit both to get a plain JAR build.
+
+### Build info
+
+When the project directory is inside a Git repository, Curie automatically generates `META-INF/build-info.properties` in the root of the JAR's classpath.
+
+```
+META-INF/build-info.properties
+  git.commit.id=a3f1b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0
+```
+
+If the working tree has uncommitted changes (staged, unstaged, or untracked files) the value is suffixed with `-dirty`:
+
+```
+git.commit.id=a3f1b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0-dirty
+```
+
+To opt out, add a `[build-info]` section to `Curie.toml`:
+
+```toml
+[build-info]
+enabled = false
+```
+
+No configuration is needed to enable it — the file is generated automatically whenever `git` is on `PATH` and the project is inside a Git repository.
 
 ### Library project
 
@@ -231,6 +256,7 @@ curie build
   ├─ Incremental JAR check (newest .class vs. existing JAR mtime)
   │    └─ Write deterministic JAR:
   │         ├─ MANIFEST.MF (Main-Class + Class-Path, if applicable)
+  │         ├─ META-INF/build-info.properties (git.commit.id, when in a Git repo)
   │         ├─ Entries sorted lexicographically
   │         └─ All timestamps = 2024-01-01 00:00:00 UTC
   │

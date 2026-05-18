@@ -3,6 +3,7 @@ mod class_manifest;
 mod compile;
 mod descriptor;
 mod docker;
+mod git;
 mod incremental;
 mod jar;
 mod main_class;

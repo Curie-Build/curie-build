@@ -15,6 +15,7 @@ pub struct Descriptor {
     pub kind: DescriptorKind,
     pub java: Java,
     pub docker: Docker,
+    pub build_info: BuildInfo,
     pub dependencies: BTreeMap<String, String>,
     pub test_dependencies: BTreeMap<String, String>,
     pub repositories: Vec<RepositoryEntry>,
@@ -136,6 +137,8 @@ struct RawDescriptor {
     java: Java,
     #[serde(default)]
     docker: Docker,
+    #[serde(rename = "build-info", default)]
+    build_info: BuildInfo,
     #[serde(default)]
     dependencies: BTreeMap<String, String>,
     #[serde(rename = "test-dependencies", default)]
@@ -245,6 +248,34 @@ impl Default for Docker {
             image_tag: None,
             section_present: false,
         }
+    }
+}
+
+/// Controls generation of `META-INF/build-info.properties` inside the JAR.
+///
+/// By default (when the `[build-info]` section is absent) Curie generates the
+/// file whenever the project directory is inside a Git repository.  Set
+/// `enabled = false` to suppress it unconditionally.
+///
+/// ```toml
+/// [build-info]
+/// enabled = false
+/// ```
+#[derive(Debug, Deserialize)]
+pub struct BuildInfo {
+    /// `true` (default) — generate the file when Git information is available.
+    /// `false` — never generate the file.
+    #[serde(default = "default_build_info_enabled")]
+    pub enabled: bool,
+}
+
+fn default_build_info_enabled() -> bool {
+    true
+}
+
+impl Default for BuildInfo {
+    fn default() -> Self {
+        BuildInfo { enabled: true }
     }
 }
 
@@ -576,6 +607,7 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         kind,
         java: parsed.java,
         docker,
+        build_info: parsed.build_info,
         dependencies: parsed.dependencies,
         test_dependencies: parsed.test_dependencies,
         repositories: parsed.repositories,
@@ -850,6 +882,47 @@ url = "https://example.com/m2"
     fn empty_descriptor_is_rejected() {
         let err = load_str("").unwrap_err().to_string();
         assert!(err.contains("must contain one of"), "got: {err}");
+    }
+
+    // -- build-info ----------------------------------------------------------
+
+    #[test]
+    fn build_info_enabled_by_default() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.build_info.enabled, "build-info must be enabled by default");
+    }
+
+    #[test]
+    fn build_info_can_be_disabled() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+
+[build-info]
+enabled = false
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(!d.build_info.enabled);
+    }
+
+    #[test]
+    fn build_info_explicitly_enabled() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+
+[build-info]
+enabled = true
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.build_info.enabled);
     }
 
     // -- workspace-dependencies ---------------------------------------------
