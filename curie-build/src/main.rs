@@ -7,6 +7,7 @@ mod fmt;
 mod git;
 mod incremental;
 mod jar;
+mod kt_stale;
 mod main_class;
 mod run;
 mod test;

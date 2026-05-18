@@ -31,6 +31,7 @@ use crate::incremental::{
     javac_version, needs_recompile, walk_files, write_javac_version_stamp, CompileStatus,
 };
 use crate::jar::classpath_string;
+use crate::kt_stale;
 use anyhow::{bail, Context, Result};
 use curie_deps::resolver::{resolve, ResolveOptions};
 use std::path::{Path, PathBuf};
@@ -390,7 +391,17 @@ pub fn compile(
         None => 0,
     };
 
-    let compile_status = if pre_pruned > 0 {
+    // Kotlin source-set tracking: compares this build's canonical .kt paths
+    // against the set we stamped on the last successful compile.  Pure
+    // deletions of .kt files don't bump any surviving mtime, so without this
+    // check `needs_recompile` would return UpToDate and orphan Kotlin classes
+    // would never get cleaned.  Empty `kt_set` with a non-empty previous set
+    // (last build had Kotlin, this build has none) is also a change.
+    let kt_set = kt_stale::canonical_kt_set(&kotlin_sources);
+    let kt_prev = kt_stale::load_kt_sources(&output_dir);
+    let kt_set_changed = kt_prev.as_ref().map(|p| p != &kt_set).unwrap_or(false);
+
+    let compile_status = if pre_pruned > 0 || kt_set_changed {
         CompileStatus::StaleClasses
     } else {
         needs_recompile(&sources, &classes_dir, &toml_path, &output_dir)
@@ -402,6 +413,22 @@ pub fn compile(
             sources.len(),
             compile_status.reason()
         );
+
+        // Wipe Kotlin-derived classes ahead of kotlinc.  kotlinc re-emits
+        // every class the current Kotlin source set still produces, so any
+        // .class file whose JVM `SourceFile` attribute names a `.kt` source
+        // is either about to be rewritten (still produced) or is orphaned
+        // (deleted source, or removed declaration inside an edited source).
+        // Wiping unconditionally before the compiler runs makes the second
+        // case impossible — anything not re-emitted stays gone.  Also fires
+        // when the project just transitioned away from Kotlin (kt_set is
+        // empty but the previous build had .kt sources), in which case
+        // kotlinc won't run and the wipe is the only cleanup.
+        let wiped_kotlin_classes: Vec<PathBuf> = if has_kotlin || kt_set_changed {
+            kt_stale::wipe_kotlin_derived_classes(&classes_dir)?
+        } else {
+            Vec::new()
+        };
 
         // Build shared classpath entries used by both phases.
         let mut shared_cp: Vec<PathBuf> = Vec::new();
@@ -457,6 +484,28 @@ pub fn compile(
             if !status.success() {
                 bail!("Kotlin compilation failed");
             }
+
+            // Of the Kotlin-derived classes we wiped pre-kotlinc, anything
+            // not present on disk now is a true orphan (deleted source, or
+            // a declaration removed from a still-present source).  Classes
+            // kotlinc just re-emitted are back, so they're filtered out.
+            let kotlin_orphans = wiped_kotlin_classes.iter().filter(|p| !p.exists()).count();
+            if kotlin_orphans > 0 {
+                println!(
+                    "  Stale (Kotlin)  removed {} orphan class file{}",
+                    kotlin_orphans,
+                    if kotlin_orphans == 1 { "" } else { "s" },
+                );
+            }
+        } else if !wiped_kotlin_classes.is_empty() {
+            // Project transitioned away from Kotlin entirely (last build had
+            // .kt sources, this one doesn't): kotlinc didn't run, so every
+            // wiped class is an orphan by definition.
+            println!(
+                "  Stale (Kotlin)  removed {} orphan class file{}",
+                wiped_kotlin_classes.len(),
+                if wiped_kotlin_classes.len() == 1 { "" } else { "s" },
+            );
         }
 
         if has_java {
@@ -553,6 +602,10 @@ pub fn compile(
         if let Ok(version) = javac_version() {
             write_javac_version_stamp(&output_dir, &version)?;
         }
+
+        // Stamp the canonical Kotlin source set so the next build can detect
+        // pure deletions (which leave no surviving mtime to compare against).
+        kt_stale::write_kt_sources(&output_dir, &kt_set)?;
     } else {
         println!("  Compile         up to date");
     }
