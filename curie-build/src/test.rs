@@ -1,6 +1,5 @@
 use crate::compile::{
-    flat_package_src_dirs, flat_package_test_dirs, KOTLIN_COMPILER_COORD, KOTLIN_VERSION,
-    KOTLIN_STDLIB_COORD,
+    flat_package_src_dirs, flat_package_test_dirs, KOTLIN_COMPILER_COORD, KOTLIN_STDLIB_COORD,
 };
 use crate::incremental::{
     javac_version, needs_recompile, walk_files, write_javac_version_stamp, Inputs, Stamp,
@@ -11,8 +10,6 @@ use anyhow::{bail, Context, Result};
 use curie_deps::resolver::{resolve, ResolveOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-/// Version of JUnit Platform Console Standalone resolved from Maven Central.
-const JUNIT_STANDALONE_VERSION: &str = "6.0.3";
 const JUNIT_STANDALONE_COORD: &str =
     "org.junit.platform:junit-platform-console-standalone";
 
@@ -71,7 +68,7 @@ pub fn run_tests(
     // --- resolve JUnit standalone launcher -----------------------------------
     let extra_repos = build::extra_repos(desc);
 
-    let standalone_jar = resolve_standalone(&extra_repos, offline)
+    let standalone_jar = resolve_standalone(&extra_repos, offline, desc.test.junit_platform_version())
         .context("failed to resolve JUnit Platform Console Standalone")?;
 
     // --- resolve test-scoped dependencies ------------------------------------
@@ -107,10 +104,11 @@ pub fn run_tests(
 
     if has_kotlin_tests && kotlin_stdlib_jars.is_empty() {
         // Production had no Kotlin sources but tests do — resolve now.
+        let kver = desc.kotlin.version();
         let kotlin_jars = resolve(
             &[
-                (KOTLIN_COMPILER_COORD, KOTLIN_VERSION),
-                (KOTLIN_STDLIB_COORD, KOTLIN_VERSION),
+                (KOTLIN_COMPILER_COORD, kver),
+                (KOTLIN_STDLIB_COORD, kver),
             ],
             &ResolveOptions {
                 extra_repos: extra_repos.clone(),
@@ -135,10 +133,11 @@ pub fn run_tests(
         test_kotlin_stdlib_jars = stdlib;
     } else if has_kotlin_tests {
         // Re-resolve compiler (all transitive deps) — stdlib already in kotlin_stdlib_jars.
+        let kver = desc.kotlin.version();
         let kotlin_jars = resolve(
             &[
-                (KOTLIN_COMPILER_COORD, KOTLIN_VERSION),
-                (KOTLIN_STDLIB_COORD, KOTLIN_VERSION),
+                (KOTLIN_COMPILER_COORD, kver),
+                (KOTLIN_STDLIB_COORD, kver),
             ],
             &ResolveOptions {
                 extra_repos: extra_repos.clone(),
@@ -556,15 +555,16 @@ fn discover_test_sources(project_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
 // JUnit standalone resolution
 // ---------------------------------------------------------------------------
 
-fn resolve_standalone(extra_repos: &[curie_deps::repo::Repository], offline: bool) -> Result<PathBuf> {
-    let coord = format!(
-        "{}:{}",
-        JUNIT_STANDALONE_COORD, JUNIT_STANDALONE_VERSION
-    );
+fn resolve_standalone(
+    extra_repos: &[curie_deps::repo::Repository],
+    offline: bool,
+    junit_version: &str,
+) -> Result<PathBuf> {
+    let coord = format!("{}:{}", JUNIT_STANDALONE_COORD, junit_version);
     // coord is "group:artifact:version" — split off the version for the resolver.
     // The resolver takes (key, version) pairs where key = "group:artifact".
     let jars = resolve(
-        &[(JUNIT_STANDALONE_COORD, JUNIT_STANDALONE_VERSION)],
+        &[(JUNIT_STANDALONE_COORD, junit_version)],
         &ResolveOptions {
             extra_repos: extra_repos.to_vec(),
             progress: false,
@@ -589,7 +589,7 @@ fn resolve_standalone(extra_repos: &[curie_deps::repo::Repository], offline: boo
         .with_context(|| {
             format!(
                 "junit-platform-console-standalone-{}.jar not found after resolution",
-                JUNIT_STANDALONE_VERSION
+                junit_version
             )
         })
 }

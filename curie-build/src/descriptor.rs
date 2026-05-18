@@ -14,6 +14,14 @@ use std::path::Path;
 pub struct Descriptor {
     pub kind: DescriptorKind,
     pub java: Java,
+    /// Populated from `[test]` (only `junitPlatformVersion` today).
+    /// Workspace inheritance is applied by `workspace::inherit_from_workspace`
+    /// before any build pipeline reads the value.
+    pub test: Test,
+    /// Populated from `[kotlin]`.  Workspace inheritance works exactly like
+    /// the `[java]` scalar: a member's value wins; when absent the workspace
+    /// value (if any) is copied in.
+    pub kotlin: Kotlin,
     pub docker: Docker,
     pub build_info: BuildInfo,
     pub dependencies: BTreeMap<String, String>,
@@ -159,6 +167,10 @@ struct RawDescriptor {
     annotation_processor_options: BTreeMap<String, BTreeMap<String, String>>,
     #[serde(rename = "test-annotation-processor-options", default)]
     test_annotation_processor_options: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(default)]
+    test: Test,
+    #[serde(default)]
+    kotlin: Kotlin,
 }
 
 /// One entry in `[workspace-dependencies]`.
@@ -219,6 +231,67 @@ impl Java {
     /// has already been populated with the workspace value if applicable.
     pub fn effective(&self) -> &str {
         self.source_compatibility.as_deref().unwrap_or("21")
+    }
+}
+
+/// Default version of the JUnit Platform Console Standalone launcher
+/// that Curie downloads (into `~/.m2`) to execute tests.  Users may
+/// override it (including at the workspace root) via:
+///
+/// ```toml
+/// [test]
+/// junitPlatformVersion = "6.0.3"
+/// ```
+pub const DEFAULT_JUNIT_PLATFORM_VERSION: &str = "6.0.3";
+
+/// Default Kotlin version used to resolve `kotlin-compiler-embeddable`
+/// and `kotlin-stdlib` from Maven Central whenever any `.kt` sources are
+/// present.  Override (workspace-inheritable) with:
+///
+/// ```toml
+/// [kotlin]
+/// version = "2.1.21"
+/// ```
+pub const DEFAULT_KOTLIN_VERSION: &str = "2.1.21";
+
+/// Configuration for the `[test]` table (currently only the version of the
+/// JUnit Platform Console Standalone runner that Curie itself downloads).
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Test {
+    /// `junitPlatformVersion` — matches the camelCase style of
+    /// `sourceCompatibility`, `mainClass`, `baseImage`, etc.
+    #[serde(rename = "junitPlatformVersion", default)]
+    pub junit_platform_version: Option<String>,
+}
+
+impl Test {
+    /// The version string that will be passed to the resolver for the
+    /// `junit-platform-console-standalone` artifact.  After
+    /// `workspace::inherit_from_workspace`, a member's field already
+    /// contains the workspace value when the member omitted the key.
+    pub fn junit_platform_version(&self) -> &str {
+        self.junit_platform_version
+            .as_deref()
+            .unwrap_or(DEFAULT_JUNIT_PLATFORM_VERSION)
+    }
+}
+
+/// Configuration for the `[kotlin]` table (the version of kotlinc + stdlib
+/// that Curie downloads when it sees Kotlin sources).
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Kotlin {
+    /// Simple `version` key inside the `[kotlin]` table.  The table name
+    /// makes the meaning unambiguous.
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+impl Kotlin {
+    /// Effective version passed to the resolver for both the Kotlin
+    /// compiler and the stdlib JARs (they are published at the same
+    /// version).
+    pub fn version(&self) -> &str {
+        self.version.as_deref().unwrap_or(DEFAULT_KOTLIN_VERSION)
     }
 }
 
@@ -606,6 +679,8 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     let descriptor = Descriptor {
         kind,
         java: parsed.java,
+        test: parsed.test,
+        kotlin: parsed.kotlin,
         docker,
         build_info: parsed.build_info,
         dependencies: parsed.dependencies,
@@ -1184,5 +1259,107 @@ fastInit = "disabled"
             d.flat_test_ap_options(),
             vec![("dagger.fastInit".to_string(), "disabled".to_string())],
         );
+    }
+
+    // -- [test] / [kotlin] tool version configuration -----------------------
+
+    #[test]
+    fn workspace_may_declare_test_and_kotlin_versions() {
+        let toml = r#"
+[workspace]
+members = ["a"]
+
+[test]
+junitPlatformVersion = "6.0.3"
+
+[kotlin]
+version = "2.1.21"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.is_workspace());
+        assert_eq!(d.test.junit_platform_version(), "6.0.3");
+        assert_eq!(d.kotlin.version(), "2.1.21");
+    }
+
+    #[test]
+    fn test_and_kotlin_versions_inherit_from_workspace_when_omitted() {
+        // Member has no [test] or [kotlin] — must pick up workspace values.
+        let toml = r#"
+[workspace]
+members = ["member"]
+
+[test]
+junitPlatformVersion = "6.1.0"
+
+[kotlin]
+version = "2.2.0"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let ws_path = dir.path();
+        std::fs::write(ws_path.join("Curie.toml"), toml).unwrap();
+        std::fs::create_dir(ws_path.join("member")).unwrap();
+        let member_toml = r#"
+[application]
+name = "member"
+version = "0.0.0"
+mainClass = "M"
+"#;
+        std::fs::write(ws_path.join("member").join("Curie.toml"), member_toml).unwrap();
+
+        // Use the real workspace loading path (not the single-file load_str)
+        // so inherit_from_workspace runs.
+        let ws = crate::workspace::load(ws_path).unwrap();
+        let member_desc = &ws.members[0].descriptor;
+        assert_eq!(member_desc.test.junit_platform_version(), "6.1.0");
+        assert_eq!(member_desc.kotlin.version(), "2.2.0");
+    }
+
+    #[test]
+    fn member_version_overrides_workspace_version() {
+        let toml = r#"
+[workspace]
+members = ["m"]
+
+[test]
+junitPlatformVersion = "6.0.3"
+
+[kotlin]
+version = "2.1.21"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let ws_path = dir.path();
+        std::fs::write(ws_path.join("Curie.toml"), toml).unwrap();
+        std::fs::create_dir(ws_path.join("m")).unwrap();
+        let member_toml = r#"
+[application]
+name = "m"
+version = "0.0.0"
+mainClass = "M"
+
+[test]
+junitPlatformVersion = "6.5.0"
+
+[kotlin]
+version = "1.9.25"
+"#;
+        std::fs::write(ws_path.join("m").join("Curie.toml"), member_toml).unwrap();
+
+        let ws = crate::workspace::load(ws_path).unwrap();
+        let m = &ws.members[0].descriptor;
+        assert_eq!(m.test.junit_platform_version(), "6.5.0");
+        assert_eq!(m.kotlin.version(), "1.9.25");
+    }
+
+    #[test]
+    fn tool_versions_fall_back_to_defaults_when_absent() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.test.junit_platform_version(), crate::descriptor::DEFAULT_JUNIT_PLATFORM_VERSION);
+        assert_eq!(d.kotlin.version(), crate::descriptor::DEFAULT_KOTLIN_VERSION);
     }
 }

@@ -38,7 +38,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Kotlin version used when resolving the compiler and stdlib from Maven Central.
-pub const KOTLIN_VERSION: &str = "2.1.21";
+/// This is the *default*; a project (or its enclosing workspace) may override
+/// it via the `[kotlin] version` key in Curie.toml.  The value is the same
+/// string that `descriptor::DEFAULT_KOTLIN_VERSION` holds.
+///
+/// The name is re-exported under `#[cfg(test)]` so the existing unit test
+/// `kotlin_version_constant_is_set` continues to compile while normal builds
+/// do not carry an unused-import warning.
+#[cfg(test)]
+pub use crate::descriptor::DEFAULT_KOTLIN_VERSION as KOTLIN_VERSION;
 pub const KOTLIN_COMPILER_COORD: &str = "org.jetbrains.kotlin:kotlin-compiler-embeddable";
 pub const KOTLIN_STDLIB_COORD: &str = "org.jetbrains.kotlin:kotlin-stdlib";
 
@@ -322,10 +330,11 @@ pub fn compile(
     let kotlin_compiler_jars: Vec<PathBuf>; // all resolved JARs (compiler + stdlib + transitive)
 
     if has_kotlin {
+        let kver = desc.kotlin.version();
         let kotlin_jars = resolve(
             &[
-                (KOTLIN_COMPILER_COORD, KOTLIN_VERSION),
-                (KOTLIN_STDLIB_COORD, KOTLIN_VERSION),
+                (KOTLIN_COMPILER_COORD, kver),
+                (KOTLIN_STDLIB_COORD, kver),
             ],
             &ResolveOptions {
                 extra_repos: extra_repos(desc),

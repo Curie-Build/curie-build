@@ -4,9 +4,15 @@
 #
 #   src/main/kotlin/com/example/Hello.kt   — production source
 #
-# No [kotlin] section needed: Curie auto-detects .kt files.
-# No mainClass needed: Curie auto-detects the entry point.
+# Kotlin sources are auto-detected; the compiler version is inherited from
+# the workspace root (see examples/Curie.toml) but can be pinned per-member
+# with a [kotlin] table if desired.
 
 [application]
 name = "hello-kotlin"
 version = "0.1.0"
+
+# Explicit pin (same as the workspace default) — demonstrates that a member
+# can override the inherited Kotlin version.
+[kotlin]
+version = "2.1.21"

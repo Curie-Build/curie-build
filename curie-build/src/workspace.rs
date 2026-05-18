@@ -261,6 +261,12 @@ fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
     if member.java.source_compatibility.is_none() {
         member.java.source_compatibility = ws.java.source_compatibility.clone();
     }
+    if member.test.junit_platform_version.is_none() {
+        member.test.junit_platform_version = ws.test.junit_platform_version.clone();
+    }
+    if member.kotlin.version.is_none() {
+        member.kotlin.version = ws.kotlin.version.clone();
+    }
     if !ws.repositories.is_empty() {
         let mut combined = ws.repositories.clone();
         combined.append(&mut member.repositories);

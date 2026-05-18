@@ -37,3 +37,11 @@ sourceCompatibility = "21"
 
 [test-bom-imports]
 "org.junit:junit-bom" = "5.11.0"
+
+# Workspace-level defaults for the two tool versions that Curie downloads.
+# Every member inherits these unless it declares its own [test] or [kotlin].
+[test]
+junitPlatformVersion = "6.0.3"
+
+[kotlin]
+version = "2.1.21"

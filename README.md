@@ -44,9 +44,9 @@ Curie will never match the plugin ecosystem of Maven or Gradle. The goal is a fo
 - **Docker support** — builds and optionally runs a Docker image. Curie auto-generates a cache-optimised `Dockerfile` that layers dependency JARs before the application JAR, so a code-only change does not invalidate the dependency layer.
 - **Custom repositories** — additional Maven repositories can be declared alongside Maven Central.
 - **Multiple source layouts** — supports both the Maven layout (`src/main/java/`, `src/main/kotlin/`) and a flat-package layout where source roots are dot-named directories directly under `src/` (e.g. `src/com.example.myapp/`). The two layouts can coexist.
-- **Kotlin support** — `.kt` files are compiled automatically with no configuration. Curie detects Kotlin sources, downloads `kotlinc` from Maven Central, and runs a two-phase compile (kotlinc first, then javac) so Java and Kotlin can reference each other freely. Mixed Java/Kotlin projects work out of the box.
+- **Kotlin support** — `.kt` files are compiled automatically with no configuration. Curie detects Kotlin sources, downloads `kotlinc` from Maven Central (version configurable via the workspace-inheritable `[kotlin] version` key), and runs a two-phase compile (kotlinc first, then javac) so Java and Kotlin can reference each other freely. Mixed Java/Kotlin projects work out of the box.
 - **Resources** — `src/main/resources` (Maven layout) or a top-level `resources/` directory (flat-package layout) are included in the JAR and classpath. Test resources (`src/test/resources` / `test-resources/`) are added to the test classpath.
-- **Workspace / multi-module projects** — a workspace `Curie.toml` lists member directories; Curie builds them in dependency order. Members can declare `[workspace-dependencies]` to depend on sibling members. Workspace-level `[java]`, `[[repositories]]`, `[bom-imports]`, and `[test-bom-imports]` are inherited by all members.
+- **Workspace / multi-module projects** — a workspace `Curie.toml` lists member directories; Curie builds them in dependency order. Members can declare `[workspace-dependencies]` to depend on sibling members. Workspace-level `[java]`, `[[repositories]]`, `[bom-imports]`, `[test-bom-imports]`, `[test]`, and `[kotlin]` are inherited by all members.
 - **Offline mode** — `--offline` prevents any network access; a cache miss is an immediate error.
 - **Build info** — when the project is inside a Git repository, Curie automatically embeds `META-INF/build-info.properties` in the JAR with the commit id of the build. If the working tree has local changes the id is suffixed with `-dirty`. Can be disabled per-project.
 
@@ -87,6 +87,14 @@ mainClass = "com.example.Main"   # optional — auto-detected from bytecode if o
 
 [java]
 sourceCompatibility = "21"   # passed to javac --release; default: 21
+
+# Optional tool-version overrides (workspace-inheritable).
+# The defaults are the same versions that were previously hardcoded.
+[test]
+junitPlatformVersion = "6.0.3"   # JUnit Platform Console Standalone runner
+
+[kotlin]
+version = "2.1.21"               # kotlinc + kotlin-stdlib (only needed when .kt sources exist)
 
 [dependencies]
 "com.fasterxml.jackson.core:jackson-databind" = "2.17.2"
