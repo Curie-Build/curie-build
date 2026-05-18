@@ -1,4 +1,4 @@
-use crate::compile::{flat_package_src_dirs, flat_package_test_dirs, remove_stale_classes};
+use crate::compile::{flat_package_src_dirs, flat_package_test_dirs};
 use crate::incremental::{
     javac_version, needs_recompile, walk_files, write_javac_version_stamp, Inputs, Stamp,
 };
@@ -84,45 +84,32 @@ pub fn run_tests(
         .context("failed to create target/test-classes")?;
 
     let toml_path = project_root.join("Curie.toml");
+    let test_manifest_path = project_root.join("target").join(".test-classes.toml");
 
-    // Remove stale test class files before checking whether recompilation is
-    // needed.  Test sources may come from multiple roots; collect all
-    // (root, sources_in_that_root) pairs for remove_stale_classes.
-    let main_src = project_root.join("src").join("main").join("java");
-    let test_src = project_root.join("src").join("test").join("java");
-    let flat_src_dirs = flat_package_src_dirs(project_root);
-    let flat_test_dirs = flat_package_test_dirs(project_root);
-
-    // Collect sources belonging to each root.
-    let mut root_source_pairs: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
-
-    for root in std::iter::once(&main_src)
-        .chain(std::iter::once(&test_src))
-        .chain(flat_src_dirs.iter())
-        .chain(flat_test_dirs.iter())
-    {
-        let belonging: Vec<PathBuf> = test_sources
-            .iter()
-            .filter(|p| p.starts_with(root))
-            .cloned()
-            .collect();
-        if !belonging.is_empty() || root.exists() {
-            root_source_pairs.push((root.clone(), belonging));
-        }
-    }
-
-    let pairs_ref: Vec<(&Path, &[PathBuf])> = root_source_pairs
+    // Pre-compile prune (same scheme as production compile).  The
+    // manifest is root-agnostic so the source-roots gymnastics the old
+    // heuristic needed are gone.
+    let old_test_manifest = crate::class_manifest::load(&test_manifest_path)?;
+    let current_test_sources_set: std::collections::HashSet<String> = test_sources
         .iter()
-        .map(|(r, s)| (r.as_path(), s.as_slice()))
+        .filter_map(|p| p.canonicalize().ok())
+        .map(|p| p.to_string_lossy().into_owned())
         .collect();
+    let pre_pruned_tests: usize = match &old_test_manifest {
+        Some(old) => {
+            let stale = crate::class_manifest::stale_classes(
+                old, None, &current_test_sources_set,
+            );
+            crate::class_manifest::delete_classes(&test_classes_dir, &stale)?
+        }
+        None => 0,
+    };
 
-    let stale_removed = remove_stale_classes(&pairs_ref, &test_classes_dir)?;
-
-    let needs_recompile_tests = stale_removed > 0
+    let needs_recompile_tests = pre_pruned_tests > 0
         || needs_recompile(&test_sources, &test_classes_dir, &toml_path, &project_root.join("target")).needs_recompile();
 
     if needs_recompile_tests {
-        let reason = if stale_removed > 0 { "  [stale classes removed]" } else { "" };
+        let reason = if pre_pruned_tests > 0 { "  [stale classes removed]" } else { "" };
         println!(
             "  Compile tests   {} source file(s){}",
             test_sources.len(),
@@ -141,7 +128,12 @@ pub fn run_tests(
         compile_cp.extend_from_slice(extra_cp);
         compile_cp.push(standalone_jar.clone());
 
-        let mut javac = Command::new("javac");
+        // Invoke the embedded javac wrapper so we capture the source →
+        // class mapping in `.test-classes.toml`.
+        let wrapper_jar = crate::wrapper::ensure()?;
+        let mut javac = Command::new("java");
+        javac.arg("-jar").arg(&wrapper_jar);
+        javac.arg("--curie-manifest-out").arg(&test_manifest_path);
         javac
             .arg("--release")
             .arg(desc.java.effective())
@@ -157,10 +149,29 @@ pub fn run_tests(
 
         let status = javac
             .status()
-            .context("failed to invoke javac — is a JDK installed?")?;
+            .context("failed to invoke java — is a JRE installed?")?;
 
         if !status.success() {
             bail!("test compilation failed");
+        }
+
+        // Post-compile prune: companion test classes removed from a still-
+        // existing source (e.g. dropping an `@Nested` inner class) leave
+        // orphan .class files in target/test-classes/.  Diff old vs new.
+        if let Some(old) = &old_test_manifest {
+            if let Some(new) = crate::class_manifest::load(&test_manifest_path)? {
+                let stale = crate::class_manifest::stale_classes(
+                    old, Some(&new), &current_test_sources_set,
+                );
+                let n = crate::class_manifest::delete_classes(&test_classes_dir, &stale)?;
+                if n > 0 {
+                    println!(
+                        "  Stale tests     removed {} orphaned class file{}",
+                        n,
+                        if n == 1 { "" } else { "s" },
+                    );
+                }
+            }
         }
 
         // Record the JDK version used so that a future upgrade triggers a rebuild.
