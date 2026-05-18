@@ -142,10 +142,22 @@ pub fn run_tests(
         .filter_map(|p| p.canonicalize().ok())
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
+    // AP-generated test sources live under `target/generated-test-sources/`;
+    // the whole `target/` tree is a fine over-approximation to give the
+    // pre-prune a path-prefix carve-out (post-compile catches the real
+    // "generator stopped producing this" case).
+    let canonical_test_target = project_root
+        .join("target")
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from));
     let pre_pruned_tests: usize = match &old_test_manifest {
         Some(old) => {
             let stale = crate::class_manifest::stale_classes(
-                old, None, &current_test_sources_set,
+                old,
+                None,
+                &current_test_sources_set,
+                canonical_test_target.as_deref(),
             );
             crate::class_manifest::delete_classes(&test_classes_dir, &stale)?
         }
@@ -225,7 +237,7 @@ pub fn run_tests(
         if let Some(old) = &old_test_manifest {
             if let Some(new) = crate::class_manifest::load(&test_manifest_path)? {
                 let stale = crate::class_manifest::stale_classes(
-                    old, Some(&new), &current_test_sources_set,
+                    old, Some(&new), &current_test_sources_set, None,
                 );
                 let n = crate::class_manifest::delete_classes(&test_classes_dir, &stale)?;
                 if n > 0 {

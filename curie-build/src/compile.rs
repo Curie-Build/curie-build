@@ -282,9 +282,21 @@ pub fn compile(
         .filter_map(|p| p.canonicalize().ok())
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
+    // AP-generated sources sit under `target/` and won't appear in
+    // `current_sources_set`.  Tell the pre-prune to skip them — the
+    // post-compile diff handles "AP stopped producing this".
+    let canonical_target = output_dir
+        .canonicalize()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from));
     let pre_pruned: usize = match &old_manifest {
         Some(old) => {
-            let stale = crate::class_manifest::stale_classes(old, None, &current_sources_set);
+            let stale = crate::class_manifest::stale_classes(
+                old,
+                None,
+                &current_sources_set,
+                canonical_target.as_deref(),
+            );
             crate::class_manifest::delete_classes(&classes_dir, &stale)?
         }
         None => 0,
@@ -367,6 +379,7 @@ pub fn compile(
                     old,
                     Some(&new),
                     &current_sources_set,
+                    None, // post-compile uses the new manifest, not the prefix carve-out
                 );
                 let n = crate::class_manifest::delete_classes(&classes_dir, &stale)?;
                 if n > 0 {

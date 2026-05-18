@@ -66,9 +66,20 @@ pub fn load(path: &Path) -> Result<Option<Manifest>> {
 /// invocation will pass to javac, in the same form the manifest uses
 /// (absolute / canonical).  It's only consulted when `now` is `None`.
 ///
+/// `pre_compile_ignore_prefix` is consulted only when `now == None`.
+/// Sources in the old manifest whose path starts with this prefix are
+/// NOT treated as "deleted" even when they're absent from
+/// `current_sources`.  Used to exempt annotation-processor outputs
+/// (under `target/generated-sources/`) from pre-compile pruning: those
+/// generated sources are never in the user-source set, but they'll be
+/// re-emitted by javac this compile and the post-compile diff catches
+/// any that the AP stops producing.  Without this carve-out, a
+/// no-change rebuild would churn through every AP-generated class.
+///
 /// Semantics:
 /// - `now = None` (pre-compile): only sources in `old` that no longer
-///   appear in `current_sources` contribute; all of their classes are
+///   appear in `current_sources` AND don't sit under
+///   `pre_compile_ignore_prefix` contribute; all of their classes are
 ///   reported.
 /// - `now = Some(m)` (post-compile): for each source in `old`:
 ///   - if `m` has the same source, report `old[src] − m[src]`,
@@ -78,12 +89,22 @@ pub fn stale_classes(
     old: &Manifest,
     now: Option<&Manifest>,
     current_sources: &HashSet<String>,
+    pre_compile_ignore_prefix: Option<&str>,
 ) -> Vec<String> {
     let mut stale = Vec::new();
     for (src, old_classes) in &old.sources {
         match now {
             None => {
                 if !current_sources.contains(src) {
+                    // AP-generated sources live under target/generated-sources/;
+                    // skip them in pre-prune (post-compile catches the
+                    // "generator stopped producing this" case correctly).
+                    if pre_compile_ignore_prefix
+                        .map(|p| src.starts_with(p))
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
                     stale.extend(old_classes.iter().cloned());
                 }
             }
@@ -150,7 +171,7 @@ mod tests {
         ]);
         // Bar.java was deleted; only Foo.java survives.
         let current = sources_set(&["/a/Foo.java"]);
-        let stale = stale_classes(&old, None, &current);
+        let stale = stale_classes(&old, None, &current, None);
         assert_eq!(stale, vec!["com/Bar.class", "com/Bar$Inner.class"]);
     }
 
@@ -160,8 +181,34 @@ mod tests {
             ("/a/Foo.java", &["com/Foo.class", "com/Foo$Inner.class"]),
         ]);
         let current = sources_set(&["/a/Foo.java"]);
-        let stale = stale_classes(&old, None, &current);
+        let stale = stale_classes(&old, None, &current, None);
         assert!(stale.is_empty(), "no source deleted → nothing stale");
+    }
+
+    /// Regression: AP-generated sources live under `target/` and are
+    /// never in the user-source set, but they're re-emitted by javac
+    /// every build.  Pre-prune must NOT delete their classes — otherwise
+    /// every rebuild reports "stale classes removed" and pointlessly
+    /// rebuilds the annotation-processor output.
+    #[test]
+    fn pre_compile_ignores_paths_under_generated_prefix() {
+        let old = manifest_with(&[
+            ("/proj/src/com/Foo.java", &["com/Foo.class"]),
+            (
+                "/proj/target/generated-sources/annotations/com/AutoValue_Foo.java",
+                &["com/AutoValue_Foo.class"],
+            ),
+        ]);
+        let current = sources_set(&["/proj/src/com/Foo.java"]);
+        // Without the carve-out the AutoValue_Foo.class would be deleted.
+        let stale_no_carve = stale_classes(&old, None, &current, None);
+        assert_eq!(stale_no_carve, vec!["com/AutoValue_Foo.class"]);
+        // With the carve-out it stays put — post-compile handles it.
+        let stale = stale_classes(&old, None, &current, Some("/proj/target"));
+        assert!(
+            stale.is_empty(),
+            "AP-generated source under target/ must not be pre-pruned",
+        );
     }
 
     // -- post-compile prune -------------------------------------------------
@@ -176,7 +223,7 @@ mod tests {
         let now = manifest_with(&[
             ("/a/Foo.java", &["com/Foo.class"]),
         ]);
-        let stale = stale_classes(&old, Some(&now), &HashSet::new());
+        let stale = stale_classes(&old, Some(&now), &HashSet::new(), None);
         assert_eq!(stale, vec!["com/Bar.class"]);
     }
 
@@ -188,7 +235,7 @@ mod tests {
             ("/a/Foo.java", &["com/Foo.class", "com/Foo$Inner.class"]),
         ]);
         let now = Manifest::default();
-        let stale = stale_classes(&old, Some(&now), &HashSet::new());
+        let stale = stale_classes(&old, Some(&now), &HashSet::new(), None);
         assert_eq!(stale, vec!["com/Foo.class", "com/Foo$Inner.class"]);
     }
 
@@ -200,7 +247,7 @@ mod tests {
         let now = manifest_with(&[
             ("/a/Foo.java", &["com/Foo.class", "com/Foo$Inner.class"]),
         ]);
-        let stale = stale_classes(&old, Some(&now), &HashSet::new());
+        let stale = stale_classes(&old, Some(&now), &HashSet::new(), None);
         assert!(stale.is_empty());
     }
 
@@ -212,7 +259,7 @@ mod tests {
             ("/a/Foo.java", &["com/Foo.class"]),
             ("/a/Bar.java", &["com/Bar.class"]),
         ]);
-        let stale = stale_classes(&old, Some(&now), &HashSet::new());
+        let stale = stale_classes(&old, Some(&now), &HashSet::new(), None);
         assert!(stale.is_empty());
     }
 
