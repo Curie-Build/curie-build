@@ -1,16 +1,26 @@
 //! Auto-detection and bytecode validation of an application's `main` class.
 //!
 //! Two phases:
-//!   1. Source heuristic — scan production `.java` files for any of the
-//!      Java-21 launch-protocol main-method shapes.
+//!   1. Source heuristic — scan production `.java` and `.kt` files for any of
+//!      the recognised main-method shapes.
 //!   2. Bytecode validation — invoke `javap -p` on each candidate FQCN to
 //!      confirm the compiled class actually declares a launchable `main`.
+//!
+//! ## Kotlin naming convention
+//! The Kotlin compiler places top-level functions from `Foo.kt` into a class
+//! named `FooKt`.  A `fun main()` at the top level of `Hello.kt` in package
+//! `com.example` therefore ends up as `com.example.HelloKt`.  The heuristic
+//! below derives this name and then confirms it via `javap`.
 
 use crate::compile::pkg_prefix_for_src_root;
 use crate::jar::classpath_string;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+// ---------------------------------------------------------------------------
+// FQCN derivation
+// ---------------------------------------------------------------------------
 
 /// Derive the fully-qualified class name from a `.java` source path, trying
 /// each `src_root` in order and using the first successful strip.
@@ -25,7 +35,7 @@ use std::process::Command;
 ///
 /// For unnamed/compact source files (no top-level type declaration) the class
 /// name equals the file stem.
-fn fqcn_from_source(src_roots: &[PathBuf], source: &Path) -> Option<String> {
+fn fqcn_from_java_source(src_roots: &[PathBuf], source: &Path) -> Option<String> {
     for src_root in src_roots {
         if let Ok(rel) = source.strip_prefix(src_root) {
             let without_ext = rel.with_extension("");
@@ -48,6 +58,46 @@ fn fqcn_from_source(src_roots: &[PathBuf], source: &Path) -> Option<String> {
     }
     None
 }
+
+/// Derive the fully-qualified class name for a `.kt` source file.
+///
+/// Kotlin compiles top-level functions from `Foo.kt` into a JVM class named
+/// `FooKt`.  The package is derived the same way as for Java sources.
+///
+/// Example: `src/main/kotlin/com/example/Hello.kt`
+///   → stem `Hello` + `Kt` suffix → FQCN `com.example.HelloKt`
+fn fqcn_from_kotlin_source(src_roots: &[PathBuf], source: &Path) -> Option<String> {
+    // Try each src_root (including kotlin-specific ones like src/main/kotlin).
+    for src_root in src_roots {
+        if let Ok(rel) = source.strip_prefix(src_root) {
+            let without_ext = rel.with_extension("");
+            let mut parts: Vec<String> = without_ext
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            if parts.is_empty() {
+                continue;
+            }
+            // Append "Kt" suffix to the file-stem (last component).
+            let last = parts.len() - 1;
+            parts[last].push_str("Kt");
+
+            let rel_fqcn = parts.join(".");
+            let pkg_prefix = pkg_prefix_for_src_root(src_root);
+            let fqcn = if pkg_prefix.is_empty() {
+                rel_fqcn
+            } else {
+                format!("{}.{}", pkg_prefix, rel_fqcn)
+            };
+            return Some(fqcn);
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Source heuristics
+// ---------------------------------------------------------------------------
 
 /// Returns `true` when the source text looks like a compact (unnamed-class)
 /// source file — heuristically: no top-level `class`, `interface`, `enum`, or
@@ -88,9 +138,9 @@ fn is_compact_source(text: &str) -> bool {
     true
 }
 
-/// Returns `true` when the source text contains any recognisable main-method
-/// signature under Java 21's flexible launch protocol.
-fn source_has_main(text: &str) -> bool {
+/// Returns `true` when the Java source text contains any recognisable
+/// main-method signature under Java 21's flexible launch protocol.
+fn java_source_has_main(text: &str) -> bool {
     // Compact / unnamed class: any `void main` is enough.
     if is_compact_source(text) && text.contains("void main") {
         return true;
@@ -107,8 +157,50 @@ fn source_has_main(text: &str) -> bool {
     false
 }
 
+/// Returns `true` when the Kotlin source text contains a top-level `fun main`
+/// entry point (with or without arguments, with or without suspend).
+///
+/// "Top-level" is approximated by tracking brace depth line by line:
+/// `fun main` is top-level when the brace depth at the start of that line is 0
+/// (i.e. not inside any class/object/function body).
+fn kotlin_source_has_main(text: &str) -> bool {
+    let mut depth: i32 = 0;
+
+    for raw_line in text.lines() {
+        // Strip inline line comment before processing.
+        let line = if let Some(i) = raw_line.find("//") {
+            &raw_line[..i]
+        } else {
+            raw_line
+        };
+
+        let trimmed = line.trim_start();
+
+        // Check for top-level `fun main` / `suspend fun main` at current depth.
+        if depth == 0
+            && (trimmed.starts_with("fun main(") || trimmed.starts_with("suspend fun main("))
+        {
+            return true;
+        }
+
+        // Update depth based on braces in this line.
+        for ch in line.chars() {
+            match ch {
+                '{' => depth += 1,
+                '}' => { depth -= 1; if depth < 0 { depth = 0; } }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Bytecode validation
+// ---------------------------------------------------------------------------
+
 /// Returns `true` when `javap` output contains a recognisable main-method
-/// signature under Java 21's launch protocol.
+/// signature under Java 21's launch protocol or Kotlin's compiled output.
 fn javap_output_has_main(javap_out: &str) -> bool {
     for line in javap_out.lines() {
         let l = line.trim();
@@ -123,6 +215,10 @@ fn javap_output_has_main(javap_out: &str) -> bool {
     }
     false
 }
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 /// Validate a declared or detected class name against compiled bytecode via
 /// `javap`.  Returns `Ok(())` if the class has a launchable main method.
@@ -170,23 +266,40 @@ pub fn validate_main_class(
 
 /// Scan production sources for candidates then validate each against compiled
 /// bytecode.  Returns the single detected class name, or an error.
+///
+/// Both `.java` and `.kt` files are scanned.  Kotlin top-level `fun main`
+/// functions are mapped to the `<FileNameKt>` JVM class that the Kotlin
+/// compiler generates.
 pub fn detect_main_class(
     src_roots: &[PathBuf],
     sources: &[PathBuf],
     classes_dir: &Path,
     dep_jars: &[PathBuf],
 ) -> Result<String> {
-    // Phase 1: fast source heuristic.
+    // Phase 1: fast source heuristic — collect (fqcn, source_path) candidates.
     let mut source_candidates: Vec<(String, PathBuf)> = Vec::new();
     for source in sources {
         let text = match std::fs::read_to_string(source) {
             Ok(t) => t,
             Err(_) => continue,
         };
-        if source_has_main(&text) {
-            if let Some(fqcn) = fqcn_from_source(src_roots, source) {
-                source_candidates.push((fqcn, source.clone()));
+        let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("");
+        match ext {
+            "java" => {
+                if java_source_has_main(&text) {
+                    if let Some(fqcn) = fqcn_from_java_source(src_roots, source) {
+                        source_candidates.push((fqcn, source.clone()));
+                    }
+                }
             }
+            "kt" => {
+                if kotlin_source_has_main(&text) {
+                    if let Some(fqcn) = fqcn_from_kotlin_source(src_roots, source) {
+                        source_candidates.push((fqcn, source.clone()));
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -242,5 +355,117 @@ pub fn detect_main_class(
                 .collect::<Vec<_>>()
                 .join("\n")
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // --- kotlin_source_has_main ---
+
+    #[test]
+    fn kotlin_main_no_args() {
+        assert!(kotlin_source_has_main("fun main() {\n    println(\"hi\")\n}\n"));
+    }
+
+    #[test]
+    fn kotlin_main_with_args() {
+        assert!(kotlin_source_has_main(
+            "fun main(args: Array<String>) {\n    println(args[0])\n}\n"
+        ));
+    }
+
+    #[test]
+    fn kotlin_suspend_main() {
+        assert!(kotlin_source_has_main("suspend fun main() {\n}\n"));
+    }
+
+    #[test]
+    fn kotlin_main_inside_class_not_matched() {
+        // Indented inside a class body — should NOT be treated as top-level.
+        let src = "class Foo {\n    fun main() {\n    }\n}\n";
+        assert!(!kotlin_source_has_main(src));
+    }
+
+    #[test]
+    fn kotlin_no_main() {
+        assert!(!kotlin_source_has_main("fun helper() {}\n"));
+    }
+
+    #[test]
+    fn kotlin_main_in_comment_not_matched() {
+        let src = "// fun main() — example\nfun helper() {}\n";
+        assert!(!kotlin_source_has_main(src));
+    }
+
+    // --- fqcn_from_kotlin_source ---
+
+    #[test]
+    fn kotlin_fqcn_maven_layout() {
+        let root = PathBuf::from("/proj/src/main/kotlin");
+        let src = PathBuf::from("/proj/src/main/kotlin/com/example/Hello.kt");
+        let fqcn = fqcn_from_kotlin_source(&[root], &src);
+        assert_eq!(fqcn, Some("com.example.HelloKt".to_string()));
+    }
+
+    #[test]
+    fn kotlin_fqcn_default_package() {
+        let root = PathBuf::from("/proj/src/main/kotlin");
+        let src = PathBuf::from("/proj/src/main/kotlin/App.kt");
+        let fqcn = fqcn_from_kotlin_source(&[root], &src);
+        assert_eq!(fqcn, Some("AppKt".to_string()));
+    }
+
+    #[test]
+    fn kotlin_fqcn_multiple_roots_picks_correct() {
+        let roots = vec![
+            PathBuf::from("/proj/src/main/java"),
+            PathBuf::from("/proj/src/main/kotlin"),
+        ];
+        let src = PathBuf::from("/proj/src/main/kotlin/com/example/Main.kt");
+        let fqcn = fqcn_from_kotlin_source(&roots, &src);
+        assert_eq!(fqcn, Some("com.example.MainKt".to_string()));
+    }
+
+    // --- java_source_has_main (renamed from source_has_main) ---
+
+    #[test]
+    fn java_main_static() {
+        assert!(java_source_has_main(
+            "public class App { public static void main(String[] args) {} }"
+        ));
+    }
+
+    #[test]
+    fn java_no_main() {
+        assert!(!java_source_has_main("public class Lib { public void run() {} }"));
+    }
+
+    // --- javap_output_has_main ---
+
+    #[test]
+    fn javap_static_main_detected() {
+        let out = "public static void main(java.lang.String[]);";
+        assert!(javap_output_has_main(out));
+    }
+
+    #[test]
+    fn javap_kotlin_compiled_main_detected() {
+        // Kotlin top-level fun main compiles to:
+        //   public static final void main(java.lang.String[]);
+        let out = "public static final void main(java.lang.String[]);";
+        assert!(javap_output_has_main(out));
+    }
+
+    #[test]
+    fn javap_no_main() {
+        let out = "public void helper();\npublic java.lang.String getName();";
+        assert!(!javap_output_has_main(out));
     }
 }

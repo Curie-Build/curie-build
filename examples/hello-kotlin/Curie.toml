@@ -5,8 +5,8 @@
 #   src/main/kotlin/com/example/Hello.kt   — production source
 #
 # No [kotlin] section needed: Curie auto-detects .kt files.
+# No mainClass needed: Curie auto-detects the entry point.
 
 [application]
 name = "hello-kotlin"
 version = "0.1.0"
-mainClass = "com.example.HelloKt"
