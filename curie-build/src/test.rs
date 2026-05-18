@@ -26,6 +26,13 @@ const JUNIT_STANDALONE_COORD: &str =
 ///
 /// Returns `Ok(())` when all tests pass (or when no test sources exist).
 /// Returns `Err` when compilation fails or any test fails.
+///
+/// The argument count exceeds clippy's default cap (7) because the test
+/// pipeline genuinely needs each piece independently — all of them flow
+/// in from a `CompileOutput` plus the user's CLI flags, and bundling them
+/// into an intermediate struct adds plumbing without making the API
+/// clearer.  Revisit if the list grows further.
+#[allow(clippy::too_many_arguments)]
 pub fn run_tests(
     project_root: &Path,
     desc: &descriptor::Descriptor,

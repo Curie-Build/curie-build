@@ -6,7 +6,7 @@
 //!     by every input it depends on?" predicate.  All binary skip checks
 //!     (test stamp, Docker stamp, JAR repackage) should go through this.
 //!   - **Per-input mtime comparisons** ([`mtime`], [`newest_mtime`],
-//!     [`oldest_mtime_in_dir`]) — building blocks used by `needs_recompile`,
+//!     [`oldest_class_mtime_in_dir`]) — building blocks used by `needs_recompile`,
 //!     where the return value distinguishes *which* input forced a rebuild.
 //!   - **JDK fingerprint** via a stamp file, so that a `javac` upgrade
 //!     triggers a full recompile regardless of source mtimes.
@@ -46,15 +46,6 @@ pub(crate) fn walk_files(dir: &Path) -> impl Iterator<Item = DirEntry> + '_ {
 pub(crate) fn mtime(path: &Path) -> SystemTime {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
-        .unwrap_or(SystemTime::UNIX_EPOCH)
-}
-
-/// Return the oldest `modified` time among all files under `dir`, or
-/// `SystemTime::UNIX_EPOCH` when the directory is empty or doesn't exist.
-pub(crate) fn oldest_mtime_in_dir(dir: &Path) -> SystemTime {
-    walk_files(dir)
-        .filter_map(|e| std::fs::metadata(e.path()).and_then(|m| m.modified()).ok())
-        .min()
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
@@ -338,36 +329,6 @@ mod tests {
         let f = dir.path().join("a.txt");
         write_file(&f, b"hi");
         assert!(mtime(&f) > SystemTime::UNIX_EPOCH);
-    }
-
-    // -- oldest_mtime_in_dir --------------------------------------------------
-
-    #[test]
-    fn oldest_mtime_empty_dir_returns_epoch() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(oldest_mtime_in_dir(dir.path()), SystemTime::UNIX_EPOCH);
-    }
-
-    #[test]
-    fn oldest_mtime_missing_dir_returns_epoch() {
-        let dir = tempfile::tempdir().unwrap();
-        let absent = dir.path().join("no_such_dir");
-        assert_eq!(oldest_mtime_in_dir(&absent), SystemTime::UNIX_EPOCH);
-    }
-
-    #[test]
-    fn oldest_mtime_returns_minimum() {
-        let dir = tempfile::tempdir().unwrap();
-        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-
-        let old = dir.path().join("old.class");
-        let new = dir.path().join("new.class");
-        write_file(&old, b"old");
-        write_file(&new, b"new");
-        set_mtime(&old, base);
-        set_mtime(&new, base + Duration::from_secs(60));
-
-        assert_eq!(oldest_mtime_in_dir(dir.path()), base);
     }
 
     // -- oldest_class_mtime_in_dir --------------------------------------------

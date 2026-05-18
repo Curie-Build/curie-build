@@ -30,16 +30,6 @@ pub struct CompileOutput {
     pub sources: Vec<PathBuf>,
     /// Resolved production dependency JARs (empty when no [dependencies] declared).
     pub dep_jars: Vec<PathBuf>,
-    /// Resolved production annotation-processor JARs (empty when no
-    /// `[annotation-processors]` declared / inherited).  These are on
-    /// javac's `-processorpath` only; downstream code paths
-    /// (test/run/Docker) generally don't need them.
-    pub ap_jars: Vec<PathBuf>,
-    /// Subset of `ap_jars` whose entry was declared with
-    /// `on-compile-classpath = true`.  Added to javac's `-cp` so user code
-    /// can reference annotation types that live in the same jar as the
-    /// processor (Lombok).
-    pub ap_on_compile_classpath_jars: Vec<PathBuf>,
     /// Production resources directory (`src/main/resources` or top-level `resources/`), if it exists.
     pub resources_dir: Option<PathBuf>,
     /// Test resources directory (`src/test/resources` or top-level `test-resources/`), if it exists.
@@ -408,7 +398,6 @@ pub fn compile(
 
     Ok(CompileOutput {
         jar_path, jar_name, classes_dir, src_roots, sources, dep_jars,
-        ap_jars, ap_on_compile_classpath_jars,
         resources_dir, test_resources_dir,
     })
 }
