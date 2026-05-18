@@ -27,7 +27,6 @@
 use crate::compile::flat_package_src_dirs;
 use anyhow::{bail, Context, Result};
 use curie_deps::resolver::{resolve, ResolveOptions};
-use indicatif::ProgressBar;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
@@ -50,29 +49,11 @@ const PJF_MAIN: &str = "com.palantir.javaformat.java.Main";
 ///   No files are modified.
 /// * `offline` — refuse to download JARs from Maven Central; fail if the
 ///   PJF JARs are not already in the local `~/.m2` cache.
-/// * `log` — when `Some`, all diagnostic lines are emitted via
-///   `ProgressBar::println` so they appear above indicatif's live bars
-///   without corrupting them.  When `None`, plain `println!` is used.
-pub fn run_fmt(
-    project_root: &Path,
-    check_only: bool,
-    offline: bool,
-    log: Option<&ProgressBar>,
-) -> Result<()> {
-    // Helper: print through the progress bar if present, else to stdout.
-    let say = |msg: String| {
-        if let Some(pb) = log {
-            pb.println(msg);
-        } else {
-            println!("{}", msg);
-        }
-    };
-
+pub fn run_fmt(project_root: &Path, check_only: bool, offline: bool) -> Result<()> {
     // --- discover source files ----------------------------------------------
     let java_files = collect_java_files(project_root);
 
     if java_files.is_empty() {
-        say("fmt: no Java source files found — nothing to do.".into());
         return Ok(());
     }
 

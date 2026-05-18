@@ -729,7 +729,7 @@ pub fn fmt_all(workspace_root: &Path, check_only: bool, offline: bool) -> Result
                 let summary = summary.clone();
                 s.spawn(move || {
                     sp.enable_steady_tick(std::time::Duration::from_millis(80));
-                    let result = fmt::run_fmt(path, check_only, offline, Some(sp));
+                    let result = fmt::run_fmt(path, check_only, offline);
                     match &result {
                         Ok(_) => sp.finish_and_clear(),
                         Err(_) => {
