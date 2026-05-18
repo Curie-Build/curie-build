@@ -49,7 +49,7 @@ pub fn build_with_desc(
 ) -> Result<BuildOutput> {
     println!(
         "Building {} v{}",
-        desc.project_name(), desc.project_version()
+        desc.buildable_name(), desc.buildable_version()
     );
 
     // Library projects must not have a Dockerfile at the project root.
@@ -117,7 +117,7 @@ pub fn do_build(
     let resources_dir = compiled.resources_dir.as_deref();
     let toml_path = project_root.join("Curie.toml");
     let resolved_main_class: Option<String> = if needs_repackage(&compiled.jar_path, &compiled.classes_dir, resources_dir, &toml_path) {
-        let main_class = if let Some(app) = &desc.application {
+        let main_class = if let Some(app) = desc.application() {
             let mc = match &app.main_class {
                 Some(declared) => {
                     validate_main_class(declared, &compiled.classes_dir, &compiled.dep_jars)?;
@@ -153,14 +153,14 @@ pub fn do_build(
     } else {
         println!("  Package         up to date");
         // mainClass not needed — JAR already has the correct manifest.
-        desc.application.as_ref().and_then(|a| a.main_class.clone())
+        desc.application().and_then(|a| a.main_class.clone())
     };
 
     // --- populate target/libs/ with dep JARs (hardlink preferred) ------------
     // Always done for application projects so that `java -jar` works.
     // target/libs/ is wiped and repopulated on every build to stay in sync
     // with the current dep set (handles version bumps cleanly).
-    if !compiled.dep_jars.is_empty() && desc.application.is_some() {
+    if !compiled.dep_jars.is_empty() && desc.application().is_some() {
         let libs_dir = project_root.join("target").join("libs");
         populate_libs_dir(&libs_dir, &compiled.dep_jars)
             .context("failed to populate target/libs")?;
@@ -183,7 +183,7 @@ pub fn clean(project_root: &Path) -> Result<()> {
 
     println!(
         "Cleaning {} v{}",
-        desc.project_name(), desc.project_version()
+        desc.buildable_name(), desc.buildable_version()
     );
 
     let target_dir = project_root.join("target");

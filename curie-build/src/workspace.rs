@@ -87,7 +87,7 @@ pub fn discover(project: &Path) -> Result<WorkspaceContext> {
     while let Some(dir) = cur {
         if dir.join("Curie.toml").exists() {
             if let Ok(d) = descriptor::load(dir) {
-                if let Some(ws) = &d.workspace {
+                if let Some(ws) = d.workspace() {
                     // Match by canonical path so `members = ["./foo"]` and
                     // a member at `./foo/` both resolve to the same place.
                     for declared in &ws.members {
@@ -130,8 +130,7 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
         .with_context(|| format!("failed to load workspace at {}", workspace_root.display()))?;
 
     let ws = root_desc
-        .workspace
-        .as_ref()
+        .workspace()
         .ok_or_else(|| anyhow::anyhow!(
             "{} is not a workspace: its Curie.toml has no [workspace] section",
             workspace_root.display(),
@@ -311,8 +310,8 @@ pub fn list(workspace_root: &Path) -> Result<()> {
         println!(
             "  {:<width$}  {:<11}  v{}",
             m.declared,
-            m.descriptor.kind(),
-            m.descriptor.project_version(),
+            m.descriptor.kind_label(),
+            m.descriptor.buildable_version(),
             width = name_w,
         );
     }
@@ -505,8 +504,8 @@ fn test_one_member(
 ) -> Result<Vec<PathBuf>> {
     println!(
         "Testing {} v{}",
-        m.descriptor.project_name(),
-        m.descriptor.project_version(),
+        m.descriptor.buildable_name(),
+        m.descriptor.buildable_version(),
     );
     let compiled = compile::compile(&m.path, &m.descriptor, offline, extra_cp)?;
     test::run_tests(
@@ -604,8 +603,8 @@ pub fn run_one(
 
     println!(
         "Running {} v{}",
-        target.descriptor.project_name(),
-        target.descriptor.project_version(),
+        target.descriptor.buildable_name(),
+        target.descriptor.buildable_version(),
     );
     println!();
 
@@ -707,7 +706,7 @@ mod tests {
         assert_eq!(ws.members.len(), 2);
         assert_eq!(ws.members[0].declared, "a");
         assert_eq!(ws.members[1].declared, "b");
-        assert_eq!(ws.members[0].descriptor.project_name(), "a");
+        assert_eq!(ws.members[0].descriptor.project_name(), Some("a"));
     }
 
     #[test]

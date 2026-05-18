@@ -16,7 +16,7 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
         bail!("`curie run` is not supported for library projects");
     }
 
-    let app = desc.application.as_ref().expect("non-library has application");
+    let app = desc.application().expect("non-library has application");
 
     let output = build::do_build(project_root, &desc, opts.offline, &[])?;
 

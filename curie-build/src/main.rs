@@ -171,8 +171,8 @@ fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: 
     let desc = descriptor::load(project)?;
     println!(
         "Testing {} v{}",
-        desc.project_name(),
-        desc.project_version()
+        desc.buildable_name(),
+        desc.buildable_version()
     );
     let compiled = compile::compile(project, &desc, offline, &[])?;
     test::run_tests(

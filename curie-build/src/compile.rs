@@ -304,7 +304,7 @@ pub fn compile(
 
     let jar_name = format!(
         "{}-{}.jar",
-        desc.project_name().replace(':', "-"), desc.project_version()
+        desc.buildable_name().replace(':', "-"), desc.buildable_version()
     );
     let jar_path = output_dir.join(&jar_name);
 

@@ -3,64 +3,70 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-#[derive(Debug, Deserialize)]
+/// A fully-validated Curie project descriptor.
+///
+/// The mutually-exclusive `[application]` / `[library]` / `[workspace]`
+/// sections are reified as the [`DescriptorKind`] enum: a Descriptor with
+/// `kind: DescriptorKind::Application(_)` is statically guaranteed to be
+/// an application, no `unreachable!()` branches needed.  Serde-side
+/// parsing happens via a private flat-shape struct in [`load`].
+#[derive(Debug)]
 pub struct Descriptor {
-    pub application: Option<Application>,
-    pub library: Option<Library>,
-    /// `[workspace]` section — present in a workspace root `Curie.toml`.
-    /// Mutually exclusive with `[application]` / `[library]`: a workspace
-    /// root is not itself buildable; only its members are.
-    pub workspace: Option<Workspace>,
-    #[serde(default)]
+    pub kind: DescriptorKind,
     pub java: Java,
-    #[serde(default)]
     pub docker: Docker,
-    /// `[dependencies]` table: keys are `"group:artifact"`, values are version strings.
-    /// An empty version string (`""`) means the version is supplied by a BOM in
-    /// `[bom-imports]`.
-    #[serde(default)]
     pub dependencies: BTreeMap<String, String>,
-    /// `[test-dependencies]` table: test-scoped deps not included in the production JAR.
-    /// An empty version string (`""`) means the version is supplied by a BOM in
-    /// `[bom-imports]` or `[test-bom-imports]`.
-    #[serde(rename = "test-dependencies", default)]
     pub test_dependencies: BTreeMap<String, String>,
-    /// `[[repositories]]` array for additional Maven repositories.
-    #[serde(default)]
     pub repositories: Vec<RepositoryEntry>,
-    /// `[bom-imports]` table: BOMs whose `<dependencyManagement>` sections provide
-    /// version constraints for `[dependencies]` and `[test-dependencies]`.
-    /// Keys are `"group:artifact"`, values are version strings.
-    /// Later entries win when two BOMs manage the same artifact.
-    #[serde(rename = "bom-imports", default)]
     pub bom_imports: BTreeMap<String, String>,
-    /// `[test-bom-imports]` table: BOMs that additionally apply to test dependencies
-    /// only.  Combined with `[bom-imports]` during test dependency resolution, with
-    /// `[test-bom-imports]` taking higher priority.
-    /// Keys are `"group:artifact"`, values are version strings.
-    #[serde(rename = "test-bom-imports", default)]
     pub test_bom_imports: BTreeMap<String, String>,
     /// BOMs inherited from the surrounding workspace's `[bom-imports]`,
     /// populated by `workspace::load` during inheritance merge.  Empty in
     /// single-module mode.  Lower priority than the member's own
     /// [`bom_imports`]: in `prod_bom_gavs()` these are emitted first so the
     /// resolver's later-wins semantics let the member override the workspace.
-    #[serde(skip)]
     pub inherited_bom_imports: BTreeMap<String, String>,
     /// Same as [`inherited_bom_imports`] for `[test-bom-imports]`.  Lower
     /// priority than the member's own [`test_bom_imports`].
-    #[serde(skip)]
     pub inherited_test_bom_imports: BTreeMap<String, String>,
-    /// `[workspace-dependencies]` table: intra-workspace references to other
-    /// members of the surrounding workspace.  Keys are arbitrary labels (the
-    /// declared member name is conventional); values point at the member
-    /// directory via `path = "..."` relative to *this* member's `Curie.toml`.
-    ///
-    /// Versions are deliberately not accepted here — the depended-on
-    /// member's own `[application]`/`[library]` version is authoritative.
-    /// A version field is rejected at load time.
-    #[serde(rename = "workspace-dependencies", default)]
     pub workspace_dependencies: BTreeMap<String, WorkspaceDep>,
+}
+
+/// Which top-level section the descriptor declares.  Exactly one variant
+/// per descriptor — enforced by [`load`] at parse time.
+#[derive(Debug)]
+pub enum DescriptorKind {
+    Application(Application),
+    Library(Library),
+    /// Workspace root: lists members but is not itself buildable.
+    Workspace(Workspace),
+}
+
+/// Flat shape for serde — every section is `Option`, and [`load`]
+/// validates exactly-one-of and converts to [`DescriptorKind`].  Kept
+/// private to descriptor.rs; consumers only see the validated
+/// [`Descriptor`].
+#[derive(Debug, Deserialize)]
+struct RawDescriptor {
+    application: Option<Application>,
+    library: Option<Library>,
+    workspace: Option<Workspace>,
+    #[serde(default)]
+    java: Java,
+    #[serde(default)]
+    docker: Docker,
+    #[serde(default)]
+    dependencies: BTreeMap<String, String>,
+    #[serde(rename = "test-dependencies", default)]
+    test_dependencies: BTreeMap<String, String>,
+    #[serde(default)]
+    repositories: Vec<RepositoryEntry>,
+    #[serde(rename = "bom-imports", default)]
+    bom_imports: BTreeMap<String, String>,
+    #[serde(rename = "test-bom-imports", default)]
+    test_bom_imports: BTreeMap<String, String>,
+    #[serde(rename = "workspace-dependencies", default)]
+    workspace_dependencies: BTreeMap<String, WorkspaceDep>,
 }
 
 /// One entry in `[workspace-dependencies]`.
@@ -161,59 +167,86 @@ pub struct RepositoryEntry {
 }
 
 impl Descriptor {
-    /// Returns true when this is a library project (has `[library]` section).
     pub fn is_library(&self) -> bool {
-        self.library.is_some()
+        matches!(self.kind, DescriptorKind::Library(_))
     }
 
-    /// Returns true when this is a workspace root (has `[workspace]` section).
     /// Workspace roots are not themselves buildable — they list member
     /// directories whose own `Curie.toml` files are the buildable modules.
     pub fn is_workspace(&self) -> bool {
-        self.workspace.is_some()
+        matches!(self.kind, DescriptorKind::Workspace(_))
+    }
+
+    /// View the `[application]` section if this descriptor is one.
+    pub fn application(&self) -> Option<&Application> {
+        match &self.kind {
+            DescriptorKind::Application(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    /// View the `[workspace]` section if this descriptor is a workspace root.
+    pub fn workspace(&self) -> Option<&Workspace> {
+        match &self.kind {
+            DescriptorKind::Workspace(w) => Some(w),
+            _ => None,
+        }
     }
 
     /// Short human-readable kind for `curie list` output and error messages.
-    pub fn kind(&self) -> &'static str {
-        if self.workspace.is_some() {
-            "workspace"
-        } else if self.library.is_some() {
-            "library"
-        } else {
-            "application"
+    pub fn kind_label(&self) -> &'static str {
+        match &self.kind {
+            DescriptorKind::Application(_) => "application",
+            DescriptorKind::Library(_) => "library",
+            DescriptorKind::Workspace(_) => "workspace",
         }
     }
 
-    /// Project name regardless of kind.  Panics on a workspace descriptor
-    /// (workspaces have no top-level name; callers must check
-    /// [`is_workspace`](Self::is_workspace) first).
-    pub fn project_name(&self) -> &str {
-        if let Some(lib) = &self.library {
-            &lib.name
-        } else if let Some(app) = &self.application {
-            &app.name
-        } else {
-            unreachable!("descriptor validation guarantees one of library/application/workspace is set; project_name() must not be called on a workspace")
+    /// Project name.  `None` for a workspace root, which has no name of
+    /// its own — only its members do.
+    pub fn project_name(&self) -> Option<&str> {
+        match &self.kind {
+            DescriptorKind::Application(a) => Some(&a.name),
+            DescriptorKind::Library(l) => Some(&l.name),
+            DescriptorKind::Workspace(_) => None,
         }
     }
 
-    /// Project version regardless of kind.  Panics on a workspace descriptor.
-    pub fn project_version(&self) -> &str {
-        if let Some(lib) = &self.library {
-            &lib.version
-        } else if let Some(app) = &self.application {
-            &app.version
-        } else {
-            unreachable!("descriptor validation guarantees one of library/application/workspace is set; project_version() must not be called on a workspace")
+    /// Project version.  `None` for a workspace root.
+    pub fn project_version(&self) -> Option<&str> {
+        match &self.kind {
+            DescriptorKind::Application(a) => Some(&a.version),
+            DescriptorKind::Library(l) => Some(&l.version),
+            DescriptorKind::Workspace(_) => None,
         }
+    }
+
+    /// Convenience: panic-with-context wrapper around [`project_name`]
+    /// for use in build/test/compile paths where the caller knows the
+    /// descriptor is buildable (those paths never run on a workspace
+    /// root — workspaces are unwrapped to their members by `workspace::*`).
+    ///
+    /// Prefer matching on `kind` directly where ambiguity is possible.
+    pub fn buildable_name(&self) -> &str {
+        self.project_name()
+            .expect("buildable_name() called on a workspace descriptor")
+    }
+
+    /// See [`buildable_name`]; same contract for the version.
+    pub fn buildable_version(&self) -> &str {
+        self.project_version()
+            .expect("buildable_version() called on a workspace descriptor")
     }
 
     /// Resolved Docker image name: descriptor override or application name.
+    /// Only meaningful for application descriptors; the helper falls back
+    /// on `project_name()` which is `Some` for any buildable kind.
     pub fn image_name(&self) -> &str {
         self.docker
             .image_name
             .as_deref()
-            .unwrap_or_else(|| self.project_name())
+            .or_else(|| self.project_name())
+            .expect("image_name() called on a workspace descriptor")
     }
 
     /// Resolved Docker image tag: descriptor override or application version.
@@ -221,7 +254,8 @@ impl Descriptor {
         self.docker
             .image_tag
             .as_deref()
-            .unwrap_or_else(|| self.project_version())
+            .or_else(|| self.project_version())
+            .expect("image_tag() called on a workspace descriptor")
     }
 
     /// Full image reference, e.g. "hello-world:0.1.0".
@@ -293,56 +327,56 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
 
-    // Parse raw table first so we can detect optional section presence.
+    // Detect which top-level sections are explicitly present via a raw
+    // first-pass parse.  We can't infer this from the deserialised
+    // RawDescriptor alone because `[docker]` with no fields would still
+    // populate a default Docker struct — but its absence in the user's
+    // file is meaningful (Docker is off unless [docker] OR a project
+    // root Dockerfile exists).
     let raw: toml::Value = toml::from_str(&content)
         .map_err(|e| format_parse_error(e, &content, &path))?;
+    let table = raw.as_table();
+    let docker_section_present = table.map(|t| t.contains_key("docker")).unwrap_or(false);
 
-    let docker_section_present = raw
-        .as_table()
-        .map(|t| t.contains_key("docker"))
-        .unwrap_or(false);
-
-    let library_section_present = raw
-        .as_table()
-        .map(|t| t.contains_key("library"))
-        .unwrap_or(false);
-
-    let application_section_present = raw
-        .as_table()
-        .map(|t| t.contains_key("application"))
-        .unwrap_or(false);
-
-    let workspace_section_present = raw
-        .as_table()
-        .map(|t| t.contains_key("workspace"))
-        .unwrap_or(false);
-
-    // Deserialize directly from the source string so that toml retains span
-    // information and can produce contextual line/column error messages.
-    let mut descriptor: Descriptor = toml::from_str(&content)
+    let parsed: RawDescriptor = toml::from_str(&content)
         .map_err(|e| format_parse_error(e, &content, &path))?;
 
-    descriptor.docker.section_present = docker_section_present;
-
-    // Validate: exactly one of [application], [library], or [workspace] must
-    // be present.  Mixing any two is meaningless: a workspace isn't itself
-    // buildable, and an application is not a library.
-    let kinds_present =
-        application_section_present as u8 + library_section_present as u8 + workspace_section_present as u8;
-    if kinds_present == 0 {
-        bail!(
+    // Exactly one of [application] / [library] / [workspace] — enforced
+    // both as a count check (for the diagnostic message) and by reifying
+    // the kind into the DescriptorKind enum.
+    let kind = match (parsed.application, parsed.library, parsed.workspace) {
+        (Some(a), None, None) => DescriptorKind::Application(a),
+        (None, Some(l), None) => DescriptorKind::Library(l),
+        (None, None, Some(w)) => DescriptorKind::Workspace(w),
+        (None, None, None) => bail!(
             "Curie.toml must contain one of [application], [library], or [workspace]"
-        );
-    }
-    if kinds_present > 1 {
-        bail!(
+        ),
+        _ => bail!(
             "Curie.toml must contain only one of [application], [library], or [workspace]"
-        );
-    }
+        ),
+    };
 
-    // Validate: workspaces don't carry per-module config that has no clear
-    // inheritance story today.  These are deferred until inheritance lands.
-    if workspace_section_present {
+    let mut docker = parsed.docker;
+    docker.section_present = docker_section_present;
+
+    let descriptor = Descriptor {
+        kind,
+        java: parsed.java,
+        docker,
+        dependencies: parsed.dependencies,
+        test_dependencies: parsed.test_dependencies,
+        repositories: parsed.repositories,
+        bom_imports: parsed.bom_imports,
+        test_bom_imports: parsed.test_bom_imports,
+        inherited_bom_imports: BTreeMap::new(),
+        inherited_test_bom_imports: BTreeMap::new(),
+        workspace_dependencies: parsed.workspace_dependencies,
+    };
+
+    // Workspace-only restrictions: they describe member layout, not
+    // build inputs of their own.  These checks need the now-built
+    // `descriptor` because that's where the deserialised collections live.
+    if descriptor.is_workspace() {
         if !descriptor.dependencies.is_empty() {
             bail!("workspace Curie.toml must not declare [dependencies] — declare them in each member");
         }
@@ -357,10 +391,10 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         }
     }
 
-    // Validate: [workspace-dependencies] entries must be version-less.
-    // The depended-on member's own version is authoritative; declaring one
-    // here is almost certainly Cargo muscle-memory and would silently mask
-    // a version mismatch.
+    // [workspace-dependencies] entries must be version-less.  The
+    // depended-on member's own version is authoritative; declaring one
+    // here is almost certainly Cargo muscle-memory and would silently
+    // mask a version mismatch.
     for (label, dep) in &descriptor.workspace_dependencies {
         if dep.version.is_some() {
             bail!(
@@ -375,8 +409,7 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         }
     }
 
-    // Validate: library projects cannot use Docker.
-    if library_section_present && docker_section_present {
+    if descriptor.is_library() && docker_section_present {
         bail!(
             "library projects do not support Docker: remove the [docker] section from Curie.toml"
         );
@@ -503,9 +536,12 @@ members = ["a", "b", "nested/c"]
 "#;
         let d = load_str(toml).unwrap();
         assert!(d.is_workspace());
-        assert_eq!(d.kind(), "workspace");
-        let ws = d.workspace.unwrap();
+        assert_eq!(d.kind_label(), "workspace");
+        let ws = d.workspace().expect("workspace section present");
         assert_eq!(ws.members, vec!["a", "b", "nested/c"]);
+        // Workspaces have no project-level name or version.
+        assert_eq!(d.project_name(), None);
+        assert_eq!(d.project_version(), None);
     }
 
     #[test]
@@ -517,8 +553,10 @@ version = "1.0"
 "#;
         let d = load_str(toml).unwrap();
         assert!(!d.is_workspace());
-        assert_eq!(d.kind(), "application");
-        assert_eq!(d.project_name(), "x");
+        assert_eq!(d.kind_label(), "application");
+        assert_eq!(d.project_name(), Some("x"));
+        assert_eq!(d.project_version(), Some("1.0"));
+        assert!(d.application().is_some());
     }
 
     #[test]
