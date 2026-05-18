@@ -76,13 +76,6 @@ pub fn run_fmt(
         return Ok(());
     }
 
-    say(format!(
-        "fmt: {} {} file(s) with palantir-java-format {}",
-        if check_only { "checking" } else { "formatting" },
-        java_files.len(),
-        PJF_VERSION,
-    ));
-
     // --- resolve PJF from Maven Central (or ~/.m2 cache) --------------------
     let pjf_jars = resolve(
         &[(PJF_COORD, PJF_VERSION)],
@@ -140,10 +133,6 @@ pub fn run_fmt(
         } else {
             bail!("palantir-java-format exited with status {}", status);
         }
-    }
-
-    if !check_only {
-        say("fmt: done.".into());
     }
 
     Ok(())
