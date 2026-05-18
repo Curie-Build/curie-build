@@ -103,7 +103,7 @@ pub fn run_tests(
 
     // --- resolve Kotlin compiler for test compilation (when needed) ----------
     let test_kotlin_stdlib_jars: Vec<PathBuf>;
-    let test_kotlin_compiler_jar: Option<PathBuf>;
+    let test_kotlin_compiler_jars: Vec<PathBuf>; // all resolved JARs for -cp invocation
 
     if has_kotlin_tests && kotlin_stdlib_jars.is_empty() {
         // Production had no Kotlin sources but tests do — resolve now.
@@ -121,16 +121,6 @@ pub fn run_tests(
         )
         .context("Kotlin compiler/stdlib resolution failed (test phase)")?;
 
-        let compiler = kotlin_jars
-            .iter()
-            .find(|p| {
-                p.file_name()
-                    .map(|f| f.to_string_lossy().starts_with("kotlin-compiler-embeddable"))
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .context("kotlin-compiler-embeddable JAR not found after resolution (test phase)")?;
-
         let stdlib: Vec<PathBuf> = kotlin_jars
             .iter()
             .filter(|p| {
@@ -141,12 +131,15 @@ pub fn run_tests(
             .cloned()
             .collect();
 
-        test_kotlin_compiler_jar = Some(compiler);
+        test_kotlin_compiler_jars = kotlin_jars;
         test_kotlin_stdlib_jars = stdlib;
     } else if has_kotlin_tests {
-        // Re-resolve compiler — we only have stdlib from the prod phase.
+        // Re-resolve compiler (all transitive deps) — stdlib already in kotlin_stdlib_jars.
         let kotlin_jars = resolve(
-            &[(KOTLIN_COMPILER_COORD, KOTLIN_VERSION)],
+            &[
+                (KOTLIN_COMPILER_COORD, KOTLIN_VERSION),
+                (KOTLIN_STDLIB_COORD, KOTLIN_VERSION),
+            ],
             &ResolveOptions {
                 extra_repos: extra_repos.clone(),
                 progress: false,
@@ -156,20 +149,11 @@ pub fn run_tests(
         )
         .context("Kotlin compiler resolution failed (test phase)")?;
 
-        let compiler = kotlin_jars
-            .into_iter()
-            .find(|p| {
-                p.file_name()
-                    .map(|f| f.to_string_lossy().starts_with("kotlin-compiler-embeddable"))
-                    .unwrap_or(false)
-            })
-            .context("kotlin-compiler-embeddable JAR not found after resolution (test phase)")?;
-
-        test_kotlin_compiler_jar = Some(compiler);
+        test_kotlin_compiler_jars = kotlin_jars;
         // Stdlib was already resolved in the prod compile phase.
         test_kotlin_stdlib_jars = kotlin_stdlib_jars.to_vec();
     } else {
-        test_kotlin_compiler_jar = None;
+        test_kotlin_compiler_jars = Vec::new();
         test_kotlin_stdlib_jars = kotlin_stdlib_jars.to_vec();
     }
 
@@ -281,9 +265,11 @@ pub fn run_tests(
 
         if has_kotlin_tests {
             // Phase 1: kotlinc — compile all .kt + .java test sources together.
-            let compiler_jar = test_kotlin_compiler_jar.as_ref().unwrap();
             let mut kotlinc = Command::new("java");
-            kotlinc.arg("-jar").arg(compiler_jar);
+            kotlinc.arg("--enable-native-access=ALL-UNNAMED");
+            kotlinc.arg("-cp").arg(classpath_string(&test_kotlin_compiler_jars));
+            kotlinc.arg("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler");
+            kotlinc.arg("-no-stdlib").arg("-no-reflect");
             kotlinc.arg("-d").arg(&test_classes_dir);
 
             if !shared_cp.is_empty() {

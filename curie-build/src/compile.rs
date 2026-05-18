@@ -318,7 +318,7 @@ pub fn compile(
 
     // --- resolve Kotlin compiler + stdlib (when needed) ----------------------
     let kotlin_stdlib_jars: Vec<PathBuf>;
-    let kotlin_compiler_jar: Option<PathBuf>;
+    let kotlin_compiler_jars: Vec<PathBuf>; // all resolved JARs (compiler + stdlib + transitive)
 
     if has_kotlin {
         let kotlin_jars = resolve(
@@ -336,18 +336,8 @@ pub fn compile(
         .context("Kotlin compiler/stdlib resolution failed")?;
         println!("  Resolve Kotlin  {} JAR(s)", kotlin_jars.len());
 
-        // The compiler embeddable is the fat jar we invoke via `java -jar`.
-        let compiler = kotlin_jars
-            .iter()
-            .find(|p| {
-                p.file_name()
-                    .map(|f| f.to_string_lossy().starts_with("kotlin-compiler-embeddable"))
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .context("kotlin-compiler-embeddable JAR not found after resolution")?;
-
         // Stdlib jars: everything except the compiler embeddable itself.
+        // These are threaded into the compile and test runtime classpaths.
         let stdlib: Vec<PathBuf> = kotlin_jars
             .iter()
             .filter(|p| {
@@ -358,10 +348,10 @@ pub fn compile(
             .cloned()
             .collect();
 
-        kotlin_compiler_jar = Some(compiler);
+        kotlin_compiler_jars = kotlin_jars;
         kotlin_stdlib_jars = stdlib;
     } else {
-        kotlin_compiler_jar = None;
+        kotlin_compiler_jars = Vec::new();
         kotlin_stdlib_jars = Vec::new();
     }
 
@@ -426,28 +416,31 @@ pub fn compile(
         if has_kotlin {
             // ------------------------------------------------------------------
             // Phase 1: kotlinc — compiles all .kt + .java sources together.
-            // The compiler embeddable is a fat JAR invoked via `java -jar`.
+            // kotlin-compiler-embeddable has no Main-Class manifest entry so
+            // we invoke it via -cp + explicit main class, passing ALL resolved
+            // Kotlin JARs (compiler + stdlib + transitive deps) on the
+            // classpath.  We also pass -no-stdlib and -no-reflect so kotlinc
+            // does not try to locate them relative to its "kotlin home"
+            // directory (which doesn't exist in this Maven-based setup).
             // ------------------------------------------------------------------
-            let compiler_jar = kotlin_compiler_jar.as_ref().unwrap();
             let mut kotlinc = Command::new("java");
-            kotlinc.arg("-jar").arg(compiler_jar);
+            // Suppress the jansi native-access warning on JDK 17+.
+            kotlinc.arg("--enable-native-access=ALL-UNNAMED");
+            kotlinc.arg("-cp").arg(classpath_string(&kotlin_compiler_jars));
+            kotlinc.arg("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler");
+
+            // Tell kotlinc not to try to find stdlib/reflect relative to a
+            // kotlin-home directory (we supply them on the -cp explicitly).
+            kotlinc.arg("-no-stdlib");
+            kotlinc.arg("-no-reflect");
 
             // Output directory.
             kotlinc.arg("-d").arg(&classes_dir);
 
-            // Classpath: deps + stdlib + extras (the compiler embeddable
-            // bundles the compiler itself; stdlib must be explicit so user
-            // code can reference kotlin.* types).
+            // Classpath: deps + stdlib + extras.
             if !shared_cp.is_empty() {
                 kotlinc.arg("-cp").arg(classpath_string(&shared_cp));
             }
-
-            // Annotation-processor path — kotlinc delegates javac-style APs
-            // via -Xkapt-annotation-processors-dir; for simplicity we pass
-            // them on the classpath where kotlinc can discover them as
-            // compiler plugins.  Full kapt/KSP support is out of scope here.
-            // APs declared in [annotation-processors] are still passed on
-            // the Java phase (Phase 2) for Java source files.
 
             // Source files: all .kt and all .java together.
             for src in &kotlin_sources {
@@ -459,7 +452,7 @@ pub fn compile(
 
             let status = kotlinc
                 .status()
-                .context("failed to invoke kotlinc (java -jar kotlin-compiler-embeddable) — is a JRE installed?")?;
+                .context("failed to invoke kotlinc — is a JRE installed?")?;
 
             if !status.success() {
                 bail!("Kotlin compilation failed");
