@@ -55,6 +55,7 @@ Curie will never match the plugin ecosystem of Maven or Gradle. The goal is a fo
 curie build             # resolve deps, compile, run tests, package JAR, build Docker image (if enabled)
 curie test              # compile and run tests only — no JAR or Docker build
 curie run               # build, then run via java -jar (or Docker)
+curie fmt               # format all Java source files with palantir-java-format
 curie clean             # remove target/
 curie list              # list the members of a workspace
 
@@ -63,6 +64,8 @@ curie build --offline   # use only locally cached artifacts; fail on any cache m
 curie run   --no-docker
 curie run   -- --my-arg # extra arguments are forwarded to the application
 curie test  --filter com.example.MyTest  # run only tests matching a class-name pattern (regex)
+curie fmt   --check     # check formatting without modifying files (exits non-zero if any file needs changes)
+curie fmt   --offline   # use only cached formatter JARs; fail if not present
 
 curie --project path/to/member build  # target a specific project or workspace member
 ```
@@ -126,6 +129,26 @@ enabled = false
 ```
 
 No configuration is needed to enable it — the file is generated automatically whenever `git` is on `PATH` and the project is inside a Git repository.
+
+### Formatting (`curie fmt`)
+
+`curie fmt` formats all Java source files in the project using
+[palantir-java-format](https://github.com/palantir/palantir-java-format) —
+a modern, lambda-friendly, 120-character Java formatter.
+
+```
+curie fmt           # reformat all .java files in place
+curie fmt --check   # exit non-zero if any file is not correctly formatted (CI)
+curie fmt --offline # use only cached JARs; fail if not present
+```
+
+On the first invocation, Curie downloads `palantir-java-format` and its
+transitive dependencies from Maven Central into the local `~/.m2` cache —
+the same mechanism used for project dependencies.  Subsequent runs reuse
+the cache and require no network access.
+
+Source files under `src/main/java/`, `src/test/java/`, and any
+flat-package source roots are all formatted in a single pass.
 
 ### Library project
 

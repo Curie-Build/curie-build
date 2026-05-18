@@ -3,6 +3,7 @@ mod class_manifest;
 mod compile;
 mod descriptor;
 mod docker;
+mod fmt;
 mod git;
 mod incremental;
 mod jar;
@@ -66,6 +67,17 @@ enum Cmd {
     Clean {},
     /// List the members of a workspace (project must be a workspace root)
     List {},
+    /// Format Java source files with palantir-java-format
+    Fmt {
+        /// Check formatting without modifying files; exit non-zero if any
+        /// file would be reformatted (useful in CI)
+        #[arg(long)]
+        check: bool,
+
+        /// Do not download formatter JARs; fail if not already cached
+        #[arg(long)]
+        offline: bool,
+    },
 }
 
 fn main() {
@@ -157,6 +169,7 @@ fn main() {
                  from a workspace member's directory."
             )),
         },
+        Cmd::Fmt { check, offline } => fmt::run_fmt(&cli.project, check, offline),
     };
 
     if let Err(e) = result {
