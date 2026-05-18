@@ -71,11 +71,58 @@ pub fn run_tests(
             &ResolveOptions {
                 extra_repos: extra_repos.clone(),
                 progress: true,
-                bom_imports: test_bom_gavs,
+                bom_imports: test_bom_gavs.clone(),
                 offline,
             },
         )
         .context("test dependency resolution failed")?
+    };
+
+    // --- resolve test-annotation-processor jars ----------------------------
+    // Test compile sees BOTH production processors (so Lombok applied to
+    // production code is also applied to test code referencing the same
+    // annotations) AND test-only processors.
+    let mut test_ap_coords: Vec<(&str, &str)> = desc.ap_pairs();
+    test_ap_coords.extend(desc.test_ap_pairs());
+    let (test_ap_jars, test_ap_on_cp_jars) = if test_ap_coords.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let jars = resolve(
+            &test_ap_coords,
+            &ResolveOptions {
+                extra_repos: extra_repos.clone(),
+                progress: true,
+                bom_imports: test_bom_gavs.clone(),
+                offline,
+            },
+        )
+        .context("test annotation-processor resolution failed")?;
+
+        // Resolve each on-compile-classpath coord individually for its
+        // transitive closure (second resolve hits ~/.m2; cheap).
+        let on_cp_coords = desc.test_ap_on_compile_classpath_coords();
+        let mut on_cp_jars: Vec<PathBuf> = Vec::new();
+        for coord in on_cp_coords {
+            let version = test_ap_coords
+                .iter()
+                .find(|(k, _)| *k == coord)
+                .map(|(_, v)| *v)
+                .expect("on-cp coord must be in test_ap_coords");
+            let single = resolve(
+                &[(coord, version)],
+                &ResolveOptions {
+                    extra_repos: extra_repos.clone(),
+                    progress: false,
+                    bom_imports: test_bom_gavs.clone(),
+                    offline,
+                },
+            )
+            .with_context(|| {
+                format!("test annotation-processor classpath resolution failed for {}", coord)
+            })?;
+            on_cp_jars.extend(single);
+        }
+        (jars, on_cp_jars)
     };
 
     // --- compile test sources (incremental) ----------------------------------
@@ -126,6 +173,7 @@ pub fn run_tests(
         compile_cp.extend_from_slice(dep_jars);
         compile_cp.extend_from_slice(&test_dep_jars);
         compile_cp.extend_from_slice(extra_cp);
+        compile_cp.extend_from_slice(&test_ap_on_cp_jars);
         compile_cp.push(standalone_jar.clone());
 
         // Invoke the embedded javac wrapper so we capture the source →
@@ -142,6 +190,22 @@ pub fn run_tests(
             .arg(&test_classes_dir)
             .arg("-cp")
             .arg(classpath_string(&compile_cp));
+
+        // Annotation-processor path + generated-test-sources directory.
+        if !test_ap_jars.is_empty() {
+            let gen_dir = project_root
+                .join("target")
+                .join("generated-test-sources")
+                .join("annotations");
+            std::fs::create_dir_all(&gen_dir).with_context(|| {
+                format!("failed to create {}", gen_dir.display())
+            })?;
+            javac.arg("-processorpath").arg(classpath_string(&test_ap_jars));
+            javac.arg("-s").arg(&gen_dir);
+        }
+        for (key, value) in desc.flat_test_ap_options() {
+            javac.arg(format!("-A{}={}", key, value));
+        }
 
         for src in &test_sources {
             javac.arg(src);

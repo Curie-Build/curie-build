@@ -247,6 +247,15 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
 ///     the member's `inherited_*_bom_imports` so the resolver sees them
 ///     before the member's own (later-wins in the resolver gives member
 ///     priority for any artifact both BOMs manage).
+///   - **[annotation-processors]** and **[test-annotation-processors]**:
+///     same pattern as BOMs — workspace's entries land in the member's
+///     `inherited_*_annotation_processors`.  Member-declared coordinates
+///     override workspace-declared ones at the same coord (handled at the
+///     `Descriptor::ap_pairs` layer).
+///   - **[annotation-processor-options]** (nested, by processor namespace):
+///     workspace's tables go into `inherited_annotation_processor_options`.
+///     The member's namespace tables override workspace's per inner key —
+///     handled in `Descriptor::flat_ap_options`.
 fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
     if member.java.source_compatibility.is_none() {
         member.java.source_compatibility = ws.java.source_compatibility.clone();
@@ -258,6 +267,11 @@ fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
     }
     member.inherited_bom_imports = ws.bom_imports.clone();
     member.inherited_test_bom_imports = ws.test_bom_imports.clone();
+    member.inherited_annotation_processors = ws.annotation_processors.clone();
+    member.inherited_test_annotation_processors = ws.test_annotation_processors.clone();
+    member.inherited_annotation_processor_options = ws.annotation_processor_options.clone();
+    member.inherited_test_annotation_processor_options =
+        ws.test_annotation_processor_options.clone();
 }
 
 /// Kahn's algorithm.  `edges[v]` is the set of nodes `v` depends on.
@@ -1076,5 +1090,56 @@ mod tests {
         assert_eq!(repos.len(), 2);
         assert_eq!(repos[0].name, "ws-repo");
         assert_eq!(repos[1].name, "own-repo");
+    }
+
+    // -- annotation-processor inheritance ----------------------------------
+
+    #[test]
+    fn workspace_annotation_processors_flow_to_member() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\
+             [annotation-processors]\n\
+             \"org.projectlombok:lombok\" = { version = \"1.18.30\", on-compile-classpath = true }\n",
+            &[("a", "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n")],
+        ).unwrap();
+        let pairs = ws.members[0].descriptor.ap_pairs();
+        assert_eq!(pairs, vec![("org.projectlombok:lombok", "1.18.30")]);
+        let on_cp = ws.members[0].descriptor.ap_on_compile_classpath_coords();
+        assert_eq!(on_cp, vec!["org.projectlombok:lombok"]);
+    }
+
+    #[test]
+    fn member_annotation_processor_overrides_workspace() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\
+             [annotation-processors]\n\
+             \"shared:proc\" = \"1.0\"\n",
+            &[("a", "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n\
+                    [annotation-processors]\n\"shared:proc\" = \"2.0\"\n")],
+        ).unwrap();
+        let pairs = ws.members[0].descriptor.ap_pairs();
+        // Member's 2.0 wins; workspace's 1.0 is dropped from the pair list.
+        assert_eq!(pairs, vec![("shared:proc", "2.0")]);
+    }
+
+    #[test]
+    fn workspace_ap_options_flow_to_member_with_member_override() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\
+             [annotation-processor-options.dagger]\n\
+             fastInit = \"disabled\"\nformatGeneratedSource = \"disabled\"\n",
+            &[("a", "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n\
+                    [annotation-processor-options.dagger]\nfastInit = \"enabled\"\n")],
+        ).unwrap();
+        let flat = ws.members[0].descriptor.flat_ap_options();
+        // Member redefined fastInit → its value wins.  Workspace's
+        // formatGeneratedSource entry survives untouched.
+        assert_eq!(
+            flat,
+            vec![
+                ("dagger.fastInit".to_string(), "enabled".to_string()),
+                ("dagger.formatGeneratedSource".to_string(), "disabled".to_string()),
+            ],
+        );
     }
 }

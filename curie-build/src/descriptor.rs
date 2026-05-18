@@ -30,6 +30,87 @@ pub struct Descriptor {
     /// priority than the member's own [`test_bom_imports`].
     pub inherited_test_bom_imports: BTreeMap<String, String>,
     pub workspace_dependencies: BTreeMap<String, WorkspaceDep>,
+    /// `[annotation-processors]` — coordinates of processor jars to put on
+    /// javac's `-processorpath` during production compilation.  Entries are
+    /// resolved through the same Maven resolver as `[dependencies]` and
+    /// honour `[bom-imports]` for version-less coordinates.
+    pub annotation_processors: BTreeMap<String, AnnotationProcessor>,
+    /// `[test-annotation-processors]` — same shape, only added to the
+    /// processor path when compiling test sources.
+    pub test_annotation_processors: BTreeMap<String, AnnotationProcessor>,
+    /// Workspace-inherited counterparts, populated by
+    /// `workspace::inherit_from_workspace`.  Member-declared entries take
+    /// precedence on a key collision.
+    pub inherited_annotation_processors: BTreeMap<String, AnnotationProcessor>,
+    pub inherited_test_annotation_processors: BTreeMap<String, AnnotationProcessor>,
+    /// `[annotation-processor-options.<prefix>]` — nested table keyed by
+    /// processor namespace.  Each inner key/value emits a single
+    /// `-A<prefix>.<key>=<value>` to javac.  Examples:
+    ///
+    /// ```toml
+    /// [annotation-processor-options.dagger]
+    /// fastInit = "enabled"
+    ///
+    /// [annotation-processor-options.mapstruct]
+    /// suppressGeneratorTimestamp = "true"
+    /// ```
+    pub annotation_processor_options: BTreeMap<String, BTreeMap<String, String>>,
+    /// Test-only counterpart of [`annotation_processor_options`].
+    pub test_annotation_processor_options: BTreeMap<String, BTreeMap<String, String>>,
+    pub inherited_annotation_processor_options: BTreeMap<String, BTreeMap<String, String>>,
+    pub inherited_test_annotation_processor_options: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// One entry in `[annotation-processors]` or `[test-annotation-processors]`.
+///
+/// Two shapes accepted, via serde's untagged enum:
+///
+/// ```toml
+/// # Shorthand: the value is just the version string.
+/// "com.google.dagger:dagger-compiler" = "2.50"
+///
+/// # Detailed: extra knobs.  Today the only knob is on-compile-classpath,
+/// # which Lombok needs because its annotation types live in the same jar
+/// # as the processor itself.
+/// "org.projectlombok:lombok" = { version = "1.18.30", on-compile-classpath = true }
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum AnnotationProcessor {
+    /// `"key" = "1.0.0"` form — equivalent to detailed with defaults.
+    Version(String),
+    /// `"key" = { version = "1.0.0", on-compile-classpath = bool }` form.
+    Detailed(AnnotationProcessorDetailed),
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct AnnotationProcessorDetailed {
+    pub version: String,
+    /// When `true`, the processor jar is added to javac's `-cp` in addition
+    /// to `-processorpath`.  Needed for processors whose annotation types
+    /// are referenced from user code and live in the same jar as the
+    /// processor (Lombok is the canonical case).  Default `false`: most
+    /// processors (Dagger, MapStruct, AutoValue, Micronaut) split their
+    /// API into a separate jar that the user declares under `[dependencies]`.
+    #[serde(default, rename = "on-compile-classpath")]
+    pub on_compile_classpath: bool,
+}
+
+impl AnnotationProcessor {
+    /// Version string as the user wrote it.  `""` means "supply via a BOM".
+    pub fn version(&self) -> &str {
+        match self {
+            AnnotationProcessor::Version(v) => v,
+            AnnotationProcessor::Detailed(d) => &d.version,
+        }
+    }
+
+    pub fn on_compile_classpath(&self) -> bool {
+        match self {
+            AnnotationProcessor::Version(_) => false,
+            AnnotationProcessor::Detailed(d) => d.on_compile_classpath,
+        }
+    }
 }
 
 /// Which top-level section the descriptor declares.  Exactly one variant
@@ -67,6 +148,14 @@ struct RawDescriptor {
     test_bom_imports: BTreeMap<String, String>,
     #[serde(rename = "workspace-dependencies", default)]
     workspace_dependencies: BTreeMap<String, WorkspaceDep>,
+    #[serde(rename = "annotation-processors", default)]
+    annotation_processors: BTreeMap<String, AnnotationProcessor>,
+    #[serde(rename = "test-annotation-processors", default)]
+    test_annotation_processors: BTreeMap<String, AnnotationProcessor>,
+    #[serde(rename = "annotation-processor-options", default)]
+    annotation_processor_options: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(rename = "test-annotation-processor-options", default)]
+    test_annotation_processor_options: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// One entry in `[workspace-dependencies]`.
@@ -312,6 +401,130 @@ impl Descriptor {
         v.extend(own_test);
         Ok(v)
     }
+
+    /// `(group:artifact, version)` pairs for production annotation
+    /// processors, in the order the resolver wants: workspace-inherited
+    /// first, then member-declared.  On a collision (same coordinate
+    /// declared in both), the member-declared one wins — its entry is
+    /// later in the returned Vec.
+    pub fn ap_pairs(&self) -> Vec<(&str, &str)> {
+        ap_pairs_merged(&self.inherited_annotation_processors, &self.annotation_processors)
+    }
+
+    /// Same as [`ap_pairs`] for `[test-annotation-processors]`.
+    pub fn test_ap_pairs(&self) -> Vec<(&str, &str)> {
+        ap_pairs_merged(
+            &self.inherited_test_annotation_processors,
+            &self.test_annotation_processors,
+        )
+    }
+
+    /// `group:artifact` strings of AP entries marked
+    /// `on-compile-classpath = true`.  These coordinates also need to be
+    /// resolved (already done as part of `ap_pairs`) and added to javac's
+    /// `-cp` so user code can reference their annotation types.
+    ///
+    /// Test entries are merged in too: a Lombok-style processor declared
+    /// only in `[test-annotation-processors]` should be visible on test
+    /// compile's `-cp`.
+    pub fn ap_on_compile_classpath_coords(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for map in [&self.inherited_annotation_processors, &self.annotation_processors] {
+            for (k, v) in map {
+                if v.on_compile_classpath() {
+                    out.push(k.as_str());
+                }
+            }
+        }
+        out
+    }
+
+    /// Same as [`ap_on_compile_classpath_coords`] but covers
+    /// test-annotation-processors too.  Used by test compile.
+    pub fn test_ap_on_compile_classpath_coords(&self) -> Vec<&str> {
+        let mut out = self.ap_on_compile_classpath_coords();
+        for map in [
+            &self.inherited_test_annotation_processors,
+            &self.test_annotation_processors,
+        ] {
+            for (k, v) in map {
+                if v.on_compile_classpath() {
+                    out.push(k.as_str());
+                }
+            }
+        }
+        out
+    }
+
+    /// Flatten the nested production-AP options into the `<prefix>.<key> = <value>`
+    /// list javac wants on `-A`.  Inherited options come first; member
+    /// entries override per (prefix, key).
+    pub fn flat_ap_options(&self) -> Vec<(String, String)> {
+        flatten_ap_options(
+            &self.inherited_annotation_processor_options,
+            &self.annotation_processor_options,
+        )
+    }
+
+    /// Same as [`flat_ap_options`] for test-compile.  Test options layer
+    /// on top of production options (a test-only override beats both).
+    pub fn flat_test_ap_options(&self) -> Vec<(String, String)> {
+        let mut merged = self.flat_ap_options();
+        let test = flatten_ap_options(
+            &self.inherited_test_annotation_processor_options,
+            &self.test_annotation_processor_options,
+        );
+        // Test entries with the same `prefix.key` override production.
+        for (k, v) in test {
+            if let Some(existing) = merged.iter_mut().find(|(ek, _)| ek == &k) {
+                existing.1 = v;
+            } else {
+                merged.push((k, v));
+            }
+        }
+        merged
+    }
+}
+
+/// Concatenate two AP maps in inherited-then-own order.  When the same
+/// coordinate appears in both, the own-map entry is emitted (the
+/// inherited one is dropped) so callers see exactly one resolve target.
+fn ap_pairs_merged<'a>(
+    inherited: &'a BTreeMap<String, AnnotationProcessor>,
+    own: &'a BTreeMap<String, AnnotationProcessor>,
+) -> Vec<(&'a str, &'a str)> {
+    let mut out: Vec<(&'a str, &'a str)> = Vec::with_capacity(inherited.len() + own.len());
+    for (k, v) in inherited {
+        if !own.contains_key(k) {
+            out.push((k.as_str(), v.version()));
+        }
+    }
+    for (k, v) in own {
+        out.push((k.as_str(), v.version()));
+    }
+    out
+}
+
+/// Two-pass merge of nested option tables, then flatten to
+/// `("prefix.key", "value")` pairs ready for `-A`.
+fn flatten_ap_options(
+    inherited: &BTreeMap<String, BTreeMap<String, String>>,
+    own: &BTreeMap<String, BTreeMap<String, String>>,
+) -> Vec<(String, String)> {
+    let mut merged: BTreeMap<String, BTreeMap<String, String>> = inherited.clone();
+    for (prefix, inner) in own {
+        let dst = merged.entry(prefix.clone()).or_default();
+        for (k, v) in inner {
+            dst.insert(k.clone(), v.clone());
+        }
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (prefix, inner) in &merged {
+        for (k, v) in inner {
+            out.push((format!("{}.{}", prefix, k), v.clone()));
+        }
+    }
+    out
 }
 
 pub fn load(project_root: &Path) -> Result<Descriptor> {
@@ -371,6 +584,14 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         inherited_bom_imports: BTreeMap::new(),
         inherited_test_bom_imports: BTreeMap::new(),
         workspace_dependencies: parsed.workspace_dependencies,
+        annotation_processors: parsed.annotation_processors,
+        test_annotation_processors: parsed.test_annotation_processors,
+        inherited_annotation_processors: BTreeMap::new(),
+        inherited_test_annotation_processors: BTreeMap::new(),
+        annotation_processor_options: parsed.annotation_processor_options,
+        test_annotation_processor_options: parsed.test_annotation_processor_options,
+        inherited_annotation_processor_options: BTreeMap::new(),
+        inherited_test_annotation_processor_options: BTreeMap::new(),
     };
 
     // Workspace-only restrictions: they describe member layout, not
@@ -690,5 +911,205 @@ core = { path = "../core" }
 "#;
         let err = load_str(toml).unwrap_err().to_string();
         assert!(err.contains("[workspace-dependencies]"), "got: {err}");
+    }
+
+    // -- annotation-processors ----------------------------------------------
+
+    #[test]
+    fn parse_annotation_processors_both_forms() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+mainClass = "X"
+
+[annotation-processors]
+"com.google.dagger:dagger-compiler" = "2.50"
+"org.projectlombok:lombok" = { version = "1.18.30", on-compile-classpath = true }
+"#;
+        let d = load_str(toml).unwrap();
+        let dagger = d.annotation_processors.get("com.google.dagger:dagger-compiler").unwrap();
+        assert_eq!(dagger.version(), "2.50");
+        assert!(!dagger.on_compile_classpath());
+
+        let lombok = d.annotation_processors.get("org.projectlombok:lombok").unwrap();
+        assert_eq!(lombok.version(), "1.18.30");
+        assert!(lombok.on_compile_classpath());
+    }
+
+    #[test]
+    fn ap_pairs_returns_inherited_then_own() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+mainClass = "X"
+
+[annotation-processors]
+"own:proc" = "2.0"
+"#;
+        let mut d = load_str(toml).unwrap();
+        // Simulate inheritance — what workspace::inherit_from_workspace
+        // would do at member-load time.
+        d.inherited_annotation_processors.insert(
+            "ws:proc".into(),
+            AnnotationProcessor::Version("1.0".into()),
+        );
+        let pairs = d.ap_pairs();
+        assert_eq!(
+            pairs,
+            vec![("ws:proc", "1.0"), ("own:proc", "2.0")],
+            "inherited entries should come first so own can override on collision",
+        );
+    }
+
+    #[test]
+    fn ap_pairs_own_overrides_inherited_on_same_coord() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+mainClass = "X"
+
+[annotation-processors]
+"shared:proc" = "2.0"
+"#;
+        let mut d = load_str(toml).unwrap();
+        d.inherited_annotation_processors.insert(
+            "shared:proc".into(),
+            AnnotationProcessor::Version("1.0".into()),
+        );
+        let pairs = d.ap_pairs();
+        // Inherited entry is dropped because member redeclared it.
+        assert_eq!(pairs, vec![("shared:proc", "2.0")]);
+    }
+
+    #[test]
+    fn test_ap_pairs_uses_test_table_only() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+mainClass = "X"
+
+[annotation-processors]
+"prod:proc" = "1.0"
+
+[test-annotation-processors]
+"test:proc" = "2.0"
+"#;
+        let d = load_str(toml).unwrap();
+        // Prod path: only "prod:proc"
+        assert_eq!(d.ap_pairs(), vec![("prod:proc", "1.0")]);
+        // Test path: only "test:proc" (test_ap_pairs is just the test table;
+        // compile.rs/test.rs concatenates the two when invoking javac).
+        assert_eq!(d.test_ap_pairs(), vec![("test:proc", "2.0")]);
+    }
+
+    #[test]
+    fn on_compile_classpath_coords_listed() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+mainClass = "X"
+
+[annotation-processors]
+"org.projectlombok:lombok" = { version = "1.18.30", on-compile-classpath = true }
+"com.google.dagger:dagger-compiler" = "2.50"
+"#;
+        let d = load_str(toml).unwrap();
+        let on_cp = d.ap_on_compile_classpath_coords();
+        assert_eq!(on_cp, vec!["org.projectlombok:lombok"]);
+    }
+
+    // -- annotation-processor-options (nested form) ------------------------
+
+    #[test]
+    fn parse_nested_ap_options_emits_dotted_flags() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+mainClass = "X"
+
+[annotation-processor-options.dagger]
+fastInit = "enabled"
+formatGeneratedSource = "disabled"
+
+[annotation-processor-options.mapstruct]
+suppressGeneratorTimestamp = "true"
+"#;
+        let d = load_str(toml).unwrap();
+        let flat = d.flat_ap_options();
+        // BTreeMap iteration is sorted, so flat is stable.
+        assert_eq!(
+            flat,
+            vec![
+                ("dagger.fastInit".to_string(), "enabled".to_string()),
+                ("dagger.formatGeneratedSource".to_string(), "disabled".to_string()),
+                ("mapstruct.suppressGeneratorTimestamp".to_string(), "true".to_string()),
+            ],
+        );
+    }
+
+    #[test]
+    fn ap_options_inheritance_member_overrides_per_key() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+mainClass = "X"
+
+[annotation-processor-options.dagger]
+fastInit = "enabled"
+"#;
+        let mut d = load_str(toml).unwrap();
+        // Simulate workspace-inherited options: a different `fastInit`
+        // value PLUS a sibling key the member doesn't redeclare.
+        let mut ws_dagger = BTreeMap::new();
+        ws_dagger.insert("fastInit".to_string(), "disabled".to_string());
+        ws_dagger.insert("formatGeneratedSource".to_string(), "disabled".to_string());
+        d.inherited_annotation_processor_options.insert("dagger".to_string(), ws_dagger);
+
+        let flat = d.flat_ap_options();
+        // Member's `fastInit = enabled` wins over workspace's `disabled`.
+        // Workspace's `formatGeneratedSource = disabled` survives because
+        // the member didn't redeclare it.
+        assert_eq!(
+            flat,
+            vec![
+                ("dagger.fastInit".to_string(), "enabled".to_string()),
+                ("dagger.formatGeneratedSource".to_string(), "disabled".to_string()),
+            ],
+        );
+    }
+
+    #[test]
+    fn flat_test_ap_options_layers_test_on_top_of_prod() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+mainClass = "X"
+
+[annotation-processor-options.dagger]
+fastInit = "enabled"
+
+[test-annotation-processor-options.dagger]
+fastInit = "disabled"
+"#;
+        let d = load_str(toml).unwrap();
+        // Production path: just fastInit=enabled.
+        assert_eq!(
+            d.flat_ap_options(),
+            vec![("dagger.fastInit".to_string(), "enabled".to_string())],
+        );
+        // Test path: production options layered first, then test ones
+        // override per (prefix, key).
+        assert_eq!(
+            d.flat_test_ap_options(),
+            vec![("dagger.fastInit".to_string(), "disabled".to_string())],
+        );
     }
 }

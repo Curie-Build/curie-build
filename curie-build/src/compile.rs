@@ -30,6 +30,16 @@ pub struct CompileOutput {
     pub sources: Vec<PathBuf>,
     /// Resolved production dependency JARs (empty when no [dependencies] declared).
     pub dep_jars: Vec<PathBuf>,
+    /// Resolved production annotation-processor JARs (empty when no
+    /// `[annotation-processors]` declared / inherited).  These are on
+    /// javac's `-processorpath` only; downstream code paths
+    /// (test/run/Docker) generally don't need them.
+    pub ap_jars: Vec<PathBuf>,
+    /// Subset of `ap_jars` whose entry was declared with
+    /// `on-compile-classpath = true`.  Added to javac's `-cp` so user code
+    /// can reference annotation types that live in the same jar as the
+    /// processor (Lombok).
+    pub ap_on_compile_classpath_jars: Vec<PathBuf>,
     /// Production resources directory (`src/main/resources` or top-level `resources/`), if it exists.
     pub resources_dir: Option<PathBuf>,
     /// Test resources directory (`src/test/resources` or top-level `test-resources/`), if it exists.
@@ -157,6 +167,65 @@ pub fn compile(
         jars
     };
 
+    // --- resolve annotation-processor jars ----------------------------------
+    // Same resolver, separate result list — these go on `-processorpath`,
+    // not the main `-cp`.  Honour [bom-imports] just like regular deps so
+    // processor versions can be BOM-managed.
+    let ap_pairs = desc.ap_pairs();
+    let (ap_jars, ap_on_compile_classpath_jars) = if ap_pairs.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let jars = resolve(
+            &ap_pairs,
+            &ResolveOptions {
+                extra_repos: extra_repos(desc),
+                progress: true,
+                bom_imports: bom_gavs.clone(),
+                offline,
+            },
+        )
+        .context("annotation-processor resolution failed")?;
+        println!("  Resolve APs     {} JAR(s)", jars.len());
+
+        // Each ap_pairs entry yields a transitive closure starting with
+        // the entry's own jar (declared deps first, BFS).  Match the
+        // on-compile-classpath flag against the entry coords; that flag
+        // applies to the leaf coordinate the user declared.  The leaf
+        // jar lives at the index of its declaration in `ap_pairs`'s
+        // transitive expansion — i.e. the first jar emitted for each
+        // declared coord.
+        //
+        // The resolver gives a flat list; recover declaration boundaries
+        // by re-resolving each declared coord individually.  Cheap because
+        // results are cached in ~/.m2 after the first call above.
+        let on_cp_coords = desc.ap_on_compile_classpath_coords();
+        let mut on_cp_jars: Vec<PathBuf> = Vec::new();
+        for coord in on_cp_coords {
+            // Find the version we just resolved for this coord.
+            let version = ap_pairs
+                .iter()
+                .find(|(k, _)| *k == coord)
+                .map(|(_, v)| *v)
+                .expect("on-cp coord must be in ap_pairs");
+            // Resolve the single coord again — second call hits ~/.m2.
+            let single = resolve(
+                &[(coord, version)],
+                &ResolveOptions {
+                    extra_repos: extra_repos(desc),
+                    progress: false,
+                    bom_imports: bom_gavs.clone(),
+                    offline,
+                },
+            )
+            .with_context(|| format!("annotation-processor classpath resolution failed for {}", coord))?;
+            // The leaf coord's own JAR is the first entry; the rest are
+            // its transitive deps which the processor needs at compile
+            // time too (it'd be incomplete without them).
+            on_cp_jars.extend(single);
+        }
+        (jars, on_cp_jars)
+    };
+
     // --- discover production sources (exclude test files) --------------------
     let mut sources: Vec<PathBuf> = Vec::new();
     for src_root in &src_roots {
@@ -249,15 +318,31 @@ pub fn compile(
 
         // Build compile classpath: src/main/resources + production deps
         // + caller-supplied entries (workspace-dep JARs and their
-        // transitive contributions).
+        // transitive contributions) + processor jars marked on-compile-classpath.
         let mut cp_entries: Vec<PathBuf> = Vec::new();
         if let Some(ref rd) = resources_dir {
             cp_entries.push(rd.clone());
         }
         cp_entries.extend_from_slice(&dep_jars);
         cp_entries.extend_from_slice(extra_cp);
+        cp_entries.extend_from_slice(&ap_on_compile_classpath_jars);
         if !cp_entries.is_empty() {
             javac.arg("-cp").arg(classpath_string(&cp_entries));
+        }
+
+        // Annotation-processor classpath + generated-sources directory.
+        if !ap_jars.is_empty() {
+            let gen_dir = output_dir.join("generated-sources").join("annotations");
+            std::fs::create_dir_all(&gen_dir).with_context(|| {
+                format!("failed to create {}", gen_dir.display())
+            })?;
+            javac.arg("-processorpath").arg(classpath_string(&ap_jars));
+            javac.arg("-s").arg(&gen_dir);
+        }
+
+        // -A options (nested table flattened to `<prefix>.<key>=<value>`).
+        for (key, value) in desc.flat_ap_options() {
+            javac.arg(format!("-A{}={}", key, value));
         }
 
         for src in &sources {
@@ -308,7 +393,11 @@ pub fn compile(
     );
     let jar_path = output_dir.join(&jar_name);
 
-    Ok(CompileOutput { jar_path, jar_name, classes_dir, src_roots, sources, dep_jars, resources_dir, test_resources_dir })
+    Ok(CompileOutput {
+        jar_path, jar_name, classes_dir, src_roots, sources, dep_jars,
+        ap_jars, ap_on_compile_classpath_jars,
+        resources_dir, test_resources_dir,
+    })
 }
 // ---------------------------------------------------------------------------
 // Tests

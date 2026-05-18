@@ -37,16 +37,48 @@ fn main() {
         .unwrap_or_else(|e| panic!("building Curie requires javac on PATH ({e})"));
     assert!(status.success(), "javac failed compiling javac-wrapper/Wrapper.java");
 
-    // --- write JAR manifest with Add-Exports --------------------------------
-    // Add-Exports as a JAR manifest attribute (JEP 261) means callers of
-    // `java -jar wrapper.jar` don't have to pass --add-exports themselves.
-    std::fs::write(
-        &manifest_path,
+    // --- write JAR manifest with Add-Exports + Add-Opens --------------------
+    // Add-Exports / Add-Opens as JAR manifest attributes (JEP 261) means
+    // callers of `java -jar wrapper.jar` don't have to pass --add-exports /
+    // --add-opens themselves.  Add-Exports is mandatory for our own use of
+    // com.sun.source.util.TaskListener.  Add-Opens covers Lombok, which
+    // requires reflective access to nine internal javac packages on JDK 16+
+    // to do its tree-rewriting magic.  Harmless for non-Lombok builds —
+    // an --add-opens to a package that's never reflected into is a no-op.
+    // JAR manifest spec: lines max 72 bytes including \r\n; continuation
+    // lines start with a single space which is NOT part of the value.
+    // Add-Opens needs ten module/package entries for Lombok → put each on
+    // its own continuation line so we stay under the byte limit.
+    // Single-line Add-Opens — the `jar` tool will fold lines >72 bytes
+    // into continuation lines on its own.  Writing it as multiple lines
+    // ourselves with leading-space continuation markers is wrong: the
+    // marker space is consumed by parsing, and the values would
+    // concatenate without separators on the receiving side.
+    let add_opens_packages = [
+        "com.sun.tools.javac.code",
+        "com.sun.tools.javac.comp",
+        "com.sun.tools.javac.file",
+        "com.sun.tools.javac.jvm",
+        "com.sun.tools.javac.main",
+        "com.sun.tools.javac.model",
+        "com.sun.tools.javac.parser",
+        "com.sun.tools.javac.processing",
+        "com.sun.tools.javac.tree",
+        "com.sun.tools.javac.util",
+    ];
+    let add_opens: String = add_opens_packages
+        .iter()
+        .map(|p| format!("jdk.compiler/{}", p))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let manifest = format!(
         "Manifest-Version: 1.0\n\
          Main-Class: dev.curie.javac.Wrapper\n\
-         Add-Exports: jdk.compiler/com.sun.source.util jdk.compiler/com.sun.source.tree\n",
-    )
-    .expect("failed to write JAR manifest");
+         Add-Exports: jdk.compiler/com.sun.source.util jdk.compiler/com.sun.source.tree\n\
+         Add-Opens: {}\n",
+        add_opens,
+    );
+    std::fs::write(&manifest_path, &manifest).expect("failed to write JAR manifest");
 
     // --- package into wrapper.jar -------------------------------------------
     let status = Command::new("jar")

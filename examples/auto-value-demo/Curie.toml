@@ -1,0 +1,26 @@
+# auto-value-demo
+#
+# Demonstrates [annotation-processors]: a minimal app that uses Google
+# AutoValue to generate an immutable value-class implementation at
+# compile time.
+#
+#   src/com.example.av/Animal.java   — @AutoValue abstract base
+#   src/com.example.av/Main.java     — uses AutoValue_Animal (generated)
+#
+# AutoValue is split between two jars:
+#   * auto-value-annotations  — runtime-visible @AutoValue annotation
+#   * auto-value              — the compile-time processor itself
+# So the API jar goes in [dependencies] and the processor jar in
+# [annotation-processors].  No `on-compile-classpath = true` needed —
+# AutoValue's processor jar is processor-internal.
+
+[application]
+name      = "auto-value-demo"
+version   = "0.1.0"
+mainClass = "com.example.av.Main"
+
+[dependencies]
+"com.google.auto.value:auto-value-annotations" = "1.11.0"
+
+[annotation-processors]
+"com.google.auto.value:auto-value" = "1.11.0"

@@ -1,0 +1,26 @@
+# lombok-greeter
+#
+# Demonstrates the on-compile-classpath = true knob.  Lombok's annotations
+# (@Getter, @Builder, …) live in the same jar as its processor, so the
+# jar must be on BOTH:
+#
+#   - javac's -processorpath (so the processor runs)
+#   - javac's -cp            (so user code can reference @Getter etc.)
+#
+# Without `on-compile-classpath = true`, `import lombok.Getter;` fails at
+# compile.  No need to declare lombok twice.
+#
+# Lombok also needs JDK-internal reflective access (the famous
+# `--add-opens` dance from JDK 16+).  Curie ships those flags in the
+# wrapper.jar's MANIFEST.MF (Add-Opens attribute) so the user never has
+# to think about them.
+
+[application]
+name      = "lombok-greeter"
+version   = "0.1.0"
+mainClass = "com.example.lombok.Main"
+
+[annotation-processors]
+# JDK 25 needs Lombok ≥ 1.18.42 (earlier versions hit
+# `NoSuchFieldException: TypeTag :: UNKNOWN` from removed javac internals).
+"org.projectlombok:lombok" = { version = "1.18.42", on-compile-classpath = true }

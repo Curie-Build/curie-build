@@ -19,6 +19,8 @@ members = [
     "json-greeter",
     "string-utils",
     "string-utils-cli",
+    "auto-value-demo",
+    "lombok-greeter",
     "maven-hello-world",
     "maven-jackson-bom-greeter",
     "maven-json-greeter",
