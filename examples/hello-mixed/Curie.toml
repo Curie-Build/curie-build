@@ -1,0 +1,22 @@
+# hello-mixed
+#
+# Demonstrates Java + Kotlin sources in the same flat-package directory:
+#
+#   src/com.example.mixed/Greeting.kt   — Kotlin data class
+#   src/com.example.mixed/Main.java     — Java entry point that uses it
+#
+# Curie's two-phase compile (kotlinc first, then javac with the resulting
+# Kotlin classes on the classpath) means Java code can freely call Kotlin
+# types declared in the same package, no extra config required.
+#
+# Tests live under tests/ and exercise the Kotlin class from Java to
+# confirm the interop boundary works end-to-end.
+
+[application]
+name      = "hello-mixed"
+version   = "0.1.0"
+mainClass = "com.example.mixed.Main"
+
+[test-dependencies]
+"org.junit.jupiter:junit-jupiter"        = ""
+"org.junit.jupiter:junit-jupiter-engine" = ""

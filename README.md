@@ -363,6 +363,7 @@ curie/
     maven-string-utils/      — Maven-layout counterpart of string-utils
     maven-jackson-bom-greeter/ — Maven-layout counterpart of jackson-bom-greeter
     hello-kotlin/    — Kotlin application (Maven layout, auto-detected, no config needed)
+    hello-mixed/     — Java + Kotlin sources in the same flat-package directory (interop demo)
 ```
 
 The paired `<name>` / `maven-<name>` examples demonstrate the two source layouts (flat-package vs. `src/main/java/`) side by side with identical functionality.
