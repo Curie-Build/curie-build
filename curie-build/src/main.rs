@@ -174,10 +174,10 @@ fn main() {
                 workspace::fmt_all(root, check, offline)
             }
             workspace::WorkspaceContext::WorkspaceMember { .. } => {
-                fmt::run_fmt(&cli.project, check, offline)
+                fmt::run_fmt(&cli.project, check, offline, None)
             }
             workspace::WorkspaceContext::Standalone(project) => {
-                fmt::run_fmt(project, check, offline)
+                fmt::run_fmt(project, check, offline, None)
             }
         },
     };
