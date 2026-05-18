@@ -11,6 +11,8 @@ indicatif = "0.18"
 quick-xml = { version = "0.40", features = ["serialize"] }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 serde = { version = "1", features = ["derive"] }
+sha1 = "0.11"
+sha2 = "0.11"
 
 [dev-dependencies]
 tempfile = "3"

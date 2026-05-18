@@ -30,6 +30,16 @@
 //! When [`ResolveOptions::offline`] is `true`, network calls are skipped
 //! entirely.  Any artifact not already present in `~/.m2/repository` is an
 //! immediate error.
+//!
+//! # Checksum verification
+//! Every artifact returned by [`ensure_artifact`] has been verified against a
+//! `.sha256` sidecar (`.sha1` fallback).  On download, the sidecar is fetched
+//! immediately after the artifact and the bytes are verified before being
+//! committed to the cache; the sidecar is then persisted alongside the
+//! artifact (mirroring Maven Central's local layout) so subsequent cache hits
+//! verify without any network call.  A missing sidecar is a hard error —
+//! well-formed Maven repos always publish one.  In offline mode, a cache hit
+//! without an adjacent sidecar is likewise a hard error.
 
 use crate::gav::Gav;
 use crate::pom::{self, BomRef, Pom};
@@ -614,6 +624,8 @@ fn ensure_artifact(
     };
 
     if local_path.exists() {
+        ensure_verified(&local_path, &relative, repos, client, offline)
+            .with_context(|| format!("checksum verification failed for cached {}", gav))?;
         return Ok(local_path);
     }
 
@@ -660,8 +672,15 @@ fn ensure_artifact(
     );
 }
 
-/// Download `url` to `dest`, using an adjacent `.part` file to avoid partial
-/// writes surviving a crash.
+/// Download `url` to `dest`, verify its checksum against the published
+/// `.sha256` (or `.sha1` fallback) sidecar, and persist the sidecar alongside
+/// the artifact for fast cache-hit verification on subsequent runs.
+///
+/// A missing sidecar is a hard error — every well-formed Maven repository
+/// publishes one (Maven's deploy plugin and Nexus/Artifactory both generate
+/// them on upload).  A missing sidecar usually means a misconfigured proxy or
+/// a manually-uploaded artifact, and either way we refuse to install an
+/// unverifiable JAR.
 fn download(
     client: &reqwest::blocking::Client,
     url: &str,
@@ -680,14 +699,235 @@ fn download(
         .bytes()
         .with_context(|| format!("failed to read response body for {}", url))?;
 
-    // Write to .part file then rename (atomic on POSIX).
+    let (expected_hex, kind) = fetch_any_remote_checksum(client, url)?;
+    verify_bytes(&bytes, &expected_hex, kind)
+        .with_context(|| format!("downloaded artifact from {} failed checksum", url))?;
+
+    // Order: stage artifact in .part, write sidecar at final location, rename
+    // artifact to final.  If anything fails before the rename no artifact is
+    // committed; if the rename fails the orphan sidecar is overwritten on the
+    // next attempt.
     let part = dest.with_extension("part");
     std::fs::write(&part, &bytes)
         .with_context(|| format!("failed to write {}", part.display()))?;
+    let sidecar = sidecar_path(dest, kind);
+    std::fs::write(&sidecar, expected_hex.as_bytes())
+        .with_context(|| format!("failed to write sidecar {}", sidecar.display()))?;
     std::fs::rename(&part, dest)
         .with_context(|| format!("failed to rename {} → {}", part.display(), dest.display()))?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Checksum verification
+// ---------------------------------------------------------------------------
+
+/// Which checksum algorithm a sidecar uses.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum DigestKind {
+    Sha256,
+    Sha1,
+}
+
+impl DigestKind {
+    fn suffix(self) -> &'static str {
+        match self {
+            DigestKind::Sha256 => ".sha256",
+            DigestKind::Sha1 => ".sha1",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            DigestKind::Sha256 => "SHA-256",
+            DigestKind::Sha1 => "SHA-1",
+        }
+    }
+
+    fn hash_hex(self, bytes: &[u8]) -> String {
+        use sha2::Digest as _;
+        match self {
+            DigestKind::Sha256 => {
+                let mut h = sha2::Sha256::new();
+                h.update(bytes);
+                hex_encode(&h.finalize())
+            }
+            DigestKind::Sha1 => {
+                let mut h = sha1::Sha1::new();
+                h.update(bytes);
+                hex_encode(&h.finalize())
+            }
+        }
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(&mut s, "{:02x}", b);
+    }
+    s
+}
+
+/// Maven Central serves the bare hex digest (optionally followed by whitespace
+/// and/or a newline).  Some private repos use the GNU `shasum` format
+/// `<hex>  <filename>`.  Accept both: take the first whitespace-delimited
+/// token and validate it as lowercase hex.
+fn parse_checksum_text(text: &str) -> Option<String> {
+    let token = text.split_whitespace().next()?;
+    if token.is_empty() || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(token.to_ascii_lowercase())
+}
+
+/// Append a sidecar suffix (e.g. `.sha256`) to the artifact path.
+/// Concatenates as bytes rather than `Path::with_extension` so
+/// `foo-1.0.jar` becomes `foo-1.0.jar.sha256` rather than `foo-1.0.sha256`.
+fn sidecar_path(artifact: &Path, kind: DigestKind) -> PathBuf {
+    let mut s = artifact.as_os_str().to_owned();
+    s.push(kind.suffix());
+    PathBuf::from(s)
+}
+
+fn verify_bytes(bytes: &[u8], expected_hex: &str, kind: DigestKind) -> Result<()> {
+    let actual = kind.hash_hex(bytes);
+    if actual.eq_ignore_ascii_case(expected_hex) {
+        Ok(())
+    } else {
+        bail!(
+            "{} checksum mismatch: expected {}, got {}",
+            kind.name(),
+            expected_hex.to_ascii_lowercase(),
+            actual,
+        )
+    }
+}
+
+/// Fetch `<url><kind.suffix>` and parse the returned hex digest.
+/// Returns `Ok(Some(_))` on success, `Ok(None)` on 404 (sidecar absent),
+/// `Err(_)` on transport or parse errors.
+fn fetch_remote_checksum(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    kind: DigestKind,
+) -> Result<Option<String>> {
+    let sidecar_url = format!("{}{}", url, kind.suffix());
+    let response = client
+        .get(&sidecar_url)
+        .send()
+        .with_context(|| format!("HTTP request failed for {}", sidecar_url))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        bail!("HTTP {} for {}", response.status(), sidecar_url);
+    }
+
+    let body = response
+        .text()
+        .with_context(|| format!("failed to read sidecar body for {}", sidecar_url))?;
+    let hex = parse_checksum_text(&body).with_context(|| {
+        format!("sidecar {} returned malformed checksum text {:?}", sidecar_url, body)
+    })?;
+    Ok(Some(hex))
+}
+
+/// Try `.sha256` first, then `.sha1`.  Returns the first sidecar that exists,
+/// or a hard error if neither is published.
+fn fetch_any_remote_checksum(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> Result<(String, DigestKind)> {
+    if let Some(hex) = fetch_remote_checksum(client, url, DigestKind::Sha256)? {
+        return Ok((hex, DigestKind::Sha256));
+    }
+    if let Some(hex) = fetch_remote_checksum(client, url, DigestKind::Sha1)? {
+        return Ok((hex, DigestKind::Sha1));
+    }
+    bail!(
+        "no .sha256 or .sha1 sidecar published at {} — refusing to use unverified artifact",
+        url,
+    )
+}
+
+/// Verify `local_path` against a locally-cached sidecar (`.sha256` preferred,
+/// `.sha1` fallback).  Returns:
+///   * `Ok(true)`  — sidecar found locally and verification succeeded.
+///   * `Ok(false)` — no sidecar in local cache (caller should fetch one).
+///   * `Err(_)`    — sidecar present but verification failed.
+fn verify_with_local_sidecar(local_path: &Path) -> Result<bool> {
+    for kind in [DigestKind::Sha256, DigestKind::Sha1] {
+        let sidecar = sidecar_path(local_path, kind);
+        if !sidecar.exists() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&sidecar)
+            .with_context(|| format!("failed to read sidecar {}", sidecar.display()))?;
+        let expected = parse_checksum_text(&text).with_context(|| {
+            format!("local sidecar {} has malformed contents", sidecar.display())
+        })?;
+        let bytes = std::fs::read(local_path)
+            .with_context(|| format!("failed to read cached artifact {}", local_path.display()))?;
+        verify_bytes(&bytes, &expected, kind)
+            .with_context(|| format!("cached artifact {} failed checksum", local_path.display()))?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Ensure that `local_path` (an existing cached artifact) has been verified
+/// against a sidecar.  If no local sidecar is present, fetch one from the
+/// configured repositories and cache it for next time.  Returns an error in
+/// offline mode when no local sidecar exists, or on checksum mismatch.
+fn ensure_verified(
+    local_path: &Path,
+    relative: &str,
+    repos: &[Repository],
+    client: &reqwest::blocking::Client,
+    offline: bool,
+) -> Result<()> {
+    if verify_with_local_sidecar(local_path)? {
+        return Ok(());
+    }
+    if offline {
+        bail!(
+            "cached artifact {} has no checksum sidecar and --offline was \
+             specified; cannot verify integrity",
+            local_path.display(),
+        );
+    }
+    let mut last_err: Option<anyhow::Error> = None;
+    for repo in repos {
+        let url = repo.artifact_url(relative);
+        match fetch_any_remote_checksum(client, &url) {
+            Ok((hex, kind)) => {
+                let bytes = std::fs::read(local_path).with_context(|| {
+                    format!("failed to read cached artifact {}", local_path.display())
+                })?;
+                verify_bytes(&bytes, &hex, kind).with_context(|| {
+                    format!(
+                        "cached artifact {} failed checksum from {}",
+                        local_path.display(),
+                        url,
+                    )
+                })?;
+                let sidecar = sidecar_path(local_path, kind);
+                std::fs::write(&sidecar, hex.as_bytes())
+                    .with_context(|| format!("failed to write sidecar {}", sidecar.display()))?;
+                return Ok(());
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    bail!(
+        "could not obtain a checksum sidecar for {} from any repository: {}",
+        local_path.display(),
+        last_err.unwrap_or_else(|| anyhow::anyhow!("no repositories configured")),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -745,6 +985,17 @@ mod tests {
         xml
     }
 
+    /// Write `bytes` to `path` and also write a `.sha256` sidecar containing
+    /// the SHA-256 hex of those bytes.  Mirrors what real downloads do so the
+    /// resolver's cache-hit verification step is satisfied.
+    fn write_with_sidecar(path: &std::path::Path, bytes: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+        let hex = DigestKind::Sha256.hash_hex(bytes);
+        let sidecar = sidecar_path(path, DigestKind::Sha256);
+        std::fs::write(&sidecar, hex.as_bytes()).unwrap();
+    }
+
     /// Write a BOM POM into a fake local Maven cache under `home_dir` (i.e. at
     /// `<home_dir>/.m2/repository/<rel_path>`) and return the Gav.
     fn write_fake_bom(
@@ -762,9 +1013,8 @@ mod tests {
         };
         let rel = gav.relative_pom_path();
         let path = home_dir.join(".m2").join("repository").join(&rel);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let xml = make_bom_pom(group, artifact, version, managed, bom_imports);
-        std::fs::write(&path, xml).unwrap();
+        write_with_sidecar(&path, xml.as_bytes());
         gav
     }
 
@@ -937,14 +1187,14 @@ mod tests {
         };
         let m2 = home_dir.join(".m2").join("repository");
 
-        // POM.
+        // POM (+ sidecar).
         let pom_path = m2.join(gav.relative_pom_path());
-        std::fs::create_dir_all(pom_path.parent().unwrap()).unwrap();
-        std::fs::write(&pom_path, make_pom(group, artifact, version, deps)).unwrap();
+        let pom_xml = make_pom(group, artifact, version, deps);
+        write_with_sidecar(&pom_path, pom_xml.as_bytes());
 
-        // Empty JAR (placeholder — resolver only checks existence).
+        // Empty JAR (placeholder — resolver only checks existence + checksum).
         let jar_path = m2.join(gav.relative_path());
-        std::fs::write(&jar_path, b"").unwrap();
+        write_with_sidecar(&jar_path, b"");
 
         gav
     }
@@ -1142,6 +1392,229 @@ mod tests {
         assert!(
             !gavs.contains(&"foo:bar:9.9.9".to_string()),
             "BOM-pinned version must lose to user's explicit version: {:?}", gavs,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Checksum verification tests
+    // -----------------------------------------------------------------------
+
+    /// SHA-256 of the empty byte string — used by `write_with_sidecar` when
+    /// the JAR placeholder content is `b""`.  Pinned here as a sanity check
+    /// on `DigestKind::hash_hex`.
+    const EMPTY_SHA256: &str =
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const EMPTY_SHA1: &str = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+    // SHA-256("abc")
+    const ABC_SHA256: &str =
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    #[test]
+    fn hex_encode_pads_each_byte_to_two_chars() {
+        assert_eq!(hex_encode(&[]), "");
+        assert_eq!(hex_encode(&[0x00, 0x0f, 0xff]), "000fff");
+        assert_eq!(hex_encode(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+    }
+
+    #[test]
+    fn digest_kind_hashes_known_vectors() {
+        assert_eq!(DigestKind::Sha256.hash_hex(b""), EMPTY_SHA256);
+        assert_eq!(DigestKind::Sha1.hash_hex(b""), EMPTY_SHA1);
+        assert_eq!(DigestKind::Sha256.hash_hex(b"abc"), ABC_SHA256);
+    }
+
+    #[test]
+    fn parse_checksum_text_accepts_bare_hex() {
+        assert_eq!(parse_checksum_text(EMPTY_SHA256), Some(EMPTY_SHA256.into()));
+    }
+
+    #[test]
+    fn parse_checksum_text_strips_trailing_newline() {
+        let body = format!("{}\n", EMPTY_SHA256);
+        assert_eq!(parse_checksum_text(&body), Some(EMPTY_SHA256.into()));
+    }
+
+    #[test]
+    fn parse_checksum_text_accepts_gnu_shasum_format() {
+        // Some private repos emit `<hex>  <filename>` (two spaces, GNU style).
+        let body = format!("{}  foo-1.0.jar\n", EMPTY_SHA256);
+        assert_eq!(parse_checksum_text(&body), Some(EMPTY_SHA256.into()));
+    }
+
+    #[test]
+    fn parse_checksum_text_lowercases_uppercase_hex() {
+        let upper = EMPTY_SHA256.to_ascii_uppercase();
+        assert_eq!(parse_checksum_text(&upper), Some(EMPTY_SHA256.into()));
+    }
+
+    #[test]
+    fn parse_checksum_text_rejects_non_hex() {
+        assert_eq!(parse_checksum_text("hello world"), None);
+        assert_eq!(parse_checksum_text(""), None);
+        assert_eq!(parse_checksum_text("  \n\t"), None);
+        // 63 hex chars then a non-hex char — first token is the whole thing,
+        // which fails the hex-digit check.
+        assert_eq!(parse_checksum_text("zzzzzzzz"), None);
+    }
+
+    #[test]
+    fn verify_bytes_passes_on_match() {
+        assert!(verify_bytes(b"", EMPTY_SHA256, DigestKind::Sha256).is_ok());
+        assert!(verify_bytes(b"abc", ABC_SHA256, DigestKind::Sha256).is_ok());
+        assert!(verify_bytes(b"", EMPTY_SHA1, DigestKind::Sha1).is_ok());
+    }
+
+    #[test]
+    fn verify_bytes_fails_on_mismatch() {
+        let err = verify_bytes(b"different", EMPTY_SHA256, DigestKind::Sha256)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("checksum mismatch") && err.contains("SHA-256"),
+            "expected SHA-256 mismatch error, got {:?}", err,
+        );
+    }
+
+    #[test]
+    fn verify_bytes_is_case_insensitive_on_expected() {
+        // Some servers serve uppercase hex.
+        let upper = EMPTY_SHA256.to_ascii_uppercase();
+        assert!(verify_bytes(b"", &upper, DigestKind::Sha256).is_ok());
+    }
+
+    #[test]
+    fn sidecar_path_appends_suffix_keeping_extension() {
+        let p = std::path::Path::new("/a/b/foo-1.0.jar");
+        assert_eq!(
+            sidecar_path(p, DigestKind::Sha256),
+            std::path::PathBuf::from("/a/b/foo-1.0.jar.sha256"),
+        );
+        assert_eq!(
+            sidecar_path(p, DigestKind::Sha1),
+            std::path::PathBuf::from("/a/b/foo-1.0.jar.sha1"),
+        );
+    }
+
+    #[test]
+    fn verify_with_local_sidecar_returns_false_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("foo.jar");
+        std::fs::write(&jar, b"").unwrap();
+        // No sidecar written.
+        assert_eq!(verify_with_local_sidecar(&jar).unwrap(), false);
+    }
+
+    #[test]
+    fn verify_with_local_sidecar_passes_when_correct() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("foo.jar");
+        std::fs::write(&jar, b"abc").unwrap();
+        std::fs::write(
+            sidecar_path(&jar, DigestKind::Sha256),
+            ABC_SHA256.as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(verify_with_local_sidecar(&jar).unwrap(), true);
+    }
+
+    #[test]
+    fn verify_with_local_sidecar_falls_back_to_sha1() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("foo.jar");
+        std::fs::write(&jar, b"").unwrap();
+        // No .sha256, only .sha1.
+        std::fs::write(
+            sidecar_path(&jar, DigestKind::Sha1),
+            EMPTY_SHA1.as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(verify_with_local_sidecar(&jar).unwrap(), true);
+    }
+
+    #[test]
+    fn verify_with_local_sidecar_errors_on_tamper() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("foo.jar");
+        std::fs::write(&jar, b"original").unwrap();
+        // Sidecar claims the empty-string digest; jar bytes differ → mismatch.
+        std::fs::write(
+            sidecar_path(&jar, DigestKind::Sha256),
+            EMPTY_SHA256.as_bytes(),
+        )
+        .unwrap();
+        let err = verify_with_local_sidecar(&jar).unwrap_err().to_string();
+        assert!(
+            err.contains("checksum"),
+            "expected checksum failure, got {:?}", err,
+        );
+    }
+
+    #[test]
+    fn verify_with_local_sidecar_errors_on_malformed_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("foo.jar");
+        std::fs::write(&jar, b"").unwrap();
+        std::fs::write(
+            sidecar_path(&jar, DigestKind::Sha256),
+            b"not-a-hex-digest",
+        )
+        .unwrap();
+        assert!(verify_with_local_sidecar(&jar).is_err());
+    }
+
+    #[test]
+    fn resolve_succeeds_when_cached_artifact_matches_sidecar() {
+        // `write_fake_artifact` writes a correct sidecar; this is the
+        // golden-path assertion that the cache-hit verification step is
+        // wired in and passes for honest caches.
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
+        let result = run_resolve(dir.path(), &[("foo:bar", "1.0")], vec![]).unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn resolve_fails_when_cached_jar_is_tampered() {
+        let dir = tempfile::tempdir().unwrap();
+        let gav = write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
+        // Tamper with the JAR after the sidecar was written.
+        let jar = dir
+            .path()
+            .join(".m2")
+            .join("repository")
+            .join(gav.relative_path());
+        std::fs::write(&jar, b"tampered bytes").unwrap();
+
+        let err = run_resolve(dir.path(), &[("foo:bar", "1.0")], vec![])
+            .unwrap_err();
+        let chain = format!("{:#}", err);
+        assert!(
+            chain.contains("checksum"),
+            "expected checksum error in chain, got {:?}", chain,
+        );
+    }
+
+    #[test]
+    fn resolve_fails_when_cached_artifact_has_no_sidecar_in_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let gav = write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
+        // Remove both possible sidecars from the cache so the offline path
+        // can't verify and must bail.  POM has a sidecar so resolving the
+        // POM still works — the failure must come from the JAR.
+        let jar = dir
+            .path()
+            .join(".m2")
+            .join("repository")
+            .join(gav.relative_path());
+        let _ = std::fs::remove_file(sidecar_path(&jar, DigestKind::Sha256));
+        let _ = std::fs::remove_file(sidecar_path(&jar, DigestKind::Sha1));
+
+        let err = run_resolve(dir.path(), &[("foo:bar", "1.0")], vec![])
+            .unwrap_err();
+        let chain = format!("{:#}", err);
+        assert!(
+            chain.contains("sidecar"),
+            "expected missing-sidecar error in chain, got {:?}", chain,
         );
     }
 }
