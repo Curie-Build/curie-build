@@ -6,11 +6,10 @@ The Java build tooling landscape has been largely static for two decades. Maven 
 
 Other language ecosystems have quietly raised the bar. Cargo, Rust's built-in build tool, ships workspaces, a lockfile, and reproducible dependency resolution as first-class features with no plugins required — a new project is correct and reproducible by default. Go takes the same philosophy further: `go.mod` and `go.sum` are part of the toolchain itself, so deterministic builds and zero-configuration module management are simply the starting point, not optional add-ons. Java developers working across languages notice the gap.
 
-This is how progress in tooling tends to work: an ecosystem experiments, different approaches compete, and over time the field converges on what actually works. Convention over configuration was Maven's correct insight in 2004. What Cargo and Go modules show is that the conventions have moved — lockfiles, first-class workspaces, and reproducible builds by default are the new baseline. Maven's conventions have not.
+This is how progress in tooling tends to work: an ecosystem experiments, different approaches compete, and over time the field converges on what actually works. Maven followed this approach by proposing excellent conventions. What Cargo and Go modules show is that the conventions have moved — there is a new baseline - Maven's conventions have not evolved.
 
 Curie is an experiment in what a Java build tool looks like if it starts from the new conventions rather than inheriting the old ones. It is a fast, minimal build tool for Java projects written in Rust. It handles dependency resolution from Maven Central, incremental compilation, [reproducible builds](https://reproducible-builds.org), test execution, and optional Docker image building — driven by a single `Curie.toml` configuration file.
 
-Using Rust to build a Java tool might look like a category error, but the logic is straightforward. A build tool is not part of the application it builds — it is infrastructure, and infrastructure benefits from being fast, self-contained, and free of runtime dependencies. Starting the JVM to compile Java is unavoidable; starting the JVM to decide whether compilation is necessary is waste. A native binary makes that overhead disappear, which is why the same pattern has already taken hold elsewhere: esbuild replaced JavaScript bundlers written in JavaScript, the Ruff linter replaced Python linters written in Python, and Cargo itself is written in Rust rather than in the language it was originally bootstrapped from. The argument is not about language preference — it is about matching the tool to the job.
 
 This is a work in progress. The current implementation covers the core build pipeline.
 
@@ -25,7 +24,7 @@ Maven and Gradle are powerful but carry significant complexity and overhead. Cur
 | **Configuration** | `Curie.toml` (~20 lines) | `pom.xml` (100+ lines of XML) | `build.gradle` (Groovy/Kotlin DSL) |
 | **Startup time** | Near-instant (native binary) | JVM startup (~1–2 s) | JVM startup + daemon overhead |
 | **Incremental builds** | Built-in | Plugin-dependent | Built-in but complex |
-| **[Reproducible builds](https://reproducible-builds.org)** | Yes, out of the box | Extra plugin config required | Extra plugin config required |
+| Reproducible builds | Yes, out of the box | Extra plugin config required | Extra plugin config required |
 | **Docker support** | First-class, auto-generated optimised `Dockerfile` | External plugins | External plugins |
 | **Learning curve** | Minimal — one file format | High — lifecycle phases, plugin ecosystem | High — DSL, task graph, plugin API |
 | **Multi-module projects** | One workspace `Curie.toml`; topo-sort and BOM inherited automatically | Aggregator POM + per-module POMs | `settings.gradle` + per-module `build.gradle`|

@@ -1,0 +1,4 @@
+
+# Why Rust?
+
+Using Rust to build a Java tool might look like a category error, but the logic is straightforward. A build tool is not part of the application it builds — it is infrastructure, and infrastructure benefits from being fast, self-contained, and free of runtime dependencies. Starting the JVM to compile Java is unavoidable; starting the JVM to decide whether compilation is necessary is waste. A native binary makes that overhead disappear, which is why the same pattern has already taken hold elsewhere: esbuild replaced JavaScript bundlers written in JavaScript, the Ruff linter replaced Python linters written in Python, and Cargo itself is written in Rust rather than in the language it was originally bootstrapped from. The argument is not about language preference — it is about matching the tool to the job.
