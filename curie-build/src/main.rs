@@ -1,4 +1,5 @@
 mod build;
+mod class_manifest;
 mod compile;
 mod descriptor;
 mod docker;
@@ -8,6 +9,7 @@ mod main_class;
 mod run;
 mod test;
 mod workspace;
+mod wrapper;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;

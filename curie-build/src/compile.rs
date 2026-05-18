@@ -200,23 +200,28 @@ pub fn compile(
 
     // --- compile (incremental) -----------------------------------------------
     let toml_path = project_root.join("Curie.toml");
+    let manifest_path = output_dir.join(".classes.toml");
 
-    // Remove stale class files before checking whether recompilation is needed.
-    // If any are removed we must recompile even if no source is newer than the
-    // oldest surviving class file.
-    let root_source_pairs: Vec<(&Path, &[PathBuf])> = src_roots
+    // Pre-compile prune: any source in the previous manifest that is no
+    // longer in the current source set takes its old classes with it.
+    // This must run BEFORE javac because the classes dir is implicitly
+    // searched during compile — a stale class could otherwise still
+    // satisfy an unrelated import.
+    let old_manifest = crate::class_manifest::load(&manifest_path)?;
+    let current_sources_set: std::collections::HashSet<String> = sources
         .iter()
-        .map(|r| {
-            let slice: &[PathBuf] = &sources;
-            (r.as_path(), slice)
-        })
+        .filter_map(|p| p.canonicalize().ok())
+        .map(|p| p.to_string_lossy().into_owned())
         .collect();
-    let stale_removed = remove_stale_classes(
-        &root_source_pairs,
-        &classes_dir,
-    )?;
+    let pre_pruned: usize = match &old_manifest {
+        Some(old) => {
+            let stale = crate::class_manifest::stale_classes(old, None, &current_sources_set);
+            crate::class_manifest::delete_classes(&classes_dir, &stale)?
+        }
+        None => 0,
+    };
 
-    let compile_status = if stale_removed > 0 {
+    let compile_status = if pre_pruned > 0 {
         CompileStatus::StaleClasses
     } else {
         needs_recompile(&sources, &classes_dir, &toml_path, &output_dir)
@@ -229,7 +234,12 @@ pub fn compile(
             compile_status.reason()
         );
 
-        let mut javac = Command::new("javac");
+        // Invoke the embedded javac wrapper instead of javac directly so
+        // we capture the source → class mapping in `.classes.toml`.
+        let wrapper_jar = crate::wrapper::ensure()?;
+        let mut javac = Command::new("java");
+        javac.arg("-jar").arg(&wrapper_jar);
+        javac.arg("--curie-manifest-out").arg(&manifest_path);
         javac
             .arg("--release")
             .arg(desc.java.effective())
@@ -256,10 +266,32 @@ pub fn compile(
 
         let status = javac
             .status()
-            .context("failed to invoke javac — is a JDK installed?")?;
+            .context("failed to invoke java — is a JRE installed?")?;
 
         if !status.success() {
             bail!("compilation failed");
+        }
+
+        // Post-compile prune: a source that's still around but produces a
+        // smaller class set this time (e.g. removed a companion `class
+        // Bar {}` from inside Foo.java) leaves Bar.class orphaned in the
+        // classes dir.  Diff the new manifest against the old one.
+        if let Some(old) = &old_manifest {
+            if let Some(new) = crate::class_manifest::load(&manifest_path)? {
+                let stale = crate::class_manifest::stale_classes(
+                    old,
+                    Some(&new),
+                    &current_sources_set,
+                );
+                let n = crate::class_manifest::delete_classes(&classes_dir, &stale)?;
+                if n > 0 {
+                    println!(
+                        "  Stale           removed {} orphaned class file{}",
+                        n,
+                        if n == 1 { "" } else { "s" },
+                    );
+                }
+            }
         }
 
         // Record the JDK version used so that a future upgrade triggers a rebuild.
