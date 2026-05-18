@@ -166,8 +166,16 @@ pub fn do_build(
         main_class
     } else {
         println!("  Package         up to date");
-        // mainClass not needed — JAR already has the correct manifest.
-        desc.application().and_then(|a| a.main_class.clone())
+        // JAR is up to date. Prefer the declared mainClass from the descriptor;
+        // if absent (auto-detected on a previous build), read it back from the
+        // JAR manifest so `curie run` doesn't panic.
+        if let Some(declared) = desc.application().and_then(|a| a.main_class.clone()) {
+            Some(declared)
+        } else if desc.application().is_some() {
+            read_main_class_from_jar(&compiled.jar_path)
+        } else {
+            None
+        }
     };
 
     // --- populate target/libs/ with dep JARs (hardlink preferred) ------------
@@ -186,6 +194,30 @@ pub fn do_build(
         main_class: resolved_main_class,
         resources_dir: compiled.resources_dir,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Read the `Main-Class` attribute from an existing JAR's manifest.
+/// Returns `None` if the JAR doesn't exist, has no manifest, or has no
+/// `Main-Class` entry.
+fn read_main_class_from_jar(jar_path: &Path) -> Option<String> {
+    let file = std::fs::File::open(jar_path).ok()?;
+    let mut zip = zip::ZipArchive::new(file).ok()?;
+    let mut entry = zip.by_name("META-INF/MANIFEST.MF").ok()?;
+    let mut contents = String::new();
+    std::io::Read::read_to_string(&mut entry, &mut contents).ok()?;
+    for line in contents.lines() {
+        if let Some(rest) = line.strip_prefix("Main-Class:") {
+            let mc = rest.trim().to_string();
+            if !mc.is_empty() {
+                return Some(mc);
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
