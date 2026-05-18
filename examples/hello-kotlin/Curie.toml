@@ -1,0 +1,12 @@
+# hello-kotlin
+#
+# Demonstrates Kotlin support with the Maven-style source layout:
+#
+#   src/main/kotlin/com/example/Hello.kt   — production source
+#
+# No [kotlin] section needed: Curie auto-detects .kt files.
+
+[application]
+name = "hello-kotlin"
+version = "0.1.0"
+mainClass = "com.example.HelloKt"

@@ -43,7 +43,8 @@ Curie will never match the plugin ecosystem of Maven or Gradle. The goal is a fo
 - **Test execution** — discovers and runs JUnit 5 tests automatically, with incremental skip when nothing has changed.
 - **Docker support** — builds and optionally runs a Docker image. Curie auto-generates a cache-optimised `Dockerfile` that layers dependency JARs before the application JAR, so a code-only change does not invalidate the dependency layer.
 - **Custom repositories** — additional Maven repositories can be declared alongside Maven Central.
-- **Multiple source layouts** — supports both the Maven layout (`src/main/java/`) and a flat-package layout where source roots are dot-named directories directly under `src/` (e.g. `src/com.example.myapp/`). The two layouts can coexist.
+- **Multiple source layouts** — supports both the Maven layout (`src/main/java/`, `src/main/kotlin/`) and a flat-package layout where source roots are dot-named directories directly under `src/` (e.g. `src/com.example.myapp/`). The two layouts can coexist.
+- **Kotlin support** — `.kt` files are compiled automatically with no configuration. Curie detects Kotlin sources, downloads `kotlinc` from Maven Central, and runs a two-phase compile (kotlinc first, then javac) so Java and Kotlin can reference each other freely. Mixed Java/Kotlin projects work out of the box.
 - **Resources** — `src/main/resources` (Maven layout) or a top-level `resources/` directory (flat-package layout) are included in the JAR and classpath. Test resources (`src/test/resources` / `test-resources/`) are added to the test classpath.
 - **Workspace / multi-module projects** — a workspace `Curie.toml` lists member directories; Curie builds them in dependency order. Members can declare `[workspace-dependencies]` to depend on sibling members. Workspace-level `[java]`, `[[repositories]]`, `[bom-imports]`, and `[test-bom-imports]` are inherited by all members.
 - **Offline mode** — `--offline` prevents any network access; a cache miss is an immediate error.
@@ -361,6 +362,7 @@ curie/
     maven-json-greeter/      — Maven-layout counterpart of json-greeter
     maven-string-utils/      — Maven-layout counterpart of string-utils
     maven-jackson-bom-greeter/ — Maven-layout counterpart of jackson-bom-greeter
+    hello-kotlin/    — Kotlin application (Maven layout, auto-detected, no config needed)
 ```
 
 The paired `<name>` / `maven-<name>` examples demonstrate the two source layouts (flat-package vs. `src/main/java/`) side by side with identical functionality.

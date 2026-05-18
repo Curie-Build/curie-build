@@ -25,6 +25,7 @@ members = [
     "maven-jackson-bom-greeter",
     "maven-json-greeter",
     "maven-string-utils",
+    "hello-kotlin",
 ]
 
 [java]

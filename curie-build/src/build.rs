@@ -105,6 +105,7 @@ pub fn do_build(
         desc,
         &compiled.classes_dir,
         &compiled.dep_jars,
+        &compiled.kotlin_stdlib_jars,
         compiled.resources_dir.as_deref(),
         compiled.test_resources_dir.as_deref(),
         None,

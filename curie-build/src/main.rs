@@ -204,6 +204,7 @@ fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: 
         &desc,
         &compiled.classes_dir,
         &compiled.dep_jars,
+        &compiled.kotlin_stdlib_jars,
         compiled.resources_dir.as_deref(),
         compiled.test_resources_dir.as_deref(),
         filter,

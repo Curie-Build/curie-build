@@ -527,6 +527,7 @@ fn test_one_member(
         &m.descriptor,
         &compiled.classes_dir,
         &compiled.dep_jars,
+        &compiled.kotlin_stdlib_jars,
         compiled.resources_dir.as_deref(),
         compiled.test_resources_dir.as_deref(),
         filter,

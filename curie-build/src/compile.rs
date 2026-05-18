@@ -2,11 +2,28 @@
 //!
 //! Supports two source layouts side-by-side:
 //!   - Maven-style: `src/main/java/com/foo/Bar.java`
+//!   - Maven-style Kotlin: `src/main/kotlin/com/foo/Bar.kt`
 //!   - Flat-package: any dot-named sibling under `src/`, e.g.
 //!     `src/com.example.myapp/Bar.java` (the directory name IS the package).
+//!     Kotlin files (`.kt`) in the same flat-package dirs are also collected.
 //!
-//! Both layouts produce the same compiled output under `target/classes/`
+//! All layouts produce the same compiled output under `target/classes/`
 //! and may coexist in a single project.
+//!
+//! ## Mixed Java + Kotlin compilation
+//!
+//! When `.kt` sources are present, compilation uses a two-phase approach:
+//!
+//!   1. **Phase 1 (`kotlinc`)**: compile all `.kt` + all `.java` sources
+//!      together → `target/classes/`.  The Kotlin compiler resolves Java
+//!      types from source so no pre-compiled stubs are needed.
+//!
+//!   2. **Phase 2 (`javac`)**: re-compile only the `.java` sources with
+//!      `target/classes/` on the classpath so Java can see the Kotlin
+//!      `.class` files.  This step is skipped when there are no Java sources.
+//!
+//! For Java-only projects the existing single-phase `javac` path is used
+//! unchanged.
 
 use crate::build::extra_repos;
 use crate::descriptor;
@@ -19,6 +36,11 @@ use curie_deps::resolver::{resolve, ResolveOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Kotlin version used when resolving the compiler and stdlib from Maven Central.
+pub const KOTLIN_VERSION: &str = "2.1.21";
+pub const KOTLIN_COMPILER_COORD: &str = "org.jetbrains.kotlin:kotlin-compiler-embeddable";
+pub const KOTLIN_STDLIB_COORD: &str = "org.jetbrains.kotlin:kotlin-stdlib";
+
 /// Intermediate output from the compile phase.
 pub struct CompileOutput {
     pub jar_path: PathBuf,
@@ -30,6 +52,9 @@ pub struct CompileOutput {
     pub sources: Vec<PathBuf>,
     /// Resolved production dependency JARs (empty when no [dependencies] declared).
     pub dep_jars: Vec<PathBuf>,
+    /// Resolved Kotlin stdlib JARs (empty when no `.kt` sources found).
+    /// Must be added to every runtime classpath that runs Kotlin code.
+    pub kotlin_stdlib_jars: Vec<PathBuf>,
     /// Production resources directory (`src/main/resources` or top-level `resources/`), if it exists.
     pub resources_dir: Option<PathBuf>,
     /// Test resources directory (`src/test/resources` or top-level `test-resources/`), if it exists.
@@ -103,20 +128,26 @@ pub fn compile(
 ) -> Result<CompileOutput> {
     // --- source roots --------------------------------------------------------
     // Support two layouts simultaneously:
-    //   A) Maven-style:   src/main/java/
-    //   B) Flat-package:  src/com.example.myapp/  (any dot-named sibling under src/)
-    let maven_src = project_root.join("src").join("main").join("java");
+    //   A) Maven-style Java:   src/main/java/
+    //   B) Maven-style Kotlin: src/main/kotlin/
+    //   C) Flat-package:       src/com.example.myapp/  (any dot-named sibling under src/)
+    //      Both .java and .kt files are collected from flat-package dirs.
+    let maven_java_src = project_root.join("src").join("main").join("java");
+    let maven_kotlin_src = project_root.join("src").join("main").join("kotlin");
     let flat_src_dirs = flat_package_src_dirs(project_root);
 
     let mut src_roots: Vec<PathBuf> = Vec::new();
-    if maven_src.exists() {
-        src_roots.push(maven_src.clone());
+    if maven_java_src.exists() {
+        src_roots.push(maven_java_src.clone());
+    }
+    if maven_kotlin_src.exists() {
+        src_roots.push(maven_kotlin_src.clone());
     }
     src_roots.extend(flat_src_dirs);
 
     if src_roots.is_empty() {
         bail!(
-            "no source directory found: expected src/main/java/ \
+            "no source directory found: expected src/main/java/, src/main/kotlin/, \
              or at least one dot-named directory under src/ \
              (e.g. src/com.example.myapp/)"
         );
@@ -217,9 +248,12 @@ pub fn compile(
     };
 
     // --- discover production sources (exclude test files) --------------------
-    let mut sources: Vec<PathBuf> = Vec::new();
+    let mut java_sources: Vec<PathBuf> = Vec::new();
+    let mut kotlin_sources: Vec<PathBuf> = Vec::new();
+
     for src_root in &src_roots {
-        let root_sources: Vec<_> = walk_files(src_root)
+        // Java sources from this root (excluding test files).
+        let root_java: Vec<_> = walk_files(src_root)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
                 name.ends_with(".java")
@@ -229,18 +263,43 @@ pub fn compile(
             })
             .map(|e| e.into_path())
             .collect();
-        sources.extend(root_sources);
+        java_sources.extend(root_java);
+
+        // Kotlin sources from this root (excluding test files).
+        let root_kotlin: Vec<_> = walk_files(src_root)
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy();
+                name.ends_with(".kt")
+                    && !name.ends_with("Test.kt")
+                    && !name.ends_with("Tests.kt")
+                    && !name.ends_with("Spec.kt")
+            })
+            .map(|e| e.into_path())
+            .collect();
+        kotlin_sources.extend(root_kotlin);
     }
+
+    java_sources.sort();
+    java_sources.dedup();
+    kotlin_sources.sort();
+    kotlin_sources.dedup();
+
+    // Combined source list for incremental stamp / manifest purposes.
+    let mut sources: Vec<PathBuf> = Vec::new();
+    sources.extend(java_sources.iter().cloned());
+    sources.extend(kotlin_sources.iter().cloned());
+    sources.sort();
+    sources.dedup();
+
+    let has_kotlin = !kotlin_sources.is_empty();
+    let has_java = !java_sources.is_empty();
 
     if sources.is_empty() {
         bail!(
-            "no Java source files found under {}",
+            "no Java or Kotlin source files found under {}",
             src_roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
         );
     }
-
-    sources.sort();
-    sources.dedup();
 
     // --- resource directories ------------------------------------------------
     // Maven-style: src/main/resources  /  src/test/resources
@@ -257,13 +316,62 @@ pub fn compile(
         if maven.exists() { Some(maven) } else if flat.exists() { Some(flat) } else { None }
     };
 
+    // --- resolve Kotlin compiler + stdlib (when needed) ----------------------
+    let kotlin_stdlib_jars: Vec<PathBuf>;
+    let kotlin_compiler_jar: Option<PathBuf>;
+
+    if has_kotlin {
+        let kotlin_jars = resolve(
+            &[
+                (KOTLIN_COMPILER_COORD, KOTLIN_VERSION),
+                (KOTLIN_STDLIB_COORD, KOTLIN_VERSION),
+            ],
+            &ResolveOptions {
+                extra_repos: extra_repos(desc),
+                progress: true,
+                bom_imports: bom_gavs.clone(),
+                offline,
+            },
+        )
+        .context("Kotlin compiler/stdlib resolution failed")?;
+        println!("  Resolve Kotlin  {} JAR(s)", kotlin_jars.len());
+
+        // The compiler embeddable is the fat jar we invoke via `java -jar`.
+        let compiler = kotlin_jars
+            .iter()
+            .find(|p| {
+                p.file_name()
+                    .map(|f| f.to_string_lossy().starts_with("kotlin-compiler-embeddable"))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .context("kotlin-compiler-embeddable JAR not found after resolution")?;
+
+        // Stdlib jars: everything except the compiler embeddable itself.
+        let stdlib: Vec<PathBuf> = kotlin_jars
+            .iter()
+            .filter(|p| {
+                p.file_name()
+                    .map(|f| !f.to_string_lossy().starts_with("kotlin-compiler-embeddable"))
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+
+        kotlin_compiler_jar = Some(compiler);
+        kotlin_stdlib_jars = stdlib;
+    } else {
+        kotlin_compiler_jar = None;
+        kotlin_stdlib_jars = Vec::new();
+    }
+
     // --- compile (incremental) -----------------------------------------------
     let toml_path = project_root.join("Curie.toml");
     let manifest_path = output_dir.join(".classes.toml");
 
     // Pre-compile prune: any source in the previous manifest that is no
     // longer in the current source set takes its old classes with it.
-    // This must run BEFORE javac because the classes dir is implicitly
+    // This must run BEFORE compilation because the classes dir is implicitly
     // searched during compile — a stale class could otherwise still
     // satisfy an unrelated import.
     let old_manifest = crate::class_manifest::load(&manifest_path)?;
@@ -305,81 +413,147 @@ pub fn compile(
             compile_status.reason()
         );
 
-        // Invoke the embedded javac wrapper instead of javac directly so
-        // we capture the source → class mapping in `.classes.toml`.
-        let wrapper_jar = crate::wrapper::ensure()?;
-        let mut javac = Command::new("java");
-        javac.arg("-jar").arg(&wrapper_jar);
-        javac.arg("--curie-manifest-out").arg(&manifest_path);
-        javac
-            .arg("--release")
-            .arg(desc.java.effective())
-            .arg("-g")
-            .arg("-d")
-            .arg(&classes_dir);
-
-        // Build compile classpath: src/main/resources + production deps
-        // + caller-supplied entries (workspace-dep JARs and their
-        // transitive contributions) + processor jars marked on-compile-classpath.
-        let mut cp_entries: Vec<PathBuf> = Vec::new();
+        // Build shared classpath entries used by both phases.
+        let mut shared_cp: Vec<PathBuf> = Vec::new();
         if let Some(ref rd) = resources_dir {
-            cp_entries.push(rd.clone());
+            shared_cp.push(rd.clone());
         }
-        cp_entries.extend_from_slice(&dep_jars);
-        cp_entries.extend_from_slice(extra_cp);
-        cp_entries.extend_from_slice(&ap_on_compile_classpath_jars);
-        if !cp_entries.is_empty() {
-            javac.arg("-cp").arg(classpath_string(&cp_entries));
+        shared_cp.extend_from_slice(&dep_jars);
+        shared_cp.extend_from_slice(extra_cp);
+        shared_cp.extend_from_slice(&ap_on_compile_classpath_jars);
+        shared_cp.extend_from_slice(&kotlin_stdlib_jars);
+
+        if has_kotlin {
+            // ------------------------------------------------------------------
+            // Phase 1: kotlinc — compiles all .kt + .java sources together.
+            // The compiler embeddable is a fat JAR invoked via `java -jar`.
+            // ------------------------------------------------------------------
+            let compiler_jar = kotlin_compiler_jar.as_ref().unwrap();
+            let mut kotlinc = Command::new("java");
+            kotlinc.arg("-jar").arg(compiler_jar);
+
+            // Output directory.
+            kotlinc.arg("-d").arg(&classes_dir);
+
+            // Classpath: deps + stdlib + extras (the compiler embeddable
+            // bundles the compiler itself; stdlib must be explicit so user
+            // code can reference kotlin.* types).
+            if !shared_cp.is_empty() {
+                kotlinc.arg("-cp").arg(classpath_string(&shared_cp));
+            }
+
+            // Annotation-processor path — kotlinc delegates javac-style APs
+            // via -Xkapt-annotation-processors-dir; for simplicity we pass
+            // them on the classpath where kotlinc can discover them as
+            // compiler plugins.  Full kapt/KSP support is out of scope here.
+            // APs declared in [annotation-processors] are still passed on
+            // the Java phase (Phase 2) for Java source files.
+
+            // Source files: all .kt and all .java together.
+            for src in &kotlin_sources {
+                kotlinc.arg(src);
+            }
+            for src in &java_sources {
+                kotlinc.arg(src);
+            }
+
+            let status = kotlinc
+                .status()
+                .context("failed to invoke kotlinc (java -jar kotlin-compiler-embeddable) — is a JRE installed?")?;
+
+            if !status.success() {
+                bail!("Kotlin compilation failed");
+            }
         }
 
-        // Annotation-processor classpath + generated-sources directory.
-        if !ap_jars.is_empty() {
-            let gen_dir = output_dir.join("generated-sources").join("annotations");
-            std::fs::create_dir_all(&gen_dir).with_context(|| {
-                format!("failed to create {}", gen_dir.display())
-            })?;
-            javac.arg("-processorpath").arg(classpath_string(&ap_jars));
-            javac.arg("-s").arg(&gen_dir);
-        }
+        if has_java {
+            // ------------------------------------------------------------------
+            // Phase 2: javac — re-compiles Java sources only.
+            // target/classes/ is on the classpath so Java can see Kotlin bytecode.
+            // When there are no Kotlin sources this is the only phase (original
+            // behaviour, unchanged except for the manifest wrapper).
+            // ------------------------------------------------------------------
+            let wrapper_jar = crate::wrapper::ensure()?;
+            let mut javac = Command::new("java");
+            javac.arg("-jar").arg(&wrapper_jar);
+            javac.arg("--curie-manifest-out").arg(&manifest_path);
+            javac
+                .arg("--release")
+                .arg(desc.java.effective())
+                .arg("-g")
+                .arg("-d")
+                .arg(&classes_dir);
 
-        // -A options (nested table flattened to `<prefix>.<key>=<value>`).
-        for (key, value) in desc.flat_ap_options() {
-            javac.arg(format!("-A{}={}", key, value));
-        }
+            // Classpath: target/classes (Kotlin bytecode) + shared entries.
+            let mut cp_entries: Vec<PathBuf> = Vec::new();
+            if has_kotlin {
+                // Java must see the Kotlin .class files from Phase 1.
+                cp_entries.push(classes_dir.clone());
+            }
+            cp_entries.extend_from_slice(&shared_cp);
+            if !cp_entries.is_empty() {
+                javac.arg("-cp").arg(classpath_string(&cp_entries));
+            }
 
-        for src in &sources {
-            javac.arg(src);
-        }
+            // Annotation-processor classpath + generated-sources directory.
+            if !ap_jars.is_empty() {
+                let gen_dir = output_dir.join("generated-sources").join("annotations");
+                std::fs::create_dir_all(&gen_dir).with_context(|| {
+                    format!("failed to create {}", gen_dir.display())
+                })?;
+                javac.arg("-processorpath").arg(classpath_string(&ap_jars));
+                javac.arg("-s").arg(&gen_dir);
+            }
 
-        let status = javac
-            .status()
-            .context("failed to invoke java — is a JRE installed?")?;
+            // -A options (nested table flattened to `<prefix>.<key>=<value>`).
+            for (key, value) in desc.flat_ap_options() {
+                javac.arg(format!("-A{}={}", key, value));
+            }
 
-        if !status.success() {
-            bail!("compilation failed");
-        }
+            for src in &java_sources {
+                javac.arg(src);
+            }
 
-        // Post-compile prune: a source that's still around but produces a
-        // smaller class set this time (e.g. removed a companion `class
-        // Bar {}` from inside Foo.java) leaves Bar.class orphaned in the
-        // classes dir.  Diff the new manifest against the old one.
-        if let Some(old) = &old_manifest {
-            if let Some(new) = crate::class_manifest::load(&manifest_path)? {
-                let stale = crate::class_manifest::stale_classes(
-                    old,
-                    Some(&new),
-                    &current_sources_set,
-                    None, // post-compile uses the new manifest, not the prefix carve-out
-                );
-                let n = crate::class_manifest::delete_classes(&classes_dir, &stale)?;
-                if n > 0 {
-                    println!(
-                        "  Stale           removed {} orphaned class file{}",
-                        n,
-                        if n == 1 { "" } else { "s" },
+            let status = javac
+                .status()
+                .context("failed to invoke java — is a JRE installed?")?;
+
+            if !status.success() {
+                bail!("compilation failed");
+            }
+
+            // Post-compile prune: a source that's still around but produces a
+            // smaller class set this time (e.g. removed a companion `class
+            // Bar {}` from inside Foo.java) leaves Bar.class orphaned in the
+            // classes dir.  Diff the new manifest against the old one.
+            if let Some(old) = &old_manifest {
+                if let Some(new) = crate::class_manifest::load(&manifest_path)? {
+                    let stale = crate::class_manifest::stale_classes(
+                        old,
+                        Some(&new),
+                        &current_sources_set,
+                        None, // post-compile uses the new manifest, not the prefix carve-out
                     );
+                    let n = crate::class_manifest::delete_classes(&classes_dir, &stale)?;
+                    if n > 0 {
+                        println!(
+                            "  Stale           removed {} orphaned class file{}",
+                            n,
+                            if n == 1 { "" } else { "s" },
+                        );
+                    }
                 }
             }
+        } else if has_kotlin {
+            // Kotlin-only: no manifest written by javac wrapper, but we still
+            // need to write a minimal stamp so incremental works next time.
+            // We write an empty manifest that covers all .kt sources so that
+            // a future unchanged build is detected as up-to-date.
+            // (The manifest schema expects source→[class] entries; an empty
+            // file is accepted by class_manifest::load as None which triggers
+            // a full recompile — so we write a minimal placeholder instead.)
+            // For now: leave manifest absent; the stamp written below is enough
+            // because needs_recompile checks source mtimes against the stamp.
         }
 
         // Record the JDK version used so that a future upgrade triggers a rebuild.
@@ -398,6 +572,7 @@ pub fn compile(
 
     Ok(CompileOutput {
         jar_path, jar_name, classes_dir, src_roots, sources, dep_jars,
+        kotlin_stdlib_jars,
         resources_dir, test_resources_dir,
     })
 }
@@ -419,5 +594,46 @@ mod tests {
     fn pkg_prefix_flat_package_is_dir_name() {
         let p = Path::new("/some/path/src/com.example.myapp");
         assert_eq!(pkg_prefix_for_src_root(p), "com.example.myapp");
+    }
+
+    #[test]
+    fn pkg_prefix_kotlin_maven_style_is_empty() {
+        // src/main/kotlin has no dot in the final component — should return "".
+        let p = Path::new("/some/path/src/main/kotlin");
+        assert_eq!(pkg_prefix_for_src_root(p), "");
+    }
+
+    // --- flat_package_src_dirs detects dot-named dirs -----------------------
+
+    #[test]
+    fn flat_package_src_dirs_finds_dot_named_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("com.example.foo")).unwrap();
+        std::fs::create_dir_all(src.join("com.example.bar")).unwrap();
+        // A non-dot dir should be ignored.
+        std::fs::create_dir_all(src.join("main")).unwrap();
+
+        let mut found = flat_package_src_dirs(dir.path());
+        found.sort();
+        assert_eq!(found.len(), 2);
+        assert!(found[0].ends_with("com.example.bar"));
+        assert!(found[1].ends_with("com.example.foo"));
+    }
+
+    #[test]
+    fn flat_package_src_dirs_empty_when_no_src_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(flat_package_src_dirs(dir.path()).is_empty());
+    }
+
+    // --- Kotlin source detection helpers ------------------------------------
+
+    #[test]
+    fn kotlin_version_constant_is_set() {
+        assert!(!KOTLIN_VERSION.is_empty());
+        // Basic sanity: must look like a semver triple.
+        let parts: Vec<&str> = KOTLIN_VERSION.split('.').collect();
+        assert!(parts.len() >= 2, "KOTLIN_VERSION should be at least major.minor");
     }
 }

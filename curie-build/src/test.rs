@@ -1,4 +1,7 @@
-use crate::compile::{flat_package_src_dirs, flat_package_test_dirs};
+use crate::compile::{
+    flat_package_src_dirs, flat_package_test_dirs, KOTLIN_COMPILER_COORD, KOTLIN_VERSION,
+    KOTLIN_STDLIB_COORD,
+};
 use crate::incremental::{
     javac_version, needs_recompile, walk_files, write_javac_version_stamp, Inputs, Stamp,
 };
@@ -18,6 +21,7 @@ const JUNIT_STANDALONE_COORD: &str =
 ///
 /// `classes_dir`        — directory containing already-compiled production classes.
 /// `dep_jars`           — resolved production dependency JARs.
+/// `kotlin_stdlib_jars` — Kotlin stdlib JARs (empty for Java-only projects).
 /// `resources_dir`      — production resources dir if it exists (`src/main/resources`
 ///                        or top-level `resources/`), otherwise `None`.
 /// `test_resources_dir` — test resources dir if it exists (`src/test/resources` or
@@ -38,6 +42,7 @@ pub fn run_tests(
     desc: &descriptor::Descriptor,
     classes_dir: &Path,
     dep_jars: &[PathBuf],
+    kotlin_stdlib_jars: &[PathBuf],
     resources_dir: Option<&Path>,
     test_resources_dir: Option<&Path>,
     filter: Option<&str>,
@@ -45,12 +50,23 @@ pub fn run_tests(
     extra_cp: &[PathBuf],
 ) -> Result<()> {
     // --- discover test sources -----------------------------------------------
-    let test_sources = discover_test_sources(project_root);
+    let (java_test_sources, kotlin_test_sources) = discover_test_sources(project_root);
 
-    if test_sources.is_empty() {
+    let all_test_sources: Vec<PathBuf> = {
+        let mut v = java_test_sources.clone();
+        v.extend(kotlin_test_sources.iter().cloned());
+        v.sort();
+        v.dedup();
+        v
+    };
+
+    if all_test_sources.is_empty() {
         println!("  Tests           no test sources found");
         return Ok(());
     }
+
+    let has_kotlin_tests = !kotlin_test_sources.is_empty();
+    let has_java_tests = !java_test_sources.is_empty();
 
     // --- resolve JUnit standalone launcher -----------------------------------
     let extra_repos = build::extra_repos(desc);
@@ -84,6 +100,78 @@ pub fn run_tests(
         )
         .context("test dependency resolution failed")?
     };
+
+    // --- resolve Kotlin compiler for test compilation (when needed) ----------
+    let test_kotlin_stdlib_jars: Vec<PathBuf>;
+    let test_kotlin_compiler_jar: Option<PathBuf>;
+
+    if has_kotlin_tests && kotlin_stdlib_jars.is_empty() {
+        // Production had no Kotlin sources but tests do — resolve now.
+        let kotlin_jars = resolve(
+            &[
+                (KOTLIN_COMPILER_COORD, KOTLIN_VERSION),
+                (KOTLIN_STDLIB_COORD, KOTLIN_VERSION),
+            ],
+            &ResolveOptions {
+                extra_repos: extra_repos.clone(),
+                progress: true,
+                bom_imports: test_bom_gavs.clone(),
+                offline,
+            },
+        )
+        .context("Kotlin compiler/stdlib resolution failed (test phase)")?;
+
+        let compiler = kotlin_jars
+            .iter()
+            .find(|p| {
+                p.file_name()
+                    .map(|f| f.to_string_lossy().starts_with("kotlin-compiler-embeddable"))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .context("kotlin-compiler-embeddable JAR not found after resolution (test phase)")?;
+
+        let stdlib: Vec<PathBuf> = kotlin_jars
+            .iter()
+            .filter(|p| {
+                p.file_name()
+                    .map(|f| !f.to_string_lossy().starts_with("kotlin-compiler-embeddable"))
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+
+        test_kotlin_compiler_jar = Some(compiler);
+        test_kotlin_stdlib_jars = stdlib;
+    } else if has_kotlin_tests {
+        // Re-resolve compiler — we only have stdlib from the prod phase.
+        let kotlin_jars = resolve(
+            &[(KOTLIN_COMPILER_COORD, KOTLIN_VERSION)],
+            &ResolveOptions {
+                extra_repos: extra_repos.clone(),
+                progress: false,
+                bom_imports: test_bom_gavs.clone(),
+                offline,
+            },
+        )
+        .context("Kotlin compiler resolution failed (test phase)")?;
+
+        let compiler = kotlin_jars
+            .into_iter()
+            .find(|p| {
+                p.file_name()
+                    .map(|f| f.to_string_lossy().starts_with("kotlin-compiler-embeddable"))
+                    .unwrap_or(false)
+            })
+            .context("kotlin-compiler-embeddable JAR not found after resolution (test phase)")?;
+
+        test_kotlin_compiler_jar = Some(compiler);
+        // Stdlib was already resolved in the prod compile phase.
+        test_kotlin_stdlib_jars = kotlin_stdlib_jars.to_vec();
+    } else {
+        test_kotlin_compiler_jar = None;
+        test_kotlin_stdlib_jars = kotlin_stdlib_jars.to_vec();
+    }
 
     // --- resolve test-annotation-processor jars ----------------------------
     // Test compile sees BOTH production processors (so Lombok applied to
@@ -140,19 +228,13 @@ pub fn run_tests(
     let toml_path = project_root.join("Curie.toml");
     let test_manifest_path = project_root.join("target").join(".test-classes.toml");
 
-    // Pre-compile prune (same scheme as production compile).  The
-    // manifest is root-agnostic so the source-roots gymnastics the old
-    // heuristic needed are gone.
+    // Pre-compile prune (same scheme as production compile).
     let old_test_manifest = crate::class_manifest::load(&test_manifest_path)?;
-    let current_test_sources_set: std::collections::HashSet<String> = test_sources
+    let current_test_sources_set: std::collections::HashSet<String> = all_test_sources
         .iter()
         .filter_map(|p| p.canonicalize().ok())
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
-    // AP-generated test sources live under `target/generated-test-sources/`;
-    // the whole `target/` tree is a fine over-approximation to give the
-    // pre-prune a path-prefix carve-out (post-compile catches the real
-    // "generator stopped producing this" case).
     let canonical_test_target = project_root
         .join("target")
         .canonicalize()
@@ -172,87 +254,122 @@ pub fn run_tests(
     };
 
     let needs_recompile_tests = pre_pruned_tests > 0
-        || needs_recompile(&test_sources, &test_classes_dir, &toml_path, &project_root.join("target")).needs_recompile();
+        || needs_recompile(&all_test_sources, &test_classes_dir, &toml_path, &project_root.join("target")).needs_recompile();
 
     if needs_recompile_tests {
         let reason = if pre_pruned_tests > 0 { "  [stale classes removed]" } else { "" };
         println!(
             "  Compile tests   {} source file(s){}",
-            test_sources.len(),
+            all_test_sources.len(),
             reason,
         );
 
-        // Classpath for compiling tests:
-        //   production classes + src/main/resources + prod deps + test deps + standalone launcher
-        let mut compile_cp: Vec<PathBuf> = Vec::new();
-        compile_cp.push(classes_dir.to_path_buf());
+        // Shared classpath for both phases:
+        //   production classes + src/main/resources + prod deps + test deps
+        //   + standalone launcher + kotlin stdlib + extras
+        let mut shared_cp: Vec<PathBuf> = Vec::new();
+        shared_cp.push(classes_dir.to_path_buf());
         if let Some(rd) = resources_dir {
-            compile_cp.push(rd.to_path_buf());
+            shared_cp.push(rd.to_path_buf());
         }
-        compile_cp.extend_from_slice(dep_jars);
-        compile_cp.extend_from_slice(&test_dep_jars);
-        compile_cp.extend_from_slice(extra_cp);
-        compile_cp.extend_from_slice(&test_ap_on_cp_jars);
-        compile_cp.push(standalone_jar.clone());
+        shared_cp.extend_from_slice(dep_jars);
+        shared_cp.extend_from_slice(&test_dep_jars);
+        shared_cp.extend_from_slice(extra_cp);
+        shared_cp.extend_from_slice(&test_ap_on_cp_jars);
+        shared_cp.extend_from_slice(&test_kotlin_stdlib_jars);
+        shared_cp.push(standalone_jar.clone());
 
-        // Invoke the embedded javac wrapper so we capture the source →
-        // class mapping in `.test-classes.toml`.
-        let wrapper_jar = crate::wrapper::ensure()?;
-        let mut javac = Command::new("java");
-        javac.arg("-jar").arg(&wrapper_jar);
-        javac.arg("--curie-manifest-out").arg(&test_manifest_path);
-        javac
-            .arg("--release")
-            .arg(desc.java.effective())
-            .arg("-g")
-            .arg("-d")
-            .arg(&test_classes_dir)
-            .arg("-cp")
-            .arg(classpath_string(&compile_cp));
+        if has_kotlin_tests {
+            // Phase 1: kotlinc — compile all .kt + .java test sources together.
+            let compiler_jar = test_kotlin_compiler_jar.as_ref().unwrap();
+            let mut kotlinc = Command::new("java");
+            kotlinc.arg("-jar").arg(compiler_jar);
+            kotlinc.arg("-d").arg(&test_classes_dir);
 
-        // Annotation-processor path + generated-test-sources directory.
-        if !test_ap_jars.is_empty() {
-            let gen_dir = project_root
-                .join("target")
-                .join("generated-test-sources")
-                .join("annotations");
-            std::fs::create_dir_all(&gen_dir).with_context(|| {
-                format!("failed to create {}", gen_dir.display())
-            })?;
-            javac.arg("-processorpath").arg(classpath_string(&test_ap_jars));
-            javac.arg("-s").arg(&gen_dir);
-        }
-        for (key, value) in desc.flat_test_ap_options() {
-            javac.arg(format!("-A{}={}", key, value));
+            if !shared_cp.is_empty() {
+                kotlinc.arg("-cp").arg(classpath_string(&shared_cp));
+            }
+
+            for src in &kotlin_test_sources {
+                kotlinc.arg(src);
+            }
+            for src in &java_test_sources {
+                kotlinc.arg(src);
+            }
+
+            let status = kotlinc
+                .status()
+                .context("failed to invoke kotlinc for test compilation")?;
+
+            if !status.success() {
+                bail!("Kotlin test compilation failed");
+            }
         }
 
-        for src in &test_sources {
-            javac.arg(src);
-        }
+        if has_java_tests {
+            // Phase 2: javac — re-compile Java test sources.
+            let wrapper_jar = crate::wrapper::ensure()?;
+            let mut javac = Command::new("java");
+            javac.arg("-jar").arg(&wrapper_jar);
+            javac.arg("--curie-manifest-out").arg(&test_manifest_path);
+            javac
+                .arg("--release")
+                .arg(desc.java.effective())
+                .arg("-g")
+                .arg("-d")
+                .arg(&test_classes_dir);
 
-        let status = javac
-            .status()
-            .context("failed to invoke java — is a JRE installed?")?;
+            // Classpath for compiling Java tests: test-classes (kotlin bytecode
+            // from phase 1) + shared_cp.
+            let mut compile_cp: Vec<PathBuf> = Vec::new();
+            if has_kotlin_tests {
+                compile_cp.push(test_classes_dir.clone());
+            }
+            compile_cp.extend_from_slice(&shared_cp);
+            javac.arg("-cp").arg(classpath_string(&compile_cp));
 
-        if !status.success() {
-            bail!("test compilation failed");
-        }
+            // Annotation-processor path + generated-test-sources directory.
+            if !test_ap_jars.is_empty() {
+                let gen_dir = project_root
+                    .join("target")
+                    .join("generated-test-sources")
+                    .join("annotations");
+                std::fs::create_dir_all(&gen_dir).with_context(|| {
+                    format!("failed to create {}", gen_dir.display())
+                })?;
+                javac.arg("-processorpath").arg(classpath_string(&test_ap_jars));
+                javac.arg("-s").arg(&gen_dir);
+            }
+            for (key, value) in desc.flat_test_ap_options() {
+                javac.arg(format!("-A{}={}", key, value));
+            }
 
-        // Post-compile prune: companion test classes removed from a still-
-        // existing source (e.g. dropping an `@Nested` inner class) leave
-        // orphan .class files in target/test-classes/.  Diff old vs new.
-        if let Some(old) = &old_test_manifest {
-            if let Some(new) = crate::class_manifest::load(&test_manifest_path)? {
-                let stale = crate::class_manifest::stale_classes(
-                    old, Some(&new), &current_test_sources_set, None,
-                );
-                let n = crate::class_manifest::delete_classes(&test_classes_dir, &stale)?;
-                if n > 0 {
-                    println!(
-                        "  Stale tests     removed {} orphaned class file{}",
-                        n,
-                        if n == 1 { "" } else { "s" },
+            for src in &java_test_sources {
+                javac.arg(src);
+            }
+
+            let status = javac
+                .status()
+                .context("failed to invoke java — is a JRE installed?")?;
+
+            if !status.success() {
+                bail!("test compilation failed");
+            }
+
+            // Post-compile prune for Java test classes.
+            if let Some(old) = &old_test_manifest {
+                if let Some(new) = crate::class_manifest::load(&test_manifest_path)? {
+                    let stale = crate::class_manifest::stale_classes(
+                        old, Some(&new), &current_test_sources_set, None,
                     );
+                    let n = crate::class_manifest::delete_classes(&test_classes_dir, &stale)?;
+                    if n > 0 {
+                        println!(
+                            "  Stale tests     removed {} orphaned class file{}",
+                            n,
+                            if n == 1 { "" } else { "s" },
+                        );
+                    }
                 }
             }
         }
@@ -266,12 +383,9 @@ pub fn run_tests(
     }
 
     // --- skip if stamp is newer than all inputs ------------------------------
-    // When no filter is active, check whether the test-stamp is newer than
-    // every input that could invalidate results.  A filter run always executes
-    // (it is a partial run and must not mark the full suite as passing).
     let stamp_path = project_root.join("target").join(".test-stamp");
 
-    if filter.is_none() && !needs_test_run(&test_sources, classes_dir, &toml_path, &stamp_path, resources_dir, test_resources_dir) {
+    if filter.is_none() && !needs_test_run(&all_test_sources, classes_dir, &toml_path, &stamp_path, resources_dir, test_resources_dir) {
         println!("  Tests           up to date");
         return Ok(());
     }
@@ -279,7 +393,7 @@ pub fn run_tests(
     // --- run tests -----------------------------------------------------------
     // Classpath for running tests:
     //   test classes + production classes + src/main/resources + src/test/resources
-    //   + prod deps + test deps
+    //   + prod deps + test deps + kotlin stdlib
     // (standalone is provided as -jar, not on -cp)
     let mut run_cp: Vec<PathBuf> = Vec::new();
     run_cp.push(test_classes_dir.clone());
@@ -293,6 +407,7 @@ pub fn run_tests(
     run_cp.extend_from_slice(dep_jars);
     run_cp.extend_from_slice(&test_dep_jars);
     run_cp.extend_from_slice(extra_cp);
+    run_cp.extend_from_slice(&test_kotlin_stdlib_jars);
 
     println!();
 
@@ -319,8 +434,6 @@ pub fn run_tests(
     }
 
     // --- write stamp on success ----------------------------------------------
-    // Only written when no filter was active (a partial run must not mark the
-    // full suite as passing).
     std::fs::write(&stamp_path, b"")
         .with_context(|| format!("failed to write test stamp {}", stamp_path.display()))?;
 
@@ -333,26 +446,31 @@ pub fn run_tests(
 
 /// Collect test source files from all supported layout roots.
 ///
+/// Returns `(java_sources, kotlin_sources)` — each sorted and deduplicated.
+///
 /// **Existing Maven-style layouts (unchanged):**
 /// - Co-located: `src/main/java` — files ending in `Test.java`, `Tests.java`,
 ///   or `Spec.java`.
 /// - Separate tree: `src/test/java` — all `*.java` files.
 ///
+/// **Kotlin Maven-style layouts:**
+/// - Co-located: `src/main/kotlin` — files ending in `Test.kt`, `Tests.kt`,
+///   or `Spec.kt`.
+/// - Separate tree: `src/test/kotlin` — all `*.kt` files.
+///
 /// **New flat-package layouts:**
 /// - Co-located unit tests: each dot-named directory under `src/` — files ending
-///   in `Test.java`, `Tests.java`, or `Spec.java`.
+///   in `Test.java/kt`, `Tests.java/kt`, or `Spec.java/kt`.
 /// - Integration tests: each dot-named directory under `tests/` — all `*.java`
-///   files.
-///
-/// Results are merged, deduplicated by canonical path, and sorted
-/// lexicographically for a deterministic `javac` invocation.
-fn discover_test_sources(project_root: &Path) -> Vec<PathBuf> {
-    let mut sources: Vec<PathBuf> = Vec::new();
+///   and `*.kt` files.
+fn discover_test_sources(project_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut java_sources: Vec<PathBuf> = Vec::new();
+    let mut kotlin_sources: Vec<PathBuf> = Vec::new();
 
-    // --- Maven-style: co-located tests in src/main/java ----------------------
-    let main_src = project_root.join("src").join("main").join("java");
-    if main_src.exists() {
-        let colocated: Vec<PathBuf> = walk_files(&main_src)
+    // --- Maven-style Java: co-located tests in src/main/java ----------------
+    let main_java_src = project_root.join("src").join("main").join("java");
+    if main_java_src.exists() {
+        let colocated: Vec<PathBuf> = walk_files(&main_java_src)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
                 name.ends_with("Test.java")
@@ -361,22 +479,47 @@ fn discover_test_sources(project_root: &Path) -> Vec<PathBuf> {
             })
             .map(|e| e.into_path())
             .collect();
-        sources.extend(colocated);
+        java_sources.extend(colocated);
     }
 
-    // --- Maven-style: separate test tree src/test/java -----------------------
-    let test_src = project_root.join("src").join("test").join("java");
-    if test_src.exists() {
-        let separate: Vec<PathBuf> = walk_files(&test_src)
+    // --- Maven-style Java: separate test tree src/test/java -----------------
+    let test_java_src = project_root.join("src").join("test").join("java");
+    if test_java_src.exists() {
+        let separate: Vec<PathBuf> = walk_files(&test_java_src)
             .filter(|e| e.file_name().to_string_lossy().ends_with(".java"))
             .map(|e| e.into_path())
             .collect();
-        sources.extend(separate);
+        java_sources.extend(separate);
     }
 
-    // --- Flat-package: co-located unit tests in src/<dot.pkg>/ ---------------
+    // --- Maven-style Kotlin: co-located tests in src/main/kotlin ------------
+    let main_kotlin_src = project_root.join("src").join("main").join("kotlin");
+    if main_kotlin_src.exists() {
+        let colocated: Vec<PathBuf> = walk_files(&main_kotlin_src)
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy();
+                name.ends_with("Test.kt")
+                    || name.ends_with("Tests.kt")
+                    || name.ends_with("Spec.kt")
+            })
+            .map(|e| e.into_path())
+            .collect();
+        kotlin_sources.extend(colocated);
+    }
+
+    // --- Maven-style Kotlin: separate test tree src/test/kotlin -------------
+    let test_kotlin_src = project_root.join("src").join("test").join("kotlin");
+    if test_kotlin_src.exists() {
+        let separate: Vec<PathBuf> = walk_files(&test_kotlin_src)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".kt"))
+            .map(|e| e.into_path())
+            .collect();
+        kotlin_sources.extend(separate);
+    }
+
+    // --- Flat-package: co-located unit tests in src/<dot.pkg>/ --------------
     for pkg_dir in flat_package_src_dirs(project_root) {
-        let colocated: Vec<PathBuf> = walk_files(&pkg_dir)
+        let colocated_java: Vec<PathBuf> = walk_files(&pkg_dir)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
                 name.ends_with("Test.java")
@@ -385,23 +528,42 @@ fn discover_test_sources(project_root: &Path) -> Vec<PathBuf> {
             })
             .map(|e| e.into_path())
             .collect();
-        sources.extend(colocated);
+        java_sources.extend(colocated_java);
+
+        let colocated_kotlin: Vec<PathBuf> = walk_files(&pkg_dir)
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy();
+                name.ends_with("Test.kt")
+                    || name.ends_with("Tests.kt")
+                    || name.ends_with("Spec.kt")
+            })
+            .map(|e| e.into_path())
+            .collect();
+        kotlin_sources.extend(colocated_kotlin);
     }
 
-    // --- Flat-package: integration tests in tests/<dot.pkg>/ -----------------
+    // --- Flat-package: integration tests in tests/<dot.pkg>/ ----------------
     for pkg_dir in flat_package_test_dirs(project_root) {
-        let integration: Vec<PathBuf> = walk_files(&pkg_dir)
+        let java_int: Vec<PathBuf> = walk_files(&pkg_dir)
             .filter(|e| e.file_name().to_string_lossy().ends_with(".java"))
             .map(|e| e.into_path())
             .collect();
-        sources.extend(integration);
+        java_sources.extend(java_int);
+
+        let kotlin_int: Vec<PathBuf> = walk_files(&pkg_dir)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".kt"))
+            .map(|e| e.into_path())
+            .collect();
+        kotlin_sources.extend(kotlin_int);
     }
 
-    // Deduplicate by canonical path (in case a path appears via multiple roots)
-    // and sort for determinism.
-    sources.sort();
-    sources.dedup();
-    sources
+    // Deduplicate by canonical path and sort for determinism.
+    java_sources.sort();
+    java_sources.dedup();
+    kotlin_sources.sort();
+    kotlin_sources.dedup();
+
+    (java_sources, kotlin_sources)
 }
 
 // ---------------------------------------------------------------------------
