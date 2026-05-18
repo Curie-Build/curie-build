@@ -33,7 +33,7 @@ use walkdir::WalkDir;
 
 /// PJF coordinate pinned to the latest version on Maven Central (2.68.0).
 const PJF_COORD: &str = "com.palantir.javaformat:palantir-java-format";
-const PJF_VERSION: &str = "2.68.0";
+const PJF_VERSION: &str = "2.90.0";
 
 /// Fully-qualified name of PJF's CLI entry point.
 const PJF_MAIN: &str = "com.palantir.javaformat.java.Main";
