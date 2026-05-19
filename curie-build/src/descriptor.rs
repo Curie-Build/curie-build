@@ -24,8 +24,8 @@ pub struct Descriptor {
     pub kotlin: Kotlin,
     pub docker: Docker,
     pub build_info: BuildInfo,
-    pub dependencies: BTreeMap<String, String>,
-    pub test_dependencies: BTreeMap<String, String>,
+    pub dependencies: BTreeMap<String, DependencyValue>,
+    pub test_dependencies: BTreeMap<String, DependencyValue>,
     pub repositories: Vec<RepositoryEntry>,
     pub bom_imports: BTreeMap<String, String>,
     pub test_bom_imports: BTreeMap<String, String>,
@@ -148,9 +148,9 @@ struct RawDescriptor {
     #[serde(rename = "build-info", default)]
     build_info: BuildInfo,
     #[serde(default)]
-    dependencies: BTreeMap<String, String>,
+    dependencies: BTreeMap<String, DependencyValue>,
     #[serde(rename = "test-dependencies", default)]
-    test_dependencies: BTreeMap<String, String>,
+    test_dependencies: BTreeMap<String, DependencyValue>,
     #[serde(default)]
     repositories: Vec<RepositoryEntry>,
     #[serde(rename = "bom-imports", default)]
@@ -355,8 +355,64 @@ impl Default for BuildInfo {
 /// An additional Maven-compatible repository declared in `[[repositories]]`.
 #[derive(Debug, Deserialize, Clone)]
 pub struct RepositoryEntry {
-    pub name: String,
+    /// Unique identifier used when deps select this repo via `repository = "id"`.
+    pub id: String,
+    /// Human-readable display label.  Defaults to [`id`] when absent.
+    pub name: Option<String>,
     pub url: String,
+}
+
+impl RepositoryEntry {
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.id)
+    }
+}
+
+/// One value in `[dependencies]` or `[test-dependencies]`.
+///
+/// Two shapes accepted, via serde's untagged enum:
+///
+/// ```toml
+/// # Shorthand: the value is just the version string.
+/// "com.example:foo" = "1.2.3"
+///
+/// # Detailed: include an explicit repository id.
+/// "net.example:bar" = { version = "2.0.0", repository = "my-repo" }
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum DependencyValue {
+    /// `"key" = "1.0.0"` shorthand form.
+    Version(String),
+    /// `"key" = { version = "1.0.0", repository = "id" }` detailed form.
+    Detailed(DependencyDetailed),
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DependencyDetailed {
+    pub version: String,
+    /// Id of the repository to fetch this artifact from (must match a
+    /// `[[repositories]]` entry's `id`).  When absent, Maven Central is used.
+    #[serde(default)]
+    pub repository: Option<String>,
+}
+
+impl DependencyValue {
+    /// Version string as the user wrote it.  `""` means "supply via a BOM".
+    pub fn version(&self) -> &str {
+        match self {
+            DependencyValue::Version(v) => v,
+            DependencyValue::Detailed(d) => &d.version,
+        }
+    }
+
+    /// Repository id override, if present.
+    pub fn repository(&self) -> Option<&str> {
+        match self {
+            DependencyValue::Version(_) => None,
+            DependencyValue::Detailed(d) => d.repository.as_deref(),
+        }
+    }
 }
 
 impl Descriptor {
@@ -743,7 +799,43 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         );
     }
 
+    validate_dep_repo_refs(&descriptor)?;
+
     Ok(descriptor)
+}
+
+/// Validate that every `repository = "id"` reference in `[dependencies]` and
+/// `[test-dependencies]` names a repository declared in `[[repositories]]`.
+///
+/// Called once at the end of single-module [`load`] and again after workspace
+/// inheritance so workspace-level repos are visible.
+pub fn validate_dep_repo_refs(desc: &Descriptor) -> Result<()> {
+    let known_ids: std::collections::HashSet<&str> =
+        desc.repositories.iter().map(|r| r.id.as_str()).collect();
+
+    for (coord, dep) in &desc.dependencies {
+        if let Some(repo_id) = dep.repository() {
+            if !known_ids.contains(repo_id) {
+                bail!(
+                    "dependency \"{}\" references unknown repository \"{}\"; \
+                     declare it with [[repositories]]",
+                    coord, repo_id
+                );
+            }
+        }
+    }
+    for (coord, dep) in &desc.test_dependencies {
+        if let Some(repo_id) = dep.repository() {
+            if !known_ids.contains(repo_id) {
+                bail!(
+                    "test-dependency \"{}\" references unknown repository \"{}\"; \
+                     declare it with [[repositories]]",
+                    coord, repo_id
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Returns true when Docker support is active:
@@ -945,12 +1037,13 @@ members = ["a"]
 [java]
 sourceCompatibility = "17"
 [[repositories]]
-name = "Nexus"
+id = "nexus"
 url = "https://example.com/m2"
 "#;
         let d = load_str(toml).unwrap();
         assert_eq!(d.java.effective(), "17");
         assert_eq!(d.repositories.len(), 1);
+        assert_eq!(d.repositories[0].id, "nexus");
     }
 
     #[test]
@@ -1361,5 +1454,130 @@ mainClass = "X"
         let d = load_str(toml).unwrap();
         assert_eq!(d.test.junit_platform_version(), crate::descriptor::DEFAULT_JUNIT_PLATFORM_VERSION);
         assert_eq!(d.kotlin.version(), crate::descriptor::DEFAULT_KOTLIN_VERSION);
+    }
+
+    // -- DependencyValue / RepositoryEntry ----------------------------------------
+
+    #[test]
+    fn parse_dependency_shorthand_form() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+[dependencies]
+"com.example:foo" = "1.2.3"
+"#;
+        let d = load_str(toml).unwrap();
+        let v = d.dependencies.get("com.example:foo").unwrap();
+        assert_eq!(v.version(), "1.2.3");
+        assert_eq!(v.repository(), None);
+    }
+
+    #[test]
+    fn parse_dependency_detailed_form_without_repo() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+[dependencies]
+"com.example:foo" = { version = "2.0.0" }
+"#;
+        let d = load_str(toml).unwrap();
+        let v = d.dependencies.get("com.example:foo").unwrap();
+        assert_eq!(v.version(), "2.0.0");
+        assert_eq!(v.repository(), None);
+    }
+
+    #[test]
+    fn parse_dependency_detailed_form_with_repo() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+[[repositories]]
+id = "my-repo"
+url = "https://repo.example.com/m2"
+[dependencies]
+"com.example:bar" = { version = "3.0.0", repository = "my-repo" }
+"#;
+        let d = load_str(toml).unwrap();
+        let v = d.dependencies.get("com.example:bar").unwrap();
+        assert_eq!(v.version(), "3.0.0");
+        assert_eq!(v.repository(), Some("my-repo"));
+    }
+
+    #[test]
+    fn dep_with_unknown_repo_id_is_rejected() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+[dependencies]
+"com.example:foo" = { version = "1.0", repository = "does-not-exist" }
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("does-not-exist"), "expected unknown-repo error, got: {err}");
+        assert!(err.contains("[[repositories]]"), "should hint about [[repositories]], got: {err}");
+    }
+
+    #[test]
+    fn dep_with_known_repo_id_is_accepted() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+[[repositories]]
+id = "shibboleth"
+url = "https://build.shibboleth.net/nexus/content/repositories/releases/"
+[dependencies]
+"net.shibboleth.oidc:oidc-common-crypto-api" = { version = "3.3.0", repository = "shibboleth" }
+"#;
+        let d = load_str(toml).unwrap();
+        let v = d.dependencies.get("net.shibboleth.oidc:oidc-common-crypto-api").unwrap();
+        assert_eq!(v.version(), "3.3.0");
+        assert_eq!(v.repository(), Some("shibboleth"));
+    }
+
+    #[test]
+    fn test_dep_with_unknown_repo_id_is_rejected() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+[test-dependencies]
+"com.example:foo" = { version = "1.0", repository = "ghost" }
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("ghost"), "expected unknown-repo error, got: {err}");
+    }
+
+    #[test]
+    fn repository_entry_display_name_defaults_to_id() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+[[repositories]]
+id = "shibboleth"
+url = "https://example.com"
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.repositories[0].display_name(), "shibboleth");
+    }
+
+    #[test]
+    fn repository_entry_display_name_uses_name_when_set() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+[[repositories]]
+id = "shibboleth"
+name = "Shibboleth Releases"
+url = "https://example.com"
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.repositories[0].id, "shibboleth");
+        assert_eq!(d.repositories[0].display_name(), "Shibboleth Releases");
     }
 }

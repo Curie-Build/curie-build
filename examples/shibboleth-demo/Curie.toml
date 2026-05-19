@@ -1,0 +1,28 @@
+# shibboleth-demo
+#
+# Demonstrates per-dependency repository selection.
+#
+# The `net.shibboleth.oidc:oidc-common-crypto-api` artifact lives in the
+# Shibboleth public Nexus.  Declaring `repository = "shibboleth"` on the
+# dependency tells Curie to fetch *that artifact* from the shibboleth repo
+# only, while its transitive dependencies are searched in both Maven Central
+# and shibboleth.  All other dependencies continue to use Central only.
+#
+# To build this example you need network access to:
+#   https://build.shibboleth.net/nexus/content/repositories/releases/
+
+[application]
+name = "shibboleth-demo"
+version = "0.1.0"
+mainClass = "net.example.Demo"
+
+[[repositories]]
+id = "shibboleth"
+name = "Shibboleth Releases"
+url = "https://build.shibboleth.net/nexus/content/repositories/releases/"
+
+[dependencies]
+# Fetched from the shibboleth repo only; transitive deps try Central + shibboleth.
+"net.shibboleth.oidc:oidc-common-crypto-api" = { version = "3.3.0", repository = "shibboleth" }
+# Fetched from Maven Central only (no repository field).
+"com.fasterxml.jackson.core:jackson-databind" = "2.17.2"

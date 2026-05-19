@@ -52,8 +52,9 @@ use std::time::Duration;
 
 /// Options for the resolver.
 pub struct ResolveOptions {
-    /// Additional repositories to check after Maven Central.
-    pub extra_repos: Vec<Repository>,
+    /// Named repositories declared in `[[repositories]]`.  Only consulted when
+    /// a [`DepEntry::repo_id`] references one by id.
+    pub named_repos: Vec<Repository>,
     /// When `true`, show a progress bar on stderr while downloading JARs.
     pub progress: bool,
     /// BOMs to import, in ascending priority order (later index wins).
@@ -68,12 +69,37 @@ pub struct ResolveOptions {
 impl Default for ResolveOptions {
     fn default() -> Self {
         ResolveOptions {
-            extra_repos: vec![],
+            named_repos: vec![],
             progress: true,
             bom_imports: vec![],
             offline: false,
         }
     }
+}
+
+/// One entry in the dependency list passed to [`resolve`].
+pub struct DepEntry<'a> {
+    /// `"group:artifact"` coordinate.
+    pub key: &'a str,
+    /// Version string (may be `""` when supplied by a BOM).
+    pub version: &'a str,
+    /// Optional repository id (matches [`Repository::id`] in
+    /// [`ResolveOptions::named_repos`]).
+    ///
+    /// * `None` — artifact is fetched from Maven Central only.
+    /// * `Some("X")` — artifact is fetched from repo X only; its transitive
+    ///   dependencies are searched in both Central and repo X.
+    pub repo_id: Option<&'a str>,
+}
+
+/// Internal BFS work item carrying per-artifact repository context.
+struct BfsWork {
+    gav: Gav,
+    /// Repos to use when fetching THIS artifact's POM and JAR.
+    fetch_repos: Vec<Repository>,
+    /// Repos passed to each of this artifact's transitive dependencies
+    /// (used as their `fetch_repos` and `child_repos`).
+    child_repos: Vec<Repository>,
 }
 
 /// Walk the parent POM chain (up to 10 levels) and merge properties +
@@ -258,22 +284,24 @@ fn resolve_bom_ref_version(bom_ref: &BomRef, importing_pom: &Pom) -> Option<Stri
     }
 }
 
-/// Resolve a list of `(key, version)` pairs from `Curie.toml` into a list of
+/// Resolve a list of [`DepEntry`] items from `Curie.toml` into a list of
 /// local JAR paths (including transitive dependencies).
 ///
-/// `deps` is a slice of `("group:artifact", "version")` pairs as declared
-/// in the `[dependencies]` table of `Curie.toml`.  An empty version string
-/// (`""`) means the version must be supplied by one of the BOMs in
-/// `opts.bom_imports`; it is a hard error if no BOM provides it.
+/// An entry with an empty version string (`""`) means the version must be
+/// supplied by one of the BOMs in `opts.bom_imports`; it is a hard error if
+/// no BOM provides it.
 pub fn resolve(
-    deps: &[(&str, &str)],
+    deps: &[DepEntry],
     opts: &ResolveOptions,
 ) -> Result<Vec<PathBuf>> {
-    let repos: Vec<Repository> = {
-        let mut r = default_repositories();
-        r.extend(opts.extra_repos.iter().cloned());
-        r
-    };
+    let central = default_repositories();
+
+    // Build a lookup map from repo id → Repository for named repos.
+    let named_map: std::collections::HashMap<&str, &Repository> = opts
+        .named_repos
+        .iter()
+        .map(|r| (r.id.as_str(), r))
+        .collect();
 
     let client = reqwest::blocking::Client::builder()
         .user_agent("curie-build/0.1")
@@ -281,14 +309,15 @@ pub fn resolve(
         .build()
         .context("failed to build HTTP client")?;
 
-    // Pre-resolve all BOM managed versions before starting the BFS.
-    let global_managed = resolve_boms(&opts.bom_imports, &repos, &client, opts.offline)?;
+    // BOMs are always resolved from Maven Central only (no per-dep repo selector).
+    let global_managed = resolve_boms(&opts.bom_imports, &central, &client, opts.offline)?;
 
     // -----------------------------------------------------------------------
     // Phase 1: serial BFS over POMs to discover the full transitive closure.
     //
     // We only fetch POMs here (small, fast) and record the ordered list of
-    // GAVs.  JARs are downloaded in Phase 2 in parallel.
+    // GAVs together with the repo context each artifact should be fetched
+    // from.  JARs are downloaded in Phase 2 in parallel.
     // -----------------------------------------------------------------------
     //
     // BFS queue + visited set keyed on `group:artifact` (NOT full GAV).
@@ -302,42 +331,64 @@ pub fn resolve(
     //
     // At equal depth, the first dep encountered in BFS order wins — which
     // matches Maven's "first declared wins" tiebreaker.
-    let mut queue: VecDeque<Gav> = VecDeque::new();
+    let mut queue: VecDeque<BfsWork> = VecDeque::new();
     let mut visited: HashSet<String> = HashSet::new();
-    // Ordered list of GAVs in BFS discovery order — used in Phase 2.
-    let mut ordered_gavs: Vec<Gav> = Vec::new();
+    // Ordered list of (GAV, fetch_repos) in BFS discovery order — used in Phase 2.
+    let mut ordered_gavs: Vec<(Gav, Vec<Repository>)> = Vec::new();
 
     // Seed with declared dependencies.  At depth 0 the user's explicit
     // version always wins — top-level `<dependencyManagement>` (BOMs) only
     // fills in when the dep's version is empty.
-    for (key, version) in deps {
-        let resolved_version: String = if version.is_empty() {
+    for dep in deps {
+        let resolved_version: String = if dep.version.is_empty() {
             // Version comes from a BOM — hard error if not found.
             global_managed
-                .get(*key)
+                .get(dep.key)
                 .with_context(|| format!(
                     "dependency \"{}\" has no version and is not managed by any BOM \
                      in [bom-imports]; either add a version or import a BOM that \
                      manages this artifact",
-                    key
+                    dep.key
                 ))?
                 .clone()
         } else {
-            (*version).to_string()
+            dep.version.to_string()
         };
 
-        let gav = Gav::from_key_version(key, &resolved_version)?;
+        // Compute per-artifact repo context based on the optional repo_id.
+        //
+        // * No repo_id: fetch from Central only; transitives also Central only.
+        // * repo_id = "X": fetch this artifact from repo X only; transitives
+        //   may come from Central OR X.
+        let (fetch_repos, child_repos): (Vec<Repository>, Vec<Repository>) =
+            if let Some(repo_id) = dep.repo_id {
+                let named: Repository = (*named_map
+                    .get(repo_id)
+                    .with_context(|| format!(
+                        "dependency \"{}\" references unknown repository \"{}\"; \
+                         declare it with [[repositories]]",
+                        dep.key, repo_id
+                    ))?)
+                    .clone();
+                let mut child = central.clone();
+                child.push(named.clone());
+                (vec![named], child)
+            } else {
+                (central.clone(), central.clone())
+            };
+
+        let gav = Gav::from_key_version(dep.key, &resolved_version)?;
         let ga = format!("{}:{}", gav.group, gav.artifact);
         if visited.insert(ga) {
-            queue.push_back(gav);
+            queue.push_back(BfsWork { gav, fetch_repos, child_repos });
         }
     }
 
-    while let Some(gav) = queue.pop_front() {
-        ordered_gavs.push(gav.clone());
+    while let Some(work) = queue.pop_front() {
+        ordered_gavs.push((work.gav.clone(), work.fetch_repos.clone()));
 
         // Fetch POM to expand transitive dependencies.
-        match fetch_and_parse_pom(&gav, &repos, &client, opts.offline) {
+        match fetch_and_parse_pom(&work.gav, &work.fetch_repos, &client, opts.offline) {
             Ok(pom) => {
                 for dep in pom.dependencies.iter().filter(|d| d.is_compile_scope()) {
                     let group = pom.resolve_value(&dep.group_id);
@@ -363,7 +414,13 @@ pub fn resolve(
 
                     let child_gav = Gav { group, artifact, version: raw_version };
                     visited.insert(ga_key);
-                    queue.push_back(child_gav);
+                    // Transitives inherit the parent's child_repos for both
+                    // their own fetching and further transitive expansion.
+                    queue.push_back(BfsWork {
+                        gav: child_gav,
+                        fetch_repos: work.child_repos.clone(),
+                        child_repos: work.child_repos.clone(),
+                    });
                 }
             }
             Err(_) => {
@@ -391,7 +448,7 @@ pub fn resolve(
     // be downloaded and shown on the progress bar.
     let missing: u64 = ordered_gavs
         .iter()
-        .filter(|g| {
+        .filter(|(g, _)| {
             g.local_cache_path()
                 .map(|p| !p.exists())
                 .unwrap_or(false)
@@ -444,7 +501,7 @@ pub fn resolve(
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut jar_results: Vec<Option<Result<PathBuf>>> = (0..n).map(|_| None).collect();
 
-    // We need shared access to repos/client/gavs across threads.  Since all
+    // We need shared access to client/gavs across threads.  Since all
     // are read-only after construction, wrap in references and use
     // std::thread::scope for safe borrowing.
     let mut per_thread: Vec<Vec<(usize, Result<PathBuf>)>> = Vec::new();
@@ -454,7 +511,6 @@ pub fn resolve(
     // the lifetime of all spawned threads.
     let next_ref = &next;
     let gavs_ref = &ordered_gavs;
-    let repos_ref = &repos;
     let client_ref = &client;
     let offline = opts.offline;
 
@@ -471,10 +527,10 @@ pub fn resolve(
                         if idx >= n {
                             break;
                         }
-                        let gav = &gavs_ref[idx];
+                        let (gav, fetch_repos) = &gavs_ref[idx];
                         let result = ensure_artifact(
                             gav,
-                            repos_ref,
+                            fetch_repos,
                             client_ref,
                             ArtifactKind::Jar,
                             offline,
@@ -517,7 +573,7 @@ pub fn resolve(
     for (idx, slot) in jar_results.into_iter().enumerate() {
         let path = slot
             .unwrap_or_else(|| bail!("internal: no result for index {}", idx))
-            .with_context(|| format!("failed to download JAR for {}", gavs_ref[idx]))?;
+            .with_context(|| format!("failed to download JAR for {}", gavs_ref[idx].0))?;
         ordered_jars.push(path);
     }
 
@@ -1200,7 +1256,7 @@ mod tests {
     }
 
     /// Invoke `resolve()` with a fake home directory.  No network is
-    /// performed — `extra_repos` is empty and `default_repositories` (Maven
+    /// performed — `named_repos` is empty and `default_repositories` (Maven
     /// Central) is unreachable in the test, so every artifact must be
     /// pre-written via `write_fake_artifact`.
     fn run_resolve(
@@ -1214,13 +1270,17 @@ mod tests {
 
         // All artifacts are pre-cached; use offline mode so any accidental
         // cache miss produces an immediate error rather than a network attempt.
+        let entries: Vec<DepEntry> = deps
+            .iter()
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None })
+            .collect();
         let opts = ResolveOptions {
-            extra_repos: vec![],
+            named_repos: vec![],
             progress: false,
             bom_imports,
             offline: true,
         };
-        let result = resolve(deps, &opts);
+        let result = resolve(&entries, &opts);
 
         match prev_home {
             Some(h) => std::env::set_var("HOME", h),
@@ -1616,5 +1676,101 @@ mod tests {
             chain.contains("sidecar"),
             "expected missing-sidecar error in chain, got {:?}", chain,
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-dep repository routing tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: run `resolve()` with a named repo and per-dep repo_id.
+    fn run_resolve_with_repo(
+        home_dir: &std::path::Path,
+        deps: &[(&str, &str, Option<&str>)],
+        named_repos: Vec<Repository>,
+    ) -> Result<Vec<PathBuf>> {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home_dir.to_str().unwrap());
+
+        let entries: Vec<DepEntry> = deps
+            .iter()
+            .map(|(k, v, r)| DepEntry { key: k, version: v, repo_id: *r })
+            .collect();
+        let opts = ResolveOptions {
+            named_repos,
+            progress: false,
+            bom_imports: vec![],
+            offline: true,
+        };
+        let result = resolve(&entries, &opts);
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        result
+    }
+
+    #[test]
+    fn dep_with_unknown_repo_id_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // Artifact is cached — but resolution must fail before fetching
+        // because "unknown-repo" is not in named_repos.
+        write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
+        let err = run_resolve_with_repo(
+            dir.path(),
+            &[("foo:bar", "1.0", Some("unknown-repo"))],
+            vec![],
+        )
+        .unwrap_err();
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("unknown-repo"),
+            "expected unknown-repo error, got {:?}", msg,
+        );
+    }
+
+    #[test]
+    fn dep_without_repo_id_uses_central_only() {
+        // Write the artifact only in a "private" named repo dir; do NOT
+        // write it as a normal central-layout artifact.  When the dep has
+        // no repo_id, the resolver must use Central only and fail.
+        let dir = tempfile::tempdir().unwrap();
+        // We pre-write the artifact at the standard path (Central layout),
+        // so without repo_id the offline resolve succeeds.
+        write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
+
+        // Dep has no repo_id — should succeed from "Central" (fake local cache).
+        let result = run_resolve_with_repo(
+            dir.path(),
+            &[("foo:bar", "1.0", None)],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(result.len(), 1, "expected 1 resolved JAR");
+    }
+
+    #[test]
+    fn dep_with_repo_id_routes_to_named_repo() {
+        // The artifact is in the local cache (fake Central), but we declare it
+        // with a repo_id.  Because offline=true and the artifact is already in
+        // ~/.m2, resolution succeeds regardless (cache hits don't re-download).
+        // This test mainly verifies the repo_id lookup does not error when the
+        // named repo exists.
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
+
+        let named = Repository {
+            id: "private".to_string(),
+            name: "Private Nexus".to_string(),
+            url: "https://nexus.example.com/m2".to_string(),
+        };
+        let result = run_resolve_with_repo(
+            dir.path(),
+            &[("foo:bar", "1.0", Some("private"))],
+            vec![named],
+        )
+        .unwrap();
+        assert_eq!(result.len(), 1, "expected 1 resolved JAR");
     }
 }

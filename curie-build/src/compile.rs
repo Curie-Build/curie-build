@@ -33,7 +33,7 @@ use crate::incremental::{
 use crate::jar::classpath_string;
 use crate::kt_stale;
 use anyhow::{bail, Context, Result};
-use curie_deps::resolver::{resolve, ResolveOptions};
+use curie_deps::resolver::{resolve, DepEntry, ResolveOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -176,16 +176,16 @@ pub fn compile(
         // No deps to resolve. (BOMs without deps is a no-op for this phase.)
         vec![]
     } else {
-        let pairs: Vec<(&str, &str)> = desc
+        let pairs: Vec<DepEntry> = desc
             .dependencies
             .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository() })
             .collect();
 
         let jars = resolve(
             &pairs,
             &ResolveOptions {
-                extra_repos: extra_repos(desc),
+                named_repos: extra_repos(desc),
                 progress: true,
                 bom_imports: bom_gavs.clone(),
                 offline,
@@ -205,10 +205,14 @@ pub fn compile(
     let (ap_jars, ap_on_compile_classpath_jars) = if ap_pairs.is_empty() {
         (Vec::new(), Vec::new())
     } else {
+        let ap_entries: Vec<DepEntry> = ap_pairs
+            .iter()
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None })
+            .collect();
         let jars = resolve(
-            &ap_pairs,
+            &ap_entries,
             &ResolveOptions {
-                extra_repos: extra_repos(desc),
+                named_repos: extra_repos(desc),
                 progress: true,
                 bom_imports: bom_gavs.clone(),
                 offline,
@@ -239,9 +243,9 @@ pub fn compile(
                 .expect("on-cp coord must be in ap_pairs");
             // Resolve the single coord again — second call hits ~/.m2.
             let single = resolve(
-                &[(coord, version)],
+                &[DepEntry { key: coord, version, repo_id: None }],
                 &ResolveOptions {
-                    extra_repos: extra_repos(desc),
+                    named_repos: extra_repos(desc),
                     progress: false,
                     bom_imports: bom_gavs.clone(),
                     offline,
@@ -333,11 +337,11 @@ pub fn compile(
         let kver = desc.kotlin.version();
         let kotlin_jars = resolve(
             &[
-                (KOTLIN_COMPILER_COORD, kver),
-                (KOTLIN_STDLIB_COORD, kver),
+                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None },
+                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None },
             ],
             &ResolveOptions {
-                extra_repos: extra_repos(desc),
+                named_repos: extra_repos(desc),
                 progress: true,
                 bom_imports: bom_gavs.clone(),
                 offline,

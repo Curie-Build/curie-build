@@ -3,7 +3,9 @@
 /// A Maven-compatible artifact repository.
 #[derive(Debug, Clone)]
 pub struct Repository {
-    /// Human-readable name, e.g. "Maven Central".
+    /// Unique identifier used when deps select this repo, e.g. `"shibboleth"`.
+    pub id: String,
+    /// Human-readable display label, e.g. "Maven Central".
     pub name: String,
     /// Base URL without trailing slash, e.g. `https://repo1.maven.org/maven2`.
     pub url: String,
@@ -19,6 +21,7 @@ impl Repository {
 /// The default set of repositories: Maven Central only.
 pub fn default_repositories() -> Vec<Repository> {
     vec![Repository {
+        id: "central".to_string(),
         name: "Maven Central".to_string(),
         url: "https://repo1.maven.org/maven2".to_string(),
     }]
@@ -31,6 +34,7 @@ mod tests {
     #[test]
     fn artifact_url_basic() {
         let repo = Repository {
+            id: "central".to_string(),
             name: "Central".to_string(),
             url: "https://repo1.maven.org/maven2".to_string(),
         };
@@ -43,6 +47,7 @@ mod tests {
     #[test]
     fn artifact_url_trailing_slash_normalised() {
         let repo = Repository {
+            id: "central".to_string(),
             name: "Central".to_string(),
             url: "https://repo1.maven.org/maven2/".to_string(),
         };

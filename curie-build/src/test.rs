@@ -7,7 +7,7 @@ use crate::incremental::{
 use crate::jar::classpath_string;
 use crate::{build, descriptor};
 use anyhow::{bail, Context, Result};
-use curie_deps::resolver::{resolve, ResolveOptions};
+use curie_deps::resolver::{resolve, DepEntry, ResolveOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 const JUNIT_STANDALONE_COORD: &str =
@@ -80,16 +80,16 @@ pub fn run_tests(
     let test_dep_jars = if desc.test_dependencies.is_empty() {
         vec![]
     } else {
-        let pairs: Vec<(&str, &str)> = desc
+        let pairs: Vec<DepEntry> = desc
             .test_dependencies
             .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository() })
             .collect();
 
         resolve(
             &pairs,
             &ResolveOptions {
-                extra_repos: extra_repos.clone(),
+                named_repos: extra_repos.clone(),
                 progress: true,
                 bom_imports: test_bom_gavs.clone(),
                 offline,
@@ -107,11 +107,11 @@ pub fn run_tests(
         let kver = desc.kotlin.version();
         let kotlin_jars = resolve(
             &[
-                (KOTLIN_COMPILER_COORD, kver),
-                (KOTLIN_STDLIB_COORD, kver),
+                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None },
+                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None },
             ],
             &ResolveOptions {
-                extra_repos: extra_repos.clone(),
+                named_repos: extra_repos.clone(),
                 progress: true,
                 bom_imports: test_bom_gavs.clone(),
                 offline,
@@ -136,11 +136,11 @@ pub fn run_tests(
         let kver = desc.kotlin.version();
         let kotlin_jars = resolve(
             &[
-                (KOTLIN_COMPILER_COORD, kver),
-                (KOTLIN_STDLIB_COORD, kver),
+                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None },
+                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None },
             ],
             &ResolveOptions {
-                extra_repos: extra_repos.clone(),
+                named_repos: extra_repos.clone(),
                 progress: false,
                 bom_imports: test_bom_gavs.clone(),
                 offline,
@@ -165,10 +165,14 @@ pub fn run_tests(
     let (test_ap_jars, test_ap_on_cp_jars) = if test_ap_coords.is_empty() {
         (Vec::new(), Vec::new())
     } else {
+        let ap_entries: Vec<DepEntry> = test_ap_coords
+            .iter()
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None })
+            .collect();
         let jars = resolve(
-            &test_ap_coords,
+            &ap_entries,
             &ResolveOptions {
-                extra_repos: extra_repos.clone(),
+                named_repos: extra_repos.clone(),
                 progress: true,
                 bom_imports: test_bom_gavs.clone(),
                 offline,
@@ -187,9 +191,9 @@ pub fn run_tests(
                 .map(|(_, v)| *v)
                 .expect("on-cp coord must be in test_ap_coords");
             let single = resolve(
-                &[(coord, version)],
+                &[DepEntry { key: coord, version, repo_id: None }],
                 &ResolveOptions {
-                    extra_repos: extra_repos.clone(),
+                    named_repos: extra_repos.clone(),
                     progress: false,
                     bom_imports: test_bom_gavs.clone(),
                     offline,
@@ -564,9 +568,9 @@ fn resolve_standalone(
     // coord is "group:artifact:version" — split off the version for the resolver.
     // The resolver takes (key, version) pairs where key = "group:artifact".
     let jars = resolve(
-        &[(JUNIT_STANDALONE_COORD, junit_version)],
+        &[DepEntry { key: JUNIT_STANDALONE_COORD, version: junit_version, repo_id: None }],
         &ResolveOptions {
-            extra_repos: extra_repos.to_vec(),
+            named_repos: extra_repos.to_vec(),
             progress: false,
             bom_imports: vec![],
             offline,

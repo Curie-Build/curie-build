@@ -78,13 +78,15 @@ pub fn build_with_desc(
     Ok(output)
 }
 
-/// Build the list of extra Maven repositories from the descriptor.
-/// Shared by production and test dependency resolution.
+/// Build the named-repository list from the descriptor for the resolver.
+/// All `[[repositories]]` entries are passed; the resolver activates only those
+/// referenced by a dep's `repository = "id"` field.
 pub fn extra_repos(desc: &descriptor::Descriptor) -> Vec<Repository> {
     desc.repositories
         .iter()
         .map(|r| Repository {
-            name: r.name.clone(),
+            id: r.id.clone(),
+            name: r.display_name().to_string(),
             url: r.url.clone(),
         })
         .collect()

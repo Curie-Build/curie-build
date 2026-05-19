@@ -26,7 +26,7 @@
 
 use crate::compile::flat_package_src_dirs;
 use anyhow::{bail, Context, Result};
-use curie_deps::resolver::{resolve, ResolveOptions};
+use curie_deps::resolver::{resolve, DepEntry, ResolveOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
@@ -50,9 +50,9 @@ const PJF_MAIN: &str = "com.palantir.javaformat.java.Main";
 /// `resolve()` calls would otherwise race on the same `~/.m2/.part` files.
 pub fn resolve_pjf(offline: bool) -> Result<Vec<PathBuf>> {
     resolve(
-        &[(PJF_COORD, PJF_VERSION)],
+        &[DepEntry { key: PJF_COORD, version: PJF_VERSION, repo_id: None }],
         &ResolveOptions {
-            extra_repos: vec![],
+            named_repos: vec![],
             progress: false,
             bom_imports: vec![],
             offline,

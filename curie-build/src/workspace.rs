@@ -158,6 +158,9 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
             );
         }
         inherit_from_workspace(&mut descriptor, &root_desc);
+        // Validate after inheritance so workspace-level repos are visible.
+        descriptor::validate_dep_repo_refs(&descriptor)
+            .with_context(|| format!("invalid repository reference in member \"{}\"", declared))?;
         raw_members.push(Member {
             path,
             declared: declared.clone(),
@@ -1176,14 +1179,14 @@ mod tests {
     fn repositories_inherit_prepended() {
         let ws = load_ws_with_content(
             "[workspace]\nmembers = [\"a\"]\n\
-             [[repositories]]\nname = \"ws-repo\"\nurl = \"https://ws.example.com\"\n",
+             [[repositories]]\nid = \"ws-repo\"\nurl = \"https://ws.example.com\"\n",
             &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
-                    [[repositories]]\nname = \"own-repo\"\nurl = \"https://own.example.com\"\n")],
+                    [[repositories]]\nid = \"own-repo\"\nurl = \"https://own.example.com\"\n")],
         ).unwrap();
         let repos = &ws.members[0].descriptor.repositories;
         assert_eq!(repos.len(), 2);
-        assert_eq!(repos[0].name, "ws-repo");
-        assert_eq!(repos[1].name, "own-repo");
+        assert_eq!(repos[0].id, "ws-repo");
+        assert_eq!(repos[1].id, "own-repo");
     }
 
     // -- annotation-processor inheritance ----------------------------------
