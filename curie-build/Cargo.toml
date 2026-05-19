@@ -2,6 +2,9 @@
 name = "curie-build"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+homepage = "https://curie-build.org"
+description = "The Curie build tool"
 build = "build.rs"
 
 [[bin]]
@@ -16,7 +19,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 zip = { version = "8", default-features = false, features = ["deflate"] }
-curie-deps = { path = "../curie-deps" }
+curie-deps = { version = "0.1.0", path = "../curie-deps" }
 indicatif = "0.18"
 
 [build-dependencies]
