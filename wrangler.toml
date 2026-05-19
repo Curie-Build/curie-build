@@ -1,0 +1,10 @@
+# Deploy with: npx wrangler deploy
+name = "curie-build"
+compatibility_date = "2026-05-06"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+[assets]
+directory = "web"
