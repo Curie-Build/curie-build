@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Get started · Curie</title>
+  <meta name="description" content="Install Curie and ship your first build in under five minutes.">
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/" target="_blank" rel="noopener">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<section style="padding-top: clamp(2rem, 5vw, 4rem);">
+  <div class="container">
+    <article class="prose" style="max-width: 50rem; margin-inline: auto;">
+
+      <span class="eyebrow">Get started · 5 min</span>
+      <h1>Your first build with Curie.</h1>
+      <p class="lede" style="margin-top: 1rem;">Install the binary, drop in a <code>Curie.toml</code>, and run <code>curie build</code>. That's the whole onboarding.</p>
+
+      <h2>1. Prerequisites</h2>
+      <ul>
+        <li><strong>JDK 21</strong> or newer on <code>PATH</code> — Curie shells out to <code>javac</code>.</li>
+        <li><strong>Cargo</strong>, if you're building Curie from source. Pre-built binaries land on the GitHub releases page.</li>
+      </ul>
+
+      <h2>2. Install</h2>
+      <p>From source (until the first release is cut):</p>
+      <div class="term">
+        <header>
+          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+          <span>shell</span>
+        </header>
+<pre><span class="prompt">$</span> git clone https://github.com/example/curie.git
+<span class="prompt">$</span> cd curie
+<span class="prompt">$</span> cargo install --path curie-build
+<span class="prompt">$</span> curie --version
+<span class="ok">curie 0.1.0</span></pre>
+      </div>
+
+      <h2>3. Create a project</h2>
+      <p>Anywhere on disk, lay out:</p>
+      <div class="term">
+        <header>
+          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+          <span>tree</span>
+        </header>
+<pre>hello/
+├── Curie.toml
+└── src/
+    └── com.example/
+        └── Hello.java</pre>
+      </div>
+
+      <p><code>Curie.toml</code> describes the build target. The flat-package layout (<code>src/com.example/...</code>) keeps the source tree shallow — the directory name <em>is</em> the package.</p>
+
+      <div class="code">
+        <header>
+          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+          <span>Curie.toml</span>
+        </header>
+<pre><span class="kw">[application]</span>
+<span class="kw">name</span>      = <span class="str">"hello"</span>
+<span class="kw">version</span>   = <span class="str">"0.1.0"</span>
+<span class="kw">mainClass</span> = <span class="str">"com.example.Hello"</span>
+</pre>
+      </div>
+
+      <div class="code">
+        <header>
+          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+          <span>src/com.example/Hello.java</span>
+        </header>
+<pre><span class="kw">package</span> com.example;
+
+<span class="kw">public class</span> Hello {
+    <span class="kw">public static void</span> main(String[] args) {
+        System.out.println(<span class="str">"Hello, Curie."</span>);
+    }
+}
+</pre>
+      </div>
+
+      <h2>4. Build</h2>
+      <div class="term">
+        <header>
+          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+          <span>$ curie build</span>
+        </header>
+<pre><span class="dim">Building hello v0.1.0</span>
+  Compile         1 source file(s)  <span class="dim">[no class files]</span>
+  Tests           no test sources found
+  Package         hello-0.1.0.jar
+  Done            <span class="em">target/hello-0.1.0.jar</span></pre>
+      </div>
+
+      <p>A second run with no edits short-circuits — every step prints <code>up to date</code> and exits in milliseconds.</p>
+
+      <h2>5. Run it</h2>
+      <div class="term">
+        <header>
+          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+          <span>$ curie run --no-docker</span>
+        </header>
+<pre>  Compile         up to date
+  Package         up to date
+<span class="ok">Hello, Curie.</span></pre>
+      </div>
+
+      <p>Or run the JAR directly: <code>java -jar target/hello-0.1.0.jar</code>.</p>
+
+      <h2>6. Add a dependency</h2>
+      <p>Open <code>Curie.toml</code> and add a <code>[dependencies]</code> table. Curie resolves from Maven Central, verifies the SHA-256 sidecar, and caches under <code>~/.m2/repository</code> — the same layout Maven uses.</p>
+      <div class="code">
+        <header>
+          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+          <span>Curie.toml</span>
+        </header>
+<pre><span class="kw">[application]</span>
+<span class="kw">name</span>      = <span class="str">"hello"</span>
+<span class="kw">version</span>   = <span class="str">"0.1.0"</span>
+<span class="kw">mainClass</span> = <span class="str">"com.example.Hello"</span>
+
+<span class="kw">[dependencies]</span>
+<span class="str">"com.fasterxml.jackson.core:jackson-databind"</span> = <span class="str">"2.17.2"</span>
+</pre>
+      </div>
+
+      <blockquote>
+        On the next build you'll see <code>Resolve deps&nbsp;&nbsp;3 JAR(s)</code> as Jackson and its transitive closure are fetched in parallel, checksum-verified, and put on the classpath. Subsequent builds verify the cached files against their <code>.sha256</code> sidecars with zero network calls.
+      </blockquote>
+
+      <h2>Next steps</h2>
+      <ul>
+        <li><a href="/docs/resolver.html">Dependency resolution & checksums</a> — how Curie talks to Maven Central</li>
+        <li><a href="/docs/kotlin.html">Kotlin support</a> — drop in <code>.kt</code> files, no config</li>
+        <li><a href="/docs/workspaces.html">Workspaces</a> — multi-module monorepos with one root <code>Curie.toml</code></li>
+        <li><a href="/docs/incremental.html">Incremental builds</a> — how the rebuild gate decides what to do</li>
+      </ul>
+
+    </article>
+  </div>
+</section>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Resolver & checksums · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/" target="_blank" rel="noopener">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · resolver</span>
+    <h1>Resolver &amp; checksums</h1>
+    <p class="lede">Curie talks to Maven Central directly. No POM you wrote, no plugin ceremony — just <code>group:artifact = "version"</code> in <code>Curie.toml</code> and a transitive closure resolved against the same <code>~/.m2/repository</code> Maven uses.</p>
+
+    <h2>Declaring dependencies</h2>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[dependencies]</span>
+<span class="str">"com.fasterxml.jackson.core:jackson-databind"</span> = <span class="str">"2.17.2"</span>
+<span class="str">"com.google.guava:guava"</span>                     = <span class="str">"33.2.0-jre"</span>
+
+<span class="kw">[test-dependencies]</span>
+<span class="str">"org.junit.jupiter:junit-jupiter"</span> = <span class="str">"5.11.0"</span></pre>
+    </div>
+
+    <p>Each entry is <code>"group:artifact" = "version"</code>. An empty version (<code>""</code>) means the version comes from a BOM — see below.</p>
+
+    <h2>BOM imports</h2>
+    <p>A BOM (<em>bill of materials</em>) is a POM-packaged artifact whose <code>&lt;dependencyManagement&gt;</code> section pins versions for a family of related artifacts. List them under <code>[bom-imports]</code> in priority order (later wins on collision):</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[bom-imports]</span>
+<span class="str">"com.fasterxml.jackson:jackson-bom"</span> = <span class="str">"2.17.2"</span>
+
+<span class="kw">[dependencies]</span>
+<span class="com"># empty version → resolved from the BOM above</span>
+<span class="str">"com.fasterxml.jackson.core:jackson-databind"</span> = <span class="str">""</span>
+<span class="str">"com.fasterxml.jackson.core:jackson-annotations"</span> = <span class="str">""</span></pre>
+    </div>
+
+    <p>If you declare a dependency with <code>""</code> and no BOM provides it, the build fails up front — there's no silent fallback to "latest".</p>
+
+    <h2>Transitive resolution</h2>
+    <p>Curie does a breadth-first walk of every dependency's POM, applying Maven's conflict-resolution rules:</p>
+    <ul>
+      <li><strong>Nearest wins</strong> — when the same <code>group:artifact</code> appears at two depths, the shallower occurrence's version is used.</li>
+      <li><strong>First declared wins</strong> at equal depth.</li>
+      <li><strong>Top-level BOM beats transitive explicit</strong> — your <code>[bom-imports]</code> overrides any version a transitive POM hard-codes.</li>
+    </ul>
+
+    <p>POMs are fetched serially in phase 1 (small, fast). JARs are then downloaded in parallel in phase 2 — up to eight concurrent workers — and arrive in the local cache in a stable, topologically ordered classpath.</p>
+
+    <h2 id="checksums">Checksum verification</h2>
+    <p>Every artifact Curie downloads is verified against its <code>.sha256</code> sidecar from the same repository. The sidecar hash is then persisted next to the artifact in <code>~/.m2/repository/...artifact.jar.sha256</code>, mirroring Maven Central's published layout. On the next build the cached hash is compared against the cached JAR — zero network calls, zero implicit trust.</p>
+
+    <blockquote>
+      A missing sidecar is a <strong>hard error</strong>. Every well-formed Maven repository publishes one — Maven's <code>deploy</code> plugin generates them, and Nexus / Artifactory generate them server-side on upload. A missing sidecar usually means a misconfigured proxy or a manually-uploaded artifact, and either way Curie refuses to install an unverifiable JAR.
+    </blockquote>
+
+    <h3>Fallback to SHA-1</h3>
+    <p>If a repository only publishes <code>.sha1</code> sidecars (older mirrors, some private repos), Curie falls back to that. SHA-1 is cryptographically weak for authentication but still catches accidental corruption and unsophisticated substitution — adequate for the integrity-check use case.</p>
+
+    <h3>Tamper detection</h3>
+    <p>Edit a JAR in <code>~/.m2/repository</code> by hand and the next build will fail with a checksum mismatch error citing the artifact and both digests. The local cache is now tamper-evident.</p>
+
+    <h2>Offline mode</h2>
+    <p>Pass <code>--offline</code> to forbid network calls entirely. Any cache miss is an immediate error. Useful for sealed CI environments, reproducibility checks, and incident-response builds where you want to be sure nothing on disk has changed since the last good build.</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build --offline</span>
+      </header>
+<pre><span class="dim">Building greeter v0.1.0</span>
+  Compile         up to date
+  Tests           up to date
+  Package         up to date
+  Done            <span class="em">target/greeter-0.1.0.jar</span></pre>
+    </div>
+
+    <h2>Extra repositories</h2>
+    <p>By default the resolver hits Maven Central. Add private mirrors or company-internal Nexus instances with <code>[repositories]</code>:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[repositories]</span>
+<span class="kw">internal</span> = <span class="str">"https://nexus.internal.example.com/repository/maven-public/"</span></pre>
+    </div>
+
+    <p>Repositories are tried in order — Central first, then each <code>[repositories]</code> entry in declaration order — until an artifact resolves.</p>
+
+    <div class="pager">
+      <a href="/docs/" >
+        <span>← Back</span>
+        <strong>Overview</strong>
+      </a>
+      <a href="/docs/kotlin.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Kotlin support</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

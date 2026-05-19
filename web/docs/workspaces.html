@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Workspaces · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/" target="_blank" rel="noopener">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · workspaces</span>
+    <h1>Workspaces</h1>
+    <p class="lede">Curie inherits Cargo's workspace model. One root <code>Curie.toml</code> lists members; each member is a self-contained project; the root inherits shared config down to every member.</p>
+
+    <h2>Layout</h2>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>tree</span>
+      </header>
+<pre>monorepo/
+├── Curie.toml          <span class="dim"># workspace root — no [application] / [library]</span>
+├── app/
+│   ├── Curie.toml      <span class="dim"># declares [application]</span>
+│   └── src/...
+├── core/
+│   ├── Curie.toml      <span class="dim"># declares [library]</span>
+│   └── src/...
+└── utils/
+    ├── Curie.toml      <span class="dim"># declares [library]</span>
+    └── src/...</pre>
+    </div>
+
+    <h2>Root configuration</h2>
+    <p>The root <code>Curie.toml</code> declares members and any config that should be inherited:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml — workspace root</span>
+      </header>
+<pre><span class="kw">[workspace]</span>
+<span class="kw">members</span> = [<span class="str">"app"</span>, <span class="str">"core"</span>, <span class="str">"utils"</span>]
+
+<span class="kw">[java]</span>
+<span class="kw">sourceCompatibility</span> = <span class="str">"21"</span>
+
+<span class="kw">[bom-imports]</span>
+<span class="str">"com.fasterxml.jackson:jackson-bom"</span> = <span class="str">"2.17.2"</span>
+
+<span class="kw">[test-bom-imports]</span>
+<span class="str">"org.junit:junit-bom"</span> = <span class="str">"5.11.0"</span></pre>
+    </div>
+
+    <h2>Inheritance rules</h2>
+    <ul>
+      <li><code>[java]</code> — applies to every member that does not declare its own.</li>
+      <li><code>[bom-imports]</code> / <code>[test-bom-imports]</code> — merged with each member's own imports. <strong>Member entries take precedence</strong> on a name collision.</li>
+      <li><code>[repositories]</code> — also inherited; member entries appended.</li>
+    </ul>
+
+    <p>Members declare dependencies with empty version strings (<code>""</code>) to defer to the inherited BOMs:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>app/Curie.toml</span>
+      </header>
+<pre><span class="kw">[application]</span>
+<span class="kw">name</span>      = <span class="str">"app"</span>
+<span class="kw">version</span>   = <span class="str">"0.1.0"</span>
+<span class="kw">mainClass</span> = <span class="str">"com.example.App"</span>
+
+<span class="kw">[dependencies]</span>
+<span class="com"># resolved from the workspace's jackson-bom</span>
+<span class="str">"com.fasterxml.jackson.core:jackson-databind"</span> = <span class="str">""</span>
+
+<span class="kw">[workspace-dependencies]</span>
+<span class="kw">core</span>  = { <span class="kw">path</span> = <span class="str">"../core"</span> }
+<span class="kw">utils</span> = { <span class="kw">path</span> = <span class="str">"../utils"</span> }</pre>
+    </div>
+
+    <h2>Topo-sorted builds</h2>
+    <p>Run <code>curie build</code> from the workspace root and Curie computes a topological order over <code>[workspace-dependencies]</code>, then builds each member in dependency order. Upstream <code>target/classes</code> directories — not just their JARs — are placed on downstream compile classpaths, so downstream tests don't have to wait for upstream JAR packaging to complete.</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build  # from workspace root</span>
+      </header>
+<pre><span class="dim">Workspace . build (3 members)</span>
+
+<span class="em">[1/3]</span> utils
+  Compile         3 source file(s)
+  Tests           <span class="ok">✔ 8 tests successful</span>
+<span class="em">[2/3]</span> core
+  Compile         5 source file(s)
+  Tests           <span class="ok">✔ 12 tests successful</span>
+<span class="em">[3/3]</span> app
+  Resolve deps    <span class="pkg">7 JAR(s)</span>
+  Compile         4 source file(s)
+  Tests           <span class="ok">✔ 7 tests successful</span>
+  Done            <span class="em">target/app-0.1.0.jar</span></pre>
+    </div>
+
+    <h2>Targeted builds</h2>
+    <p>Run <code>curie build</code> from a member directory and Curie still respects topology — it builds the member plus its transitive workspace dependencies, but skips siblings the target doesn't depend on. This is the everyday loop in a large monorepo: edit one package, build only what's affected.</p>
+
+    <h2>List members</h2>
+    <p><code>curie list</code> from the root prints the member roster and their declared roles (<code>application</code> vs <code>library</code>):</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie list</span>
+      </header>
+<pre><span class="dim">Workspace . (3 members)</span>
+  app    application  v0.1.0
+  core   library      v0.1.0
+  utils  library      v0.1.0</pre>
+    </div>
+
+    <h2>Parallel formatting</h2>
+    <p><code>curie fmt</code> at the workspace root fans out across every member in parallel. palantir-java-format is resolved once, then the JAR list is shared across the worker threads so there's no contention on the local cache.</p>
+
+    <div class="pager">
+      <a href="/docs/incremental.html">
+        <span>← Previous</span>
+        <strong>Incremental builds</strong>
+      </a>
+      <a href="/docs/" style="text-align: right; align-items: flex-end;">
+        <span>Up →</span>
+        <strong>Documentation overview</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

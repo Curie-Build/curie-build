@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Docs · Curie</title>
+  <meta name="description" content="Curie documentation: dependency resolution, Kotlin support, incremental builds, multi-module workspaces.">
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/" target="_blank" rel="noopener">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/resolver.html">Resolver & checksums</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Docs</span>
+    <h1>Curie, end to end.</h1>
+    <p class="lede">Curie's surface area is small — a single binary, a single config file. The docs below cover each subsystem you'll hit as your project grows.</p>
+
+    <h2>Where to start</h2>
+    <p>If you haven't built anything yet, run through <a href="/getting-started.html">Get started</a> first. It takes about five minutes and leaves you with a working JAR you can run. Once that's clicking, the topics below dive into each piece.</p>
+
+    <h2>Topics</h2>
+
+    <div class="feature-rows" style="margin-top: 1.5rem;">
+      <a class="feature-card" href="/docs/resolver.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">01</span>
+        <h3>Resolver &amp; checksums</h3>
+        <p>How Curie pulls JARs from Maven Central, expands transitives, applies BOM imports, and verifies every artifact against a <code>.sha256</code> sidecar.</p>
+      </a>
+      <a class="feature-card" href="/docs/kotlin.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">02</span>
+        <h3>Kotlin support</h3>
+        <p>Auto-detected <code>.kt</code> sources, two-phase Kotlin/Java compile, automatic Kotlin main-class detection, stale-class cleanup.</p>
+      </a>
+      <a class="feature-card" href="/docs/incremental.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">03</span>
+        <h3>Incremental builds</h3>
+        <p>The mtime check, the JDK fingerprint, the per-source class manifest the wrapper emits, and how all three combine into a precise rebuild gate.</p>
+      </a>
+      <a class="feature-card" href="/docs/workspaces.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">04</span>
+        <h3>Workspaces</h3>
+        <p>Multi-module projects under one root <code>Curie.toml</code>. Topo-sorted builds, inherited BOM imports, shared Java version.</p>
+      </a>
+    </div>
+
+    <h2>Reference</h2>
+    <p>The <a href="/docs/resolver.html">Resolver</a> page lists every TOML key in the dependency section. <a href="/docs/workspaces.html">Workspaces</a> covers the inheritance rules. If something isn't documented, treat it as not yet stable — Curie is a research project and the surface area is intentionally small until each piece has had time to settle.</p>
+
+    <h2>Source &amp; issues</h2>
+    <p>The codebase lives on <a href="https://github.com/" target="_blank" rel="noopener">GitHub</a>. Issues, design discussions, and merge requests are all welcome.</p>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

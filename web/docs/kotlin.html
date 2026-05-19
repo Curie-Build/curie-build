@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kotlin support · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/" target="_blank" rel="noopener">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · kotlin</span>
+    <h1>Kotlin support</h1>
+    <p class="lede">Drop a <code>.kt</code> file into your sources and the rest happens automatically. No <code>[kotlin]</code> section to fill in, no plugin to add, no kotlinc to install.</p>
+
+    <h2>Detection</h2>
+    <p>On every build Curie scans the source roots. If at least one <code>.kt</code> file is present, it switches into <em>mixed mode</em>: the Kotlin compiler and the Kotlin stdlib are resolved from Maven Central (cached in <code>~/.m2</code> after the first run), and compilation runs in two phases.</p>
+
+    <h2>Two-phase compile</h2>
+    <ol>
+      <li><strong>Phase 1 — kotlinc.</strong> Every <code>.kt</code> and every <code>.java</code> source is handed to kotlinc together. Kotlin resolves Java types directly from source — no pre-compiled stubs needed — and writes <code>.class</code> files to <code>target/classes/</code>.</li>
+      <li><strong>Phase 2 — javac.</strong> Only the <code>.java</code> sources are re-compiled, this time with <code>target/classes/</code> on the classpath so javac sees the Kotlin bytecode from phase 1. This step is skipped when there are no Java sources.</li>
+    </ol>
+
+    <p>The two-phase order gives both directions of interop. Java can call Kotlin types (resolved against phase-1 bytecode); Kotlin can call Java types (resolved against source in phase 1).</p>
+
+    <h2>Source layouts</h2>
+    <p>Three layouts coexist in the same project:</p>
+    <ul>
+      <li><strong>Maven Java</strong> — <code>src/main/java/com/foo/Bar.java</code></li>
+      <li><strong>Maven Kotlin</strong> — <code>src/main/kotlin/com/foo/Bar.kt</code></li>
+      <li><strong>Flat-package</strong> — <code>src/com.foo/Bar.kt</code> (the directory name <em>is</em> the package; <code>.java</code> and <code>.kt</code> can share a single dot-named directory)</li>
+    </ul>
+
+    <h2>Main class auto-detection</h2>
+    <p>For Kotlin <code>fun main()</code> declarations, Curie infers the synthetic <code>FileNameKt</code> class name and writes it into the JAR's <code>Main-Class</code> manifest entry. You can still set <code>mainClass</code> in <code>Curie.toml</code> to override.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>src/main/kotlin/com/example/Hello.kt</span>
+      </header>
+<pre><span class="kw">package</span> com.example
+
+<span class="kw">fun</span> main() {
+    println(<span class="str">"Hello from Curie (Kotlin)!"</span>)
+}</pre>
+    </div>
+
+    <p>Build the project and Curie picks <code>com.example.HelloKt</code> automatically — no <code>mainClass</code> required in <code>Curie.toml</code>.</p>
+
+    <h2>Stale-class detection</h2>
+    <p>Removing a top-level type from a <code>.kt</code> file — or deleting a <code>.kt</code> file outright — leaves orphan <code>.class</code> files in <code>target/classes</code> that the next javac run could silently re-pick-up. Curie cleans them in three steps:</p>
+
+    <ol>
+      <li>Before kotlinc runs, every <code>.class</code> file whose JVM <code>SourceFile</code> attribute ends in <code>.kt</code> is deleted.</li>
+      <li>kotlinc compiles the current source set and re-emits exactly the classes still produced. Anything not re-emitted stays gone.</li>
+      <li>A canonical Kotlin source list is stamped to <code>target/.kt-sources</code> so a pure deletion (which leaves no mtime to compare against) still triggers a recompile next time.</li>
+    </ol>
+
+    <p>The Java equivalent — driven by a source→class manifest the javac wrapper emits — covers the same cases for <code>.java</code> files. See <a href="/docs/incremental.html#stale">Incremental builds &rsaquo; stale detection</a>.</p>
+
+    <h2>Worked example</h2>
+    <p>A Java entry point calling into a Kotlin data class — both files in the same flat-package directory:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>src/com.example.mixed/Greeting.kt</span>
+      </header>
+<pre><span class="kw">package</span> com.example.mixed
+
+<span class="kw">data class</span> Greeting(<span class="kw">val</span> name: String) {
+    <span class="kw">fun</span> message(): String = <span class="str">"Hello, $name, from Kotlin!"</span>
+}</pre>
+    </div>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>src/com.example.mixed/Main.java</span>
+      </header>
+<pre><span class="kw">package</span> com.example.mixed;
+
+<span class="kw">public class</span> Main {
+    <span class="kw">public static void</span> main(String[] args) {
+        Greeting g = <span class="kw">new</span> Greeting(<span class="str">"Curie"</span>);
+        System.out.println(g.message());
+    }
+}</pre>
+    </div>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build</span>
+      </header>
+<pre><span class="dim">Building hello-mixed v0.1.0</span>
+  Resolve Kotlin  <span class="pkg">8 JAR(s)</span>
+  Compile         2 source file(s)  <span class="dim">[no class files]</span>
+  Tests           <span class="ok">✔ 2 tests successful</span>
+  Done            <span class="em">target/hello-mixed-0.1.0.jar</span></pre>
+    </div>
+
+    <div class="pager">
+      <a href="/docs/resolver.html">
+        <span>← Previous</span>
+        <strong>Resolver &amp; checksums</strong>
+      </a>
+      <a href="/docs/incremental.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Incremental builds</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

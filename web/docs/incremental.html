@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Incremental builds · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/" target="_blank" rel="noopener">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · incremental</span>
+    <h1>Incremental builds</h1>
+    <p class="lede">Curie's rebuild gate is precise — false negatives (a missed edit) would be worse than a stray rebuild, and the design is biased accordingly. Three signals decide whether to invoke the compiler at all.</p>
+
+    <h2>The mtime check</h2>
+    <p>The compiler runs when any source file's mtime is greater than or equal to the oldest <code>.class</code> file's mtime in <code>target/classes</code>. The comparison is intentionally <code>≥</code>, not <code>&gt;</code> — on second-resolution filesystems (FAT, some NFS mounts, CI cache restores) a fast edit/test/edit loop can put an edit and a stamp in the same filesystem second, and silently masking the second edit would be a correctness bug.</p>
+
+    <p>Non-class files in <code>target/classes</code> (annotation-processor resources like <code>BenchmarkList</code> or <code>CompilerHints</code>) are deliberately ignored — they can have older mtimes than your sources and would otherwise force a recompile on every build.</p>
+
+    <h2>The JDK fingerprint</h2>
+    <p>Curie writes the output of <code>javac -version</code> to <code>target/.javac-version</code> after every successful build. On the next build that string is compared to the current <code>javac -version</code>; any difference forces a full recompile regardless of source mtimes. Upgrading the JDK between builds is an unambiguous "everything is stale" signal.</p>
+
+    <h2 id="stale">Stale-class detection</h2>
+    <p>The mtime check decides <em>whether</em> to recompile. Stale-class detection decides <em>what stays on disk</em>. The story differs by language because Java and Kotlin emit metadata differently.</p>
+
+    <h3>Java: source→class manifest</h3>
+    <p>Curie ships a javac wrapper that registers a <code>TaskListener</code> on <code>JavacTask</code>. For every <code>TaskEvent.Kind.GENERATE</code> event the listener records the originating source path and the binary name of the emitted class. After a successful build the mapping is written atomically to <code>target/.classes.toml</code>:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>target/.classes.toml</span>
+      </header>
+<pre><span class="com"># Authoritative source → class-file mapping</span>
+<span class="kw">[sources]</span>
+<span class="str">"/abs/path/src/com/foo/Bar.java"</span> = [<span class="str">"com/foo/Bar.class"</span>, <span class="str">"com/foo/Bar$Inner.class"</span>]</pre>
+    </div>
+
+    <p>On the next build:</p>
+    <ul>
+      <li><strong>Pre-compile prune</strong> — any source in the previous manifest that no longer exists in the current source set has all of its old classes deleted before javac runs. Stops a deleted-but-still-on-disk class from being picked up via javac's classes-dir-on-classpath fall-through.</li>
+      <li><strong>Post-compile prune</strong> — for every source present in both old and new manifests, the set difference (classes in old, not in new) is pruned. Catches the case where a still-present source produces fewer classes than before (e.g. an inner / companion type was removed).</li>
+    </ul>
+
+    <p>Annotation-processor outputs (under <code>target/generated-sources</code>) are exempted from pre-pruning so a no-change rebuild doesn't churn through every AP-generated class — the post-prune handles the "AP stopped producing this" case correctly.</p>
+
+    <h3>Kotlin: SourceFile attribute + source-set stamp</h3>
+    <p>kotlinc offers no equivalent <code>TaskListener</code> hook, so Curie exploits a different invariant: <strong>every</strong> Kotlin source is passed to kotlinc on every recompile, so kotlinc re-emits every class the current source set still produces.</p>
+
+    <p>Before kotlinc runs, Curie parses each <code>.class</code> file's JVM <code>SourceFile</code> attribute and deletes any whose value ends with <code>.kt</code>. kotlinc then puts back exactly what's still live. Anything not re-emitted (a deleted source, a removed top-level declaration) is gone.</p>
+
+    <p>Pure deletions wouldn't bump any surviving mtime, so the source list is also stamped to <code>target/.kt-sources</code>. Any change between builds — additions, deletions, or renames — forces a recompile so the wipe gets a chance to run.</p>
+
+    <h2>What you'll see</h2>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build  # second run, no edits</span>
+      </header>
+<pre>  Compile         <span class="dim">up to date</span>
+  Tests           <span class="dim">up to date</span>
+  Package         <span class="dim">up to date</span>
+  Done            <span class="em">target/hello-0.1.0.jar</span></pre>
+    </div>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build  # after removing a companion class</span>
+      </header>
+<pre>  Compile         2 source file(s)  <span class="dim">[source changed]</span>
+  Stale (Kotlin)  removed 1 orphan class file
+  Tests           <span class="ok">✔ 2 tests successful</span>
+  Done            <span class="em">target/hello-0.1.0.jar</span></pre>
+    </div>
+
+    <h2>Forcing a clean rebuild</h2>
+    <p><code>curie clean</code> wipes the <code>target/</code> directory entirely. The next build starts from a cold cache — same as a fresh clone.</p>
+
+    <div class="pager">
+      <a href="/docs/kotlin.html">
+        <span>← Previous</span>
+        <strong>Kotlin support</strong>
+      </a>
+      <a href="/docs/workspaces.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Workspaces</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

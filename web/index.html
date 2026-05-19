@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Curie — a fast, minimal build tool for the JVM</title>
+  <meta name="description" content="Curie is a fast, minimal build tool for Java and Kotlin projects, written in Rust. Maven Central resolution, checksum verification, incremental compilation, multi-module workspaces — driven by a single Curie.toml file.">
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/" target="_blank" rel="noopener">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="container">
+    <div>
+      <span class="eyebrow">Research project · v0.1</span>
+      <h1>A build tool for the JVM, distilled to its <span class="glow">stable isotope</span>.</h1>
+      <p class="lede">
+        Curie is a fast, minimal build tool for Java and Kotlin projects, written in Rust. One <code>Curie.toml</code> file replaces hundreds of lines of POM XML or Gradle DSL — and the binary starts in milliseconds, not seconds.
+      </p>
+      <div class="hero-ctas">
+        <a class="btn btn-primary" href="/getting-started.html">Get started →</a>
+        <a class="btn btn-ghost" href="/docs/">Read the docs</a>
+      </div>
+      <div class="hero-stats">
+        <div class="hero-stat">
+          <span class="num">~20</span>
+          <span class="label">lines of config</span>
+        </div>
+        <div class="hero-stat">
+          <span class="num">8×</span>
+          <span class="label">parallel downloads</span>
+        </div>
+        <div class="hero-stat">
+          <span class="num">SHA-256</span>
+          <span class="label">verified by default</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="atom-wrap" aria-hidden="true">
+      <svg class="atom" viewBox="0 0 400 400">
+        <defs>
+          <radialGradient id="nuc" cx="50%" cy="50%" r="50%">
+            <stop offset="0%"  stop-color="#d3ffe1"/>
+            <stop offset="55%" stop-color="#7df3a5"/>
+            <stop offset="100%" stop-color="#3a8a55" stop-opacity="0.7"/>
+          </radialGradient>
+        </defs>
+
+        <!-- three tilted orbits -->
+        <g transform="rotate(0 200 200)">
+          <ellipse class="orbit" cx="200" cy="200" rx="170" ry="55"/>
+          <g class="electron-group e1">
+            <circle class="electron" cx="370" cy="200" r="5"/>
+          </g>
+        </g>
+        <g transform="rotate(60 200 200)">
+          <ellipse class="orbit" cx="200" cy="200" rx="170" ry="55"/>
+          <g class="electron-group e2">
+            <circle class="electron" cx="370" cy="200" r="5"/>
+          </g>
+        </g>
+        <g transform="rotate(120 200 200)">
+          <ellipse class="orbit" cx="200" cy="200" rx="170" ry="55"/>
+          <g class="electron-group e3">
+            <circle class="electron" cx="370" cy="200" r="5"/>
+          </g>
+        </g>
+
+        <!-- nucleus -->
+        <circle class="nucleus" cx="200" cy="200" r="22" fill="url(#nuc)"/>
+        <circle cx="200" cy="200" r="9" fill="#e8f9ee"/>
+      </svg>
+      <div class="element-badge">
+        <span class="num">96</span>
+        <span class="sym">Cm</span>
+        <span class="name">Curium</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- =================== Periodic feature grid =================== -->
+<section class="features">
+  <div class="container">
+    <header>
+      <span class="eyebrow">The toolkit</span>
+      <h2>Eight elements. One build tool.</h2>
+      <p>Every feature you'd expect from a modern build system — and nothing you wouldn't. Click any element for details.</p>
+    </header>
+
+    <div class="periodic">
+      <a class="element" href="/docs/resolver.html">
+        <span class="num">01</span>
+        <span class="sym">Mvn</span>
+        <span class="name">Resolver</span>
+        <span class="tag">Maven Central, BOM imports, transitive expansion</span>
+      </a>
+      <a class="element" href="/docs/resolver.html#checksums">
+        <span class="num">02</span>
+        <span class="sym">Sha</span>
+        <span class="name">Verified</span>
+        <span class="tag">SHA-256 sidecar checks every cached artifact</span>
+      </a>
+      <a class="element" href="/docs/kotlin.html">
+        <span class="num">03</span>
+        <span class="sym">Kt</span>
+        <span class="name">Kotlin</span>
+        <span class="tag">Auto-detected, two-phase compile, no config</span>
+      </a>
+      <a class="element" href="/docs/incremental.html">
+        <span class="num">04</span>
+        <span class="sym">Inc</span>
+        <span class="name">Incremental</span>
+        <span class="tag">mtime + per-source class manifest + JDK fingerprint</span>
+      </a>
+      <a class="element" href="/docs/workspaces.html">
+        <span class="num">05</span>
+        <span class="sym">Wks</span>
+        <span class="name">Workspaces</span>
+        <span class="tag">Topo-sorted multi-module with inherited BOMs</span>
+      </a>
+      <a class="element" href="/docs/">
+        <span class="num">06</span>
+        <span class="sym">Fmt</span>
+        <span class="name">Formatter</span>
+        <span class="tag">palantir-java-format, one click across the workspace</span>
+      </a>
+      <a class="element" href="/docs/">
+        <span class="num">07</span>
+        <span class="sym">Tst</span>
+        <span class="name">Tests</span>
+        <span class="tag">JUnit 5 console runner, no Surefire ceremony</span>
+      </a>
+      <a class="element" href="/docs/">
+        <span class="num">08</span>
+        <span class="sym">Dkr</span>
+        <span class="name">Docker</span>
+        <span class="tag">Optimised Dockerfile, generated automatically</span>
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- =================== Code + terminal pair =================== -->
+<section>
+  <div class="container">
+    <header style="margin-bottom: 2rem;">
+      <span class="eyebrow">A complete build</span>
+      <h2 style="margin-top: 1rem;">One file in. A signed JAR out.</h2>
+    </header>
+
+    <div class="code-pair">
+      <div class="code">
+        <header>
+          <span class="dot live"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span>Curie.toml</span>
+        </header>
+<pre><span class="com"># Everything Curie needs to build a Jackson-using app.</span>
+<span class="kw">[application]</span>
+<span class="kw">name</span>      = <span class="str">"greeter"</span>
+<span class="kw">version</span>   = <span class="str">"0.1.0"</span>
+<span class="kw">mainClass</span> = <span class="str">"com.example.Greeter"</span>
+
+<span class="kw">[dependencies]</span>
+<span class="str">"com.fasterxml.jackson.core:jackson-databind"</span> = <span class="str">"2.17.2"</span>
+
+<span class="kw">[test-dependencies]</span>
+<span class="str">"org.junit.jupiter:junit-jupiter"</span> = <span class="str">"5.11.0"</span>
+</pre>
+      </div>
+
+      <div class="term">
+        <header>
+          <span class="dot live"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span>$ curie build</span>
+        </header>
+<pre><span class="dim">Building greeter v0.1.0</span>
+  Resolve deps    <span class="pkg">3 JAR(s)</span>
+  Compile         1 source file(s)  <span class="dim">[no class files]</span>
+  Compile tests   1 source file(s)
+  Tests           <span class="ok">✔ 4 tests successful</span>
+  Package         greeter-0.1.0.jar
+  Done            <span class="em">target/greeter-0.1.0.jar</span>
+</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- =================== Why Curie =================== -->
+<section>
+  <div class="container">
+    <header style="margin-bottom: 2rem;">
+      <span class="eyebrow">Where it fits</span>
+      <h2 style="margin-top: 1rem;">Maven and Gradle, condensed.</h2>
+    </header>
+
+    <table class="compare">
+      <thead>
+        <tr>
+          <th></th>
+          <th class="curie">Curie</th>
+          <th>Maven</th>
+          <th>Gradle</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Configuration</td>
+          <td class="curie">Curie.toml (~20 lines)</td>
+          <td>pom.xml (100+ XML)</td>
+          <td>build.gradle DSL</td>
+        </tr>
+        <tr>
+          <td>Startup</td>
+          <td class="curie">Native binary — instant</td>
+          <td>JVM cold start (~1–2 s)</td>
+          <td>JVM + daemon</td>
+        </tr>
+        <tr>
+          <td>Incremental builds</td>
+          <td class="curie">Built-in</td>
+          <td>Plugin-dependent</td>
+          <td>Built-in (complex)</td>
+        </tr>
+        <tr>
+          <td>Reproducible output</td>
+          <td class="curie">Yes, default</td>
+          <td>Extra plugin</td>
+          <td>Extra plugin</td>
+        </tr>
+        <tr>
+          <td>Checksum verification</td>
+          <td class="curie">SHA-256, default</td>
+          <td>Extra config</td>
+          <td>Extra config</td>
+        </tr>
+        <tr>
+          <td>Docker support</td>
+          <td class="curie">First-class</td>
+          <td>External plugin</td>
+          <td>External plugin</td>
+        </tr>
+        <tr>
+          <td>Multi-module</td>
+          <td class="curie">One workspace Curie.toml</td>
+          <td>Aggregator POM + per-module</td>
+          <td>settings.gradle + per-module</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- =================== Workspace example =================== -->
+<section>
+  <div class="container">
+    <header style="margin-bottom: 2rem;">
+      <span class="eyebrow">Workspaces</span>
+      <h2 style="margin-top: 1rem;">A monorepo in 12 lines.</h2>
+      <p class="lede" style="margin-top: 1rem;">Curie inherits Cargo's workspace model. Declare members, share BOM imports and Java version once, build in topological order with a single command.</p>
+    </header>
+
+    <div class="code-pair">
+      <div class="code">
+        <header>
+          <span class="dot live"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span>./Curie.toml — workspace root</span>
+        </header>
+<pre><span class="kw">[workspace]</span>
+<span class="kw">members</span> = [<span class="str">"app"</span>, <span class="str">"core"</span>, <span class="str">"utils"</span>]
+
+<span class="kw">[java]</span>
+<span class="kw">sourceCompatibility</span> = <span class="str">"21"</span>
+
+<span class="kw">[bom-imports]</span>
+<span class="str">"com.fasterxml.jackson:jackson-bom"</span> = <span class="str">"2.17.2"</span>
+
+<span class="kw">[test-bom-imports]</span>
+<span class="str">"org.junit:junit-bom"</span> = <span class="str">"5.11.0"</span>
+</pre>
+      </div>
+      <div class="term">
+        <header>
+          <span class="dot live"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span>$ curie build</span>
+        </header>
+<pre><span class="dim">Workspace . build (3 members)</span>
+
+<span class="em">[1/3]</span> utils
+<span class="em">[2/3]</span> core
+<span class="em">[3/3]</span> app
+  Resolve deps    <span class="pkg">7 JAR(s)</span>
+  Compile         12 source file(s)
+  Tests           <span class="ok">✔ 27 tests successful</span>
+  Done            <span class="em">target/app-0.1.0.jar</span>
+</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- =================== Pillars =================== -->
+<section>
+  <div class="container">
+    <header style="margin-bottom: 2rem;">
+      <span class="eyebrow">Design pillars</span>
+      <h2 style="margin-top: 1rem;">Built on three principles.</h2>
+    </header>
+
+    <div class="feature-rows">
+      <div class="feature-card">
+        <span class="badge">01 — fast</span>
+        <h3>Compiled, parallel, incremental.</h3>
+        <p>Curie is a native binary that starts in milliseconds. Dependency downloads run on eight parallel threads. Recompilation is gated by per-source class manifests and an mtime check that's tied to your JDK version — change the JDK, get a clean rebuild for free.</p>
+      </div>
+      <div class="feature-card">
+        <span class="badge">02 — verifiable</span>
+        <h3>SHA-256 by default. Reproducible by default.</h3>
+        <p>Every artifact pulled from Maven Central is checksum-verified on download. The sidecar hash is cached locally and re-checked on every build — your <code>~/.m2</code> is now a tamper-evident store. Outputs are deterministic: re-run a build with the same inputs, get a byte-identical JAR.</p>
+      </div>
+      <div class="feature-card">
+        <span class="badge">03 — minimal</span>
+        <h3>One file, no plugins, no DSL.</h3>
+        <p>Curie.toml is a flat, declarative TOML document. There are no lifecycle phases to memorise, no task graph, no extension points to learn. If a feature isn't in the core binary, it's not in Curie. The complexity ceiling is low on purpose.</p>
+      </div>
+      <div class="feature-card">
+        <span class="badge">04 — polyglot</span>
+        <h3>Java and Kotlin in the same project.</h3>
+        <p>Drop a <code>.kt</code> file next to your <code>.java</code> files — Curie detects it, resolves the Kotlin compiler from Maven Central, and runs a two-phase compile (kotlinc → javac) so Java sees Kotlin types and vice versa. Auto-detects your <code>main</code> entry point in either language.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- =================== Status / CTA =================== -->
+<section>
+  <div class="container" style="text-align: center;">
+    <span class="eyebrow">Status</span>
+    <h2 style="margin: 1rem 0 1.5rem;">Research project — and shipping.</h2>
+    <p class="lede" style="margin-inline: auto;">
+      Curie is an experiment in what a Java build tool looks like if it starts from Cargo's conventions instead of Maven's. The core build pipeline works end-to-end — resolve, compile, test, package, optionally containerise — and is in active development.
+    </p>
+    <div class="hero-ctas" style="justify-content: center; margin-top: 2rem;">
+      <a class="btn btn-primary" href="/getting-started.html">Try it →</a>
+      <a class="btn btn-ghost" href="/docs/">Browse the docs</a>
+    </div>
+  </div>
+</section>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>
