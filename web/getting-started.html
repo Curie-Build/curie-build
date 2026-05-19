@@ -39,21 +39,30 @@
       <h2>1. Prerequisites</h2>
       <ul>
         <li><strong>JDK 21</strong> or newer on <code>PATH</code> — Curie shells out to <code>javac</code>.</li>
-        <li><strong>Cargo</strong>, if you're building Curie from source. Pre-built binaries land on the GitHub releases page.</li>
+        <li><strong>Cargo</strong> (from <a href="https://rustup.rs" target="_blank" rel="noopener">rustup</a>) — Curie installs via <code>cargo install</code> below.</li>
       </ul>
 
       <h2>2. Install</h2>
-      <p>From source (until the first release is cut):</p>
+      <p>Curie is published on <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">crates.io</a>, so the install is one Cargo invocation. Cargo pulls the sources, builds a release binary, and drops it on your <code>PATH</code>:</p>
       <div class="term">
         <header>
           <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
           <span>shell</span>
         </header>
-<pre><span class="prompt">$</span> git clone https://github.com/example/curie.git
-<span class="prompt">$</span> cd curie
-<span class="prompt">$</span> cargo install --path curie-build
+<pre><span class="prompt">$</span> cargo install curie-build
 <span class="prompt">$</span> curie --version
 <span class="ok">curie 0.1.0</span></pre>
+      </div>
+
+      <p>Upgrading is the same command with <code>--force</code>; pinning to an exact version uses <code>--version</code>. To build from source instead — useful when contributing to Curie itself — clone the repo and <code>cargo install --path curie-build</code> from the workspace root:</p>
+      <div class="term">
+        <header>
+          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+          <span>shell</span>
+        </header>
+<pre><span class="prompt">$</span> git clone https://github.com/atteo/curie-build.git
+<span class="prompt">$</span> cd curie-build
+<span class="prompt">$</span> cargo install --path curie-build</pre>
       </div>
 
       <h2>3. Create a project</h2>
