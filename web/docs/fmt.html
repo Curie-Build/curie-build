@@ -45,10 +45,10 @@
   <main class="prose">
     <span class="eyebrow">Subsystem · formatter</span>
     <h1>Formatter</h1>
-    <p class="lede"><code>curie fmt</code> rewrites your Java sources to a consistent style — powered by <a href="https://github.com/palantir/palantir-java-format" target="_blank" rel="noopener">palantir-java-format</a>, which is a fork of google-java-format with reflow improvements.</p>
+    <p class="lede"><code>curie fmt</code> formats both Java and Kotlin sources in one command — <a href="https://github.com/palantir/palantir-java-format" target="_blank" rel="noopener">palantir-java-format</a> for Java and <a href="https://github.com/facebook/ktfmt" target="_blank" rel="noopener">ktfmt</a> for Kotlin. Neither tool needs a separate install.</p>
 
     <h2>What it runs</h2>
-    <p>The formatter and its closure (Jackson, Guava, etc.) are resolved from Maven Central the first time you invoke <code>curie fmt</code>; subsequent runs hit the local <code>~/.m2</code> cache. There is no separate install step and no plugin to wire in.</p>
+    <p>Both formatters are resolved from Maven Central on the first invocation and cached in <code>~/.m2</code>. The Kotlin step (<code>ktfmt</code>) is skipped entirely — including resolution — when the project has no <code>.kt</code> sources, so pure-Java builds pay no overhead.</p>
 
     <h2>Usage</h2>
 
@@ -60,7 +60,7 @@
 <pre><span class="dim"># rewrites every .java file in place to the AOSP style.</span></pre>
     </div>
 
-    <p>Add <code>--check</code> to forbid edits — useful in CI. Curie exits non-zero if any file would change and prints the offending paths.</p>
+    <p>Add <code>--check</code> to forbid edits — useful in CI. Curie runs both formatters and exits non-zero if any file would change, collecting errors from both so the full diff surfaces in one pass.</p>
 
     <div class="term">
       <header>
@@ -68,9 +68,17 @@
         <span>$ curie fmt --check</span>
       </header>
 <pre>./src/com.example/Greeter.java
-<span class="em">error:</span> fmt: one or more files are not correctly formatted.
+<span class="em">error:</span> fmt: one or more Java files are not correctly formatted.
        Run `curie fmt` (without --check) to fix them.</pre>
     </div>
+
+    <h2>Style</h2>
+    <p>Both formatters use 4-space indentation to keep Java and Kotlin files visually consistent:</p>
+    <ul>
+      <li><strong>Java</strong> — palantir-java-format with <code>--aosp</code> (AOSP style, 4-space indentation; Google style uses 2).</li>
+      <li><strong>Kotlin</strong> — ktfmt with <code>--kotlinlang-style</code> (official Kotlin coding conventions, 4-space indentation).</li>
+    </ul>
+    <p>Style is not configurable per-project. The opinionated defaults remove the debate and match each language's widely-adopted community standard.</p>
 
     <h2>Source discovery</h2>
     <p>Every <code>.java</code> file under your project's source roots is included:</p>
@@ -104,7 +112,7 @@
     </div>
 
     <h2>Ignoring files</h2>
-    <p>Curie passes every discovered <code>.java</code> file to palantir. There is no per-file opt-out. If you need to keep generated or vendored sources untouched, keep them outside the source roots (e.g. under <code>target/</code> for annotation-processor output, which is automatically excluded).</p>
+    <p>There is no per-file opt-out. If you need to keep generated or vendored sources untouched, keep them outside the source roots (e.g. under <code>target/</code> for annotation-processor output, which is excluded automatically).</p>
 
     <div class="pager">
       <a href="/docs/workspaces.html">

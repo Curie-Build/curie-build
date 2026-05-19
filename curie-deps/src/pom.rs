@@ -109,6 +109,9 @@ impl Pom {
                 result = result.replace("${project.version}", v);
                 result = result.replace("${project.parent.version}", v);
             }
+            if let Some(g) = self.effective_group() {
+                result = result.replace("${project.groupId}", g);
+            }
 
             // User-defined <properties>.
             for (k, v) in &self.properties {
@@ -167,6 +170,13 @@ fn next_ctx(parent: Ctx, tag: &str) -> Ctx {
         (Ctx::DepMgmtDependencies, "dependency") => Ctx::ManagedDependency,
         (Ctx::ManagedDependency, "exclusions") => Ctx::ManagedExclusions,
         (Ctx::ManagedExclusions, "exclusion") => Ctx::ManagedExclusion,
+        // Unknown children of Ctx::Project must NOT inherit Ctx::Project.
+        // If they did, any <groupId> inside <build><plugins><plugin> (for
+        // example) would be mistaken for the project's own <groupId>, silently
+        // overwriting pom.group_id with a build-plugin's group (e.g.
+        // org.codehaus.mojo).  Ctx::Root is an effective sink — nothing
+        // meaningful fires when parent_ctx == Root.
+        (Ctx::Project, _) => Ctx::Root,
         _ => parent,
     }
 }
@@ -728,5 +738,64 @@ mod tests {
             version: "9.9.9".to_string(),
         });
         assert_eq!(pom.effective_version(), Some("9.9.9"));
+    }
+
+    // --- ${project.groupId} resolution + parser isolation -------------------
+
+    #[test]
+    fn resolve_project_group_id() {
+        let mut pom = Pom::default();
+        pom.group_id = Some("com.google.guava".to_string());
+        // guava-testlib uses ${project.groupId}:guava as a self-referential dep
+        assert_eq!(pom.resolve_value("${project.groupId}"), "com.google.guava");
+    }
+
+    #[test]
+    fn resolve_project_group_id_inherits_from_parent() {
+        let mut pom = Pom::default();
+        pom.group_id = None;
+        pom.parent = Some(ParentRef {
+            group_id: "com.example".to_string(),
+            artifact_id: "parent".to_string(),
+            version: "1.0".to_string(),
+        });
+        assert_eq!(pom.resolve_value("${project.groupId}"), "com.example");
+    }
+
+    /// Regression: <build><plugins><plugin><groupId> must NOT overwrite pom.group_id.
+    /// Before the parser fix, the `_ => parent` default in next_ctx() kept the
+    /// context as Ctx::Project inside <build>, so the first <groupId> of a
+    /// <plugin> would be captured as the project's own groupId.
+    #[test]
+    fn build_plugin_group_id_does_not_overwrite_project_group_id() {
+        let xml = r#"<?xml version="1.0"?>
+<project>
+  <parent>
+    <groupId>com.google.guava</groupId>
+    <artifactId>guava-parent</artifactId>
+    <version>32.1.3-jre</version>
+  </parent>
+  <artifactId>guava-testlib</artifactId>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>animal-sniffer-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>"#;
+        let pom = parse(xml).unwrap();
+        // Own groupId is absent; effective_group falls back to parent — which
+        // is com.google.guava, NOT org.codehaus.mojo.
+        assert_eq!(
+            pom.effective_group(),
+            Some("com.google.guava"),
+            "build plugin groupId must not overwrite the project groupId"
+        );
+        assert!(
+            pom.group_id.is_none(),
+            "group_id should remain None when only inherited"
+        );
     }
 }

@@ -698,11 +698,19 @@ pub fn fmt_all(workspace_root: &Path, check_only: bool, offline: bool) -> Result
     let ws = load(workspace_root)?;
     let n = ws.members.len();
 
-    // Resolve palantir-java-format exactly once for the whole workspace.
-    // The per-member workers (below) share this classpath; if each one
-    // resolved independently, the parallel resolve() calls would race on
-    // the same ~/.m2 staging files for any shared transitive dep.
+    // Resolve both formatters exactly once for the whole workspace.
+    // The per-member workers share these classpaths; if each resolved
+    // independently, the parallel resolve() calls would race on the same
+    // ~/.m2 staging files for any shared transitive dep.
     let pjf_jars = fmt::resolve_pjf(offline)?;
+    // Only resolve ktfmt if at least one member has .kt sources — avoids an
+    // unnecessary network round-trip for purely-Java workspaces.
+    let kt_in_workspace = ws.members.iter().any(|m| fmt::has_kotlin_sources(&m.path));
+    let ktfmt_jars = if kt_in_workspace {
+        fmt::resolve_ktfmt(offline)?
+    } else {
+        Vec::new()
+    };
 
     // --- progress bars (same style as artifact downloading) -----------------
     let mp = MultiProgress::new();
@@ -735,6 +743,7 @@ pub fn fmt_all(workspace_root: &Path, check_only: bool, offline: bool) -> Result
     // Run one `java` process per member concurrently.  Collect every error
     // so that `--check` in CI reports all unformatted members in one pass.
     let pjf_jars_ref = &pjf_jars;
+    let ktfmt_jars_ref = &ktfmt_jars;
     let errors: Vec<String> = std::thread::scope(|s| {
         let handles: Vec<_> = ws
             .members
@@ -745,7 +754,7 @@ pub fn fmt_all(workspace_root: &Path, check_only: bool, offline: bool) -> Result
                 let summary = summary.clone();
                 s.spawn(move || {
                     sp.enable_steady_tick(std::time::Duration::from_millis(80));
-                    let result = fmt::run_fmt_with_jars(path, check_only, pjf_jars_ref);
+                    let result = fmt::run_fmt_with_jars(path, check_only, pjf_jars_ref, ktfmt_jars_ref);
                     match &result {
                         Ok(_) => sp.finish_and_clear(),
                         Err(_) => {
