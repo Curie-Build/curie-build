@@ -37,6 +37,9 @@
       <li><a href="/docs/kotlin.html">Kotlin support</a></li>
       <li><a href="/docs/incremental.html">Incremental builds</a></li>
       <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
     </ul>
   </aside>
 
@@ -70,6 +73,21 @@
         <span class="badge">04</span>
         <h3>Workspaces</h3>
         <p>Multi-module projects under one root <code>Curie.toml</code>. Topo-sorted builds, inherited BOM imports, shared Java version.</p>
+      </a>
+      <a class="feature-card" href="/docs/fmt.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">05</span>
+        <h3>Formatter</h3>
+        <p><code>curie fmt</code> runs palantir-java-format across every Java source. <code>--check</code> mode for CI; workspace fan-out shares one resolved palantir classpath across all members.</p>
+      </a>
+      <a class="feature-card" href="/docs/testing.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">06</span>
+        <h3>Testing</h3>
+        <p>JUnit 5 platform console runner with configurable version, co-located <code>*Test.java</code>/<code>*Spec.java</code> and top-level <code>tests/</code> integration sources, optional filter argument.</p>
+      </a>
+      <a class="feature-card" href="/docs/docker.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">07</span>
+        <h3>Docker</h3>
+        <p>Generated layer-friendly Dockerfile + <code>.dockerignore</code>, eclipse-temurin JRE base by default, configurable <code>baseImage</code>, dep JARs in their own cached layer.</p>
       </a>
     </div>
 

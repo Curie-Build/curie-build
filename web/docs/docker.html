@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Docker · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · docker</span>
+    <h1>Docker</h1>
+    <p class="lede">Curie generates a Dockerfile alongside your JAR — no plugin, no Buildpacks, no <code>jib</code>. The output is layer-friendly: dep JARs land in their own layer so app-code changes don't invalidate the dependency layer.</p>
+
+    <h2>When it runs</h2>
+    <p><code>curie build</code> on an <code>[application]</code> project always produces the JAR. When Docker is in scope (<code>curie run</code>, or future <code>curie docker</code> commands), Curie writes a Dockerfile + <code>.dockerignore</code> next to the JAR in <code>target/</code>. Library projects (<code>[library]</code>) never produce a Dockerfile — they're not runnable on their own.</p>
+
+    <h2>Configuration</h2>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[application]</span>
+<span class="kw">name</span>      = <span class="str">"greeter"</span>
+<span class="kw">version</span>   = <span class="str">"0.1.0"</span>
+<span class="kw">mainClass</span> = <span class="str">"com.example.Greeter"</span>
+
+<span class="kw">[docker]</span>
+<span class="kw">baseImage</span> = <span class="str">"eclipse-temurin:21-jre-alpine"</span></pre>
+    </div>
+
+    <p>The only knob is <code>baseImage</code>. The default is <code>eclipse-temurin:21-jre</code> — a JRE-sized image is much smaller than a JDK image, and the runtime needs no compiler. Switch to <code>-alpine</code> for a smaller image, or to a distroless base for hardened deployments; whatever you choose is interpolated verbatim into the <code>FROM</code> line.</p>
+
+    <h2>Generated Dockerfile</h2>
+    <p>For an application with no dependencies, Curie writes:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>target/Dockerfile</span>
+      </header>
+<pre><span class="kw">FROM</span> eclipse-temurin:21-jre
+<span class="kw">WORKDIR</span> /app
+<span class="kw">COPY</span> greeter-0.1.0.jar app.jar
+<span class="kw">ENTRYPOINT</span> [<span class="str">"java"</span>, <span class="str">"-jar"</span>, <span class="str">"app.jar"</span>]</pre>
+    </div>
+
+    <p>When the application has <code>[dependencies]</code>, Curie copies the resolved dep JARs into <code>target/libs/</code> at package time and adds a <code>COPY libs/ libs/</code> step <strong>before</strong> the app JAR is copied. Docker caches each <code>COPY</code> as its own layer, so the dep layer is reused across rebuilds whenever your direct dependencies don't change — only the small app-JAR layer is rebuilt on a code edit.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>target/Dockerfile  (with deps)</span>
+      </header>
+<pre><span class="kw">FROM</span> eclipse-temurin:21-jre
+<span class="kw">WORKDIR</span> /app
+<span class="kw">COPY</span> libs/ libs/
+<span class="kw">COPY</span> greeter-0.1.0.jar app.jar
+<span class="kw">ENTRYPOINT</span> [<span class="str">"java"</span>, <span class="str">"-jar"</span>, <span class="str">"app.jar"</span>]</pre>
+    </div>
+
+    <p>The JAR's <code>Class-Path</code> manifest entry points at <code>libs/</code>, so <code>java -jar app.jar</code> finds every transitive dep without a wrapper script.</p>
+
+    <h2>.dockerignore</h2>
+    <p>Curie also generates <code>target/.dockerignore</code> that excludes everything by default and re-whitelists only the files the build needs:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>target/.dockerignore</span>
+      </header>
+<pre>*
+!greeter-0.1.0.jar
+!libs/</pre>
+    </div>
+
+    <p>This keeps the build context small and stops accidental secrets in <code>target/</code> (test outputs, intermediate class files) from being baked into the image.</p>
+
+    <h2>Running</h2>
+    <p><code>curie run</code> defaults to Docker: it builds the image and launches a container in one step. Pass <code>--no-docker</code> to invoke <code>java -jar</code> directly against the host JRE — useful for quick local sanity checks where you don't care about the container.</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie run</span>
+      </header>
+<pre>  Compile         up to date
+  Package         up to date
+  Docker image    <span class="ok">greeter:0.1.0</span>  <span class="dim">(via target/Dockerfile)</span>
+  Run             <span class="em">docker run --rm greeter:0.1.0</span>
+
+<span class="ok">Hello from greeter.</span></pre>
+    </div>
+
+    <h2>Incremental Docker builds</h2>
+    <p>The Dockerfile + <code>.dockerignore</code> are stamped against their inputs: the JAR mtime, the <code>libs/</code> directory mtime, and <code>Curie.toml</code>'s <code>[docker]</code> table. If none of those moved since the last image build, Curie skips the <code>docker build</code> invocation entirely.</p>
+
+    <div class="pager">
+      <a href="/docs/testing.html">
+        <span>← Previous</span>
+        <strong>Testing</strong>
+      </a>
+      <a href="/docs/" style="text-align: right; align-items: flex-end;">
+        <span>Up →</span>
+        <strong>Documentation overview</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

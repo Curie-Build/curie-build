@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Testing · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · testing</span>
+    <h1>Testing</h1>
+    <p class="lede">Curie runs JUnit 5 tests via the official platform console runner. No Surefire, no Failsafe, no <code>maven-surefire-plugin</code> XML — declare a test dependency and put a test file where Curie can find it.</p>
+
+    <h2>How tests are run</h2>
+    <p>On <code>curie test</code> (or as part of <code>curie build</code>), Curie resolves <code>org.junit.platform:junit-platform-console-standalone</code> from Maven Central, places it on the classpath alongside your test classes and dependencies, and shells out to <code>java -jar junit-platform-console-standalone.jar</code> with the test classpath wired up.</p>
+
+    <p>The console runner discovers JUnit Jupiter, JUnit Vintage, and JUnit Platform Suite tests in one pass — anything that registers a <code>TestEngine</code> just works.</p>
+
+    <h2>Source discovery</h2>
+    <p>Curie collects test sources from two layouts simultaneously:</p>
+    <ul>
+      <li><strong>Co-located</strong> — files in your production source roots whose names end with <code>Test.java</code>, <code>Tests.java</code>, or <code>Spec.java</code> (and their <code>.kt</code> equivalents). These exercise package-private APIs without breaking encapsulation.</li>
+      <li><strong>tests/</strong> — a top-level <code>tests/</code> directory for integration tests that should only see the public surface. Mirrors Maven's <code>src/test/java/</code> when using the flat-package layout.</li>
+    </ul>
+
+    <p>Maven-style projects keep using <code>src/test/java/</code>.</p>
+
+    <h2>Declaring test dependencies</h2>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[test-dependencies]</span>
+<span class="str">"org.junit.jupiter:junit-jupiter"</span>        = <span class="str">"5.11.0"</span>
+<span class="str">"org.junit.jupiter:junit-jupiter-engine"</span> = <span class="str">"5.11.0"</span>
+<span class="str">"org.assertj:assertj-core"</span>               = <span class="str">"3.26.3"</span>
+
+<span class="kw">[test-bom-imports]</span>
+<span class="str">"org.junit:junit-bom"</span> = <span class="str">"5.11.0"</span></pre>
+    </div>
+
+    <p><code>[test-bom-imports]</code> pins versions for a whole family of artifacts at once. Combined with empty version strings (<code>""</code>), it lets you declare just the artifact name and inherit the version from the BOM — matching how Spring Boot starters keep their version graph consistent.</p>
+
+    <h2>Filtering</h2>
+    <p>Pass a substring to <code>curie test</code> to run only matching tests:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie test reverse</span>
+      </header>
+<pre><span class="dim">Testing string-utils-flat v0.1.0</span>
+  Tests           <span class="ok">✔ 3 tests successful</span>  <span class="dim">(matched "reverse")</span></pre>
+    </div>
+
+    <h2>Configuring the JUnit Platform version</h2>
+    <p>By default Curie pins the console-runner version it knows it has tested against. If you need to track a newer (or older) JUnit Platform release, set it in <code>[test]</code>:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[test]</span>
+<span class="kw">junitPlatformVersion</span> = <span class="str">"6.0.3"</span></pre>
+    </div>
+
+    <p>The same key in a workspace root <code>Curie.toml</code> applies to every member that doesn't override it.</p>
+
+    <h2>Workspace fan-out</h2>
+    <p><code>curie test</code> at the workspace root iterates over members in topological order. Upstream members' <code>target/classes</code> directories (not their JARs) are placed on downstream test classpaths, so test runs don't have to wait for upstream JAR packaging.</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie test  # workspace</span>
+      </header>
+<pre><span class="dim">Workspace . test (3 members)</span>
+
+<span class="em">[1/3]</span> utils
+  Tests           <span class="ok">✔ 8 tests successful</span>
+<span class="em">[2/3]</span> core
+  Tests           <span class="ok">✔ 12 tests successful</span>
+<span class="em">[3/3]</span> app
+  Tests           <span class="ok">✔ 7 tests successful</span></pre>
+    </div>
+
+    <h2>Incremental test runs</h2>
+    <p>Curie stamps the test classes directory + the dep JARs + the test resources, and skips the JVM round-trip when none of those have changed since the last green run. A pure <code>curie test</code> on an unchanged tree exits in milliseconds with <code>Tests up to date</code>.</p>
+
+    <p>JVM startup is still the dominant cost on a real test run — a long-lived JVM daemon for sub-second TDD loops is on the roadmap.</p>
+
+    <div class="pager">
+      <a href="/docs/fmt.html">
+        <span>← Previous</span>
+        <strong>Formatter</strong>
+      </a>
+      <a href="/docs/docker.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Docker</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>
