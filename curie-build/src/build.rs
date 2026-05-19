@@ -2,6 +2,7 @@
 //! and `docker` together for the `curie build` and `curie clean` commands.
 
 use crate::compile::compile;
+use crate::config;
 use crate::descriptor;
 use crate::docker;
 use crate::git;
@@ -78,18 +79,28 @@ pub fn build_with_desc(
     Ok(output)
 }
 
-/// Build the named-repository list from the descriptor for the resolver.
+/// The effective "default" repos (normally Maven Central) with any user
+/// mirrors from `~/.curie/config.toml` applied.
+pub fn central_repos() -> Vec<Repository> {
+    let cfg = config::load_config().unwrap_or_default();
+    config::apply_mirrors(curie_deps::repo::default_repositories(), &cfg.mirrors)
+}
+
+/// Named repositories from the descriptor with user mirrors applied.
 /// All `[[repositories]]` entries are passed; the resolver activates only those
 /// referenced by a dep's `repository = "id"` field.
 pub fn extra_repos(desc: &descriptor::Descriptor) -> Vec<Repository> {
-    desc.repositories
+    let cfg = config::load_config().unwrap_or_default();
+    let repos = desc
+        .repositories
         .iter()
         .map(|r| Repository {
             id: r.id.clone(),
             name: r.display_name().to_string(),
             url: r.url.clone(),
         })
-        .collect()
+        .collect();
+    config::apply_mirrors(repos, &cfg.mirrors)
 }
 
 /// Phase 2: compile production sources, run tests, then package JAR.

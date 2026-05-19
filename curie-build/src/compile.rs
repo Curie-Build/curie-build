@@ -25,7 +25,7 @@
 //! For Java-only projects the existing single-phase `javac` path is used
 //! unchanged.
 
-use crate::build::extra_repos;
+use crate::build::{central_repos, extra_repos};
 use crate::descriptor;
 use crate::incremental::{
     javac_version, needs_recompile, walk_files, write_javac_version_stamp, CompileStatus,
@@ -185,6 +185,7 @@ pub fn compile(
         let jars = resolve(
             &pairs,
             &ResolveOptions {
+                default_repos: central_repos(),
                 named_repos: extra_repos(desc),
                 progress: true,
                 bom_imports: bom_gavs.clone(),
@@ -212,6 +213,7 @@ pub fn compile(
         let jars = resolve(
             &ap_entries,
             &ResolveOptions {
+                default_repos: central_repos(),
                 named_repos: extra_repos(desc),
                 progress: true,
                 bom_imports: bom_gavs.clone(),
@@ -245,6 +247,7 @@ pub fn compile(
             let single = resolve(
                 &[DepEntry { key: coord, version, repo_id: None }],
                 &ResolveOptions {
+                    default_repos: central_repos(),
                     named_repos: extra_repos(desc),
                     progress: false,
                     bom_imports: bom_gavs.clone(),
@@ -341,6 +344,7 @@ pub fn compile(
                 DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None },
             ],
             &ResolveOptions {
+                default_repos: central_repos(),
                 named_repos: extra_repos(desc),
                 progress: true,
                 bom_imports: bom_gavs.clone(),

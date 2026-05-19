@@ -1,6 +1,7 @@
 mod build;
 mod class_manifest;
 mod compile;
+mod config;
 mod descriptor;
 mod docker;
 mod fmt;

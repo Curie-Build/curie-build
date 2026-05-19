@@ -6,6 +6,7 @@ use crate::incremental::{
 };
 use crate::jar::classpath_string;
 use crate::{build, descriptor};
+use crate::build::central_repos;
 use anyhow::{bail, Context, Result};
 use curie_deps::resolver::{resolve, DepEntry, ResolveOptions};
 use std::path::{Path, PathBuf};
@@ -89,6 +90,7 @@ pub fn run_tests(
         resolve(
             &pairs,
             &ResolveOptions {
+                default_repos: central_repos(),
                 named_repos: extra_repos.clone(),
                 progress: true,
                 bom_imports: test_bom_gavs.clone(),
@@ -111,6 +113,7 @@ pub fn run_tests(
                 DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None },
             ],
             &ResolveOptions {
+                default_repos: central_repos(),
                 named_repos: extra_repos.clone(),
                 progress: true,
                 bom_imports: test_bom_gavs.clone(),
@@ -140,6 +143,7 @@ pub fn run_tests(
                 DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None },
             ],
             &ResolveOptions {
+                default_repos: central_repos(),
                 named_repos: extra_repos.clone(),
                 progress: false,
                 bom_imports: test_bom_gavs.clone(),
@@ -172,6 +176,7 @@ pub fn run_tests(
         let jars = resolve(
             &ap_entries,
             &ResolveOptions {
+                default_repos: central_repos(),
                 named_repos: extra_repos.clone(),
                 progress: true,
                 bom_imports: test_bom_gavs.clone(),
@@ -193,6 +198,7 @@ pub fn run_tests(
             let single = resolve(
                 &[DepEntry { key: coord, version, repo_id: None }],
                 &ResolveOptions {
+                    default_repos: central_repos(),
                     named_repos: extra_repos.clone(),
                     progress: false,
                     bom_imports: test_bom_gavs.clone(),
@@ -570,6 +576,7 @@ fn resolve_standalone(
     let jars = resolve(
         &[DepEntry { key: JUNIT_STANDALONE_COORD, version: junit_version, repo_id: None }],
         &ResolveOptions {
+            default_repos: central_repos(),
             named_repos: extra_repos.to_vec(),
             progress: false,
             bom_imports: vec![],

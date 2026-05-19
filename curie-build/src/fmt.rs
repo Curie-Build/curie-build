@@ -26,6 +26,7 @@
 
 use crate::compile::flat_package_src_dirs;
 use anyhow::{bail, Context, Result};
+use crate::build::central_repos;
 use curie_deps::resolver::{resolve, DepEntry, ResolveOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -52,6 +53,7 @@ pub fn resolve_pjf(offline: bool) -> Result<Vec<PathBuf>> {
     resolve(
         &[DepEntry { key: PJF_COORD, version: PJF_VERSION, repo_id: None }],
         &ResolveOptions {
+            default_repos: central_repos(),
             named_repos: vec![],
             progress: false,
             bom_imports: vec![],
