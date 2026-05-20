@@ -1,0 +1,13 @@
+# groovy-greeter
+#
+# Demonstrates Groovy language support in Curie.
+# The Groovy compiler (org.apache.groovy:groovy) is resolved automatically
+# from Maven Central the first time you build.
+
+[application]
+name = "groovy-greeter"
+version = "0.1.0"
+mainClass = "com.example.GroovyGreeter"
+
+[groovy]
+version = "4.0.23"

@@ -41,6 +41,7 @@ pub fn run_tests(
     classes_dir: &Path,
     dep_jars: &[PathBuf],
     kotlin_stdlib_jars: &[PathBuf],
+    groovy_jars: &[PathBuf],
     resources_dir: Option<&Path>,
     test_resources_dir: Option<&Path>,
     filter: Option<&str>,
@@ -49,10 +50,12 @@ pub fn run_tests(
 ) -> Result<()> {
     // --- discover test sources -----------------------------------------------
     let (java_test_sources, kotlin_test_sources) = discover_test_sources(project_root);
+    let groovy_test_sources = discover_groovy_test_sources(project_root);
 
     let all_test_sources: Vec<PathBuf> = {
         let mut v = java_test_sources.clone();
         v.extend(kotlin_test_sources.iter().cloned());
+        v.extend(groovy_test_sources.iter().cloned());
         v.sort();
         v.dedup();
         v
@@ -64,7 +67,8 @@ pub fn run_tests(
     }
 
     let has_kotlin_tests = !kotlin_test_sources.is_empty();
-    let has_java_tests = !java_test_sources.is_empty();
+    let has_java_tests   = !java_test_sources.is_empty();
+    let has_groovy_tests = !groovy_test_sources.is_empty();
 
     // --- resolve JUnit standalone launcher -----------------------------------
     let extra_repos = build::extra_repos(desc);
@@ -270,6 +274,7 @@ pub fn run_tests(
         shared_cp.extend_from_slice(extra_cp);
         shared_cp.extend_from_slice(&test_ap_on_cp_jars);
         shared_cp.extend_from_slice(&test_kotlin_stdlib_jars);
+        shared_cp.extend_from_slice(groovy_jars);
         shared_cp.push(standalone_jar.clone());
 
         if has_kotlin_tests {
@@ -369,6 +374,53 @@ pub fn run_tests(
             }
         }
 
+        if has_groovy_tests {
+            // groovyc — compile all .groovy test sources.
+            // When Java test sources are also present, use --jointCompilation.
+            let groovy_cp_jars: Vec<PathBuf> = {
+                if groovy_jars.is_empty() {
+                    // Groovy tests exist but production had no groovy sources
+                    // → resolve the Groovy runtime now.
+                    use crate::compile::GROOVY_COORD;
+                    resolve(
+                        &[DepEntry { key: GROOVY_COORD, version: desc.groovy.version(), repo_id: None }],
+                        &ResolveOptions {
+                            default_repos: central_repos(),
+                            named_repos: extra_repos.clone(),
+                            progress: true,
+                            bom_imports: test_bom_gavs.clone(),
+                            offline,
+                        },
+                    )
+                    .context("Groovy test compiler resolution failed")?
+                } else {
+                    groovy_jars.to_vec()
+                }
+            };
+            let mut groovyc = Command::new("java");
+            groovyc.arg("-cp").arg(classpath_string(&groovy_cp_jars));
+            groovyc.arg("org.codehaus.groovy.tools.FileSystemCompiler");
+            groovyc.arg("-d").arg(&test_classes_dir);
+            let mut gcp = shared_cp.clone();
+            if !groovy_cp_jars.is_empty() {
+                gcp.extend_from_slice(&groovy_cp_jars);
+            }
+            if !gcp.is_empty() {
+                groovyc.arg("--classpath").arg(classpath_string(&gcp));
+            }
+            if has_java_tests {
+                groovyc.arg("--jointCompilation");
+                for src in &java_test_sources { groovyc.arg(src); }
+            }
+            for src in &groovy_test_sources { groovyc.arg(src); }
+            let status = groovyc
+                .status()
+                .context("failed to invoke groovyc for test compilation")?;
+            if !status.success() {
+                bail!("Groovy test compilation failed");
+            }
+        }
+
         // Record the JDK version used so that a future upgrade triggers a rebuild.
         if let Ok(version) = javac_version() {
             write_javac_version_stamp(&project_root.join("target"), &version)?;
@@ -403,6 +455,7 @@ pub fn run_tests(
     run_cp.extend_from_slice(&test_dep_jars);
     run_cp.extend_from_slice(extra_cp);
     run_cp.extend_from_slice(&test_kotlin_stdlib_jars);
+    run_cp.extend_from_slice(groovy_jars);
 
     println!();
 
@@ -559,6 +612,63 @@ fn discover_test_sources(project_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     kotlin_sources.dedup();
 
     (java_sources, kotlin_sources)
+}
+
+/// Discover Groovy test sources — mirrors [`discover_test_sources`] for `.groovy` files.
+fn discover_groovy_test_sources(project_root: &Path) -> Vec<PathBuf> {
+    let mut sources: Vec<PathBuf> = Vec::new();
+
+    // Co-located tests in src/main/groovy/
+    let main_groovy = project_root.join("src").join("main").join("groovy");
+    if main_groovy.exists() {
+        let colocated: Vec<PathBuf> = walk_files(&main_groovy)
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy();
+                name.ends_with("Test.groovy")
+                    || name.ends_with("Tests.groovy")
+                    || name.ends_with("Spec.groovy")
+            })
+            .map(|e| e.into_path())
+            .collect();
+        sources.extend(colocated);
+    }
+
+    // Separate test tree src/test/groovy/
+    let test_groovy = project_root.join("src").join("test").join("groovy");
+    if test_groovy.exists() {
+        let all: Vec<PathBuf> = walk_files(&test_groovy)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".groovy"))
+            .map(|e| e.into_path())
+            .collect();
+        sources.extend(all);
+    }
+
+    // Flat-package: co-located tests in src/<dot.pkg>/
+    for pkg_dir in flat_package_src_dirs(project_root) {
+        let colocated: Vec<PathBuf> = walk_files(&pkg_dir)
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy();
+                name.ends_with("Test.groovy")
+                    || name.ends_with("Tests.groovy")
+                    || name.ends_with("Spec.groovy")
+            })
+            .map(|e| e.into_path())
+            .collect();
+        sources.extend(colocated);
+    }
+
+    // Flat-package: integration tests in tests/<dot.pkg>/
+    for pkg_dir in flat_package_test_dirs(project_root) {
+        let all: Vec<PathBuf> = walk_files(&pkg_dir)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".groovy"))
+            .map(|e| e.into_path())
+            .collect();
+        sources.extend(all);
+    }
+
+    sources.sort();
+    sources.dedup();
+    sources
 }
 
 // ---------------------------------------------------------------------------

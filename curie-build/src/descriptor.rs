@@ -22,6 +22,7 @@ pub struct Descriptor {
     /// the `[java]` scalar: a member's value wins; when absent the workspace
     /// value (if any) is copied in.
     pub kotlin: Kotlin,
+    pub groovy: Groovy,
     pub docker: Docker,
     pub build_info: BuildInfo,
     pub dependencies: BTreeMap<String, DependencyValue>,
@@ -175,6 +176,8 @@ struct RawDescriptor {
     #[serde(default)]
     kotlin: Kotlin,
     #[serde(default)]
+    groovy: Groovy,
+    #[serde(default)]
     publish: PublishConfig,
 }
 
@@ -305,6 +308,30 @@ impl Kotlin {
     /// version).
     pub fn version(&self) -> &str {
         self.version.as_deref().unwrap_or(DEFAULT_KOTLIN_VERSION)
+    }
+}
+
+/// Default version of Apache Groovy resolved from Maven Central when `.groovy`
+/// sources are present.  Override (workspace-inheritable) with:
+///
+/// ```toml
+/// [groovy]
+/// version = "4.0.23"
+/// ```
+pub const DEFAULT_GROOVY_VERSION: &str = "4.0.23";
+
+/// Configuration for the `[groovy]` table.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Groovy {
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+impl Groovy {
+    /// Effective version passed to the resolver for the Groovy compiler and
+    /// runtime JARs (`org.apache.groovy:groovy:VERSION`).
+    pub fn version(&self) -> &str {
+        self.version.as_deref().unwrap_or(DEFAULT_GROOVY_VERSION)
     }
 }
 
@@ -811,6 +838,7 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         java: parsed.java,
         test: parsed.test,
         kotlin: parsed.kotlin,
+        groovy: parsed.groovy,
         docker,
         build_info: parsed.build_info,
         dependencies: parsed.dependencies,
@@ -1654,5 +1682,34 @@ url = "https://example.com"
         let d = load_str(toml).unwrap();
         assert_eq!(d.repositories[0].id, "shibboleth");
         assert_eq!(d.repositories[0].display_name(), "Shibboleth Releases");
+    }
+
+    // -- [groovy] ---------------------------------------------------------------
+
+    #[test]
+    fn groovy_version_defaults_to_constant() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.groovy.version(), crate::descriptor::DEFAULT_GROOVY_VERSION);
+    }
+
+    #[test]
+    fn groovy_version_can_be_set() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[groovy]
+version = "3.0.22"
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.groovy.version(), "3.0.22");
     }
 }

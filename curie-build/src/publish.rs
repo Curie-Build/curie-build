@@ -549,6 +549,7 @@ mod tests {
             java: Java::default(),
             test: Test::default(),
             kotlin: Kotlin::default(),
+            groovy: Groovy::default(),
             docker: Docker::default(),
             build_info: BuildInfo::default(),
             dependencies: BTreeMap::new(),

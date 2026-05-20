@@ -270,6 +270,9 @@ fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
     if member.kotlin.version.is_none() {
         member.kotlin.version = ws.kotlin.version.clone();
     }
+    if member.groovy.version.is_none() {
+        member.groovy.version = ws.groovy.version.clone();
+    }
     if !ws.repositories.is_empty() {
         let mut combined = ws.repositories.clone();
         combined.append(&mut member.repositories);
@@ -538,6 +541,7 @@ fn test_one_member(
         &compiled.classes_dir,
         &compiled.dep_jars,
         &compiled.kotlin_stdlib_jars,
+        &compiled.groovy_jars,
         compiled.resources_dir.as_deref(),
         compiled.test_resources_dir.as_deref(),
         filter,
@@ -1278,5 +1282,24 @@ mod tests {
         let result = fmt_all(dir.path(), true, false);
         // No java files → no errors.
         assert!(result.is_ok(), "unexpected error: {:?}", result);
+    }
+
+    #[test]
+    fn groovy_version_inherits_from_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws_path = dir.path();
+        std::fs::write(
+            ws_path.join("Curie.toml"),
+            "[workspace]\nmembers = [\"m\"]\n\n[groovy]\nversion = \"4.0.20\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir(ws_path.join("m")).unwrap();
+        std::fs::write(
+            ws_path.join("m").join("Curie.toml"),
+            "[application]\nname = \"m\"\nversion = \"0.0.0\"\nmainClass = \"M\"\n",
+        )
+        .unwrap();
+        let ws = crate::workspace::load(ws_path).unwrap();
+        assert_eq!(ws.members[0].descriptor.groovy.version(), "4.0.20");
     }
 }

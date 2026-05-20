@@ -81,9 +81,10 @@ pub fn resolve_pjf(offline: bool) -> Result<Vec<PathBuf>> {
 /// and pass the result to [`run_fmt_with_jars`] to avoid concurrent races.
 pub fn resolve_ktfmt(offline: bool) -> Result<Vec<PathBuf>> {
     resolve(
-        &[(KTFMT_COORD, KTFMT_VERSION)],
+        &[DepEntry { key: KTFMT_COORD, version: KTFMT_VERSION, repo_id: None }],
         &ResolveOptions {
-            extra_repos: vec![],
+            default_repos: central_repos(),
+            named_repos: vec![],
             progress: false,
             bom_imports: vec![],
             offline,

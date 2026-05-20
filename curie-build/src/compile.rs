@@ -49,6 +49,8 @@ use std::process::Command;
 pub use crate::descriptor::DEFAULT_KOTLIN_VERSION as KOTLIN_VERSION;
 pub const KOTLIN_COMPILER_COORD: &str = "org.jetbrains.kotlin:kotlin-compiler-embeddable";
 pub const KOTLIN_STDLIB_COORD: &str = "org.jetbrains.kotlin:kotlin-stdlib";
+/// Apache Groovy compiler + runtime (transitive deps provide ASM, Antlr, etc.).
+pub const GROOVY_COORD: &str = "org.apache.groovy:groovy";
 
 /// Intermediate output from the compile phase.
 pub struct CompileOutput {
@@ -64,6 +66,9 @@ pub struct CompileOutput {
     /// Resolved Kotlin stdlib JARs (empty when no `.kt` sources found).
     /// Must be added to every runtime classpath that runs Kotlin code.
     pub kotlin_stdlib_jars: Vec<PathBuf>,
+    /// Resolved Groovy runtime JARs (empty when no `.groovy` sources found).
+    /// Must be added to every runtime classpath that runs Groovy code.
+    pub groovy_jars: Vec<PathBuf>,
     /// Production resources directory (`src/main/resources` or top-level `resources/`), if it exists.
     pub resources_dir: Option<PathBuf>,
     /// Test resources directory (`src/test/resources` or top-level `test-resources/`), if it exists.
@@ -136,28 +141,27 @@ pub fn compile(
     extra_cp: &[PathBuf],
 ) -> Result<CompileOutput> {
     // --- source roots --------------------------------------------------------
-    // Support two layouts simultaneously:
+    // Supported layouts (may coexist):
     //   A) Maven-style Java:   src/main/java/
     //   B) Maven-style Kotlin: src/main/kotlin/
-    //   C) Flat-package:       src/com.example.myapp/  (any dot-named sibling under src/)
-    //      Both .java and .kt files are collected from flat-package dirs.
-    let maven_java_src = project_root.join("src").join("main").join("java");
+    //   C) Maven-style Groovy: src/main/groovy/
+    //   D) Flat-package:       src/com.example.myapp/  (dot-named sibling under src/)
+    //      .java, .kt, and .groovy files are all collected from flat-package dirs.
+    let maven_java_src   = project_root.join("src").join("main").join("java");
     let maven_kotlin_src = project_root.join("src").join("main").join("kotlin");
+    let maven_groovy_src = project_root.join("src").join("main").join("groovy");
     let flat_src_dirs = flat_package_src_dirs(project_root);
 
     let mut src_roots: Vec<PathBuf> = Vec::new();
-    if maven_java_src.exists() {
-        src_roots.push(maven_java_src.clone());
-    }
-    if maven_kotlin_src.exists() {
-        src_roots.push(maven_kotlin_src.clone());
-    }
+    if maven_java_src.exists()   { src_roots.push(maven_java_src.clone()); }
+    if maven_kotlin_src.exists() { src_roots.push(maven_kotlin_src.clone()); }
+    if maven_groovy_src.exists() { src_roots.push(maven_groovy_src.clone()); }
     src_roots.extend(flat_src_dirs);
 
     if src_roots.is_empty() {
         bail!(
             "no source directory found: expected src/main/java/, src/main/kotlin/, \
-             or at least one dot-named directory under src/ \
+             src/main/groovy/, or at least one dot-named directory under src/ \
              (e.g. src/com.example.myapp/)"
         );
     }
@@ -264,11 +268,11 @@ pub fn compile(
     };
 
     // --- discover production sources (exclude test files) --------------------
-    let mut java_sources: Vec<PathBuf> = Vec::new();
+    let mut java_sources: Vec<PathBuf>   = Vec::new();
     let mut kotlin_sources: Vec<PathBuf> = Vec::new();
+    let mut groovy_sources: Vec<PathBuf> = Vec::new();
 
     for src_root in &src_roots {
-        // Java sources from this root (excluding test files).
         let root_java: Vec<_> = walk_files(src_root)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
@@ -281,7 +285,6 @@ pub fn compile(
             .collect();
         java_sources.extend(root_java);
 
-        // Kotlin sources from this root (excluding test files).
         let root_kotlin: Vec<_> = walk_files(src_root)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
@@ -293,26 +296,46 @@ pub fn compile(
             .map(|e| e.into_path())
             .collect();
         kotlin_sources.extend(root_kotlin);
+
+        let root_groovy: Vec<_> = walk_files(src_root)
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy();
+                name.ends_with(".groovy")
+                    && !name.ends_with("Test.groovy")
+                    && !name.ends_with("Tests.groovy")
+                    && !name.ends_with("Spec.groovy")
+            })
+            .map(|e| e.into_path())
+            .collect();
+        groovy_sources.extend(root_groovy);
     }
 
-    java_sources.sort();
-    java_sources.dedup();
-    kotlin_sources.sort();
-    kotlin_sources.dedup();
+    java_sources.sort();   java_sources.dedup();
+    kotlin_sources.sort(); kotlin_sources.dedup();
+    groovy_sources.sort(); groovy_sources.dedup();
+
+    let has_kotlin = !kotlin_sources.is_empty();
+    let has_java   = !java_sources.is_empty();
+    let has_groovy = !groovy_sources.is_empty();
+
+    if has_groovy && has_kotlin {
+        bail!(
+            "mixing Groovy and Kotlin sources in the same module is not supported; \
+             use separate modules for each language"
+        );
+    }
 
     // Combined source list for incremental stamp / manifest purposes.
     let mut sources: Vec<PathBuf> = Vec::new();
     sources.extend(java_sources.iter().cloned());
     sources.extend(kotlin_sources.iter().cloned());
+    sources.extend(groovy_sources.iter().cloned());
     sources.sort();
     sources.dedup();
 
-    let has_kotlin = !kotlin_sources.is_empty();
-    let has_java = !java_sources.is_empty();
-
     if sources.is_empty() {
         bail!(
-            "no Java or Kotlin source files found under {}",
+            "no Java, Kotlin, or Groovy source files found under {}",
             src_roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
         );
     }
@@ -371,6 +394,27 @@ pub fn compile(
     } else {
         kotlin_compiler_jars = Vec::new();
         kotlin_stdlib_jars = Vec::new();
+    }
+
+    // --- resolve Groovy compiler + runtime (when needed) ---------------------
+    let groovy_jars: Vec<PathBuf>;
+    if has_groovy {
+        let gver = desc.groovy.version();
+        let jars = resolve(
+            &[DepEntry { key: GROOVY_COORD, version: gver, repo_id: None }],
+            &ResolveOptions {
+                default_repos: central_repos(),
+                named_repos: extra_repos(desc),
+                progress: true,
+                bom_imports: bom_gavs.clone(),
+                offline,
+            },
+        )
+        .context("Groovy compiler/runtime resolution failed")?;
+        println!("  Resolve Groovy  {} JAR(s)", jars.len());
+        groovy_jars = jars;
+    } else {
+        groovy_jars = Vec::new();
     }
 
     // --- compile (incremental) -----------------------------------------------
@@ -525,7 +569,39 @@ pub fn compile(
             );
         }
 
-        if has_java {
+        if has_groovy {
+            // ------------------------------------------------------------------
+            // Groovy phase: FileSystemCompiler compiles all .groovy sources.
+            // When Java sources are also present, --jointCompilation is passed
+            // so Groovy and Java can reference each other.  No separate javac
+            // step is needed in that case.
+            // ------------------------------------------------------------------
+            let mut groovyc = Command::new("java");
+            groovyc.arg("-cp").arg(classpath_string(&groovy_jars));
+            groovyc.arg("org.codehaus.groovy.tools.FileSystemCompiler");
+            groovyc.arg("-d").arg(&classes_dir);
+            // Provide the full compile classpath so Groovy can resolve types.
+            let mut gcp = shared_cp.clone();
+            gcp.extend_from_slice(&groovy_jars);
+            if !gcp.is_empty() {
+                groovyc.arg("--classpath").arg(classpath_string(&gcp));
+            }
+            if has_java {
+                groovyc.arg("--jointCompilation");
+                for src in &java_sources {
+                    groovyc.arg(src);
+                }
+            }
+            for src in &groovy_sources {
+                groovyc.arg(src);
+            }
+            let status = groovyc
+                .status()
+                .context("failed to invoke groovyc — is a JRE installed?")?;
+            if !status.success() {
+                bail!("Groovy compilation failed");
+            }
+        } else if has_java {
             // ------------------------------------------------------------------
             // Phase 2: javac — re-compiles Java sources only.
             // target/classes/ is on the classpath so Java can see Kotlin bytecode.
@@ -603,8 +679,9 @@ pub fn compile(
                     }
                 }
             }
-        } else if has_kotlin {
-            // Kotlin-only: no manifest written by javac wrapper, but we still
+        } else if has_kotlin || has_groovy {
+            // Kotlin-only / Groovy-only: no manifest written by javac wrapper,
+            // but we still
             // need to write a minimal stamp so incremental works next time.
             // We write an empty manifest that covers all .kt sources so that
             // a future unchanged build is detected as up-to-date.
@@ -635,7 +712,7 @@ pub fn compile(
 
     Ok(CompileOutput {
         jar_path, jar_name, classes_dir, src_roots, sources, dep_jars,
-        kotlin_stdlib_jars,
+        kotlin_stdlib_jars, groovy_jars,
         resources_dir, test_resources_dir,
     })
 }
@@ -698,5 +775,52 @@ mod tests {
         // Basic sanity: must look like a semver triple.
         let parts: Vec<&str> = KOTLIN_VERSION.split('.').collect();
         assert!(parts.len() >= 2, "KOTLIN_VERSION should be at least major.minor");
+    }
+
+    // --- Groovy source detection helpers ------------------------------------
+
+    #[test]
+    fn groovy_sources_discovered_from_maven_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let groovy_src = dir.path().join("src").join("main").join("groovy")
+            .join("com").join("example");
+        std::fs::create_dir_all(&groovy_src).unwrap();
+        std::fs::write(groovy_src.join("Greeter.groovy"), b"package com.example; class Greeter {}").unwrap();
+
+        // Walk the maven-layout Groovy root and collect *.groovy, excluding test suffixes.
+        use crate::incremental::walk_files;
+        let root = dir.path().join("src").join("main").join("groovy");
+        let found: Vec<_> = walk_files(&root)
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy();
+                name.ends_with(".groovy")
+                    && !name.ends_with("Test.groovy")
+                    && !name.ends_with("Tests.groovy")
+                    && !name.ends_with("Spec.groovy")
+            })
+            .collect();
+        assert_eq!(found.len(), 1, "should find exactly Greeter.groovy; got: {:?}", found);
+        assert!(found[0].file_name().to_string_lossy().ends_with("Greeter.groovy"));
+    }
+
+    #[test]
+    fn groovy_sources_discovered_from_flat_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let flat_dir = dir.path().join("src").join("com.example");
+        std::fs::create_dir_all(&flat_dir).unwrap();
+        std::fs::write(flat_dir.join("Hello.groovy"), b"package com.example; class Hello {}").unwrap();
+        std::fs::write(flat_dir.join("Hello.java"), b"package com.example; class Hello {}").unwrap();
+
+        let flat_dirs = flat_package_src_dirs(dir.path());
+        assert!(!flat_dirs.is_empty(), "should find com.example dir");
+
+        use crate::incremental::walk_files;
+        let groovy_files: Vec<_> = flat_dirs.iter()
+            .flat_map(|d| walk_files(d)
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".groovy"))
+                .collect::<Vec<_>>()
+            )
+            .collect();
+        assert_eq!(groovy_files.len(), 1, "should find Hello.groovy; got: {:?}", groovy_files);
     }
 }

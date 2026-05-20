@@ -67,7 +67,7 @@ pub fn write_sources_jar(
             // Only Java + Kotlin sources.
             let is_source = matches!(
                 fs_path.extension().and_then(|s| s.to_str()),
-                Some("java") | Some("kt")
+                Some("java") | Some("kt") | Some("groovy")
             );
             if !is_source {
                 continue;
@@ -222,6 +222,28 @@ mod tests {
 
         let entries = list_jar_entries(&jar);
         assert!(entries.contains(&"config.properties".to_string()), "got: {entries:?}");
+    }
+
+    #[test]
+    fn sources_jar_includes_groovy_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src").join("com.example");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("Greeter.groovy"), b"package com.example; class Greeter {}").unwrap();
+        std::fs::write(src.join("Helper.java"),    b"package com.example; class Helper {}").unwrap();
+
+        let jar = dir.path().join("out.jar");
+        write_sources_jar(&jar, &[src], None).unwrap();
+
+        let entries = list_jar_entries(&jar);
+        assert!(
+            entries.contains(&"com/example/Greeter.groovy".to_string()),
+            "Groovy source must land at com/example/Greeter.groovy; got: {entries:?}",
+        );
+        assert!(
+            entries.contains(&"com/example/Helper.java".to_string()),
+            "Java source must also be present; got: {entries:?}",
+        );
     }
 
     #[test]

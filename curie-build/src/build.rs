@@ -119,6 +119,7 @@ pub fn do_build(
         &compiled.classes_dir,
         &compiled.dep_jars,
         &compiled.kotlin_stdlib_jars,
+        &compiled.groovy_jars,
         compiled.resources_dir.as_deref(),
         compiled.test_resources_dir.as_deref(),
         None,
@@ -166,12 +167,17 @@ pub fn do_build(
         };
 
         println!("  Package         {}", compiled.jar_name);
+        // Effective runtime deps = user deps + Groovy stdlib (when Groovy sources present).
+        // Kotlin stdlib is NOT included because simple Kotlin programs compile to bytecode
+        // that doesn't reference stdlib classes — Groovy always does.
+        let mut effective_dep_jars = compiled.dep_jars.clone();
+        effective_dep_jars.extend_from_slice(&compiled.groovy_jars);
         write_deterministic_jar(
             &compiled.jar_path,
             &compiled.classes_dir,
             resources_dir,
             main_class.as_deref(),
-            &compiled.dep_jars,
+            &effective_dep_jars,
             build_info_content.as_deref(),
         )
         .context("failed to write JAR")?;
@@ -195,15 +201,21 @@ pub fn do_build(
     // Always done for application projects so that `java -jar` works.
     // target/libs/ is wiped and repopulated on every build to stay in sync
     // with the current dep set (handles version bumps cleanly).
-    if !compiled.dep_jars.is_empty() && desc.application().is_some() {
+    // Merge Groovy stdlib into effective_dep_jars for libs/ and run-time classpath.
+    let effective_dep_jars: Vec<std::path::PathBuf> = {
+        let mut v = compiled.dep_jars;
+        v.extend(compiled.groovy_jars);
+        v
+    };
+    if !effective_dep_jars.is_empty() && desc.application().is_some() {
         let libs_dir = project_root.join("target").join("libs");
-        populate_libs_dir(&libs_dir, &compiled.dep_jars)
-            .context("failed to populate target/libs")?;
+        populate_libs_dir(&libs_dir, &effective_dep_jars)
+            .context("failed to populate target/libs/")?;
     }
 
     Ok(BuildOutput {
         jar: compiled.jar_path,
-        dep_jars: compiled.dep_jars,
+        dep_jars: effective_dep_jars,
         main_class: resolved_main_class,
         resources_dir: compiled.resources_dir,
     })
