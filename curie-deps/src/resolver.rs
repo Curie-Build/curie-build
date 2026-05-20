@@ -47,6 +47,7 @@ use crate::repo::{default_repositories, Repository};
 use anyhow::{bail, Context, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::Ordering;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -325,32 +326,26 @@ pub fn resolve(
     let global_managed = resolve_boms(&opts.bom_imports, &central, &client, opts.offline)?;
 
     // -----------------------------------------------------------------------
-    // Phase 1: serial BFS over POMs to discover the full transitive closure.
+    // Phase 1: level-synchronised parallel BFS over POMs.
     //
-    // We only fetch POMs here (small, fast) and record the ordered list of
-    // GAVs together with the repo context each artifact should be fetched
-    // from.  JARs are downloaded in Phase 2 in parallel.
+    // All POMs at the same BFS depth are independent of each other and are
+    // fetched concurrently (up to PARALLEL_POM_FETCHES threads).  Once a
+    // level's POMs are all parsed, their children form the next level.
+    //
+    // This preserves both Maven conflict-resolution rules:
+    //   - Nearest wins: shallower levels are fully resolved before deeper ones.
+    //   - First declared wins (same depth): the serial result-collection pass
+    //     processes items in their original declaration order.
     // -----------------------------------------------------------------------
-    //
-    // BFS queue + visited set keyed on `group:artifact` (NOT full GAV).
-    //
-    // Maven's conflict-resolution rule is **nearest wins**: when the same
-    // artifact appears at multiple depths with different versions, the
-    // shallowest occurrence wins.  BFS naturally produces shallowest-first
-    // visitation, so a GA-keyed visited set gives us this for free: once we
-    // commit to a version for a `group:artifact`, every later encounter
-    // (necessarily at equal or greater depth) is skipped.
-    //
-    // At equal depth, the first dep encountered in BFS order wins — which
-    // matches Maven's "first declared wins" tiebreaker.
-    let mut queue: VecDeque<BfsWork> = VecDeque::new();
+    const PARALLEL_POM_FETCHES: usize = 8;
+
     let mut visited: HashSet<String> = HashSet::new();
     // Ordered list of (GAV, fetch_repos) in BFS discovery order — used in Phase 2.
     let mut ordered_gavs: Vec<(Gav, Vec<Repository>)> = Vec::new();
 
-    // Seed with declared dependencies.  At depth 0 the user's explicit
-    // version always wins — top-level `<dependencyManagement>` (BOMs) only
-    // fills in when the dep's version is empty.
+    // Seed the first level from declared dependencies.  At depth 0 the user's
+    // explicit version always wins — BOMs only fill in when the version is empty.
+    let mut current_level: Vec<BfsWork> = Vec::new();
     for dep in deps {
         let resolved_version: String = if dep.version.is_empty() {
             // Version comes from a BOM — hard error if not found.
@@ -392,13 +387,12 @@ pub fn resolve(
         let gav = Gav::from_key_version(dep.key, &resolved_version)?;
         let ga = format!("{}:{}", gav.group, gav.artifact);
         if visited.insert(ga) {
-            queue.push_back(BfsWork { gav, fetch_repos, child_repos });
+            current_level.push(BfsWork { gav, fetch_repos, child_repos });
         }
     }
 
-    // Phase 1 spinner — shows which POM is being fetched while the transitive
-    // closure is being discovered.  Cleared silently when Phase 1 finishes so
-    // fully-cached runs produce no extra output.
+    // Phase 1 spinner — shows a running count of resolved POMs.  Cleared
+    // silently at the end so fully-cached runs produce no visible output.
     let phase1_spinner: Option<ProgressBar> = if opts.progress {
         let sp = ProgressBar::new_spinner();
         sp.set_style(
@@ -412,23 +406,66 @@ pub fn resolve(
         None
     };
 
-    while let Some(work) = queue.pop_front() {
-        if let Some(sp) = &phase1_spinner {
-            sp.set_message(work.gav.notation());
-        }
-        ordered_gavs.push((work.gav.clone(), work.fetch_repos.clone()));
+    while !current_level.is_empty() {
+        let level_n = current_level.len();
+        let thread_count = PARALLEL_POM_FETCHES.min(level_n);
 
-        // Fetch POM to expand transitive dependencies.
-        match fetch_and_parse_pom(&work.gav, &work.fetch_repos, &client, opts.offline) {
-            Ok(pom) => {
+        // Parallel fetch: each thread pulls the next item from `current_level`
+        // via an atomic index and stores (index, pom_result).
+        let next_idx = std::sync::atomic::AtomicUsize::new(0);
+        let mut pom_results: Vec<Option<Result<Pom>>> =
+            (0..level_n).map(|_| None).collect();
+        let mut per_thread: Vec<Vec<(usize, Result<Pom>)>> = Vec::new();
+
+        let next_ref = &next_idx;
+        let level_ref = &current_level;
+        let client_ref = &client;
+        let offline = opts.offline;
+
+        std::thread::scope(|s| -> Result<()> {
+            let handles: Vec<_> = (0..thread_count)
+                .map(|_| {
+                    s.spawn(move || -> Vec<(usize, Result<Pom>)> {
+                        let mut local = Vec::new();
+                        loop {
+                            let i = next_ref.fetch_add(1, Ordering::Relaxed);
+                            if i >= level_n { break; }
+                            let work = &level_ref[i];
+                            local.push((i, fetch_and_parse_pom(
+                                &work.gav, &work.fetch_repos, client_ref, offline,
+                            )));
+                        }
+                        local
+                    })
+                })
+                .collect();
+            for h in handles {
+                per_thread.push(h.join().unwrap_or_default());
+            }
+            Ok(())
+        })?;
+
+        for thread_results in per_thread {
+            for (i, result) in thread_results {
+                pom_results[i] = Some(result);
+            }
+        }
+
+        // Serial pass: collect results in level order, deduplicate via `visited`,
+        // and build the next level.  Processing in declaration order preserves
+        // "first declared wins" for same-depth conflicts.
+        let mut next_level: Vec<BfsWork> = Vec::new();
+        for (i, work) in current_level.iter().enumerate() {
+            ordered_gavs.push((work.gav.clone(), work.fetch_repos.clone()));
+
+            if let Some(Ok(pom)) = &pom_results[i] {
                 for dep in pom.dependencies.iter().filter(|d| d.is_compile_scope()) {
                     let group = pom.resolve_value(&dep.group_id);
                     let artifact = pom.resolve_value(&dep.artifact_id);
                     let ga_key = format!("{}:{}", group, artifact);
 
-                    // Nearest-wins short-circuit: a shallower BFS layer already
-                    // committed to a version for this GA — skip without even
-                    // resolving the version.
+                    // Nearest-wins short-circuit: already committed to a version
+                    // for this GA at a shallower depth — skip.
                     if visited.contains(&ga_key) {
                         continue;
                     }
@@ -436,7 +473,7 @@ pub fn resolve(
                     let raw_version = match resolve_transitive_version(
                         &ga_key,
                         dep.version.as_deref(),
-                        &pom,
+                        pom,
                         &global_managed,
                     ) {
                         Some(v) => v,
@@ -445,19 +482,21 @@ pub fn resolve(
 
                     let child_gav = Gav { group, artifact, version: raw_version };
                     visited.insert(ga_key);
-                    // Transitives inherit the parent's child_repos for both
-                    // their own fetching and further transitive expansion.
-                    queue.push_back(BfsWork {
+                    // Transitives inherit the parent's child_repos.
+                    next_level.push(BfsWork {
                         gav: child_gav,
                         fetch_repos: work.child_repos.clone(),
                         child_repos: work.child_repos.clone(),
                     });
                 }
             }
-            Err(_) => {
-                // POM unavailable — continue without transitive expansion.
-            }
         }
+
+        if let Some(sp) = &phase1_spinner {
+            sp.set_message(format!("{} POM(s)", ordered_gavs.len()));
+        }
+
+        current_level = next_level;
     }
 
     if let Some(sp) = phase1_spinner {
