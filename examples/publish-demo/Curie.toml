@@ -1,0 +1,43 @@
+# publish-demo
+#
+# Demonstrates `curie publish` — produces a JAR + sources jar + javadoc jar +
+# POM + GPG signatures, then uploads via HTTP PUT to a Maven repository.
+#
+# To try it locally:
+#
+#   curie --project examples/publish-demo publish --dry-run
+#
+# The dry run prints the upload plan without making any HTTP calls.
+#
+# For a real upload, declare the target repo in [[repositories]] below and add
+# matching credentials in ~/.curie/config.toml:
+#
+#   [[credentials]]
+#   repo_id = "local-nexus"
+#   username = "${NEXUS_USER}"
+#   password = "${NEXUS_TOKEN}"
+
+[library]
+name = "publish-demo"
+version = "0.1.0"
+groupId = "com.example.curie"
+
+[[repositories]]
+id = "local-nexus"
+url = "http://localhost:8081/repository/maven-releases"
+
+[publish]
+repository = "local-nexus"
+# Maven Central-compliant defaults are sign = true and javadoc = true.
+# Signing is disabled here so the dry run works without GPG setup; for
+# a real Central deploy keep `sign = true` (or omit it) and configure GPG.
+sign = false
+javadoc = true
+
+description = "A tiny library that demonstrates curie publish"
+homepage = "https://github.com/example/publish-demo"
+licenses = ["Apache-2.0"]
+developers = [
+    { id = "alice", name = "Alice Example", email = "alice@example.com" },
+]
+scm = { url = "https://github.com/example/publish-demo", connection = "scm:git:git@github.com:example/publish-demo.git" }

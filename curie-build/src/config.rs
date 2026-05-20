@@ -14,6 +14,49 @@ use std::path::PathBuf;
 pub struct CurieConfig {
     #[serde(default)]
     pub mirrors: Vec<MirrorEntry>,
+    #[serde(default)]
+    pub credentials: Vec<CredentialEntry>,
+}
+
+/// One entry in the `[[credentials]]` array.  Values support `${VAR}`
+/// env-var substitution applied lazily at lookup time.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CredentialEntry {
+    /// Matches a `[[repositories]]` id, e.g. `"internal-nexus"`.
+    pub repo_id: String,
+    /// Username (literal or `${ENV_VAR}`).
+    pub username: String,
+    /// Password (literal or `${ENV_VAR}`).
+    pub password: String,
+}
+
+impl CredentialEntry {
+    /// Resolve `${ENV_VAR}` indirections at lookup time, returning
+    /// `(username, password)` as concrete strings.
+    pub fn resolve(&self) -> Result<(String, String)> {
+        let u = resolve_env_indirection(&self.username)
+            .with_context(|| format!("invalid username for repo '{}'", self.repo_id))?;
+        let p = resolve_env_indirection(&self.password)
+            .with_context(|| format!("invalid password for repo '{}'", self.repo_id))?;
+        Ok((u, p))
+    }
+}
+
+/// Look up the credentials for a given repo id, if any.
+pub fn credentials_for<'a>(cfg: &'a CurieConfig, repo_id: &str) -> Option<&'a CredentialEntry> {
+    cfg.credentials.iter().find(|c| c.repo_id == repo_id)
+}
+
+/// If `s` is exactly `${VAR}`, read `VAR` from the environment.  Otherwise
+/// return `s` unchanged.  An unset `${VAR}` is a hard error so callers don't
+/// silently use empty passwords.
+fn resolve_env_indirection(s: &str) -> Result<String> {
+    if let Some(var) = s.strip_prefix("${").and_then(|rest| rest.strip_suffix('}')) {
+        std::env::var(var)
+            .with_context(|| format!("environment variable '{}' is not set", var))
+    } else {
+        Ok(s.to_string())
+    }
 }
 
 /// One entry in the `[[mirrors]]` array.
@@ -221,6 +264,103 @@ url = "https://nexus.internal/shibboleth"
         ];
         let result = apply_mirrors(repos, &mirrors);
         assert_eq!(result[0].url, "https://first.mirror/maven2");
+    }
+
+    // -- credentials --------------------------------------------------------
+
+    #[test]
+    fn credentials_load_with_literal_values() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", dir.path());
+
+        std::fs::create_dir_all(dir.path().join(".curie")).unwrap();
+        std::fs::write(
+            dir.path().join(".curie").join("config.toml"),
+            r#"
+[[credentials]]
+repo_id = "nexus"
+username = "alice"
+password = "literal-secret"
+"#,
+        )
+        .unwrap();
+
+        let cfg = load_config().unwrap();
+        let cred = credentials_for(&cfg, "nexus").expect("found");
+        let (u, p) = cred.resolve().unwrap();
+        assert_eq!(u, "alice");
+        assert_eq!(p, "literal-secret");
+
+        match prev {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn credentials_load_with_env_var_substitution() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", dir.path());
+        std::env::set_var("TEST_NEXUS_USER", "bob");
+        std::env::set_var("TEST_NEXUS_TOKEN", "tok-xyz");
+
+        std::fs::create_dir_all(dir.path().join(".curie")).unwrap();
+        std::fs::write(
+            dir.path().join(".curie").join("config.toml"),
+            r#"
+[[credentials]]
+repo_id = "nx"
+username = "${TEST_NEXUS_USER}"
+password = "${TEST_NEXUS_TOKEN}"
+"#,
+        )
+        .unwrap();
+
+        let cfg = load_config().unwrap();
+        let (u, p) = credentials_for(&cfg, "nx").unwrap().resolve().unwrap();
+        assert_eq!(u, "bob");
+        assert_eq!(p, "tok-xyz");
+
+        std::env::remove_var("TEST_NEXUS_USER");
+        std::env::remove_var("TEST_NEXUS_TOKEN");
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn credentials_missing_env_var_errors() {
+        let entry = CredentialEntry {
+            repo_id: "x".into(),
+            username: "${DEFINITELY_NOT_SET_42}".into(),
+            password: "p".into(),
+        };
+        let err = entry.resolve().unwrap_err().to_string();
+        // anyhow's chain shows the leaf cause — both Display and Debug forms work.
+        let chain = format!("{:#}", entry.resolve().unwrap_err());
+        assert!(
+            chain.contains("DEFINITELY_NOT_SET_42") || err.contains("DEFINITELY_NOT_SET_42"),
+            "expected env-var name in error, got: {err}, chain: {chain}",
+        );
+    }
+
+    #[test]
+    fn credentials_lookup_by_repo_id_picks_correct_entry() {
+        let cfg = CurieConfig {
+            mirrors: vec![],
+            credentials: vec![
+                CredentialEntry { repo_id: "a".into(), username: "ua".into(), password: "pa".into() },
+                CredentialEntry { repo_id: "b".into(), username: "ub".into(), password: "pb".into() },
+            ],
+        };
+        let b = credentials_for(&cfg, "b").unwrap();
+        assert_eq!(b.username, "ub");
+        assert!(credentials_for(&cfg, "missing").is_none());
     }
 
     #[test]

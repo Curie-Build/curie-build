@@ -10,7 +10,10 @@ mod incremental;
 mod jar;
 mod kt_stale;
 mod main_class;
+mod pom_writer;
+mod publish;
 mod run;
+mod sources_jar;
 mod test;
 mod workspace;
 mod wrapper;
@@ -79,6 +82,24 @@ enum Cmd {
         /// Do not download formatter JARs; fail if not already cached
         #[arg(long)]
         offline: bool,
+    },
+    /// Build, sign, and upload artifacts to a Maven repository
+    Publish {
+        /// Override [publish] repository/url with an inline URL
+        #[arg(long)]
+        repo: Option<String>,
+
+        /// Skip GPG signing (overrides [publish] sign = true)
+        #[arg(long = "no-sign")]
+        no_sign: bool,
+
+        /// Skip building the javadoc jar (overrides [publish] javadoc = true)
+        #[arg(long = "no-javadoc")]
+        no_javadoc: bool,
+
+        /// Build and prepare all artifacts but do not PUT them
+        #[arg(long = "dry-run")]
+        dry_run: bool,
     },
 }
 
@@ -182,6 +203,30 @@ fn main() {
                 fmt::run_fmt(project, check, offline)
             }
         },
+        Cmd::Publish { repo, no_sign, no_javadoc, dry_run } => {
+            let target = match &ctx {
+                workspace::WorkspaceContext::WorkspaceRoot(_) => {
+                    Err(anyhow::anyhow!(
+                        "`curie publish` cannot run on a workspace root; target a member with --project"
+                    ))
+                }
+                workspace::WorkspaceContext::WorkspaceMember { .. }
+                | workspace::WorkspaceContext::Standalone(_) => Ok(cli.project.clone()),
+            };
+            match target {
+                Ok(project) => publish::publish(
+                    &project,
+                    publish::PublishOptions {
+                        repo_url: repo,
+                        no_sign,
+                        no_javadoc,
+                        dry_run,
+                        skip_tests: false,
+                    },
+                ),
+                Err(e) => Err(e),
+            }
+        }
     };
 
     if let Err(e) = result {

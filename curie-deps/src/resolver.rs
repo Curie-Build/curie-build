@@ -290,6 +290,49 @@ fn resolve_bom_ref_version(bom_ref: &BomRef, importing_pom: &Pom) -> Option<Stri
     }
 }
 
+/// Resolve a list of [`DepEntry`] items into their final declared `Gav` form
+/// (versions filled in from BOMs where applicable).
+///
+/// This is the same seeding logic as [`resolve`] but stops there — no BFS,
+/// no POM/JAR downloads.  Intended for tooling such as `curie publish` that
+/// needs to know the resolved versions of the declared deps but doesn't
+/// need the full transitive closure.
+pub fn resolve_declared_gavs(
+    deps: &[DepEntry],
+    opts: &ResolveOptions,
+) -> Result<Vec<Gav>> {
+    let central = if opts.default_repos.is_empty() {
+        default_repositories()
+    } else {
+        opts.default_repos.clone()
+    };
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("curie-build/0.1")
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let global_managed = resolve_boms(&opts.bom_imports, &central, &client, opts.offline)?;
+
+    let mut out = Vec::with_capacity(deps.len());
+    for dep in deps {
+        let version: String = if dep.version.is_empty() {
+            global_managed
+                .get(dep.key)
+                .with_context(|| format!(
+                    "dependency \"{}\" has no version and is not managed by any BOM",
+                    dep.key
+                ))?
+                .clone()
+        } else {
+            dep.version.to_string()
+        };
+        out.push(Gav::from_key_version(dep.key, &version)?);
+    }
+    Ok(out)
+}
+
 /// Resolve a list of [`DepEntry`] items from `Curie.toml` into a list of
 /// local JAR paths (including transitive dependencies).
 ///

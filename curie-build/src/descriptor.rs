@@ -68,6 +68,9 @@ pub struct Descriptor {
     pub test_annotation_processor_options: BTreeMap<String, BTreeMap<String, String>>,
     pub inherited_annotation_processor_options: BTreeMap<String, BTreeMap<String, String>>,
     pub inherited_test_annotation_processor_options: BTreeMap<String, BTreeMap<String, String>>,
+    /// `[publish]` — empty/default when the section is absent.  Validated at
+    /// publish time, not load time.
+    pub publish: PublishConfig,
 }
 
 /// One entry in `[annotation-processors]` or `[test-annotation-processors]`.
@@ -171,6 +174,8 @@ struct RawDescriptor {
     test: Test,
     #[serde(default)]
     kotlin: Kotlin,
+    #[serde(default)]
+    publish: PublishConfig,
 }
 
 /// One entry in `[workspace-dependencies]`.
@@ -193,6 +198,11 @@ pub struct WorkspaceDep {
 pub struct Application {
     pub name: String,
     pub version: String,
+    /// Maven `groupId` — required only when publishing.  When absent, build
+    /// and test paths work normally; `curie publish` errors with a clear
+    /// message asking the user to add it.
+    #[serde(rename = "groupId", default)]
+    pub group_id: Option<String>,
     /// The fully-qualified main class name.  When omitted, curie will scan
     /// production sources and compiled bytecode to detect it automatically.
     #[serde(rename = "mainClass")]
@@ -203,6 +213,9 @@ pub struct Application {
 pub struct Library {
     pub name: String,
     pub version: String,
+    /// Maven `groupId` — required only when publishing.  See [`Application::group_id`].
+    #[serde(rename = "groupId", default)]
+    pub group_id: Option<String>,
 }
 
 /// Workspace descriptor: lists member directories whose own `Curie.toml`
@@ -352,6 +365,56 @@ impl Default for BuildInfo {
     }
 }
 
+/// `[publish]` — settings for `curie publish`.
+///
+/// All POM-metadata fields are optional in the type so that descriptors
+/// without a `[publish]` section parse fine; they are validated at publish
+/// time by `publish::validate_for_publish`.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct PublishConfig {
+    /// Named repository id from `[[repositories]]` to publish to.
+    /// Mutually exclusive with [`url`].
+    pub repository: Option<String>,
+    /// Inline target URL.  Mutually exclusive with [`repository`].
+    pub url: Option<String>,
+
+    /// Default: GPG-sign every artifact.  Maven Central requires this.
+    #[serde(default = "default_true")]
+    pub sign: bool,
+    /// Default: build a javadoc jar.  Maven Central requires this.
+    #[serde(default = "default_true")]
+    pub javadoc: bool,
+
+    pub description: Option<String>,
+    /// Project homepage for the POM `<url>` element.  Named `homepage` to
+    /// disambiguate from the `url` field above (which is the publish target).
+    pub homepage: Option<String>,
+    #[serde(default)]
+    pub licenses: Vec<String>,
+    #[serde(default)]
+    pub developers: Vec<Developer>,
+    pub scm: Option<Scm>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Developer {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Scm {
+    pub url: Option<String>,
+    pub connection: Option<String>,
+    #[serde(rename = "developerConnection")]
+    pub developer_connection: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// An additional Maven-compatible repository declared in `[[repositories]]`.
 #[derive(Debug, Deserialize, Clone)]
 pub struct RepositoryEntry {
@@ -457,6 +520,17 @@ impl Descriptor {
         match &self.kind {
             DescriptorKind::Application(a) => Some(&a.name),
             DescriptorKind::Library(l) => Some(&l.name),
+            DescriptorKind::Workspace(_) => None,
+        }
+    }
+
+    /// Maven `groupId`.  `None` for a workspace root and when the buildable
+    /// section omitted the key.  `publish::validate_for_publish` errors on
+    /// `None` for buildable projects.
+    pub fn group_id(&self) -> Option<&str> {
+        match &self.kind {
+            DescriptorKind::Application(a) => a.group_id.as_deref(),
+            DescriptorKind::Library(l) => l.group_id.as_deref(),
             DescriptorKind::Workspace(_) => None,
         }
     }
@@ -755,6 +829,7 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         test_annotation_processor_options: parsed.test_annotation_processor_options,
         inherited_annotation_processor_options: BTreeMap::new(),
         inherited_test_annotation_processor_options: BTreeMap::new(),
+        publish: parsed.publish,
     };
 
     // Workspace-only restrictions: they describe member layout, not
