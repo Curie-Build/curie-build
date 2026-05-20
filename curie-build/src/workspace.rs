@@ -587,7 +587,7 @@ pub fn run_one(
 
     // ---- build phase ------------------------------------------------------
     let subset = transitive_closure(&ws, member_index);
-    let build_opts = build::BuildOptions { no_docker: opts.no_docker, offline: opts.offline };
+    let build_opts = build::BuildOptions { no_docker: opts.no_docker, no_native: false, offline: opts.offline };
 
     let n = subset.len();
     println!(

@@ -23,6 +23,11 @@ pub struct Descriptor {
     /// value (if any) is copied in.
     pub kotlin: Kotlin,
     pub groovy: Groovy,
+    /// Populated from `[native-image]`.  The `section_present` flag is set
+    /// by [`load`] after a raw-TOML presence check, because an absent section
+    /// and a section with all-default values produce the same deserialised
+    /// struct — but only the former disables native-image compilation.
+    pub native_image: NativeImage,
     pub docker: Docker,
     pub build_info: BuildInfo,
     pub dependencies: BTreeMap<String, DependencyValue>,
@@ -177,6 +182,8 @@ struct RawDescriptor {
     kotlin: Kotlin,
     #[serde(default)]
     groovy: Groovy,
+    #[serde(rename = "native-image", default)]
+    native_image: NativeImage,
     #[serde(default)]
     publish: PublishConfig,
 }
@@ -319,6 +326,64 @@ impl Kotlin {
 /// version = "4.0.23"
 /// ```
 pub const DEFAULT_GROOVY_VERSION: &str = "4.0.23";
+
+/// Configuration for the `[native-image]` table.
+///
+/// Native image compilation is opt-in: the section must be explicitly present
+/// in `Curie.toml` to trigger `native-image` after JAR packaging.  Only
+/// meaningful for `[application]` projects.
+///
+/// ```toml
+/// [native-image]
+/// # Name of the output binary written to target/ (default: application.name)
+/// outputName = "my-app"
+///
+/// # Path to a directory containing GraalVM reachability-metadata config files
+/// # (reflect-config.json, resource-config.json, proxy-config.json, …).
+/// # Passed as -H:ConfigurationFileDirectories=<path>.
+/// configDir = "src/main/resources/META-INF/native-image"
+///
+/// # Additional flags forwarded verbatim to native-image (appended last).
+/// extraArgs = ["--no-fallback", "-H:+ReportExceptionStackTraces"]
+/// ```
+///
+/// Curie locates the `native-image` executable by checking, in order:
+///   1. `$GRAALVM_HOME/bin/native-image`
+///   2. `native-image` on `$PATH`
+///
+/// Install GraalVM from <https://www.graalvm.org/downloads/> or via sdkman.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct NativeImage {
+    /// Name of the output binary written to `target/`.
+    /// Defaults to the application name (hyphens replaced with hyphens — kept
+    /// as-is since native-image accepts hyphens in output names).
+    #[serde(rename = "outputName", default)]
+    pub output_name: Option<String>,
+
+    /// Path to a directory that contains GraalVM reachability-metadata JSON
+    /// files (relative to the project root).  Passed as
+    /// `-H:ConfigurationFileDirectories=<abs-path>`.
+    #[serde(rename = "configDir", default)]
+    pub config_dir: Option<String>,
+
+    /// Extra flags appended verbatim to the `native-image` invocation.
+    #[serde(rename = "extraArgs", default)]
+    pub extra_args: Vec<String>,
+
+    /// Whether the `[native-image]` section was explicitly present in
+    /// `Curie.toml`.  Set by [`load`] after the raw-TOML presence check;
+    /// never written by serde.
+    #[serde(skip)]
+    pub section_present: bool,
+}
+
+impl NativeImage {
+    /// Resolved output binary name: descriptor override or application name.
+    /// `app_name` is the fallback when `outputName` was omitted.
+    pub fn resolved_output_name<'a>(&'a self, app_name: &'a str) -> &'a str {
+        self.output_name.as_deref().unwrap_or(app_name)
+    }
+}
 
 /// Configuration for the `[groovy]` table.
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -833,12 +898,17 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     let mut docker = parsed.docker;
     docker.section_present = docker_section_present;
 
+    let native_image_section_present = table.map(|t| t.contains_key("native-image")).unwrap_or(false);
+    let mut native_image = parsed.native_image;
+    native_image.section_present = native_image_section_present;
+
     let descriptor = Descriptor {
         kind,
         java: parsed.java,
         test: parsed.test,
         kotlin: parsed.kotlin,
         groovy: parsed.groovy,
+        native_image,
         docker,
         build_info: parsed.build_info,
         dependencies: parsed.dependencies,
@@ -902,6 +972,13 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         );
     }
 
+    if descriptor.is_library() && native_image_section_present {
+        bail!(
+            "library projects do not support native-image compilation: \
+             remove the [native-image] section from Curie.toml"
+        );
+    }
+
     validate_dep_repo_refs(&descriptor)?;
 
     Ok(descriptor)
@@ -947,6 +1024,13 @@ pub fn validate_dep_repo_refs(desc: &Descriptor) -> Result<()> {
 /// project root.
 pub fn docker_enabled(project_root: &Path, desc: &Descriptor) -> bool {
     desc.docker.section_present || project_root.join("Dockerfile").exists()
+}
+
+/// Native-image compilation is enabled when the `[native-image]` section is
+/// explicitly present in `Curie.toml`.  Unlike Docker, there is no implicit
+/// trigger (no Dockerfile analogue); the section must always be declared.
+pub fn native_image_enabled(desc: &Descriptor) -> bool {
+    desc.native_image.section_present
 }
 
 // ---------------------------------------------------------------------------
@@ -1711,5 +1795,114 @@ version = "3.0.22"
 "#;
         let d = load_str(toml).unwrap();
         assert_eq!(d.groovy.version(), "3.0.22");
+    }
+
+    // -- native-image --------------------------------------------------------
+
+    #[test]
+    fn native_image_absent_means_disabled() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(!d.native_image.section_present);
+        assert!(!native_image_enabled(&d));
+    }
+
+    #[test]
+    fn native_image_section_present_enables_it() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[native-image]
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.native_image.section_present);
+        assert!(native_image_enabled(&d));
+    }
+
+    #[test]
+    fn native_image_output_name_defaults_to_app_name() {
+        let toml = r#"
+[application]
+name = "my-app"
+version = "0.1"
+mainClass = "X"
+
+[native-image]
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.native_image.resolved_output_name("my-app"), "my-app");
+    }
+
+    #[test]
+    fn native_image_output_name_override() {
+        let toml = r#"
+[application]
+name = "my-app"
+version = "0.1"
+mainClass = "X"
+
+[native-image]
+outputName = "my-binary"
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.native_image.output_name.as_deref(), Some("my-binary"));
+        assert_eq!(d.native_image.resolved_output_name("my-app"), "my-binary");
+    }
+
+    #[test]
+    fn native_image_config_dir_parsed() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[native-image]
+configDir = "src/main/resources/META-INF/native-image"
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(
+            d.native_image.config_dir.as_deref(),
+            Some("src/main/resources/META-INF/native-image")
+        );
+    }
+
+    #[test]
+    fn native_image_extra_args_parsed() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[native-image]
+extraArgs = ["--no-fallback", "-H:+ReportExceptionStackTraces"]
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(
+            d.native_image.extra_args,
+            vec!["--no-fallback", "-H:+ReportExceptionStackTraces"]
+        );
+    }
+
+    #[test]
+    fn native_image_on_library_is_rejected() {
+        let toml = r#"
+[library]
+name = "x"
+version = "0.1"
+
+[native-image]
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("library") && err.contains("native-image"), "got: {err}");
     }
 }

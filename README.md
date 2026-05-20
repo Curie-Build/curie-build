@@ -115,7 +115,52 @@ imageTag  = "latest"    # default: application.version
 
 Docker is enabled when either the `[docker]` section is present or a `Dockerfile` exists at the project root. Omit both to get a plain JAR build.
 
-### Build info
+### GraalVM native-image
+
+Curie can compile an application to a standalone native binary using [GraalVM native-image](https://www.graalvm.org/latest/reference-manual/native-image/).  The step is **opt-in**: add a `[native-image]` section to `Curie.toml`.
+
+```toml
+[native-image]
+# Output binary name written to target/ (default: application.name)
+outputName = "my-app"
+
+# Directory containing GraalVM reachability-metadata JSON files
+# (reflect-config.json, resource-config.json, proxy-config.json, …).
+# Passed as -H:ConfigurationFileDirectories=<abs-path>.
+configDir = "src/main/resources/META-INF/native-image"
+
+# Extra flags forwarded verbatim to native-image (appended last).
+extraArgs = ["--no-fallback"]
+```
+
+`mainClass` must be declared in `[application]`; auto-detection is not supported for native compilation.
+
+**Commands:**
+
+```
+curie build               # includes the native-image step when [native-image] is present
+curie build --no-native   # suppress native-image even if Curie.toml enables it
+curie native              # compile + package JAR (skips tests), then run native-image
+```
+
+`curie native` is optimised for the inner compile→native iteration loop.  Use `curie build` when you also want tests to run before the native step.
+
+**Locating `native-image`:**
+
+Curie checks, in order:
+1. `$GRAALVM_HOME/bin/native-image`
+2. `native-image` on `$PATH`
+
+Install GraalVM from <https://www.graalvm.org/downloads/> or via [sdkman](https://sdkman.io):
+```
+sdk install java 25.0.1-graal
+```
+
+Library projects do not support native-image; declaring `[native-image]` in a library `Curie.toml` is an error.
+
+See `examples/graalvm-hello/` for a working example.
+
+
 
 When the project directory is inside a Git repository, Curie automatically generates `META-INF/build-info.properties` in the root of the JAR's classpath.
 

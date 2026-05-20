@@ -27,6 +27,7 @@ members = [
     "maven-string-utils",
     "hello-kotlin",
     "hello-mixed",
+    "graalvm-hello",
 ]
 
 [java]

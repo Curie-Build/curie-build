@@ -70,6 +70,7 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
         &desc,
         BuildOptions {
             no_docker: true, // publishing never builds docker
+            no_native: true, // publishing never builds native binaries
             offline: false,
         },
         &[],
@@ -550,6 +551,7 @@ mod tests {
             test: Test::default(),
             kotlin: Kotlin::default(),
             groovy: Groovy::default(),
+            native_image: NativeImage::default(),
             docker: Docker::default(),
             build_info: BuildInfo::default(),
             dependencies: BTreeMap::new(),

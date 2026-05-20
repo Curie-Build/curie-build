@@ -10,6 +10,7 @@ mod incremental;
 mod jar;
 mod kt_stale;
 mod main_class;
+mod native;
 mod pom_writer;
 mod publish;
 mod run;
@@ -39,6 +40,10 @@ enum Cmd {
         /// Skip Docker build even when Docker support is configured
         #[arg(long)]
         no_docker: bool,
+
+        /// Skip native-image compilation even when [native-image] is configured
+        #[arg(long)]
+        no_native: bool,
 
         /// Do not access the network; use only locally cached artifacts
         #[arg(long)]
@@ -70,6 +75,20 @@ enum Cmd {
     },
     /// Remove the target/ build directory
     Clean {},
+    /// Compile the project and produce a GraalVM native binary (skips tests)
+    ///
+    /// Runs the full build pipeline (compile, package JAR) and then invokes
+    /// `native-image`.  Tests are intentionally skipped so the command is
+    /// fast enough for the inner compile→native iteration loop.  Use
+    /// `curie build` to also run tests before compiling the native binary.
+    ///
+    /// Requires GraalVM to be installed.  Curie looks for the `native-image`
+    /// executable in $GRAALVM_HOME/bin first, then on $PATH.
+    Native {
+        /// Do not access the network; use only locally cached artifacts
+        #[arg(long)]
+        offline: bool,
+    },
     /// List the members of a workspace (project must be a workspace root)
     List {},
     /// Format Java source files with palantir-java-format
@@ -119,8 +138,8 @@ fn main() {
     };
 
     let result = match cli.command {
-        Cmd::Build { no_docker, offline } => {
-            let opts = build::BuildOptions { no_docker, offline };
+        Cmd::Build { no_docker, no_native, offline } => {
+            let opts = build::BuildOptions { no_docker, no_native, offline };
             match &ctx {
                 workspace::WorkspaceContext::WorkspaceRoot(root) => {
                     workspace::build_all(root, opts)
@@ -174,12 +193,22 @@ fn main() {
         Cmd::Clean {} => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(root) => workspace::clean_all(root),
             workspace::WorkspaceContext::WorkspaceMember { .. } => {
-                // Per-member `clean` matches Cargo's semantics: it wipes
                 // just the targeted member's `target/`, not the whole
                 // workspace's.
                 build::clean(&cli.project)
             }
             workspace::WorkspaceContext::Standalone(project) => build::clean(project),
+        },
+        Cmd::Native { offline } => match &ctx {
+            workspace::WorkspaceContext::WorkspaceRoot(_) => Err(anyhow::anyhow!(
+                "`curie native` is ambiguous in a workspace — native binaries are \
+                 per-application.  Re-run with --project <member>, e.g.\n  \
+                 curie --project examples/graalvm-hello native"
+            )),
+            workspace::WorkspaceContext::WorkspaceMember { .. }
+            | workspace::WorkspaceContext::Standalone(_) => {
+                native_single_module(&cli.project, offline)
+            }
         },
         Cmd::List {} => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(root)
@@ -259,5 +288,41 @@ fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: 
         offline,
         &[],
     )?;
+    Ok(())
+}
+
+/// Single-module variant of the native-image pipeline.
+///
+/// Runs compile → package JAR (no tests) → native-image.  Tests are
+/// intentionally skipped so this command is fast enough for the inner
+/// compile→native iteration loop.  The `[native-image]` section must be
+/// present in `Curie.toml`; if it is absent this function errors early.
+fn native_single_module(project: &std::path::Path, offline: bool) -> anyhow::Result<()> {
+    let desc = descriptor::load(project)?;
+
+    if !descriptor::native_image_enabled(&desc) {
+        anyhow::bail!(
+            "native-image is not enabled for this project.\n\
+             Add a [native-image] section to Curie.toml to enable it, e.g.:\n\n  \
+             [native-image]\n  extraArgs = [\"--no-fallback\"]"
+        );
+    }
+
+    println!(
+        "Native  {} v{}",
+        desc.buildable_name(),
+        desc.buildable_version()
+    );
+
+    // compile + package JAR, skipping tests and Docker
+    let opts = build::BuildOptions {
+        no_docker: true,
+        no_native: true, // we call native::build_native ourselves below
+        offline,
+    };
+    let output = build::build_with_desc(project, &desc, opts, &[])?;
+
+    native::build_native(project, &desc, &output.jar, &output.dep_jars)?;
+
     Ok(())
 }

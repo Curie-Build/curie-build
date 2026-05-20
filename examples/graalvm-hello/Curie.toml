@@ -1,0 +1,29 @@
+# graalvm-hello
+#
+# Demonstrates GraalVM native-image compilation with Curie.
+#
+# Build a native binary with:
+#
+#   curie --project examples/graalvm-hello build
+#
+# or use the faster iteration command (skips tests):
+#
+#   curie --project examples/graalvm-hello native
+#
+# Requires GraalVM to be installed.  Curie looks for the `native-image`
+# executable in $GRAALVM_HOME/bin first, then on $PATH.
+# Install GraalVM from https://www.graalvm.org/downloads/ or via sdkman:
+#   sdk install java 25.0.1-graal
+
+[application]
+name = "graalvm-hello"
+version = "0.1.0"
+mainClass = "com.example.Hello"
+
+# Opt in to GraalVM native-image compilation.
+# The section must be explicitly present to trigger the native step.
+[native-image]
+# Output binary name (defaults to the application name).
+outputName = "graalvm-hello"
+# Extra flags forwarded verbatim to native-image.
+extraArgs = ["--no-fallback"]

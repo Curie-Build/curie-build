@@ -9,6 +9,7 @@ use crate::git;
 use crate::incremental::needs_repackage;
 use crate::jar::{populate_libs_dir, write_deterministic_jar};
 use crate::main_class::{detect_main_class, validate_main_class};
+use crate::native;
 use crate::test;
 use anyhow::{Context, Result};
 use curie_deps::repo::Repository;
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 #[derive(Copy, Clone)]
 pub struct BuildOptions {
     pub no_docker: bool,
+    pub no_native: bool,
     pub offline: bool,
 }
 
@@ -74,6 +76,10 @@ pub fn build_with_desc(
 
     if !desc.is_library() && !opts.no_docker && descriptor::docker_enabled(project_root, desc) {
         docker::docker_build(project_root, desc, &output.jar, &output.dep_jars)?;
+    }
+
+    if !desc.is_library() && !opts.no_native && descriptor::native_image_enabled(desc) {
+        native::build_native(project_root, desc, &output.jar, &output.dep_jars)?;
     }
 
     Ok(output)
