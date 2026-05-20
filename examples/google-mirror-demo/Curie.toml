@@ -1,0 +1,23 @@
+# google-mirror-demo
+#
+# Demonstrates the repository mirror feature.  Dependencies are resolved
+# from Maven Central as usual, but if ~/.curie/config.toml points Central
+# at the Google mirror, all downloads go through:
+#   https://maven-central.storage.googleapis.com
+#
+# Example ~/.curie/config.toml:
+#
+#   [[mirrors]]
+#   id = "google"
+#   mirror_of = "central"
+#   url = "https://maven-central.storage.googleapis.com/maven2"
+#
+# The project itself needs no changes — mirrors are transparent.
+
+[application]
+name = "google-mirror-demo"
+version = "0.1.0"
+mainClass = "com.example.MirrorDemo"
+
+[dependencies]
+"com.fasterxml.jackson.core:jackson-databind" = "2.17.2"
