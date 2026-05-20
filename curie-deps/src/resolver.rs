@@ -396,7 +396,26 @@ pub fn resolve(
         }
     }
 
+    // Phase 1 spinner — shows which POM is being fetched while the transitive
+    // closure is being discovered.  Cleared silently when Phase 1 finishes so
+    // fully-cached runs produce no extra output.
+    let phase1_spinner: Option<ProgressBar> = if opts.progress {
+        let sp = ProgressBar::new_spinner();
+        sp.set_style(
+            ProgressStyle::with_template("  Resolving      {spinner} {msg}")
+                .unwrap()
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
+        );
+        sp.enable_steady_tick(Duration::from_millis(80));
+        Some(sp)
+    } else {
+        None
+    };
+
     while let Some(work) = queue.pop_front() {
+        if let Some(sp) = &phase1_spinner {
+            sp.set_message(work.gav.notation());
+        }
         ordered_gavs.push((work.gav.clone(), work.fetch_repos.clone()));
 
         // Fetch POM to expand transitive dependencies.
@@ -439,6 +458,10 @@ pub fn resolve(
                 // POM unavailable — continue without transitive expansion.
             }
         }
+    }
+
+    if let Some(sp) = phase1_spinner {
+        sp.finish_and_clear();
     }
 
     // -----------------------------------------------------------------------
