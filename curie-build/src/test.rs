@@ -73,7 +73,16 @@ pub fn run_tests(
     // --- resolve JUnit standalone launcher -----------------------------------
     let extra_repos = build::extra_repos(desc);
 
-    let standalone_jar = resolve_standalone(&extra_repos, offline, desc.test.junit_platform_version())
+    // spock-core 2.x is built against JUnit Platform 1.x.  The default
+    // standalone runner is JUnit 6 (Platform 2.x) which has an incompatible
+    // `--scan-class-path` discovery protocol.  When Spock is enabled and the
+    // user hasn't overridden the version, use the latest 1.x standalone.
+    let junit_version = if desc.spock.enabled && !desc.test.junit_platform_version_is_user_set() {
+        "1.14.4"
+    } else {
+        desc.test.junit_platform_version()
+    };
+    let standalone_jar = resolve_standalone(&extra_repos, offline, junit_version)
         .context("failed to resolve JUnit Platform Console Standalone")?;
 
     // --- resolve test-scoped dependencies ------------------------------------
@@ -105,18 +114,31 @@ pub fn run_tests(
     };
 
     // --- resolve spock-core (when [spock] is configured) ---------------------
+    // spock-core's transitive deps (junit-platform-engine, opentest4j, …)
+    // carry no explicit version — they are managed by the embedded junit-bom
+    // which spock-bom imports.  We pass spock-bom as an extra bom_import so
+    // those managed versions land in global_managed and the resolver can
+    // resolve the full transitive closure.
     let spock_jars: Vec<PathBuf> = if desc.spock.enabled {
+        let spock_version = desc.spock.version();
+        let spock_bom = curie_deps::Gav::from_key_version(
+            "org.spockframework:spock-bom",
+            spock_version,
+        )?;
+        let mut spock_bom_imports = test_bom_gavs.clone();
+        spock_bom_imports.push(spock_bom);
+
         let jars = resolve(
             &[DepEntry {
                 key: "org.spockframework:spock-core",
-                version: desc.spock.version(),
+                version: spock_version,
                 repo_id: None,
             }],
             &ResolveOptions {
                 default_repos: central_repos(),
                 named_repos: extra_repos.clone(),
                 progress: true,
-                bom_imports: test_bom_gavs.clone(),
+                bom_imports: spock_bom_imports,
                 offline,
             },
         )
@@ -421,8 +443,23 @@ pub fn run_tests(
                     groovy_jars.to_vec()
                 }
             };
+            // Spock AST transforms are loaded by the groovyc JVM process
+            // itself, so spock-core and ALL its transitive deps (incl. opentest4j,
+            // junit-platform-*) must be on the process -cp alongside groovy.jar.
+            // shared_cp already contains all of these — use it as the process cp
+            // (excluding the standalone launcher jar which is not a compile dep).
+            let groovyc_process_cp: Vec<PathBuf> = {
+                let mut cp = groovy_cp_jars.clone();
+                cp.extend(shared_cp.iter().filter(|p| {
+                    !p.file_name()
+                        .map(|f| f.to_string_lossy().starts_with("junit-platform-console-standalone"))
+                        .unwrap_or(false)
+                }).cloned());
+                cp
+            };
+
             let mut groovyc = Command::new("java");
-            groovyc.arg("-cp").arg(classpath_string(&groovy_cp_jars));
+            groovyc.arg("-cp").arg(classpath_string(&groovyc_process_cp));
             groovyc.arg("org.codehaus.groovy.tools.FileSystemCompiler");
             groovyc.arg("-d").arg(&test_classes_dir);
             let mut gcp = shared_cp.clone();
@@ -492,8 +529,16 @@ pub fn run_tests(
         .arg(classpath_string(&run_cp))
         .arg("--scan-class-path");
 
+    // JUnit Platform's default class-name filter matches *Test/*Tests and
+    // similar Java/Kotlin conventions but skips Groovy *Spec classes.  When
+    // Spock is enabled, broaden the filter to include `.*Spec` names.
     if let Some(f) = filter {
         java.arg(format!("--include-classname={}", f));
+    } else if !spock_jars.is_empty() {
+        // Match the Spock *Spec convention alongside JUnit's default patterns.
+        // The default JUnit pattern already covers *Tests / *Test / Test* etc.;
+        // we add .*Spec so Groovy specification classes are included.
+        java.arg("--include-classname=.*Tests?$|^Test.*|.*TestCase$|.*Spec$");
     }
 
     let status = java

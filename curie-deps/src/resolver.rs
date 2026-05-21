@@ -204,6 +204,42 @@ fn fetch_and_parse_pom(
     let mut pom = pom::parse(&xml)
         .with_context(|| format!("failed to parse POM for {}", gav))?;
     merge_parent_chain(&mut pom, repos, client, offline);
+
+    // Resolve the POM's own <dependencyManagement> BOM imports so that
+    // dependencies declared without an explicit version (e.g. spock-core's
+    // `junit-platform-engine` whose version is managed by the embedded
+    // `junit-bom`) can be resolved via `managed_versions`.  The merge
+    // uses "existing wins" so the POM's own explicit entries are not
+    // overwritten by the BOM imports.
+    //
+    // We intentionally use a SHALLOW one-level expansion here — fetch each
+    // BOM POM and extract its managed_versions directly, without calling
+    // fetch_and_parse_pom recursively (which would cause mutual recursion
+    // with resolve_boms and overflow on BOM cycles).
+    if !pom.bom_imports.is_empty() {
+        for bom_ref in &pom.bom_imports {
+            let version = pom.resolve_value(&bom_ref.version);
+            if version.contains("${") { continue; }
+            let bom_gav = Gav {
+                group: bom_ref.group_id.clone(),
+                artifact: bom_ref.artifact_id.clone(),
+                version,
+            };
+            // Fetch the BOM POM directly without further BOM-import expansion.
+            if let Ok(path) = ensure_artifact(&bom_gav, repos, client, ArtifactKind::Pom, offline, None, None) {
+                if let Ok(xml) = std::fs::read_to_string(&path) {
+                    if let Ok(bom_pom) = pom::parse(&xml) {
+                        for (k, v) in &bom_pom.managed_versions {
+                            pom.managed_versions
+                                .entry(k.clone())
+                                .or_insert_with(|| bom_pom.resolve_value(v));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(pom)
 }
 

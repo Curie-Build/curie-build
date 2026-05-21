@@ -302,6 +302,13 @@ impl Test {
             .as_deref()
             .unwrap_or(DEFAULT_JUNIT_PLATFORM_VERSION)
     }
+
+    /// `true` when the user explicitly set `junitPlatformVersion` in
+    /// `Curie.toml` (or inherited it from a workspace).  Used by the test
+    /// runner to decide whether to override the version for Spock compatibility.
+    pub fn junit_platform_version_is_user_set(&self) -> bool {
+        self.junit_platform_version.is_some()
+    }
 }
 
 /// Configuration for the `[kotlin]` table (the version of kotlinc + stdlib
@@ -330,7 +337,7 @@ impl Kotlin {
 /// [groovy]
 /// version = "4.0.23"
 /// ```
-pub const DEFAULT_GROOVY_VERSION: &str = "4.0.23";
+pub const DEFAULT_GROOVY_VERSION: &str = "5.0.6";
 
 /// Configuration for the `[native-image]` table.
 ///
@@ -413,7 +420,7 @@ impl Groovy {
 /// [spock]
 /// version = "2.3-groovy-4.0"
 /// ```
-pub const DEFAULT_SPOCK_VERSION: &str = "2.3-groovy-4.0";
+pub const DEFAULT_SPOCK_VERSION: &str = "2.4-groovy-5.0";
 
 /// Configuration for the `[spock]` table.  The section's mere presence
 /// (even with no keys) activates Spock support — `section_present` is set
