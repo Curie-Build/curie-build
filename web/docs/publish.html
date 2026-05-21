@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Publishing · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · publish</span>
+    <h1>Publishing</h1>
+    <p class="lede"><code>curie publish</code> uploads your library or application to any Maven 2-layout repository — Nexus, Artifactory, GitHub Packages, or a self-hosted mirror. It generates a POM, builds sources and javadoc jars, optionally GPG-signs everything, and uploads each artifact with its checksums via HTTP PUT.</p>
+
+    <h2>Configuration</h2>
+    <p>Add a <code>[publish]</code> table and declare the target repository. All POM-metadata fields are required at publish time (Maven Central's validation checks them):</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[library]</span>
+<span class="kw">name</span>    = <span class="str">"my-lib"</span>
+<span class="kw">version</span> = <span class="str">"1.0.0"</span>
+<span class="com"># groupId is required for publishing</span>
+<span class="kw">groupId</span> = <span class="str">"com.example"</span>
+
+<span class="kw">[[repositories]]</span>
+<span class="kw">id</span>  = <span class="str">"internal-nexus"</span>
+<span class="kw">url</span> = <span class="str">"https://nexus.internal/repository/releases/"</span>
+
+<span class="kw">[publish]</span>
+<span class="kw">repository</span>  = <span class="str">"internal-nexus"</span>  <span class="com"># references the [[repositories]] entry above</span>
+<span class="kw">sign</span>        = <span class="kw">true</span>              <span class="com"># GPG-sign every artifact (default: true)</span>
+<span class="kw">javadoc</span>     = <span class="kw">true</span>              <span class="com"># build javadoc jar (default: true)</span>
+<span class="kw">description</span> = <span class="str">"A useful library"</span>
+<span class="kw">homepage</span>    = <span class="str">"https://github.com/example/my-lib"</span>
+<span class="kw">licenses</span>    = [<span class="str">"Apache-2.0"</span>]
+<span class="kw">developers</span>  = [{ id = <span class="str">"alice"</span>, name = <span class="str">"Alice"</span>, email = <span class="str">"alice@example.com"</span> }]
+<span class="kw">scm</span>         = { url = <span class="str">"https://github.com/example/my-lib"</span>,
+                 connection = <span class="str">"scm:git:git@github.com:example/my-lib.git"</span> }</pre>
+    </div>
+
+    <h2>Credentials</h2>
+    <p>Authentication lives in <code>~/.curie/config.toml</code> so credentials never touch the project tree. Use <code>${ENV_VAR}</code> indirection to keep secrets out of the file itself:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>~/.curie/config.toml</span>
+      </header>
+<pre><span class="kw">[[credentials]]</span>
+<span class="kw">repo_id</span>  = <span class="str">"internal-nexus"</span>
+<span class="kw">username</span> = <span class="str">"${NEXUS_USER}"</span>
+<span class="kw">password</span> = <span class="str">"${NEXUS_TOKEN}"</span></pre>
+    </div>
+
+    <h2>Running a publish</h2>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie publish --project my-lib</span>
+      </header>
+<pre><span class="dim">Building my-lib v1.0.0</span>
+  Resolve deps    3 JAR(s)
+  Compile         5 source file(s)
+  Tests           <span class="ok">✔ 12 tests successful</span>
+  Package         my-lib-1.0.0.jar
+  Sources jar     my-lib-1.0.0-sources.jar
+  Javadoc jar     my-lib-1.0.0-javadoc.jar
+  POM             my-lib-1.0.0.pom
+  Signed          4 artifact(s)
+  Publishing to   https://nexus.internal/repository/releases/com/example/my-lib/1.0.0
+    → my-lib-1.0.0.jar  (.sha1 .sha256 .sha512 .asc)
+    → my-lib-1.0.0-sources.jar  (…)
+    → my-lib-1.0.0-javadoc.jar  (…)
+    → my-lib-1.0.0.pom  (…)
+  Uploaded        20 file(s)</pre>
+    </div>
+
+    <h2>Dry run</h2>
+    <p>Preview the upload plan without making any network calls. Credentials are not required in dry-run mode:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie publish --dry-run</span>
+      </header>
+<pre>  Dry-run         20 file(s) would be uploaded</pre>
+    </div>
+
+    <h2>Flags</h2>
+    <table>
+      <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>--dry-run</code></td><td>Build all artifacts but do not PUT anything</td></tr>
+        <tr><td><code>--no-sign</code></td><td>Skip GPG signatures (overrides <code>[publish] sign = true</code>)</td></tr>
+        <tr><td><code>--no-javadoc</code></td><td>Skip javadoc jar (overrides <code>[publish] javadoc = true</code>)</td></tr>
+        <tr><td><code>--repo &lt;url&gt;</code></td><td>Override the target URL inline (bypasses <code>[publish] repository</code>)</td></tr>
+      </tbody>
+    </table>
+
+    <h2>What gets uploaded</h2>
+    <p>For each artifact (<code>.jar</code>, <code>-sources.jar</code>, <code>-javadoc.jar</code>, <code>.pom</code>) Curie PUTs:</p>
+    <ul>
+      <li>The artifact itself</li>
+      <li><code>.sha1</code>, <code>.sha256</code>, <code>.sha512</code> checksum sidecars</li>
+      <li><code>.asc</code> GPG detached signature (when signing is enabled)</li>
+    </ul>
+
+    <h2>POM generation</h2>
+    <p>Curie writes a complete POM 4.0.0 XML file from your <code>Curie.toml</code>. The <code>[dependencies]</code> table becomes <code>&lt;dependencies&gt;</code> with <code>&lt;scope&gt;compile&lt;/scope&gt;</code>; BOM-managed deps have their resolved version written in. SPDX license identifiers are expanded to the canonical <code>&lt;name&gt;</code> and <code>&lt;url&gt;</code> values (Apache-2.0, MIT, BSD-3-Clause, and a dozen others are built-in).</p>
+
+    <h2>GPG signing</h2>
+    <p>When <code>sign = true</code> (the default), Curie shells out to <code>gpg --detach-sign --armor</code>. The default GPG key is used; set the <code>GPG_KEY</code> environment variable to select a specific key by fingerprint or email.</p>
+    <p><code>gpg</code> must be on <code>PATH</code>. If it isn't and signing is enabled, the build fails with a clear error pointing at the <code>--no-sign</code> flag.</p>
+
+    <div class="pager">
+      <a href="/docs/docker.html">
+        <span>← Previous</span>
+        <strong>Docker</strong>
+      </a>
+      <a href="/docs/deps.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Dependency tree</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

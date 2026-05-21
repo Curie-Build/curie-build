@@ -34,11 +34,17 @@
       <li><a href="/docs/">Overview</a></li>
       <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
       <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
       <li><a href="/docs/incremental.html">Incremental builds</a></li>
       <li><a href="/docs/workspaces.html">Workspaces</a></li>
       <li><a href="/docs/fmt.html">Formatter</a></li>
       <li><a href="/docs/testing.html">Testing</a></li>
       <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
     </ul>
   </aside>
 
@@ -120,19 +126,96 @@
   Done            <span class="em">target/greeter-0.1.0.jar</span></pre>
     </div>
 
-    <h2>Extra repositories</h2>
-    <p>By default the resolver hits Maven Central. Add private mirrors or company-internal Nexus instances with <code>[repositories]</code>:</p>
+    <h2>Per-dependency repository selection</h2>
+    <p>By default every artifact is fetched from Maven Central. To pull a specific artifact from a different repository, declare the repository with a unique <code>id</code> and reference it from the dependency:</p>
 
     <div class="code">
       <header>
         <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
         <span>Curie.toml</span>
       </header>
-<pre><span class="kw">[repositories]</span>
-<span class="kw">internal</span> = <span class="str">"https://nexus.internal.example.com/repository/maven-public/"</span></pre>
+<pre><span class="kw">[[repositories]]</span>
+<span class="kw">id</span>  = <span class="str">"shibboleth"</span>
+<span class="kw">url</span> = <span class="str">"https://build.shibboleth.net/nexus/content/repositories/releases/"</span>
+
+<span class="kw">[dependencies]</span>
+<span class="com"># fetched from shibboleth only; its transitive deps try Central + shibboleth</span>
+<span class="str">"net.shibboleth.oidc:oidc-common-crypto-api"</span> = { version = <span class="str">"3.3.0"</span>, repository = <span class="str">"shibboleth"</span> }
+<span class="com"># fetched from Maven Central only (no repository field)</span>
+<span class="str">"com.fasterxml.jackson.core:jackson-databind"</span> = <span class="str">"2.17.2"</span></pre>
     </div>
 
-    <p>Repositories are tried in order — Central first, then each <code>[repositories]</code> entry in declaration order — until an artifact resolves.</p>
+    <p>The routing rules are precise: the explicitly-declared artifact is fetched from the named repository <em>only</em>; its transitive deps are tried in both Central and the named repository. Artifacts with no <code>repository</code> field never hit extra repositories.</p>
+
+    <h2>Repository mirrors</h2>
+    <p>Redirect artifact downloads through a corporate proxy or local cache without changing project config. Mirrors are per-machine and live in <code>~/.curie/config.toml</code>:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>~/.curie/config.toml</span>
+      </header>
+<pre><span class="com"># Route Maven Central through an internal Nexus proxy.</span>
+<span class="kw">[[mirrors]]</span>
+<span class="kw">id</span>        = <span class="str">"internal-nexus"</span>
+<span class="kw">mirror_of</span> = <span class="str">"central"</span>
+<span class="kw">url</span>       = <span class="str">"https://nexus.internal/repository/maven-central/"</span>
+
+<span class="com"># Use "*" to mirror every configured repository.</span>
+<span class="kw">[[mirrors]]</span>
+<span class="kw">id</span>        = <span class="str">"catch-all"</span>
+<span class="kw">mirror_of</span> = <span class="str">"*"</span>
+<span class="kw">url</span>       = <span class="str">"https://nexus.internal/repository/all/"</span></pre>
+    </div>
+
+    <p>Each repo gets its own independent mirror substitution. First matching mirror wins. Mirrors are transparent to the project — <code>Curie.toml</code> stays unchanged.</p>
+
+    <h2>Repository credentials</h2>
+    <p>Private repositories that require authentication are configured in <code>~/.curie/config.toml</code> with <code></code> indirection so secrets stay out of files:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>~/.curie/config.toml</span>
+      </header>
+<pre><span class="kw">[[credentials]]</span>
+<span class="kw">repo_id</span>  = <span class="str">"internal-nexus"</span>
+<span class="kw">username</span> = <span class="str">""</span>
+<span class="kw">password</span> = <span class="str">""</span></pre>
+    </div>
+
+    <p>The <code>repo_id</code> matches the <code>id</code> field in <code>[[repositories]]</code>. <code></code> is expanded at credential-use time — the string is read from the environment variable, not stored as a literal. Literal values are accepted too (for local-only configs where the credential is not sensitive).</p>
+
+    <h2>Dependency tree and conflict traces</h2>
+    <p>After a successful build, inspect the resolved closure with <code>curie deps</code>:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie deps</span>
+      </header>
+<pre><span class="dim">Dependencies for my-app v0.1.0</span>
+└─ com.fasterxml.jackson.core:jackson-databind:2.17.2
+   ├─ com.fasterxml.jackson.core:jackson-annotations:2.17.2
+   └─ com.fasterxml.jackson.core:jackson-core:2.17.2</pre>
+    </div>
+
+    <p>Use <code>--why group:artifact</code> to explain why a specific artifact is at its chosen version — especially useful when nearest-wins resolved a conflict:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie deps --why com.fasterxml.jackson.core:jackson-core</span>
+      </header>
+<pre>com.fasterxml.jackson.core:jackson-core:2.17.2  (depth 1)
+
+  Introduced by:
+    [declared] → jackson-databind:2.17.2 → jackson-core:2.17.2  (chosen — depth 1)
+
+  No version conflicts.</pre>
+    </div>
+
+    <p>Add <code>--tests</code> to inspect the test-dependency closure instead. See <a href="/docs/deps.html">Dependency tree</a> for the full reference.</p>
 
     <div class="pager">
       <a href="/docs/" >

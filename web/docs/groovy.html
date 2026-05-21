@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Groovy &amp; Spock · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · groovy</span>
+    <h1>Groovy &amp; Spock</h1>
+    <p class="lede">Drop <code>.groovy</code> files into your sources — Curie auto-detects them, resolves Apache Groovy from Maven Central, and compiles everything together. Add <code>[spock]</code> for Spock 2.x BDD specs backed by JUnit Platform.</p>
+
+    <h2>Configuration</h2>
+    <p>Add a <code>[groovy]</code> table to pin the Groovy version. If the table is absent, Curie uses the bundled default (currently 5.0.6):</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[groovy]</span>
+<span class="kw">version</span> = <span class="str">"5.0.6"</span>   <span class="com"># optional; defaults to DEFAULT_GROOVY_VERSION</span>
+
+<span class="kw">[spock]</span>
+<span class="kw">version</span> = <span class="str">"2.4-groovy-5.0"</span>   <span class="com"># optional; defaults to DEFAULT_SPOCK_VERSION</span></pre>
+    </div>
+
+    <p>The version strings are inherited from a workspace root and can be overridden per member, exactly like <code>[kotlin] version</code>.</p>
+
+    <h2>Source layouts</h2>
+    <p>Curie discovers Groovy sources from three layouts:</p>
+    <ul>
+      <li><strong>Maven-style</strong> — <code>src/main/groovy/com/example/Foo.groovy</code></li>
+      <li><strong>Flat-package</strong> — <code>src/com.example/Foo.groovy</code> (the directory name <em>is</em> the package; <code>.java</code>, <code>.kt</code>, and <code>.groovy</code> can share a single dot-named directory)</li>
+    </ul>
+    <p>Test sources follow the same convention under <code>src/test/groovy/</code> or in flat-package test directories. Files ending in <code>*Spec.groovy</code>, <code>*Test.groovy</code>, or <code>*Tests.groovy</code> are treated as test sources.</p>
+
+    <h2>Compilation</h2>
+    <p>Curie resolves <code>org.apache.groovy:groovy</code> from Maven Central and invokes <code>org.codehaus.groovy.tools.FileSystemCompiler</code> via <code>java -cp</code>:</p>
+    <ul>
+      <li><strong>Groovy-only</strong> — <code>FileSystemCompiler</code> compiles all <code>.groovy</code> sources.</li>
+      <li><strong>Groovy + Java</strong> — <code>--jointCompilation</code> is passed so Groovy and Java can call each other in a single pass. No separate <code>javac</code> step is needed.</li>
+      <li><strong>Groovy + Kotlin</strong> — not supported in the same module; use separate modules.</li>
+    </ul>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build</span>
+      </header>
+<pre><span class="dim">Building groovy-greeter v0.1.0</span>
+  Resolve Groovy  <span class="pkg">1 JAR(s)</span>
+  Compile         1 source file(s)  <span class="dim">[no class files]</span>
+  Tests           no test sources found
+  Package         groovy-greeter-0.1.0.jar
+  Done            <span class="em">target/groovy-greeter-0.1.0.jar</span></pre>
+    </div>
+
+    <h2>Spock test framework</h2>
+    <p>Add <code>[spock]</code> to activate Spock 2.x. Curie resolves <code>spock-core</code> and <code>spock-spring</code> (for Spring Boot tests), wires them onto the test compilation and runtime classpaths, and auto-selects a compatible JUnit Platform standalone launcher (Spock 2.x targets Platform 1.x).</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>src/test/groovy/com/example/CalculatorSpec.groovy</span>
+      </header>
+<pre><span class="kw">package</span> com.example
+
+<span class="kw">import</span> spock.lang.Specification
+<span class="kw">import</span> spock.lang.Unroll
+
+<span class="kw">class</span> CalculatorSpec <span class="kw">extends</span> Specification {
+
+    <span class="kw">def</span> calc = <span class="kw">new</span> Calculator()
+
+    <span class="str">@Unroll</span>
+    <span class="kw">def</span> <span class="str">"multiply #a * #b == #result"</span>() {
+        <span class="kw">expect:</span>
+        calc.multiply(a, b) == result
+
+        <span class="kw">where:</span>
+        a | b | result
+        2 | 3 |  6
+        0 | 5 |  0
+        4 | 4 | 16
+    }
+}</pre>
+    </div>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build</span>
+      </header>
+<pre>  Resolve Groovy  <span class="pkg">1 JAR(s)</span>
+  Compile         1 source file(s)
+  Resolve Spock   <span class="pkg">9 JAR(s)</span>
+  Compile tests   1 source file(s)
+  Tests           <span class="ok">✔ 3 tests successful</span>
+  Package         calculator-0.1.0.jar
+  Done            <span class="em">target/calculator-0.1.0.jar</span></pre>
+    </div>
+
+    <h2>Spring Boot integration</h2>
+    <p>For Spring Boot projects, Spock specs annotated with <code>@SpringBootTest</code> work out of the box because <code>spock-spring</code> is automatically included when <code>[spock]</code> is configured. <code>@ServiceConnection</code> (Spring Boot 3.1+) auto-wires Testcontainers datasources:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>src/test/groovy/com/example/TaskSpec.groovy</span>
+      </header>
+<pre><span class="str">@SpringBootTest</span>(webEnvironment = WebEnvironment.NONE)
+<span class="str">@Testcontainers</span>
+<span class="kw">class</span> TaskSpec <span class="kw">extends</span> Specification {
+
+    <span class="str">@Container</span> <span class="str">@ServiceConnection</span>
+    <span class="kw">static</span> PostgreSQLContainer postgres = <span class="kw">new</span> PostgreSQLContainer(<span class="str">"postgres:16-alpine"</span>)
+
+    <span class="str">@Autowired</span> TaskRepository repository
+
+    <span class="kw">def</span> <span class="str">"saves and retrieves a task"</span>() {
+        <span class="kw">when:</span>  <span class="kw">def</span> saved = repository.save(<span class="kw">new</span> Task(<span class="kw">null</span>, <span class="str">"hello"</span>, [:]))
+        <span class="kw">then:</span>  saved.id() != <span class="kw">null</span>
+    }
+}</pre>
+    </div>
+
+    <h2>Groovy runtime classpath</h2>
+    <p>Unlike Kotlin (where the stdlib is optional for simple programs), Groovy classes always reference <code>groovy.lang.GroovyObject</code> at runtime. Curie merges the Groovy runtime JAR into the application's <code>target/libs/</code> directory and the JAR manifest's <code>Class-Path</code> entry automatically, so <code>curie run</code> and the Docker image just work.</p>
+
+    <div class="pager">
+      <a href="/docs/kotlin.html">
+        <span>← Previous</span>
+        <strong>Kotlin support</strong>
+      </a>
+      <a href="/docs/incremental.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Incremental builds</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

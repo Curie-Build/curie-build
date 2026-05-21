@@ -34,11 +34,17 @@
       <li><a href="/docs/">Overview</a></li>
       <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
       <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
       <li><a href="/docs/incremental.html">Incremental builds</a></li>
       <li><a href="/docs/workspaces.html">Workspaces</a></li>
       <li><a href="/docs/fmt.html">Formatter</a></li>
       <li><a href="/docs/testing.html">Testing</a></li>
       <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
     </ul>
   </aside>
 
@@ -81,20 +87,13 @@
     <p>Style is not configurable per-project. The opinionated defaults remove the debate and match each language's widely-adopted community standard.</p>
 
     <h2>Source discovery</h2>
-    <p>Every <code>.java</code> file under your project's source roots is included:</p>
+    <p>Java sources (<code>.java</code>) and Kotlin sources (<code>.kt</code>) are discovered from all source roots:</p>
     <ul>
-      <li><code>src/main/java/</code> — Maven-style production sources</li>
-      <li><code>src/test/java/</code> — Maven-style test sources</li>
-      <li><code>src/&lt;dot-package&gt;/</code> — flat-package layout</li>
-      <li><code>tests/&lt;dot-package&gt;/</code> — flat-package integration tests</li>
+      <li><code>src/main/java/</code> and <code>src/test/java/</code> — Maven-style Java</li>
+      <li><code>src/main/kotlin/</code> and <code>src/test/kotlin/</code> — Maven-style Kotlin</li>
+      <li><code>src/&lt;dot-package&gt;/</code> and <code>tests/&lt;dot-package&gt;/</code> — flat-package layout (both <code>.java</code> and <code>.kt</code>)</li>
     </ul>
-
-    <p>Kotlin sources (<code>.kt</code>) are intentionally excluded — they need a separate formatter (ktlint or ktfmt). Adding Kotlin support to <code>curie fmt</code> is on the roadmap.</p>
-
-    <h2>Style</h2>
-    <p>Curie runs palantir with <code>--aosp</code>, which uses 4-space indentation (Google's default is 2 spaces). The style is otherwise palantir's reflow-friendly variant of google-java-format — line length 120, no manual line-break massaging.</p>
-
-    <p>Style is not currently configurable. The argument is that a one-true-style for a given project removes a recurring source of bikeshedding; teams that need something else should keep using their existing formatter and skip <code>curie fmt</code>.</p>
+    <p>The ktfmt step is skipped entirely when no <code>.kt</code> files are present, so pure-Java projects pay zero overhead.</p>
 
     <h2>Workspace fan-out</h2>
     <p>Run <code>curie fmt</code> from a workspace root and Curie fans out across every member in parallel, one <code>java</code> process per member. palantir-java-format is resolved <strong>once</strong> at the start of the run and the JAR list is shared across the worker threads — concurrent identical resolves would otherwise race on the same <code>~/.m2</code> staging files.</p>

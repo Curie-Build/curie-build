@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scaffolding · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · scaffold</span>
+    <h1>Scaffolding</h1>
+    <p class="lede"><code>curie new</code> and <code>curie init</code> generate a ready-to-build project skeleton — <code>Curie.toml</code> and a starter source file — in one command. No archetype zoo, no interactive wizard.</p>
+
+    <h2>curie new</h2>
+    <p>Create a new project directory with the given name:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie new app hello --package com.example</span>
+      </header>
+<pre><span class="ok">Created</span> hello/Curie.toml
+<span class="ok">Created</span> hello/src/com.example/Hello.java
+
+<span class="dim">Run `curie build` inside hello/ to compile and package.</span></pre>
+    </div>
+
+    <p>The generated <code>Curie.toml</code>:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>hello/Curie.toml</span>
+      </header>
+<pre><span class="kw">[application]</span>
+<span class="kw">name</span>      = <span class="str">"hello"</span>
+<span class="kw">version</span>   = <span class="str">"0.1.0"</span>
+<span class="kw">mainClass</span> = <span class="str">"com.example.Hello"</span>
+</pre>
+    </div>
+
+    <h2>curie init</h2>
+    <p>Same as <code>curie new</code> but operates in the current directory rather than creating a subdirectory:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ mkdir my-project &amp;&amp; cd my-project</span>
+      </header>
+<pre><span class="prompt">$</span> curie init app --package com.example
+<span class="ok">Created</span> Curie.toml
+<span class="ok">Created</span> src/com.example/MyProject.java</pre>
+    </div>
+
+    <h2>Project kinds</h2>
+    <table>
+      <thead><tr><th>Kind</th><th>Generates</th><th>Use when</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>app</code></td>
+          <td><code>[application]</code> with a <code>main</code> class</td>
+          <td>Standalone runnable JAR, Docker image</td>
+        </tr>
+        <tr>
+          <td><code>lib</code></td>
+          <td><code>[library]</code> with no <code>mainClass</code></td>
+          <td>Reusable library, publishable to Maven</td>
+        </tr>
+        <tr>
+          <td><code>workspace</code></td>
+          <td><code>[workspace]</code> root with an empty members list</td>
+          <td>Multi-module monorepo root</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Options</h2>
+    <table>
+      <thead><tr><th>Option</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>--package &lt;pkg&gt;</code></td><td>Java package for the generated source file (default: <code>com.example</code>)</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Source layout</h2>
+    <p>The generated source file uses the flat-package layout by default (<code>src/com.example/Hello.java</code>). This keeps the source tree shallow and is the layout Curie recommends for new projects. If you prefer Maven-style (<code>src/main/java/com/example/Hello.java</code>), move the file — both layouts are supported and can coexist.</p>
+
+    <div class="pager">
+      <a href="/docs/native.html">
+        <span>← Previous</span>
+        <strong>GraalVM native</strong>
+      </a>
+      <a href="/docs/" style="text-align: right; align-items: flex-end;">
+        <span>↑ Back to</span>
+        <strong>Overview</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

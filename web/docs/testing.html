@@ -34,11 +34,17 @@
       <li><a href="/docs/">Overview</a></li>
       <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
       <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
       <li><a href="/docs/incremental.html">Incremental builds</a></li>
       <li><a href="/docs/workspaces.html">Workspaces</a></li>
       <li><a href="/docs/fmt.html">Formatter</a></li>
       <li><a href="/docs/testing.html">Testing</a></li>
       <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
     </ul>
   </aside>
 
@@ -121,6 +127,25 @@
 <span class="em">[3/3]</span> app
   Tests           <span class="ok">✔ 7 tests successful</span></pre>
     </div>
+
+    <h2>Spock framework</h2>
+    <p>Spock 2.x specs (Groovy-based BDD tests) run through the same JUnit Platform launcher with zero extra configuration beyond adding <code>[spock]</code> to <code>Curie.toml</code>:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[groovy]</span>
+<span class="kw">version</span> = <span class="str">"5.0.6"</span>
+
+<span class="kw">[spock]</span>
+<span class="kw">version</span> = <span class="str">"2.4-groovy-5.0"</span></pre>
+    </div>
+
+    <p>Curie resolves <code>spock-core</code> from Maven Central, adds it to the test compilation and runtime classpath, and sets a compatible JUnit Platform standalone launcher version (Spock 2.x targets Platform 1.x). Spec files ending in <code>*Spec.groovy</code>, <code>*Test.groovy</code>, or <code>*Tests.groovy</code> are discovered and compiled automatically alongside any Java/Kotlin test sources.</p>
+
+    <p>See <a href="/docs/groovy.html">Groovy &amp; Spock</a> for the full Groovy/Spock reference.</p>
 
     <h2>Incremental test runs</h2>
     <p>Curie stamps the test classes directory + the dep JARs + the test resources, and skips the JVM round-trip when none of those have changed since the last green run. A pure <code>curie test</code> on an unchanged tree exits in milliseconds with <code>Tests up to date</code>.</p>

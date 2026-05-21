@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dependency tree · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · deps</span>
+    <h1>Dependency tree</h1>
+    <p class="lede"><code>curie deps</code> prints the full transitive dependency tree and explains version-selection decisions. It answers "what is on my classpath and why?" without running a build — filling the gap that <code>mvn dependency:tree</code> covers for Maven users.</p>
+
+    <h2>Print the tree</h2>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie deps --project examples/jackson-bom-greeter</span>
+      </header>
+<pre><span class="dim">Dependencies for jackson-bom-greeter v0.1.0</span>
+└─ com.fasterxml.jackson.core:jackson-databind:2.17.2
+   ├─ com.fasterxml.jackson.core:jackson-annotations:2.17.2
+   └─ com.fasterxml.jackson.core:jackson-core:2.17.2</pre>
+    </div>
+
+    <p><code>curie deps</code> resolves POMs (using the local <code>~/.m2</code> cache after the first build) but does <em>not</em> download JARs — it's a read-only query command.</p>
+
+    <h2>Explain a version choice (--why)</h2>
+    <p>Use <code>--why group:artifact</code> to see which introduction path won and what was skipped:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie deps --why com.fasterxml.jackson.core:jackson-core</span>
+      </header>
+<pre>com.fasterxml.jackson.core:jackson-core:2.17.2  (depth 1)
+
+  Introduced by:
+    [declared] → jackson-databind:2.17.2 → jackson-core:2.17.2  (chosen — depth 1)
+
+  No version conflicts.</pre>
+    </div>
+
+    <p>When nearest-wins resolved a conflict you'll see the skipped path too:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie deps --why com.example:shared-lib</span>
+      </header>
+<pre>com.example:shared-lib:1.0  (depth 1)
+
+  Introduced by:
+    [declared] → lib-a:1.0 → shared-lib:1.0  (chosen — depth 1)
+
+  Skipped (nearest-wins):
+    [declared] → lib-b:1.0 → lib-c:1.0 → shared-lib:2.0  (depth 3)
+
+  → version 1.0 wins because it is at depth 1 (shallowest path wins).</pre>
+    </div>
+
+    <h2>Test dependencies (--tests)</h2>
+    <p>By default <code>curie deps</code> shows production (<code>[dependencies]</code>) deps. Pass <code>--tests</code> to inspect the test closure instead:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie deps --tests</span>
+      </header>
+<pre><span class="dim">Test dependencies for my-app v0.1.0</span>
+├─ org.junit.jupiter:junit-jupiter:5.11.0
+│  ├─ org.junit.jupiter:junit-jupiter-api:5.11.0
+│  └─ org.junit.jupiter:junit-jupiter-params:5.11.0
+└─ org.junit.jupiter:junit-jupiter-engine:5.11.0
+   └─ org.junit.platform:junit-platform-engine:1.11.0</pre>
+    </div>
+
+    <h2>Offline mode</h2>
+    <p>If the POM cache is already warm (e.g. after running <code>curie build</code>), add <code>--offline</code> to avoid any network calls:</p>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie deps --offline</span>
+      </header>
+<pre><span class="dim">Dependencies for my-app v0.1.0</span>
+└─ …</pre>
+    </div>
+
+    <h2>Conflict resolution rules</h2>
+    <p>Curie follows Maven's standard rules:</p>
+    <ul>
+      <li><strong>Nearest wins</strong> — when the same <code>group:artifact</code> appears at two depths, the shallower version wins.</li>
+      <li><strong>First declared wins</strong> — at equal depth, the artifact declared first in <code>[dependencies]</code> (or the POM that introduced it first) takes precedence.</li>
+      <li><strong>Top-level BOM beats transitive explicit</strong> — your <code>[bom-imports]</code> overrides any version a transitive POM hard-codes.</li>
+    </ul>
+    <p><code>--why</code> always shows both the winning path and any skipped losers, so you can confirm that the correct rule was applied.</p>
+
+    <div class="pager">
+      <a href="/docs/publish.html">
+        <span>← Previous</span>
+        <strong>Publishing</strong>
+      </a>
+      <a href="/docs/audit.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Audit (SBOM)</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

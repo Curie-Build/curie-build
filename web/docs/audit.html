@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Audit (SBOM) · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · audit</span>
+    <h1>Audit (SBOM)</h1>
+    <p class="lede"><code>curie audit</code> emits a CycloneDX 1.6 Software Bill of Materials for your resolved dependency closure and cross-references every component against the <a href="https://osv.dev" target="_blank" rel="noopener">OSV vulnerability database</a>, printing any findings grouped by artifact with ANSI-coloured severity.</p>
+
+    <h2>Running an audit</h2>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie audit</span>
+      </header>
+<pre><span class="dim">Auditing my-app v0.1.0 (14 components)</span>
+  Querying OSV    14 components
+  Found           2 vulnerability finding(s)
+
+<span class="em">com.example:vulnerable-lib:1.2.0</span>
+  <span style="color:#e55">CRITICAL</span>  CVE-2024-12345  Remote code execution via deserialization
+             https://osv.dev/vulnerability/GHSA-xxxx-yyyy-zzzz
+  <span style="color:#f90">HIGH</span>      CVE-2024-67890  Path traversal in archive extraction
+             https://osv.dev/vulnerability/GHSA-aaaa-bbbb-cccc</pre>
+    </div>
+
+    <p>Exit code is non-zero when any vulnerabilities are found, making it drop-in ready for CI gates.</p>
+
+    <h2>SBOM output</h2>
+    <p>Write the SBOM to a file for supply-chain tooling, procurement checklists, or archiving:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie audit --sbom sbom.json</span>
+      </header>
+<pre><span class="dim">Auditing my-app v0.1.0 (14 components)</span>
+  SBOM written    sbom.json  (CycloneDX 1.6 JSON)</pre>
+    </div>
+
+    <p>The SBOM follows the CycloneDX 1.6 JSON schema and includes every resolved component with its group, name, version, and a <a href="https://github.com/package-url/purl-spec" target="_blank" rel="noopener">Package URL (purl)</a> of the form <code>pkg:maven/group/artifact@version</code>.</p>
+
+    <h2>Severity colours</h2>
+    <table>
+      <thead><tr><th>Colour</th><th>OSV severity</th></tr></thead>
+      <tbody>
+        <tr><td style="color:#e55">Red</td><td>CRITICAL</td></tr>
+        <tr><td style="color:#f90">Orange</td><td>HIGH</td></tr>
+        <tr><td style="color:#cc0">Yellow</td><td>MEDIUM</td></tr>
+        <tr><td>Default</td><td>LOW / UNKNOWN</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Flags</h2>
+    <table>
+      <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>--sbom &lt;path&gt;</code></td><td>Write CycloneDX 1.6 JSON to this file in addition to printing findings</td></tr>
+        <tr><td><code>--full</code></td><td>Print full vulnerability details (IDs, URLs, aliases) — default</td></tr>
+        <tr><td><code>--short</code></td><td>Print a compact one-line-per-finding summary</td></tr>
+        <tr><td><code>--offline</code></td><td>Use cached POM data; still queries OSV over the network</td></tr>
+      </tbody>
+    </table>
+
+    <h2>How it works</h2>
+    <ol>
+      <li>Curie resolves the full transitive closure (same BFS as <code>curie build</code>).</li>
+      <li>For each component it constructs a <code>pkg:maven/group/artifact@version</code> purl.</li>
+      <li>All purls are sent to the <a href="https://google.github.io/osv.dev/post-v1-querybatch/" target="_blank" rel="noopener">OSV batch query API</a> (<code>POST /v1/querybatch</code>) in a single HTTP call.</li>
+      <li>Findings are grouped by artifact and sorted by descending severity.</li>
+    </ol>
+
+    <blockquote>
+      OSV aggregates data from GitHub Advisory Database, NVD, and dozens of other sources. It covers Java/Maven artifacts under the <code>Maven</code> ecosystem key — most CVEs affecting popular libraries are indexed.
+    </blockquote>
+
+    <div class="pager">
+      <a href="/docs/deps.html">
+        <span>← Previous</span>
+        <strong>Dependency tree</strong>
+      </a>
+      <a href="/docs/native.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>GraalVM native</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

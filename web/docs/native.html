@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GraalVM native · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · native</span>
+    <h1>GraalVM native-image</h1>
+    <p class="lede"><code>curie native</code> compiles your project to a standalone native binary using GraalVM's <code>native-image</code> tool. The result starts in milliseconds, uses a fraction of the heap, and ships without a JVM — ideal for serverless functions, CLI tools, and containers where image size and cold-start time matter.</p>
+
+    <h2>Prerequisites</h2>
+    <p>GraalVM (Community or Enterprise) must be installed and <code>native-image</code> must be on <code>PATH</code>. The easiest way is <a href="https://sdkman.io" target="_blank" rel="noopener">SDKMAN</a>:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>shell</span>
+      </header>
+<pre><span class="prompt">$</span> sdk install java 21.0.3-graalce
+<span class="prompt">$</span> native-image --version
+<span class="ok">native-image 21.0.3 2024-04-16</span></pre>
+    </div>
+
+    <h2>Configuration</h2>
+    <p>Add a <code>[native-image]</code> table. An empty table is enough to enable the step — all keys are optional:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[application]</span>
+<span class="kw">name</span>      = <span class="str">"my-cli"</span>
+<span class="kw">version</span>   = <span class="str">"0.1.0"</span>
+<span class="kw">mainClass</span> = <span class="str">"com.example.Main"</span>
+
+<span class="kw">[native-image]</span>
+<span class="com"># Output binary name (default: application name)</span>
+<span class="kw">outputName</span> = <span class="str">"my-cli"</span>
+
+<span class="com"># Path to reachability-metadata config dir</span>
+<span class="kw">configDir</span> = <span class="str">"src/main/resources/META-INF/native-image"</span>
+
+<span class="com"># Extra flags forwarded verbatim to native-image</span>
+<span class="kw">extraArgs</span> = [<span class="str">"--no-fallback"</span>, <span class="str">"-H:+ReportExceptionStackTraces"</span>]</pre>
+    </div>
+
+    <h2>Building</h2>
+    <p><code>curie native</code> compiles the project (skipping tests for a faster iteration loop) and then invokes <code>native-image</code>:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie native --project my-cli</span>
+      </header>
+<pre><span class="dim">Building my-cli v0.1.0</span>
+  Resolve deps    3 JAR(s)
+  Compile         4 source file(s)
+  Package         my-cli-0.1.0.jar
+  Native image    my-cli (GraalVM native-image)
+  <span class="dim">…compiling…  ~1–2 minutes…</span>
+  Done            <span class="em">target/my-cli</span></pre>
+    </div>
+
+    <p>The binary lands at <code>target/&lt;outputName&gt;</code>. Run it directly — no JVM needed:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ ./target/my-cli --help</span>
+      </header>
+<pre><span class="ok">my-cli 0.1.0</span>
+Usage: my-cli [options]</pre>
+    </div>
+
+    <h2>Integration with curie build</h2>
+    <p>When <code>[native-image]</code> is present in <code>Curie.toml</code>, <code>curie build</code> also compiles the native binary after packaging the JAR and running tests. Pass <code>--no-native</code> to skip it when iterating quickly:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build --no-native</span>
+      </header>
+<pre><span class="dim">Building my-cli v0.1.0</span>
+  <span class="dim">…  (native-image step skipped)</span>
+  Done            <span class="em">target/my-cli-0.1.0.jar</span></pre>
+    </div>
+
+    <h2>Reachability metadata</h2>
+    <p>Frameworks that use reflection, dynamic proxies, or resources at runtime need GraalVM reachability metadata so the AOT compiler knows to include those classes. Place JSON configuration files in the directory declared by <code>configDir</code>:</p>
+    <ul>
+      <li><code>reflect-config.json</code> — classes accessed via reflection</li>
+      <li><code>resource-config.json</code> — resources loaded from the classpath</li>
+      <li><code>proxy-config.json</code> — dynamic proxy interfaces</li>
+    </ul>
+    <p>The <a href="https://www.graalvm.org/native-image/libraries-and-frameworks/" target="_blank" rel="noopener">GraalVM reachability-metadata repository</a> already contains entries for many popular libraries.</p>
+
+    <div class="pager">
+      <a href="/docs/audit.html">
+        <span>← Previous</span>
+        <strong>Audit (SBOM)</strong>
+      </a>
+      <a href="/docs/scaffold.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Scaffolding</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>
