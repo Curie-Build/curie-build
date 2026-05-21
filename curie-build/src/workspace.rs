@@ -12,6 +12,7 @@
 
 use crate::audit::{self, AuditOptions};
 use crate::descriptor::{self, Descriptor};
+use crate::update::{self, UpdateOptions};
 use crate::{build, compile, fmt, jar, run, test};
 use anyhow::{bail, Context, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -743,6 +744,44 @@ pub fn audit_one(
     let member_opts = override_output(opts, &m.path);
     let report = audit::run_audit_with_desc(&m.path, &m.descriptor, &member_opts)?;
     Ok(audit::should_exit_nonzero(&report, &member_opts))
+}
+
+/// Fan `curie update` out over every workspace member.
+/// Returns `true` when `--check` mode finds any available updates.
+pub fn update_all(workspace_root: &Path, opts: &UpdateOptions) -> Result<bool> {
+    let ws = load(workspace_root)?;
+    let n = ws.members.len();
+    println!(
+        "Workspace {} update ({} member{})",
+        ws.root.display(),
+        n,
+        if n == 1 { "" } else { "s" },
+    );
+    println!();
+
+    let mut any_updates = false;
+    for (pos, m) in ws.members.iter().enumerate() {
+        println!("[{}/{}] {}", pos + 1, n, m.declared);
+        let report = update::run_update_with_desc(&m.path, &m.descriptor, opts)
+            .with_context(|| format!("update failed for workspace member \"{}\"", m.declared))?;
+        if report.has_updates() {
+            any_updates = true;
+        }
+        println!();
+    }
+    Ok(any_updates)
+}
+
+/// Run `curie update` on a single workspace member (by index).
+pub fn update_one(
+    workspace_root: &Path,
+    member_index: usize,
+    opts: &UpdateOptions,
+) -> Result<bool> {
+    let ws = load(workspace_root)?;
+    let m = &ws.members[member_index];
+    let report = update::run_update_with_desc(&m.path, &m.descriptor, opts)?;
+    Ok(report.has_updates())
 }
 
 /// If `opts.output` is `None`, leave it `None` so `run_audit_with_desc` uses

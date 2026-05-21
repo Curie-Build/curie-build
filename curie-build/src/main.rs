@@ -19,6 +19,7 @@ mod publish;
 mod run;
 mod sources_jar;
 mod test;
+mod update;
 mod workspace;
 mod wrapper;
 
@@ -134,6 +135,20 @@ enum Cmd {
         /// Build and prepare all artifacts but do not PUT them
         #[arg(long = "dry-run")]
         dry_run: bool,
+    },
+    /// Check for newer stable versions of all versioned dependencies and optionally update Curie.toml
+    Update {
+        /// Report available updates but do not rewrite Curie.toml; exit 1 when any updates exist
+        #[arg(long)]
+        check: bool,
+
+        /// Do not access the network; skip the update check
+        #[arg(long)]
+        offline: bool,
+
+        /// Skip [test-dependencies] and [test-bom-imports]
+        #[arg(long = "no-test")]
+        no_test: bool,
     },
     /// Emit a CycloneDX 1.6 SBOM and check dependencies against the OSV vulnerability database
     Audit {
@@ -344,6 +359,34 @@ fn main() {
                         skip_tests: false,
                     },
                 ),
+                Err(e) => Err(e),
+            }
+        }
+        Cmd::Update { check, offline, no_test } => {
+            let opts = update::UpdateOptions {
+                check,
+                offline,
+                include_test: !no_test,
+            };
+            let any_updates = match &ctx {
+                workspace::WorkspaceContext::WorkspaceRoot(root) => {
+                    workspace::update_all(root, &opts)
+                }
+                workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+                    workspace::update_one(workspace_root, *member_index, &opts)
+                }
+                workspace::WorkspaceContext::Standalone(project) => {
+                    match update::run_update(project, &opts) {
+                        Ok(report) => Ok(report.has_updates()),
+                        Err(e) => Err(e),
+                    }
+                }
+            };
+            match any_updates {
+                Ok(true) if check => {
+                    std::process::exit(1);
+                }
+                Ok(_) => return,
                 Err(e) => Err(e),
             }
         }
