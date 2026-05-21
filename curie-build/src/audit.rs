@@ -580,21 +580,37 @@ fn extract_score(db: &BTreeMap<String, serde_json::Value>) -> Option<f32> {
 // Output
 // ---------------------------------------------------------------------------
 
+/// Return an OSC 8 terminal hyperlink for a vuln ID, falling back to the
+/// plain ID when the terminal does not support hyperlinks (the escape codes
+/// are simply ignored by terminals that don't understand them).
+fn vuln_link(id: &str) -> String {
+    let url = if id.starts_with("GHSA-") {
+        format!("https://github.com/advisories/{}", id)
+    } else if id.starts_with("CVE-") {
+        format!("https://www.cve.org/CVERecord?id={}", id)
+    } else {
+        format!("https://osv.dev/vulnerability/{}", id)
+    };
+    // OSC 8 hyperlink: ESC ] 8 ; ; <url> ESC \ <text> ESC ] 8 ; ; ESC \
+    format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, id)
+}
+
 fn print_findings(findings: &[Finding], full: bool) {
     println!("  {} vulnerability finding(s):", findings.len());
     for f in findings {
+        let id = vuln_link(&f.id);
         if full {
             let score_str = f
                 .score
                 .map(|s| format!(" (CVSS {:.1})", s))
                 .unwrap_or_default();
             let summary = f.summary.as_deref().unwrap_or("no summary");
-            println!("    [{}]{} {} — {}", f.id, score_str, f.purl, summary);
+            println!("    [{}]{} {} — {}", id, score_str, f.purl, summary);
             if !f.fixed.is_empty() {
                 println!("      Fixed in: {}", f.fixed.join(", "));
             }
         } else {
-            println!("    [{}] {}", f.id, f.purl);
+            println!("    [{}] {}", id, f.purl);
         }
     }
 }
