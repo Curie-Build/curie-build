@@ -7,10 +7,11 @@
 //! 2. Emit `target/sbom.cdx.json` (CycloneDX 1.6 JSON).
 //! 3. Unless `--offline`, POST the closure to `https://api.osv.dev/v1/querybatch`
 //!    and collect any findings.
-//! 4. If `--full` is set, fetch full vuln detail for each finding via
-//!    `GET https://api.osv.dev/v1/vulns/{id}`.
-//! 5. Print findings; exit 1 when the max CVSS score ≥ `--severity` threshold
-//!    (default 7.0), or on any finding when `--full` is not set.
+//! 4. Fetch full vuln detail for each finding via
+//!    `GET https://api.osv.dev/v1/vulns/{id}` (pass `--no-full` to skip).
+//! 5. Print findings grouped by artifact; exit 1 when the max CVSS score ≥
+//!    `--severity` threshold (default 7.0), or on any finding when full
+//!    detail is not fetched.
 
 use crate::build::{central_repos, extra_repos};
 use crate::descriptor::{self, Descriptor};
@@ -32,8 +33,8 @@ pub struct AuditOptions {
     /// Skip OSV network call; only emit the SBOM.
     pub offline: bool,
     /// Fetch full vuln detail from OSV (aliases, fixed versions, severity).
-    /// When `false` (default) only the vuln ID is shown and exit 1 is
-    /// triggered on any finding.
+    /// Enabled by default; pass `--no-full` to skip and show IDs only
+    /// (exit 1 triggered on any finding when skipped).
     pub full: bool,
     /// CVSS score threshold for a non-zero exit (default 7.0).
     /// Only meaningful when `--full` is set; ignored otherwise.
@@ -47,7 +48,7 @@ impl Default for AuditOptions {
         AuditOptions {
             include_test: false,
             offline: false,
-            full: false,
+            full: true,
             severity: 7.0,
             output: None,
         }
@@ -596,21 +597,39 @@ fn vuln_link(id: &str) -> String {
 }
 
 fn print_findings(findings: &[Finding], full: bool) {
-    println!("  {} vulnerability finding(s):", findings.len());
+    // Group findings by purl so all vulns for one artifact appear together.
+    let mut by_purl: Vec<(&str, Vec<&Finding>)> = Vec::new();
     for f in findings {
-        let id = vuln_link(&f.id);
-        if full {
-            let score_str = f
-                .score
-                .map(|s| format!(" (CVSS {:.1})", s))
-                .unwrap_or_default();
-            let summary = f.summary.as_deref().unwrap_or("no summary");
-            println!("    [{}]{} {} — {}", id, score_str, f.purl, summary);
-            if !f.fixed.is_empty() {
-                println!("      Fixed in: {}", f.fixed.join(", "));
-            }
+        if let Some(entry) = by_purl.iter_mut().find(|(p, _)| *p == f.purl.as_str()) {
+            entry.1.push(f);
         } else {
-            println!("    [{}] {}", id, f.purl);
+            by_purl.push((f.purl.as_str(), vec![f]));
+        }
+    }
+
+    let total = findings.len();
+    let artifacts = by_purl.len();
+    println!(
+        "  {} vulnerability finding(s) across {} artifact(s):",
+        total, artifacts
+    );
+    for (purl, vulns) in &by_purl {
+        println!("  {}", purl);
+        for f in vulns {
+            let id = vuln_link(&f.id);
+            if full {
+                let score_str = f
+                    .score
+                    .map(|s| format!(" CVSS {:.1}", s))
+                    .unwrap_or_default();
+                let summary = f.summary.as_deref().unwrap_or("no summary");
+                println!("    [{}]{} — {}", id, score_str, summary);
+                if !f.fixed.is_empty() {
+                    println!("      Fixed in: {}", f.fixed.join(", "));
+                }
+            } else {
+                println!("    [{}]", id);
+            }
         }
     }
 }
