@@ -360,7 +360,11 @@ pub fn run_tests(
             javac.arg("--curie-manifest-out").arg(&test_manifest_path);
             javac
                 .arg("--release")
-                .arg(desc.java.effective())
+                .arg(desc.java.effective());
+            if desc.java.enable_preview {
+                javac.arg("--enable-preview");
+            }
+            javac
                 .arg("-g")
                 .arg("-d")
                 .arg(&test_classes_dir);
@@ -522,6 +526,9 @@ pub fn run_tests(
     println!();
 
     let mut java = Command::new("java");
+    if desc.java.enable_preview {
+        java.arg("--enable-preview");
+    }
     java.arg("-jar")
         .arg(&standalone_jar)
         .arg("execute")

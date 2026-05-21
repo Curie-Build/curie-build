@@ -38,6 +38,9 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
         docker::docker_run(project_root, &desc, &output.jar, &output.dep_jars, extra_args)?;
     } else {
         let mut java = Command::new("java");
+        if desc.java.enable_preview {
+            java.arg("--enable-preview");
+        }
 
         // When running with deps (can't use -jar), build a full classpath.
         // Also include src/main/resources so resource loading via getResourceAsStream works.

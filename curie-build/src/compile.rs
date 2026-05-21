@@ -147,6 +147,7 @@ pub fn compile(
     //   C) Maven-style Groovy: src/main/groovy/
     //   D) Flat-package:       src/com.example.myapp/  (dot-named sibling under src/)
     //      .java, .kt, and .groovy files are all collected from flat-package dirs.
+    //   E) Bare src/:          src/Hello.java  (unnamed classes — no package dir)
     let maven_java_src   = project_root.join("src").join("main").join("java");
     let maven_kotlin_src = project_root.join("src").join("main").join("kotlin");
     let maven_groovy_src = project_root.join("src").join("main").join("groovy");
@@ -158,11 +159,37 @@ pub fn compile(
     if maven_groovy_src.exists() { src_roots.push(maven_groovy_src.clone()); }
     src_roots.extend(flat_src_dirs);
 
+    // Layout E: source files placed directly under src/ (no package subdirectory).
+    // This is the natural location for unnamed-class files that have no package
+    // declaration.  Only add src/ itself if it contains at least one direct
+    // source file — this prevents accidentally treating src/ as a root in
+    // projects that already use one of the layouts above.
+    let bare_src = project_root.join("src");
+    if bare_src.exists() && !src_roots.contains(&bare_src) {
+        let has_direct_sources = std::fs::read_dir(&bare_src)
+            .ok()
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .any(|e| {
+                        e.file_type().map(|t| t.is_file()).unwrap_or(false)
+                            && matches!(
+                                e.path().extension().and_then(|s| s.to_str()),
+                                Some("java") | Some("kt") | Some("groovy")
+                            )
+                    })
+            })
+            .unwrap_or(false);
+        if has_direct_sources {
+            src_roots.push(bare_src);
+        }
+    }
+
     if src_roots.is_empty() {
         bail!(
             "no source directory found: expected src/main/java/, src/main/kotlin/, \
-             src/main/groovy/, or at least one dot-named directory under src/ \
-             (e.g. src/com.example.myapp/)"
+             src/main/groovy/, src/<dot-named>/ (flat-package), or source files \
+             directly in src/ (unnamed classes)"
         );
     }
 
@@ -614,7 +641,11 @@ pub fn compile(
             javac.arg("--curie-manifest-out").arg(&manifest_path);
             javac
                 .arg("--release")
-                .arg(desc.java.effective())
+                .arg(desc.java.effective());
+            if desc.java.enable_preview {
+                javac.arg("--enable-preview");
+            }
+            javac
                 .arg("-g")
                 .arg("-d")
                 .arg(&classes_dir);

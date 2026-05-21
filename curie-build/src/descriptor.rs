@@ -250,6 +250,18 @@ pub struct Java {
     /// "inherit from the workspace if any, else use the default".
     #[serde(rename = "sourceCompatibility")]
     pub source_compatibility: Option<String>,
+    /// When `true`, passes `--enable-preview` to javac and to the java
+    /// runtime.  Required for preview features on Java 21–22 (e.g. unnamed
+    /// classes and instance main methods).  Not needed on Java 23+ where
+    /// those features became standard (JEP 463).
+    ///
+    /// ```toml
+    /// [java]
+    /// sourceCompatibility = "21"
+    /// enablePreview = true
+    /// ```
+    #[serde(rename = "enablePreview", default)]
+    pub enable_preview: bool,
 }
 
 impl Java {
@@ -1886,6 +1898,37 @@ version = "3.0.22"
 "#;
         let d = load_str(toml).unwrap();
         assert_eq!(d.groovy.version(), "3.0.22");
+    }
+
+    // -- enablePreview -------------------------------------------------------
+
+    #[test]
+    fn enable_preview_defaults_to_false() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(!d.java.enable_preview, "enablePreview must default to false");
+    }
+
+    #[test]
+    fn enable_preview_can_be_set_true() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[java]
+sourceCompatibility = "21"
+enablePreview = true
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.java.enable_preview);
+        assert_eq!(d.java.effective(), "21");
     }
 
     // -- native-image --------------------------------------------------------

@@ -1,0 +1,22 @@
+# simplified-main
+#
+# Demonstrates "Simple Source Files and Instance Main Methods" — the
+# feature that allows a bare void main() with no class or package.
+#
+# History:
+#   Java 21–24  preview (JEP 445/463/480/495) — needs enablePreview = true
+#   Java 25+    standard (JEP 512)             — no flag needed
+#
+# The source file src/Hello.java has no `class` declaration and no
+# `public static void main(String[] args)` — just a bare `void main()`.
+# Curie detects it as the application entry point automatically.
+
+[application]
+name    = "simplified-main"
+version = "0.1.0"
+# mainClass omitted — auto-detected from the unnamed class file
+
+[java]
+# Unnamed classes and instance main methods were finalized in Java 25 (JEP 512).
+# No enablePreview needed.  On Java 21–24, add: enablePreview = true
+sourceCompatibility = "25"
