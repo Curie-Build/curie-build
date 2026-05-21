@@ -406,7 +406,9 @@ struct OsvBatchRequest {
 #[derive(Serialize)]
 struct OsvQuery {
     package: OsvPackage,
-    version: String,
+    // version is intentionally omitted: when querying by purl the version is
+    // already encoded in the purl string; sending both causes OSV to return
+    // HTTP 400 "version specified in params and PURL query".
 }
 
 #[derive(Serialize)]
@@ -478,7 +480,6 @@ fn osv_querybatch(components: &[Component]) -> Result<Vec<Finding>> {
             .iter()
             .map(|c| OsvQuery {
                 package: OsvPackage { purl: c.purl() },
-                version: c.version.clone(),
             })
             .collect();
 
