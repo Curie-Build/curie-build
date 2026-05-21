@@ -1,3 +1,4 @@
+mod audit;
 mod build;
 mod class_manifest;
 mod compile;
@@ -133,6 +134,28 @@ enum Cmd {
         /// Build and prepare all artifacts but do not PUT them
         #[arg(long = "dry-run")]
         dry_run: bool,
+    },
+    /// Emit a CycloneDX 1.6 SBOM and check dependencies against the OSV vulnerability database
+    Audit {
+        /// Include test-scope dependencies in the SBOM and scan
+        #[arg(long = "include-test")]
+        include_test: bool,
+
+        /// Skip the OSV network call; only emit the SBOM
+        #[arg(long)]
+        offline: bool,
+
+        /// Fetch full vulnerability detail (summary, aliases, fixed versions, severity)
+        #[arg(long)]
+        full: bool,
+
+        /// CVSS score threshold for a non-zero exit (only with --full; default: 7.0)
+        #[arg(long, default_value = "7.0")]
+        severity: f32,
+
+        /// Override the SBOM output path (default: target/sbom.cdx.json)
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
     },
     /// Scaffold a new Curie project in a new subdirectory
     New {
@@ -321,6 +344,36 @@ fn main() {
                         skip_tests: false,
                     },
                 ),
+                Err(e) => Err(e),
+            }
+        }
+        Cmd::Audit { include_test, offline, full, severity, output } => {
+            let opts = audit::AuditOptions {
+                include_test,
+                offline,
+                full,
+                severity,
+                output,
+            };
+            let exit_nonzero = match &ctx {
+                workspace::WorkspaceContext::WorkspaceRoot(root) => {
+                    workspace::audit_all(root, &opts)
+                }
+                workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+                    workspace::audit_one(workspace_root, *member_index, &opts)
+                }
+                workspace::WorkspaceContext::Standalone(project) => {
+                    match audit::run_audit(project, &opts) {
+                        Ok(report) => Ok(audit::should_exit_nonzero(&report, &opts)),
+                        Err(e) => Err(e),
+                    }
+                }
+            };
+            match exit_nonzero {
+                Ok(true) => {
+                    std::process::exit(1);
+                }
+                Ok(false) => return,
                 Err(e) => Err(e),
             }
         }

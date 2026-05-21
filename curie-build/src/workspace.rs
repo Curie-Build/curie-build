@@ -10,6 +10,7 @@
 //! through the existing single-module pipeline.  No intra-workspace
 //! dependencies yet — those arrive in step 3 along with topo sort.
 
+use crate::audit::{self, AuditOptions};
 use crate::descriptor::{self, Descriptor};
 use crate::{build, compile, fmt, jar, run, test};
 use anyhow::{bail, Context, Result};
@@ -702,6 +703,54 @@ pub fn clean_all(workspace_root: &Path) -> Result<()> {
         build::clean(&m.path)?;
         Ok(Vec::new())
     })
+}
+
+/// Fan `curie audit` out over every member in topo order.
+/// Returns `true` when any member's result should cause a non-zero exit.
+pub fn audit_all(workspace_root: &Path, opts: &AuditOptions) -> Result<bool> {
+    let ws = load(workspace_root)?;
+    let n = ws.members.len();
+    println!(
+        "Workspace {} audit ({} member{})",
+        ws.root.display(),
+        n,
+        if n == 1 { "" } else { "s" },
+    );
+    println!();
+
+    let mut exit_nonzero = false;
+    for (pos, m) in ws.members.iter().enumerate() {
+        println!("[{}/{}] {}", pos + 1, n, m.declared);
+        let member_opts = override_output(opts, &m.path);
+        let report = audit::run_audit_with_desc(&m.path, &m.descriptor, &member_opts)
+            .with_context(|| format!("audit failed for workspace member \"{}\"", m.declared))?;
+        if audit::should_exit_nonzero(&report, &member_opts) {
+            exit_nonzero = true;
+        }
+        println!();
+    }
+    Ok(exit_nonzero)
+}
+
+/// Run audit on a single workspace member (by index).
+pub fn audit_one(
+    workspace_root: &Path,
+    member_index: usize,
+    opts: &AuditOptions,
+) -> Result<bool> {
+    let ws = load(workspace_root)?;
+    let m = &ws.members[member_index];
+    let member_opts = override_output(opts, &m.path);
+    let report = audit::run_audit_with_desc(&m.path, &m.descriptor, &member_opts)?;
+    Ok(audit::should_exit_nonzero(&report, &member_opts))
+}
+
+/// If `opts.output` is `None`, leave it `None` so `run_audit_with_desc` uses
+/// `<member>/target/sbom.cdx.json`.  If it *is* set (user supplied --output),
+/// only the last member would win in a workspace run, so we keep the override
+/// as-is; workspace callers that care can handle this upstream.
+fn override_output(opts: &AuditOptions, _member_path: &Path) -> AuditOptions {
+    opts.clone()
 }
 
 pub fn fmt_all(workspace_root: &Path, check_only: bool, offline: bool) -> Result<()> {

@@ -66,6 +66,7 @@ curie run               # build, then run via java -jar (or Docker)
 curie fmt               # format all Java source files with palantir-java-format
 curie clean             # remove target/
 curie list              # list the members of a workspace
+curie audit             # emit CycloneDX SBOM and scan dependencies against OSV
 
 curie build --no-docker # suppress Docker even if Curie.toml enables it
 curie build --offline   # use only locally cached artifacts; fail on any cache miss
@@ -368,6 +369,63 @@ version = "0.1.0"
 [workspace-dependencies]
 lib-a = { path = "../lib-a" }
 ```
+
+---
+
+## Audit
+
+`curie audit` resolves your dependency closure, emits a
+[CycloneDX 1.6](https://cyclonedx.org/specification/overview/) SBOM at
+`target/sbom.cdx.json`, and checks every component against the
+[OSV vulnerability database](https://osv.dev/).
+
+```
+curie audit                           # scan production deps; exit 1 on any finding
+curie audit --include-test            # also include test-scope deps
+curie audit --offline                 # emit SBOM only; skip OSV network call
+curie audit --full                    # fetch full detail (summary, fixed versions, CVSS)
+curie audit --full --severity 9.0     # only fail on CRITICAL findings (CVSS ≥ 9.0)
+curie audit --output path/to/sbom.json  # override the SBOM output path
+```
+
+### SBOM
+
+The SBOM is written to `target/sbom.cdx.json` by default.  Each dependency in
+the closure becomes a `library` component with a Maven PURL
+(`pkg:maven/<groupId>/<artifactId>@<version>`).  Production deps are marked
+`scope: required`; test deps (when `--include-test` is set) are marked
+`scope: optional`.
+
+The `metadata.component` field is populated when `groupId` is set in
+`Curie.toml`'s `[application]` or `[library]` section.
+
+### Vulnerability scanning
+
+Without `--full`, only vuln IDs are shown and **any finding causes exit 1**.
+This is the conservative default — IDs alone carry no CVSS score.
+
+With `--full`, curie fetches full detail from OSV and exits 1 only when the
+highest CVSS score across all findings meets or exceeds `--severity` (default
+`7.0`, i.e. HIGH and above).
+
+CVSS scores are derived from the `database_specific.severity` field in OSV
+advisories (the primary source for GHSA advisories):
+
+| OSV severity | CVSS equivalent |
+|---|---|
+| CRITICAL | 9.0 |
+| HIGH | 7.0 |
+| MEDIUM | 4.0 |
+| LOW | 1.0 |
+
+Findings with an unrecognised or absent severity string always trigger exit 1
+when `--full` is used, to avoid silently passing unknown risks.
+
+### Workspace
+
+When invoked at a workspace root, `curie audit` runs the full pipeline for
+every member in topological order and exits 1 if **any** member has findings
+that exceed the threshold.
 
 ---
 
