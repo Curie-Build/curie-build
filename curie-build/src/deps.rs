@@ -11,15 +11,16 @@ pub fn run_deps_workspace_member(
     workspace_root: &Path,
     member_index: usize,
     why: Option<&str>,
+    tests: bool,
     offline: bool,
 ) -> Result<()> {
     let ws = workspace::load(workspace_root)?;
     let member = &ws.members[member_index];
-    run_deps_with_desc(&member.path, &member.descriptor, why, offline)
+    run_deps_with_desc(&member.path, &member.descriptor, why, tests, offline)
 }
 
 /// Entry point for standalone (non-workspace) projects.
-pub fn run_deps(project_root: &Path, why: Option<&str>, offline: bool) -> Result<()> {
+pub fn run_deps(project_root: &Path, why: Option<&str>, tests: bool, offline: bool) -> Result<()> {
     let desc = descriptor::load(project_root)?;
     if desc.is_workspace() {
         bail!(
@@ -27,7 +28,7 @@ pub fn run_deps(project_root: &Path, why: Option<&str>, offline: bool) -> Result
              target a member with --project"
         );
     }
-    run_deps_with_desc(project_root, &desc, why, offline)
+    run_deps_with_desc(project_root, &desc, why, tests, offline)
 }
 
 /// Entry point when the descriptor has already been loaded with workspace
@@ -36,20 +37,24 @@ pub fn run_deps_with_desc(
     _project_root: &Path,
     desc: &descriptor::Descriptor,
     why: Option<&str>,
+    tests: bool,
     offline: bool,
 ) -> Result<()> {
-    if desc.dependencies.is_empty() {
+    // Choose between production deps and test deps.
+    let dep_map  = if tests { &desc.test_dependencies } else { &desc.dependencies };
+    let bom_gavs = if tests { desc.test_bom_gavs()? }  else { desc.prod_bom_gavs()? };
+    let scope_label = if tests { "Test dependencies" } else { "Dependencies" };
+
+    if dep_map.is_empty() {
         println!(
-            "Dependencies for {} v{}",
-            desc.buildable_name(), desc.buildable_version(),
+            "{} for {} v{}",
+            scope_label, desc.buildable_name(), desc.buildable_version(),
         );
         println!("  (none)");
         return Ok(());
     }
 
-    let bom_gavs = desc.prod_bom_gavs()?;
-    let entries: Vec<DepEntry> = desc
-        .dependencies
+    let entries: Vec<DepEntry> = dep_map
         .iter()
         .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository() })
         .collect();
@@ -64,7 +69,7 @@ pub fn run_deps_with_desc(
     let tree = curie_deps::resolve_tree(&entries, &opts)?;
 
     match why {
-        None => print_tree(desc, &tree),
+        None => print_tree_with_label(scope_label, desc, &tree),
         Some(coord) => explain_why(coord, &tree),
     }
 }
@@ -73,10 +78,10 @@ pub fn run_deps_with_desc(
 // Tree printing
 // ---------------------------------------------------------------------------
 
-fn print_tree(desc: &descriptor::Descriptor, tree: &DepTree) -> Result<()> {
+fn print_tree_with_label(label: &str, desc: &descriptor::Descriptor, tree: &DepTree) -> Result<()> {
     println!(
-        "Dependencies for {} v{}",
-        desc.buildable_name(),
+        "{} for {} v{}",
+        label, desc.buildable_name(),
         desc.buildable_version(),
     );
 

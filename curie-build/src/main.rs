@@ -108,6 +108,9 @@ enum Cmd {
         /// Explain why this artifact was selected (e.g. "org.foo:bar" or "org.foo:bar:1.0")
         #[arg(long)]
         why: Option<String>,
+        /// Show [test-dependencies] instead of [dependencies]
+        #[arg(long)]
+        tests: bool,
         /// Use only locally cached POMs; do not download
         #[arg(long)]
         offline: bool,
@@ -242,18 +245,18 @@ fn main() {
                 fmt::run_fmt(project, check, offline)
             }
         },
-        Cmd::Deps { why, offline } => match &ctx {
+        Cmd::Deps { why, tests, offline } => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(_) => Err(anyhow::anyhow!(
                 "`curie deps` cannot run on a workspace root; \
                  target a member with --project"
             )),
             workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
                 deps::run_deps_workspace_member(
-                    workspace_root, *member_index, why.as_deref(), offline,
+                    workspace_root, *member_index, why.as_deref(), tests, offline,
                 )
             }
             workspace::WorkspaceContext::Standalone(project) => {
-                deps::run_deps(project, why.as_deref(), offline)
+                deps::run_deps(project, why.as_deref(), tests, offline)
             }
         },
         Cmd::Publish { repo, no_sign, no_javadoc, dry_run } => {
