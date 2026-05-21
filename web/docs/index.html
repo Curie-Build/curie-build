@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Docs · Curie</title>
-  <meta name="description" content="Curie documentation: dependency resolution, Kotlin support, incremental builds, multi-module workspaces.">
+  <meta name="description" content="Curie documentation: dependency resolution, Kotlin, Groovy & Spock, incremental builds, multi-module workspaces, publishing, dependency tree, SBOM audit, GraalVM native, scaffolding.">
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -33,20 +33,26 @@
     <h4>Documentation</h4>
     <ul>
       <li><a href="/docs/">Overview</a></li>
-      <li><a href="/docs/resolver.html">Resolver & checksums</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
       <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
       <li><a href="/docs/incremental.html">Incremental builds</a></li>
       <li><a href="/docs/workspaces.html">Workspaces</a></li>
       <li><a href="/docs/fmt.html">Formatter</a></li>
       <li><a href="/docs/testing.html">Testing</a></li>
       <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
     </ul>
   </aside>
 
   <main class="prose">
     <span class="eyebrow">Docs</span>
     <h1>Curie, end to end.</h1>
-    <p class="lede">Curie's surface area is small — a single binary, a single config file. The docs below cover each subsystem you'll hit as your project grows.</p>
+    <p class="lede">Curie's surface area is intentionally small — a single binary, a single config file. The docs below cover each subsystem you'll hit as your project grows, from the first compile to publishing a release and auditing it for vulnerabilities.</p>
 
     <h2>Where to start</h2>
     <p>If you haven't built anything yet, run through <a href="/getting-started.html">Get started</a> first. It takes about five minutes and leaves you with a working JAR you can run. Once that's clicking, the topics below dive into each piece.</p>
@@ -77,7 +83,7 @@
       <a class="feature-card" href="/docs/fmt.html" style="text-decoration: none; color: inherit;">
         <span class="badge">05</span>
         <h3>Formatter</h3>
-        <p><code>curie fmt</code> runs palantir-java-format across every Java source. <code>--check</code> mode for CI; workspace fan-out shares one resolved palantir classpath across all members.</p>
+        <p><code>curie fmt</code> runs palantir-java-format (Java) and ktfmt (Kotlin) in one command. <code>--check</code> mode for CI; workspace fan-out shares one resolved classpath across all members.</p>
       </a>
       <a class="feature-card" href="/docs/testing.html" style="text-decoration: none; color: inherit;">
         <span class="badge">06</span>
@@ -88,6 +94,36 @@
         <span class="badge">07</span>
         <h3>Docker</h3>
         <p>Generated layer-friendly Dockerfile + <code>.dockerignore</code>, eclipse-temurin JRE base by default, configurable <code>baseImage</code>, dep JARs in their own cached layer.</p>
+      </a>
+      <a class="feature-card" href="/docs/groovy.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">08</span>
+        <h3>Groovy &amp; Spock</h3>
+        <p>Auto-detected <code>.groovy</code> sources, joint Java/Groovy compilation via <code>FileSystemCompiler</code>, Spock 2.x test specs discovered and run through JUnit Platform. Configure with <code>[groovy]</code> and <code>[spock]</code> in <code>Curie.toml</code>.</p>
+      </a>
+      <a class="feature-card" href="/docs/publish.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">09</span>
+        <h3>Publishing</h3>
+        <p><code>curie publish</code> generates a POM, sources jar, javadoc jar, and GPG signatures, then uploads everything via HTTP PUT to any Maven 2-layout repository. Credentials stored in <code>~/.curie/config.toml</code>.</p>
+      </a>
+      <a class="feature-card" href="/docs/deps.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">10</span>
+        <h3>Dependency tree</h3>
+        <p><code>curie deps</code> prints the full transitive tree. <code>--why org.foo:bar</code> explains which path introduced an artifact and why nearest-wins chose its version over any conflicts. <code>--tests</code> shows the test closure.</p>
+      </a>
+      <a class="feature-card" href="/docs/audit.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">11</span>
+        <h3>Audit (SBOM)</h3>
+        <p><code>curie audit</code> emits a CycloneDX 1.6 SBOM for the resolved dependency closure and cross-references every artifact against the OSV vulnerability database, printing findings grouped by artifact with ANSI-coloured severity.</p>
+      </a>
+      <a class="feature-card" href="/docs/native.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">12</span>
+        <h3>GraalVM native-image</h3>
+        <p><code>curie native</code> compiles the project to a standalone native binary using GraalVM's <code>native-image</code> tool. Configure reachability metadata, output name, and extra flags via <code>[native-image]</code> in <code>Curie.toml</code>.</p>
+      </a>
+      <a class="feature-card" href="/docs/scaffold.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">13</span>
+        <h3>Scaffolding</h3>
+        <p><code>curie new app &lt;name&gt;</code> and <code>curie new lib &lt;name&gt;</code> generate a ready-to-build project skeleton — <code>Curie.toml</code>, source file, and directory layout — in one command. <code>curie init</code> does the same in the current directory.</p>
       </a>
     </div>
 

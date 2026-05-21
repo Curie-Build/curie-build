@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Curie — a fast, minimal build tool for the JVM</title>
-  <meta name="description" content="Curie is a fast, minimal build tool for Java and Kotlin projects, written in Rust. Maven Central resolution, checksum verification, incremental compilation, multi-module workspaces — driven by a single Curie.toml file.">
+  <meta name="description" content="Curie is a fast, minimal build tool for Java, Kotlin, and Groovy projects, written in Rust. Maven Central resolution, curie publish, dependency tree with conflict traces, GraalVM native images, CycloneDX SBOM audits — driven by a single Curie.toml file.">
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -34,7 +34,7 @@
       <span class="eyebrow">Research project · v0.1</span>
       <h1>A build tool for the JVM, distilled to its <span class="glow">stable isotope</span>.</h1>
       <p class="lede">
-        Curie is a fast, minimal build tool for Java and Kotlin projects, written in Rust. One <code>Curie.toml</code> file replaces hundreds of lines of POM XML or Gradle DSL — and the binary starts in milliseconds, not seconds.
+        Curie is a fast, minimal build tool for Java, Kotlin, and Groovy projects, written in Rust. One <code>Curie.toml</code> file replaces hundreds of lines of POM XML or Gradle DSL — and the binary starts in milliseconds, not seconds.
       </p>
       <div class="hero-ctas">
         <a class="btn btn-primary" href="/getting-started.html">Get started →</a>
@@ -104,7 +104,7 @@
   <div class="container">
     <header>
       <span class="eyebrow">The toolkit</span>
-      <h2>Eight elements. One build tool.</h2>
+      <h2>Fourteen elements. One build tool.</h2>
       <p>Every feature you'd expect from a modern build system — and nothing you wouldn't. Click any element for details.</p>
     </header>
 
@@ -143,7 +143,7 @@
         <span class="num">06</span>
         <span class="sym">Fmt</span>
         <span class="name">Formatter</span>
-        <span class="tag">palantir-java-format + ktfmt, Java and Kotlin in one command</span>
+        <span class="tag">palantir-java-format + ktfmt — Java and Kotlin in one command</span>
       </a>
       <a class="element" href="/docs/testing.html">
         <span class="num">07</span>
@@ -156,6 +156,42 @@
         <span class="sym">Dkr</span>
         <span class="name">Docker</span>
         <span class="tag">Optimised Dockerfile, generated automatically</span>
+      </a>
+      <a class="element" href="/docs/groovy.html">
+        <span class="num">09</span>
+        <span class="sym">Grv</span>
+        <span class="name">Groovy</span>
+        <span class="tag">Groovy + Spock, auto-detected, joint Java/Groovy compilation</span>
+      </a>
+      <a class="element" href="/docs/publish.html">
+        <span class="num">10</span>
+        <span class="sym">Pub</span>
+        <span class="name">Publish</span>
+        <span class="tag">POM generation, sources/javadoc jars, GPG signing, HTTP PUT to any Maven 2 repo</span>
+      </a>
+      <a class="element" href="/docs/deps.html">
+        <span class="num">11</span>
+        <span class="sym">Dep</span>
+        <span class="name">Deps</span>
+        <span class="tag">Dependency tree, --why conflict traces, --tests</span>
+      </a>
+      <a class="element" href="/docs/audit.html">
+        <span class="num">12</span>
+        <span class="sym">Aud</span>
+        <span class="name">Audit</span>
+        <span class="tag">CycloneDX 1.6 SBOM, OSV vulnerability scan</span>
+      </a>
+      <a class="element" href="/docs/native.html">
+        <span class="num">13</span>
+        <span class="sym">Nat</span>
+        <span class="name">Native</span>
+        <span class="tag">GraalVM native-image via [native-image] config</span>
+      </a>
+      <a class="element" href="/docs/scaffold.html">
+        <span class="num">14</span>
+        <span class="sym">New</span>
+        <span class="name">Scaffold</span>
+        <span class="tag">curie new / curie init — project skeleton in one command</span>
       </a>
     </div>
   </div>
@@ -265,6 +301,18 @@
           <td>External plugin</td>
           <td>External plugin</td>
         </tr>
+        <tr>
+          <td>Maven publishing</td>
+          <td class="curie">curie publish</td>
+          <td>mvn deploy</td>
+          <td>publish task</td>
+        </tr>
+        <tr>
+          <td>Vulnerability scan</td>
+          <td class="curie">curie audit (built-in)</td>
+          <td>External plugin</td>
+          <td>External plugin</td>
+        </tr>
       </tbody>
     </table>
   </div>
@@ -348,8 +396,8 @@
       </div>
       <div class="feature-card">
         <span class="badge">04 — polyglot</span>
-        <h3>Java and Kotlin in the same project.</h3>
-        <p>Drop a <code>.kt</code> file next to your <code>.java</code> files — Curie detects it, resolves the Kotlin compiler from Maven Central, and runs a two-phase compile (kotlinc → javac) so Java sees Kotlin types and vice versa. Auto-detects your <code>main</code> entry point in either language.</p>
+        <h3>Java, Kotlin, and Groovy — in the same project.</h3>
+        <p>Drop a <code>.kt</code> or <code>.groovy</code> file next to your <code>.java</code> files — Curie detects it, resolves the right compiler from Maven Central, and compiles everything together. Spock specs (<code>*Spec.groovy</code>) are auto-discovered and run via JUnit Platform. Auto-detects your <code>main</code> entry point in any language.</p>
       </div>
     </div>
   </div>

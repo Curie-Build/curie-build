@@ -66,7 +66,20 @@
       </div>
 
       <h2>3. Create a project</h2>
-      <p>Anywhere on disk, lay out:</p>
+
+      <p><strong>Shortcut: <code>curie new</code></strong> — scaffold a project in one command. Curie generates the directory, <code>Curie.toml</code>, and a starter source file for you:</p>
+      <div class="term">
+        <header>
+          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+          <span>$ curie new app hello</span>
+        </header>
+<pre><span class="ok">Created</span> hello/Curie.toml
+<span class="ok">Created</span> hello/src/com.example/Hello.java
+<span class="dim">
+Run `curie build` inside hello/ to compile and package.</span></pre>
+      </div>
+
+      <p>Or create the files manually. Anywhere on disk, lay out:</p>
       <div class="term">
         <header>
           <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
@@ -159,10 +172,14 @@
 
       <h2>Next steps</h2>
       <ul>
-        <li><a href="/docs/resolver.html">Dependency resolution & checksums</a> — how Curie talks to Maven Central</li>
+        <li><a href="/docs/resolver.html">Dependency resolution & checksums</a> — Maven Central, BOM imports, <code>curie deps --why</code> conflict traces</li>
         <li><a href="/docs/kotlin.html">Kotlin support</a> — drop in <code>.kt</code> files, no config</li>
+        <li><a href="/docs/groovy.html">Groovy &amp; Spock</a> — <code>.groovy</code> sources and Spock specs, auto-detected</li>
         <li><a href="/docs/workspaces.html">Workspaces</a> — multi-module monorepos with one root <code>Curie.toml</code></li>
         <li><a href="/docs/incremental.html">Incremental builds</a> — how the rebuild gate decides what to do</li>
+        <li><a href="/docs/publish.html">Publishing</a> — <code>curie publish</code>: POM, sources/javadoc jars, GPG, HTTP PUT</li>
+        <li><a href="/docs/audit.html">Audit</a> — <code>curie audit</code>: CycloneDX SBOM &amp; OSV vulnerability scan</li>
+        <li><a href="/docs/native.html">GraalVM native</a> — <code>curie native</code> for serverless and CLI binaries</li>
       </ul>
 
     </article>
