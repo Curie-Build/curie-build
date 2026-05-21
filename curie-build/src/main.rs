@@ -12,6 +12,7 @@ mod jar;
 mod kt_stale;
 mod main_class;
 mod native;
+mod new;
 mod pom_writer;
 mod publish;
 mod run;
@@ -133,10 +134,50 @@ enum Cmd {
         #[arg(long = "dry-run")]
         dry_run: bool,
     },
+    /// Scaffold a new Curie project in a new subdirectory
+    New {
+        /// Project kind: app, lib, or workspace
+        kind: new::ProjectKind,
+
+        /// Project name (defaults to current directory name for app/lib)
+        name: Option<String>,
+
+        /// Root Java package, e.g. com.example.myapp (derived from name when absent)
+        #[arg(long)]
+        package: Option<String>,
+    },
+    /// Initialise a Curie project in the current directory
+    Init {
+        /// Project kind: app, lib, or workspace
+        kind: new::ProjectKind,
+
+        /// Root Java package, e.g. com.example.myapp (derived from directory name when absent)
+        #[arg(long)]
+        package: Option<String>,
+    },
 }
 
 fn main() {
     let cli = Cli::parse();
+
+    // `curie new` and `curie init` don't operate on an existing project —
+    // they create one.  Skip workspace discovery entirely for them.
+    let early_result = match &cli.command {
+        Cmd::New { kind, name, package } => {
+            Some(new::run_new(*kind, name.clone(), package.clone()))
+        }
+        Cmd::Init { kind, package } => {
+            Some(new::run_init(*kind, package.clone()))
+        }
+        _ => None,
+    };
+    if let Some(result) = early_result {
+        if let Err(e) = result {
+            eprintln!("error: {:#}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // Discovery is done once per invocation so every command sees a
     // consistent view of (project, surrounding workspace) — and so a
@@ -283,6 +324,8 @@ fn main() {
                 Err(e) => Err(e),
             }
         }
+        // Handled above in the early-exit block; unreachable at runtime.
+        Cmd::New { .. } | Cmd::Init { .. } => unreachable!(),
     };
 
     if let Err(e) = result {

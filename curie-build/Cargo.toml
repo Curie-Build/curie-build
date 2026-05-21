@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 toml = "1.1"
+toml_edit = "0.22"
 serde = { version = "1", features = ["derive"] }
 walkdir = "2"
 anyhow = "1"

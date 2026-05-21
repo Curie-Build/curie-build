@@ -53,6 +53,13 @@ Curie will never match the plugin ecosystem of Maven or Gradle. The goal is a fo
 ### Commands
 
 ```
+curie new app   <name>  # scaffold a new application project in a new subdirectory
+curie new lib   <name>  # scaffold a new library project in a new subdirectory
+curie new workspace <name>  # scaffold a new workspace in a new subdirectory
+curie init app          # initialise an application project in the current directory
+curie init lib          # initialise a library project in the current directory
+curie init workspace    # initialise a workspace in the current directory
+
 curie build             # resolve deps, compile, run tests, package JAR, build Docker image (if enabled)
 curie test              # compile and run tests only — no JAR or Docker build
 curie run               # build, then run via java -jar (or Docker)
@@ -70,6 +77,97 @@ curie fmt   --offline   # use only cached formatter JARs; fail if not present
 
 curie --project path/to/member build  # target a specific project or workspace member
 ```
+
+---
+
+## Scaffolding
+
+`curie new` and `curie init` generate a ready-to-build project skeleton — the
+`cargo new` ergonomics that Maven archetypes never delivered.
+
+### `curie new` — create a project in a new subdirectory
+
+```sh
+curie new app   my-app      # creates ./my-app/ with an application skeleton
+curie new lib   my-lib      # creates ./my-lib/ with a library skeleton
+curie new workspace my-ws   # creates ./my-ws/ with an empty workspace
+```
+
+For `app` and `lib`, `[name]` defaults to the current directory name when
+omitted.
+
+### `curie init` — initialise in the current directory
+
+```sh
+mkdir my-app && cd my-app
+curie init app              # writes Curie.toml + source skeleton into ./
+curie init lib
+curie init workspace
+```
+
+Fails immediately if `Curie.toml` already exists.
+
+### Generated layout
+
+For `curie new app my-app` (or `curie init app` inside `my-app/`):
+
+```
+my-app/
+├── .gitignore          # target/
+├── Curie.toml
+└── src/
+    └── com.example.myapp/
+        └── MyApp.java
+```
+
+For `curie new lib my-lib`:
+
+```
+my-lib/
+├── .gitignore
+├── Curie.toml
+└── src/
+    └── com.example.mylib/
+        └── MyLib.java
+```
+
+For `curie new workspace my-ws`:
+
+```
+my-ws/
+├── .gitignore
+└── Curie.toml          # [workspace] members = []
+```
+
+### Package name
+
+The Java package is derived automatically from the project name:
+
+| Project name | Package | Class |
+|---|---|---|
+| `my-app` | `com.example.myapp` | `MyApp` |
+| `hello-world` | `com.example.helloworld` | `HelloWorld` |
+| `string_utils` | `com.example.stringutils` | `StringUtils` |
+
+Override with `--package`:
+
+```sh
+curie new app my-app --package org.acme.demo
+```
+
+### Workspace auto-registration
+
+If you run `curie new` or `curie init` inside a directory that already
+contains a workspace `Curie.toml`, Curie automatically appends the new
+project to `members`:
+
+```sh
+cd my-workspace
+curie new app hello         # also adds "hello" to ./Curie.toml members
+```
+
+The workspace file is updated with format-preserving edits — comments and
+ordering are preserved.
 
 ---
 
