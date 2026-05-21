@@ -108,6 +108,50 @@ struct BfsWork {
     child_repos: Vec<Repository>,
 }
 
+// ---------------------------------------------------------------------------
+// Dependency-tree types (used by resolve_tree)
+// ---------------------------------------------------------------------------
+
+/// One artifact in the resolved transitive closure.
+#[derive(Debug, Clone)]
+pub struct ResolvedDep {
+    pub gav: Gav,
+    /// BFS depth: 0 = declared by user, 1 = direct transitive, etc.
+    pub depth: usize,
+    /// The artifact that pulled this one in.  `None` for depth-0 (declared) deps.
+    pub via: Option<Gav>,
+}
+
+/// A version candidate that lost the nearest-wins conflict: a deeper path
+/// tried to introduce the same `group:artifact` but was already visited.
+#[derive(Debug, Clone)]
+pub struct SkippedDep {
+    /// The version that was discarded.
+    pub version: String,
+    pub depth: usize,
+    /// The artifact that tried to introduce this version.
+    pub via: Option<Gav>,
+}
+
+/// Full dependency tree returned by [`resolve_tree`].
+#[derive(Debug)]
+pub struct DepTree {
+    /// All resolved deps in BFS discovery order.
+    pub resolved: Vec<ResolvedDep>,
+    /// Nearest-wins losers keyed by `"group:artifact"`.
+    pub skipped: HashMap<String, Vec<SkippedDep>>,
+}
+
+/// Internal BFS work item for [`resolve_tree`] — same as [`BfsWork`] but
+/// also tracks depth and the introducing parent.
+struct TreeBfsWork {
+    gav: Gav,
+    fetch_repos: Vec<Repository>,
+    child_repos: Vec<Repository>,
+    depth: usize,
+    via: Option<Gav>,
+}
+
 /// Walk the parent POM chain (up to 10 levels) and merge properties +
 /// managed_versions into `pom`. Parent values only fill gaps — own values win.
 fn merge_parent_chain(
@@ -324,6 +368,189 @@ fn resolve_bom_ref_version(bom_ref: &BomRef, importing_pom: &Pom) -> Option<Stri
     } else {
         Some(resolved)
     }
+}
+
+/// Resolve the full transitive dependency tree and return rich metadata
+/// about depth, introduction paths, and nearest-wins conflict decisions.
+///
+/// Runs Phase 1 of the resolver (BFS over POMs) but skips Phase 2 (JAR
+/// downloads) — suitable for `curie deps` queries that don't need the JARs.
+pub fn resolve_tree(
+    deps: &[DepEntry],
+    opts: &ResolveOptions,
+) -> Result<DepTree> {
+    let central = if opts.default_repos.is_empty() {
+        default_repositories()
+    } else {
+        opts.default_repos.clone()
+    };
+
+    let named_map: std::collections::HashMap<&str, &Repository> = opts
+        .named_repos
+        .iter()
+        .map(|r| (r.id.as_str(), r))
+        .collect();
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("curie-build/0.1")
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let global_managed = resolve_boms(&opts.bom_imports, &central, &client, opts.offline)?;
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut resolved: Vec<ResolvedDep> = Vec::new();
+    let mut skipped: HashMap<String, Vec<SkippedDep>> = HashMap::new();
+
+    // Seed depth-0 from declared deps.
+    let mut current_level: Vec<TreeBfsWork> = Vec::new();
+    for dep in deps {
+        let resolved_version: String = if dep.version.is_empty() {
+            global_managed
+                .get(dep.key)
+                .with_context(|| format!(
+                    "dependency \"{}\" has no version and is not managed by any BOM",
+                    dep.key
+                ))?
+                .clone()
+        } else {
+            dep.version.to_string()
+        };
+
+        let (fetch_repos, child_repos) = if let Some(repo_id) = dep.repo_id {
+            let named: Repository = (*named_map
+                .get(repo_id)
+                .with_context(|| format!(
+                    "dependency \"{}\" references unknown repository \"{}\"",
+                    dep.key, repo_id
+                ))?)
+                .clone();
+            let mut child = central.clone();
+            child.push(named.clone());
+            (vec![named], child)
+        } else {
+            (central.clone(), central.clone())
+        };
+
+        let gav = Gav::from_key_version(dep.key, &resolved_version)?;
+        let ga = format!("{}:{}", gav.group, gav.artifact);
+        if visited.insert(ga) {
+            current_level.push(TreeBfsWork {
+                gav,
+                fetch_repos,
+                child_repos,
+                depth: 0,
+                via: None,
+            });
+        }
+    }
+
+    // Level-synchronised parallel BFS — same structure as resolve().
+    const PARALLEL_POM_FETCHES: usize = 8;
+
+    while !current_level.is_empty() {
+        let level_n = current_level.len();
+        let thread_count = PARALLEL_POM_FETCHES.min(level_n);
+
+        let next_idx = std::sync::atomic::AtomicUsize::new(0);
+        let mut pom_results: Vec<Option<Result<Pom>>> =
+            (0..level_n).map(|_| None).collect();
+        let mut per_thread: Vec<Vec<(usize, Result<Pom>)>> = Vec::new();
+
+        let next_ref = &next_idx;
+        let level_ref = &current_level;
+        let client_ref = &client;
+        let offline = opts.offline;
+
+        std::thread::scope(|s| -> Result<()> {
+            let handles: Vec<_> = (0..thread_count)
+                .map(|_| {
+                    s.spawn(move || -> Vec<(usize, Result<Pom>)> {
+                        let mut local = Vec::new();
+                        loop {
+                            let i = next_ref.fetch_add(1, Ordering::Relaxed);
+                            if i >= level_n { break; }
+                            let work = &level_ref[i];
+                            local.push((i, fetch_and_parse_pom(
+                                &work.gav, &work.fetch_repos, client_ref, offline,
+                            )));
+                        }
+                        local
+                    })
+                })
+                .collect();
+            for h in handles {
+                per_thread.push(h.join().unwrap_or_default());
+            }
+            Ok(())
+        })?;
+
+        for thread_results in per_thread {
+            for (i, result) in thread_results {
+                pom_results[i] = Some(result);
+            }
+        }
+
+        let mut next_level: Vec<TreeBfsWork> = Vec::new();
+        for (i, work) in current_level.iter().enumerate() {
+            resolved.push(ResolvedDep {
+                gav: work.gav.clone(),
+                depth: work.depth,
+                via: work.via.clone(),
+            });
+
+            if let Some(Ok(pom)) = &pom_results[i] {
+                for dep in pom.dependencies.iter().filter(|d| d.is_compile_scope()) {
+                    let group = pom.resolve_value(&dep.group_id);
+                    let artifact = pom.resolve_value(&dep.artifact_id);
+                    let ga_key = format!("{}:{}", group, artifact);
+                    let child_depth = work.depth + 1;
+
+                    if visited.contains(&ga_key) {
+                        // Record the losing candidate for conflict traces.
+                        if let Some(raw_version) = resolve_transitive_version(
+                            &ga_key,
+                            dep.version.as_deref(),
+                            pom,
+                            &global_managed,
+                        ) {
+                            skipped.entry(ga_key).or_default().push(SkippedDep {
+                                version: raw_version,
+                                depth: child_depth,
+                                via: Some(work.gav.clone()),
+                            });
+                        }
+                        continue;
+                    }
+
+                    let raw_version = match resolve_transitive_version(
+                        &ga_key,
+                        dep.version.as_deref(),
+                        pom,
+                        &global_managed,
+                    ) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+
+                    let child_gav = Gav { group, artifact, version: raw_version };
+                    visited.insert(ga_key);
+                    next_level.push(TreeBfsWork {
+                        fetch_repos: work.child_repos.clone(),
+                        child_repos: work.child_repos.clone(),
+                        depth: child_depth,
+                        via: Some(work.gav.clone()),
+                        gav: child_gav,
+                    });
+                }
+            }
+        }
+
+        current_level = next_level;
+    }
+
+    Ok(DepTree { resolved, skipped })
 }
 
 /// Resolve a list of [`DepEntry`] items into their final declared `Gav` form
@@ -1971,5 +2198,113 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.len(), 1, "expected 1 resolved JAR");
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_tree tests
+    // -----------------------------------------------------------------------
+
+    fn run_resolve_tree(
+        home_dir: &std::path::Path,
+        deps: &[(&str, &str)],
+        bom_imports: Vec<Gav>,
+    ) -> Result<DepTree> {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home_dir.to_str().unwrap());
+
+        let entries: Vec<DepEntry> = deps
+            .iter()
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None })
+            .collect();
+        let opts = ResolveOptions {
+            default_repos: vec![],
+            named_repos: vec![],
+            progress: false,
+            bom_imports,
+            offline: true,
+        };
+        let result = resolve_tree(&entries, &opts);
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        result
+    }
+
+    #[test]
+    fn tree_is_empty_for_no_deps() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = run_resolve_tree(dir.path(), &[], vec![]).unwrap();
+        assert!(tree.resolved.is_empty());
+        assert!(tree.skipped.is_empty());
+    }
+
+    #[test]
+    fn tree_records_depth_correctly() {
+        let dir = tempfile::tempdir().unwrap();
+        // foo:bar:1.0 → foo:baz:1.0 → foo:qux:1.0
+        write_fake_artifact(dir.path(), "foo", "qux", "1.0", &[]);
+        write_fake_artifact(dir.path(), "foo", "baz", "1.0", &[("foo", "qux", "1.0")]);
+        write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[("foo", "baz", "1.0")]);
+
+        let tree = run_resolve_tree(dir.path(), &[("foo:bar", "1.0")], vec![]).unwrap();
+        assert_eq!(tree.resolved.len(), 3);
+
+        let bar = tree.resolved.iter().find(|d| d.gav.artifact == "bar").unwrap();
+        let baz = tree.resolved.iter().find(|d| d.gav.artifact == "baz").unwrap();
+        let qux = tree.resolved.iter().find(|d| d.gav.artifact == "qux").unwrap();
+
+        assert_eq!(bar.depth, 0);
+        assert_eq!(baz.depth, 1);
+        assert_eq!(qux.depth, 2);
+    }
+
+    #[test]
+    fn tree_records_via_correctly() {
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "foo", "child", "1.0", &[]);
+        write_fake_artifact(dir.path(), "foo", "parent", "1.0", &[("foo", "child", "1.0")]);
+
+        let tree = run_resolve_tree(dir.path(), &[("foo:parent", "1.0")], vec![]).unwrap();
+
+        let parent_dep = tree.resolved.iter().find(|d| d.gav.artifact == "parent").unwrap();
+        let child_dep  = tree.resolved.iter().find(|d| d.gav.artifact == "child").unwrap();
+
+        assert!(parent_dep.via.is_none(), "depth-0 dep has no via");
+        let via = child_dep.via.as_ref().expect("child must have a via");
+        assert_eq!(via.artifact, "parent");
+        assert_eq!(via.version, "1.0");
+    }
+
+    #[test]
+    fn tree_records_skipped_on_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        // Direct dep A pulls child:1.0 at depth 1.
+        // Direct dep B → C pulls child:2.0 at depth 2 — should be skipped.
+        write_fake_artifact(dir.path(), "foo", "child", "1.0", &[]);
+        write_fake_artifact(dir.path(), "foo", "child", "2.0", &[]);
+        write_fake_artifact(dir.path(), "foo", "c",     "1.0", &[("foo", "child", "2.0")]);
+        write_fake_artifact(dir.path(), "foo", "a",     "1.0", &[("foo", "child", "1.0")]);
+        write_fake_artifact(dir.path(), "foo", "b",     "1.0", &[("foo", "c", "1.0")]);
+
+        let tree = run_resolve_tree(
+            dir.path(),
+            &[("foo:a", "1.0"), ("foo:b", "1.0")],
+            vec![],
+        ).unwrap();
+
+        // child:1.0 was chosen (depth 1 via a).
+        let child = tree.resolved.iter().find(|d| d.gav.artifact == "child").unwrap();
+        assert_eq!(child.gav.version, "1.0");
+
+        // child:2.0 (depth 2, via c) should appear in skipped.
+        let skips = tree.skipped.get("foo:child").expect("foo:child should have skipped entries");
+        assert_eq!(skips.len(), 1);
+        assert_eq!(skips[0].version, "2.0");
+        assert_eq!(skips[0].depth, 2);
+        let skip_via = skips[0].via.as_ref().unwrap();
+        assert_eq!(skip_via.artifact, "c");
     }
 }

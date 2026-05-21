@@ -2,6 +2,7 @@ mod build;
 mod class_manifest;
 mod compile;
 mod config;
+mod deps;
 mod descriptor;
 mod docker;
 mod fmt;
@@ -99,6 +100,15 @@ enum Cmd {
         check: bool,
 
         /// Do not download formatter JARs; fail if not already cached
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Print the dependency tree; optionally explain why a specific artifact was chosen
+    Deps {
+        /// Explain why this artifact was selected (e.g. "org.foo:bar" or "org.foo:bar:1.0")
+        #[arg(long)]
+        why: Option<String>,
+        /// Use only locally cached POMs; do not download
         #[arg(long)]
         offline: bool,
     },
@@ -230,6 +240,20 @@ fn main() {
             }
             workspace::WorkspaceContext::Standalone(project) => {
                 fmt::run_fmt(project, check, offline)
+            }
+        },
+        Cmd::Deps { why, offline } => match &ctx {
+            workspace::WorkspaceContext::WorkspaceRoot(_) => Err(anyhow::anyhow!(
+                "`curie deps` cannot run on a workspace root; \
+                 target a member with --project"
+            )),
+            workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+                deps::run_deps_workspace_member(
+                    workspace_root, *member_index, why.as_deref(), offline,
+                )
+            }
+            workspace::WorkspaceContext::Standalone(project) => {
+                deps::run_deps(project, why.as_deref(), offline)
             }
         },
         Cmd::Publish { repo, no_sign, no_javadoc, dry_run } => {

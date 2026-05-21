@@ -13,4 +13,7 @@ pub mod resolver;
 
 pub use gav::Gav;
 pub use repo::Repository;
-pub use resolver::{resolve, resolve_declared_gavs, DepEntry, ResolveOptions};
+pub use resolver::{
+    resolve, resolve_declared_gavs, resolve_tree,
+    DepEntry, DepTree, ResolvedDep, ResolveOptions, SkippedDep,
+};
