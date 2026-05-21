@@ -1,0 +1,64 @@
+# spring-boot-demo
+#
+# Demonstrates Curie building a production-quality Spring Boot 3 application:
+#
+#   - REST API with Spring MVC (Spring Web)
+#   - Spring Boot Actuator: /actuator/health, /actuator/prometheus
+#   - Micrometer Prometheus registry for metrics
+#   - Spring Data JDBC (not JPA) accessing PostgreSQL
+#   - JSONB column in PostgreSQL with custom JdbcCustomConversions (PGobject)
+#   - Groovy/Spock integration tests backed by Testcontainers PostgreSQL
+#   - Docker image built by `curie build`
+#
+# To build and test (requires Docker for Testcontainers):
+#   curie --project examples/spring-boot-demo build
+#
+# To run locally (also requires a running PostgreSQL):
+#   docker run --name demo-pg -e POSTGRES_DB=demo -e POSTGRES_USER=demo \
+#       -e POSTGRES_PASSWORD=demo -p 5432:5432 -d postgres:16-alpine
+#   curie --project examples/spring-boot-demo run --no-docker
+
+[application]
+name      = "spring-boot-demo"
+version   = "0.1.0"
+mainClass = "com.example.springdemo.SpringBootDemoApplication"
+
+[java]
+sourceCompatibility = "21"
+
+[groovy]
+version = "5.0.6"
+
+[spock]
+version = "2.4-groovy-5.0"
+
+[docker]
+baseImage = "eclipse-temurin:21-jre-alpine"
+
+[bom-imports]
+# Spring Boot 4.0 uses Spring Framework 7.x (ASM 9.8+) which supports JDK 25.
+"org.springframework.boot:spring-boot-dependencies" = "4.0.6"
+
+[test-bom-imports]
+"org.testcontainers:testcontainers-bom" = "1.20.4"
+
+[dependencies]
+"org.springframework.boot:spring-boot-starter-web"       = ""
+"org.springframework.boot:spring-boot-starter-actuator"  = ""
+"org.springframework.boot:spring-boot-starter-data-jdbc" = ""
+"org.postgresql:postgresql"                              = ""
+"io.micrometer:micrometer-registry-prometheus"           = ""
+"com.fasterxml.jackson.core:jackson-databind"            = ""
+
+[test-dependencies]
+"org.springframework.boot:spring-boot-starter-test"   = ""
+"org.springframework.boot:spring-boot-testcontainers" = ""
+"org.testcontainers:postgresql"                       = ""
+"org.testcontainers:junit-jupiter"                    = ""
+"org.spockframework:spock-spring"                     = "2.4-groovy-5.0"
+
+[test]
+# Spring Boot 3.4 / Spock 2.4 both target JUnit Platform 1.x.
+# Use the 1.x standalone launcher; Platform 2.x (the default) has
+# incompatible scan-class-path discovery.
+junitPlatformVersion = "1.14.4"
