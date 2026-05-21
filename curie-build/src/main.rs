@@ -145,9 +145,9 @@ enum Cmd {
         #[arg(long)]
         offline: bool,
 
-        /// Skip fetching full vulnerability detail (show IDs only; exit 1 on any finding)
+        /// Show vuln IDs only, skip fetching full detail; exit 1 on any finding
         #[arg(long)]
-        no_full: bool,
+        short: bool,
 
         /// CVSS score threshold for a non-zero exit (default: 7.0)
         #[arg(long, default_value = "7.0")]
@@ -347,11 +347,11 @@ fn main() {
                 Err(e) => Err(e),
             }
         }
-        Cmd::Audit { include_test, offline, no_full, severity, output } => {
+        Cmd::Audit { include_test, offline, short, severity, output } => {
             let opts = audit::AuditOptions {
                 include_test,
                 offline,
-                full: !no_full,
+                full: !short,
                 severity,
                 output,
             };

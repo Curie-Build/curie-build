@@ -33,7 +33,7 @@ pub struct AuditOptions {
     /// Skip OSV network call; only emit the SBOM.
     pub offline: bool,
     /// Fetch full vuln detail from OSV (aliases, fixed versions, severity).
-    /// Enabled by default; pass `--no-full` to skip and show IDs only
+    /// Enabled by default; pass `--short` to skip and show IDs only
     /// (exit 1 triggered on any finding when skipped).
     pub full: bool,
     /// CVSS score threshold for a non-zero exit (default 7.0).
@@ -596,6 +596,50 @@ fn vuln_link(id: &str) -> String {
     format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, id)
 }
 
+/// Returns `true` when stdout is a terminal and `NO_COLOR` is not set.
+fn use_color() -> bool {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    // Check if stdout is a tty via the TERM / isatty heuristic.
+    // We use the `libc` approach via a raw fd check without adding a dep:
+    // on Unix fd 1 is stdout; on Windows we just skip colors.
+    #[cfg(unix)]
+    {
+        // SAFETY: isatty is always safe to call with a valid fd.
+        unsafe { libc_isatty(1) }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+#[cfg(unix)]
+fn libc_isatty(fd: i32) -> bool {
+    extern "C" {
+        fn isatty(fd: i32) -> i32;
+    }
+    unsafe { isatty(fd) != 0 }
+}
+
+/// ANSI color for a CVSS score (or the bracket when score is unknown).
+/// Critical ≥9: bright red; High ≥7: red; Medium ≥4: yellow; Low: cyan.
+fn severity_color(score: Option<f32>) -> (&'static str, &'static str) {
+    if !use_color() {
+        return ("", "");
+    }
+    let reset = "\x1b[0m";
+    let color = match score {
+        Some(s) if s >= 9.0 => "\x1b[91m", // bright red  – Critical
+        Some(s) if s >= 7.0 => "\x1b[31m", // red         – High
+        Some(s) if s >= 4.0 => "\x1b[33m", // yellow      – Medium
+        Some(_)             => "\x1b[36m", // cyan        – Low
+        None                => "\x1b[33m", // yellow      – unknown
+    };
+    (color, reset)
+}
+
 fn print_findings(findings: &[Finding], full: bool) {
     // Group findings by purl so all vulns for one artifact appear together.
     let mut by_purl: Vec<(&str, Vec<&Finding>)> = Vec::new();
@@ -617,18 +661,19 @@ fn print_findings(findings: &[Finding], full: bool) {
         println!("  {}", purl);
         for f in vulns {
             let id = vuln_link(&f.id);
+            let (color, reset) = severity_color(f.score);
             if full {
                 let score_str = f
                     .score
                     .map(|s| format!(" CVSS {:.1}", s))
                     .unwrap_or_default();
                 let summary = f.summary.as_deref().unwrap_or("no summary");
-                println!("    [{}]{} — {}", id, score_str, summary);
+                println!("    {}[{}]{}{} — {}", color, id, score_str, reset, summary);
                 if !f.fixed.is_empty() {
                     println!("      Fixed in: {}", f.fixed.join(", "));
                 }
             } else {
-                println!("    [{}]", id);
+                println!("    {}[{}]{}", color, id, reset);
             }
         }
     }
@@ -640,8 +685,8 @@ fn print_findings(findings: &[Finding], full: bool) {
 
 /// Returns `true` when the audit result should cause a non-zero exit.
 ///
-/// * Without `--full`: any finding → exit 1 (we cannot score IDs alone).
-/// * With `--full`: exit 1 when max CVSS ≥ threshold.
+/// * With `--short`: any finding → exit 1 (we cannot score IDs alone).
+/// * Default (full): exit 1 when max CVSS ≥ threshold.
 pub fn should_exit_nonzero(report: &AuditReport, opts: &AuditOptions) -> bool {
     if report.findings.is_empty() {
         return false;
