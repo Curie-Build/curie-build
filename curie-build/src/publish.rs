@@ -551,6 +551,7 @@ mod tests {
             test: Test::default(),
             kotlin: Kotlin::default(),
             groovy: Groovy::default(),
+            spock: Spock::default(),
             native_image: NativeImage::default(),
             docker: Docker::default(),
             build_info: BuildInfo::default(),

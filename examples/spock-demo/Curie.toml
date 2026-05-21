@@ -1,0 +1,19 @@
+# spock-demo
+#
+# Demonstrates Spock test framework support.
+# `[spock]` activates automatic resolution of spock-core from Maven Central.
+# Spock specs (files ending in Spec.groovy) are compiled alongside production
+# Groovy sources and executed by the JUnit Platform Console Standalone launcher.
+#
+# NOTE: Groovy 4.0.x requires JDK <= 24.  On JDK 25+ use Groovy 5.x when
+# it reaches stable (it ships with ASM 9.8+ which supports class file v69).
+
+[library]
+name = "spock-demo"
+version = "0.1.0"
+
+[groovy]
+version = "4.0.23"
+
+[spock]
+version = "2.3-groovy-4.0"

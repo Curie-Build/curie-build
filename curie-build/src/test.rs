@@ -104,6 +104,29 @@ pub fn run_tests(
         .context("test dependency resolution failed")?
     };
 
+    // --- resolve spock-core (when [spock] is configured) ---------------------
+    let spock_jars: Vec<PathBuf> = if desc.spock.enabled {
+        let jars = resolve(
+            &[DepEntry {
+                key: "org.spockframework:spock-core",
+                version: desc.spock.version(),
+                repo_id: None,
+            }],
+            &ResolveOptions {
+                default_repos: central_repos(),
+                named_repos: extra_repos.clone(),
+                progress: true,
+                bom_imports: test_bom_gavs.clone(),
+                offline,
+            },
+        )
+        .context("Spock resolution failed")?;
+        println!("  Resolve Spock   {} JAR(s)", jars.len());
+        jars
+    } else {
+        vec![]
+    };
+
     // --- resolve Kotlin compiler for test compilation (when needed) ----------
     let test_kotlin_stdlib_jars: Vec<PathBuf>;
     let test_kotlin_compiler_jars: Vec<PathBuf>; // all resolved JARs for -cp invocation
@@ -275,6 +298,7 @@ pub fn run_tests(
         shared_cp.extend_from_slice(&test_ap_on_cp_jars);
         shared_cp.extend_from_slice(&test_kotlin_stdlib_jars);
         shared_cp.extend_from_slice(groovy_jars);
+        shared_cp.extend_from_slice(&spock_jars);
         shared_cp.push(standalone_jar.clone());
 
         if has_kotlin_tests {
@@ -456,6 +480,7 @@ pub fn run_tests(
     run_cp.extend_from_slice(extra_cp);
     run_cp.extend_from_slice(&test_kotlin_stdlib_jars);
     run_cp.extend_from_slice(groovy_jars);
+    run_cp.extend_from_slice(&spock_jars);
 
     println!();
 

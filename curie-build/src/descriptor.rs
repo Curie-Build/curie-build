@@ -23,6 +23,9 @@ pub struct Descriptor {
     /// value (if any) is copied in.
     pub kotlin: Kotlin,
     pub groovy: Groovy,
+    /// Populated from `[spock]`.  `enabled` is set by [`load`] after a
+    /// raw-TOML presence check — absent section = Spock disabled.
+    pub spock: Spock,
     /// Populated from `[native-image]`.  The `section_present` flag is set
     /// by [`load`] after a raw-TOML presence check, because an absent section
     /// and a section with all-default values produce the same deserialised
@@ -182,6 +185,8 @@ struct RawDescriptor {
     kotlin: Kotlin,
     #[serde(default)]
     groovy: Groovy,
+    #[serde(default)]
+    spock: Spock,
     #[serde(rename = "native-image", default)]
     native_image: NativeImage,
     #[serde(default)]
@@ -397,6 +402,35 @@ impl Groovy {
     /// runtime JARs (`org.apache.groovy:groovy:VERSION`).
     pub fn version(&self) -> &str {
         self.version.as_deref().unwrap_or(DEFAULT_GROOVY_VERSION)
+    }
+}
+
+/// Default `spock-core` version resolved from Maven Central when `[spock]`
+/// is present.  The version string includes a Groovy compatibility suffix
+/// (e.g. `groovy-4.0`).  Override with:
+///
+/// ```toml
+/// [spock]
+/// version = "2.3-groovy-4.0"
+/// ```
+pub const DEFAULT_SPOCK_VERSION: &str = "2.3-groovy-4.0";
+
+/// Configuration for the `[spock]` table.  The section's mere presence
+/// (even with no keys) activates Spock support — `section_present` is set
+/// by [`load`] from the raw TOML.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Spock {
+    #[serde(default)]
+    pub version: Option<String>,
+    /// `true` when `[spock]` appeared in `Curie.toml`.  Set by [`load`];
+    /// never written by serde.
+    #[serde(skip)]
+    pub enabled: bool,
+}
+
+impl Spock {
+    pub fn version(&self) -> &str {
+        self.version.as_deref().unwrap_or(DEFAULT_SPOCK_VERSION)
     }
 }
 
@@ -902,12 +936,17 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     let mut native_image = parsed.native_image;
     native_image.section_present = native_image_section_present;
 
+    let spock_section_present = table.map(|t| t.contains_key("spock")).unwrap_or(false);
+    let mut spock = parsed.spock;
+    spock.enabled = spock_section_present;
+
     let descriptor = Descriptor {
         kind,
         java: parsed.java,
         test: parsed.test,
         kotlin: parsed.kotlin,
         groovy: parsed.groovy,
+        spock,
         native_image,
         docker,
         build_info: parsed.build_info,
@@ -1769,6 +1808,51 @@ url = "https://example.com"
     }
 
     // -- [groovy] ---------------------------------------------------------------
+
+    // -- [spock] ---------------------------------------------------------------
+
+    #[test]
+    fn spock_section_absent_is_disabled() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(!d.spock.enabled, "absent [spock] must leave enabled = false");
+    }
+
+    #[test]
+    fn spock_section_present_is_enabled() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[spock]
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.spock.enabled, "[spock] present must set enabled = true");
+        assert_eq!(d.spock.version(), crate::descriptor::DEFAULT_SPOCK_VERSION);
+    }
+
+    #[test]
+    fn spock_version_can_be_set() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[spock]
+version = "2.4-groovy-4.0"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.spock.enabled);
+        assert_eq!(d.spock.version(), "2.4-groovy-4.0");
+    }
 
     #[test]
     fn groovy_version_defaults_to_constant() {

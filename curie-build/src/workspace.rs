@@ -273,6 +273,12 @@ fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
     if member.groovy.version.is_none() {
         member.groovy.version = ws.groovy.version.clone();
     }
+    if !member.spock.enabled {
+        member.spock.enabled = ws.spock.enabled;
+        if member.spock.version.is_none() {
+            member.spock.version = ws.spock.version.clone();
+        }
+    }
     if !ws.repositories.is_empty() {
         let mut combined = ws.repositories.clone();
         combined.append(&mut member.repositories);
@@ -1282,6 +1288,26 @@ mod tests {
         let result = fmt_all(dir.path(), true, false);
         // No java files → no errors.
         assert!(result.is_ok(), "unexpected error: {:?}", result);
+    }
+
+    #[test]
+    fn spock_inherits_from_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws_path = dir.path();
+        std::fs::write(
+            ws_path.join("Curie.toml"),
+            "[workspace]\nmembers = [\"m\"]\n\n[spock]\nversion = \"2.3-groovy-4.0\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir(ws_path.join("m")).unwrap();
+        std::fs::write(
+            ws_path.join("m").join("Curie.toml"),
+            "[application]\nname = \"m\"\nversion = \"0.0.0\"\nmainClass = \"M\"\n",
+        )
+        .unwrap();
+        let ws = crate::workspace::load(ws_path).unwrap();
+        assert!(ws.members[0].descriptor.spock.enabled, "spock.enabled must inherit from workspace");
+        assert_eq!(ws.members[0].descriptor.spock.version(), "2.3-groovy-4.0");
     }
 
     #[test]
