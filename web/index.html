@@ -31,7 +31,7 @@
 <header class="hero">
   <div class="container">
     <div>
-      <span class="eyebrow">Research project · v0.1</span>
+      <span class="eyebrow">v0.1</span>
       <h1>A build tool for the JVM, distilled to its <span class="glow">stable isotope</span>.</h1>
       <p class="lede">
         Curie is a fast, minimal build tool for Java, Kotlin, and Groovy projects, written in Rust. One <code>Curie.toml</code> file replaces hundreds of lines of POM XML or Gradle DSL — and the binary starts in milliseconds, not seconds.
@@ -46,12 +46,12 @@
           <span class="label">lines of config</span>
         </div>
         <div class="hero-stat">
-          <span class="num">8×</span>
-          <span class="label">parallel downloads</span>
+          <span class="num">instant</span>
+          <span class="label">startup, no daemon</span>
         </div>
         <div class="hero-stat">
-          <span class="num">SHA-256</span>
-          <span class="label">verified by default</span>
+          <span class="num">zero</span>
+          <span class="label">plugins to install</span>
         </div>
       </div>
     </div>
@@ -98,6 +98,131 @@
     </div>
   </div>
 </header>
+
+<!-- =================== Code + terminal pair =================== -->
+<section>
+  <div class="container">
+    <header style="margin-bottom: 2rem;">
+      <span class="eyebrow">A complete build</span>
+      <h2 style="margin-top: 1rem;">One file in. A Docker image out.</h2>
+    </header>
+
+    <div class="code-pair">
+      <div class="code">
+        <header>
+          <span class="dot live"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span>Curie.toml</span>
+        </header>
+<pre><span class="com"># Everything Curie needs to build and containerise an app.</span>
+<span class="kw">[application]</span>
+<span class="kw">name</span>      = <span class="str">"greeter"</span>
+<span class="kw">version</span>   = <span class="str">"0.1.0"</span>
+
+<span class="kw">[docker]</span>
+
+<span class="kw">[dependencies]</span>
+<span class="str">"com.fasterxml.jackson.core:jackson-databind"</span> = <span class="str">"2.17.2"</span>
+
+<span class="kw">[test-dependencies]</span>
+<span class="str">"org.junit.jupiter:junit-jupiter"</span> = <span class="str">"5.11.0"</span>
+</pre>
+      </div>
+
+      <div class="term">
+        <header>
+          <span class="dot live"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span>$ curie run</span>
+        </header>
+<pre><span class="dim">Building greeter v0.1.0</span>
+  Resolve deps    <span class="pkg">3 JAR(s)</span>
+  Compile         1 source file(s)  <span class="dim">[no class files]</span>
+  Compile tests   1 source file(s)
+  Tests           <span class="ok">✔ 4 tests successful</span>
+  Package         greeter-0.1.0.jar
+  Docker image    <span class="ok">greeter:0.1.0</span>  <span class="dim">(via target/Dockerfile)</span>
+  Run             <span class="em">docker run --rm greeter:0.1.0</span>
+
+<span class="ok">Hello from greeter.</span>
+</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- =================== Why Curie =================== -->
+<section>
+  <div class="container">
+    <header style="margin-bottom: 2rem;">
+      <span class="eyebrow">Where it fits</span>
+      <h2 style="margin-top: 1rem;">Maven and Gradle, condensed.</h2>
+    </header>
+
+    <table class="compare">
+      <thead>
+        <tr>
+          <th></th>
+          <th class="curie">Curie</th>
+          <th>Maven</th>
+          <th>Gradle</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Configuration</td>
+          <td class="curie">Curie.toml (~20 lines)</td>
+          <td>pom.xml (100+ XML)</td>
+          <td>build.gradle DSL</td>
+        </tr>
+        <tr>
+          <td>Startup</td>
+          <td class="curie">Native binary — instant</td>
+          <td>JVM cold start (~1–2 s)</td>
+          <td>JVM + daemon</td>
+        </tr>
+        <tr>
+          <td>Incremental builds</td>
+          <td class="curie">Built-in</td>
+          <td>Plugin-dependent</td>
+          <td>Built-in (complex)</td>
+        </tr>
+        <tr>
+          <td>Reproducible output</td>
+          <td class="curie">Yes, default</td>
+          <td>Extra plugin</td>
+          <td>Extra plugin</td>
+        </tr>
+        <tr>
+          <td>Checksum verification</td>
+          <td class="curie">SHA-256, default</td>
+          <td>Extra config</td>
+          <td>Extra config</td>
+        </tr>
+        <tr>
+          <td>Docker support</td>
+          <td class="curie">First-class</td>
+          <td>External plugin</td>
+          <td>External plugin</td>
+        </tr>
+        <tr>
+          <td>Maven publishing</td>
+          <td class="curie">curie publish</td>
+          <td>mvn deploy</td>
+          <td>publish task</td>
+        </tr>
+        <tr>
+          <td>Vulnerability scan</td>
+          <td class="curie">curie audit (built-in)</td>
+          <td>External plugin</td>
+          <td>External plugin</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
 
 <!-- =================== Periodic feature grid =================== -->
 <section class="features">
@@ -194,127 +319,6 @@
         <span class="tag">curie new / curie init — project skeleton in one command</span>
       </a>
     </div>
-  </div>
-</section>
-
-<!-- =================== Code + terminal pair =================== -->
-<section>
-  <div class="container">
-    <header style="margin-bottom: 2rem;">
-      <span class="eyebrow">A complete build</span>
-      <h2 style="margin-top: 1rem;">One file in. A signed JAR out.</h2>
-    </header>
-
-    <div class="code-pair">
-      <div class="code">
-        <header>
-          <span class="dot live"></span>
-          <span class="dot"></span>
-          <span class="dot"></span>
-          <span>Curie.toml</span>
-        </header>
-<pre><span class="com"># Everything Curie needs to build a Jackson-using app.</span>
-<span class="kw">[application]</span>
-<span class="kw">name</span>      = <span class="str">"greeter"</span>
-<span class="kw">version</span>   = <span class="str">"0.1.0"</span>
-<span class="kw">mainClass</span> = <span class="str">"com.example.Greeter"</span>
-
-<span class="kw">[dependencies]</span>
-<span class="str">"com.fasterxml.jackson.core:jackson-databind"</span> = <span class="str">"2.17.2"</span>
-
-<span class="kw">[test-dependencies]</span>
-<span class="str">"org.junit.jupiter:junit-jupiter"</span> = <span class="str">"5.11.0"</span>
-</pre>
-      </div>
-
-      <div class="term">
-        <header>
-          <span class="dot live"></span>
-          <span class="dot"></span>
-          <span class="dot"></span>
-          <span>$ curie build</span>
-        </header>
-<pre><span class="dim">Building greeter v0.1.0</span>
-  Resolve deps    <span class="pkg">3 JAR(s)</span>
-  Compile         1 source file(s)  <span class="dim">[no class files]</span>
-  Compile tests   1 source file(s)
-  Tests           <span class="ok">✔ 4 tests successful</span>
-  Package         greeter-0.1.0.jar
-  Done            <span class="em">target/greeter-0.1.0.jar</span>
-</pre>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- =================== Why Curie =================== -->
-<section>
-  <div class="container">
-    <header style="margin-bottom: 2rem;">
-      <span class="eyebrow">Where it fits</span>
-      <h2 style="margin-top: 1rem;">Maven and Gradle, condensed.</h2>
-    </header>
-
-    <table class="compare">
-      <thead>
-        <tr>
-          <th></th>
-          <th class="curie">Curie</th>
-          <th>Maven</th>
-          <th>Gradle</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td>Configuration</td>
-          <td class="curie">Curie.toml (~20 lines)</td>
-          <td>pom.xml (100+ XML)</td>
-          <td>build.gradle DSL</td>
-        </tr>
-        <tr>
-          <td>Startup</td>
-          <td class="curie">Native binary — instant</td>
-          <td>JVM cold start (~1–2 s)</td>
-          <td>JVM + daemon</td>
-        </tr>
-        <tr>
-          <td>Incremental builds</td>
-          <td class="curie">Built-in</td>
-          <td>Plugin-dependent</td>
-          <td>Built-in (complex)</td>
-        </tr>
-        <tr>
-          <td>Reproducible output</td>
-          <td class="curie">Yes, default</td>
-          <td>Extra plugin</td>
-          <td>Extra plugin</td>
-        </tr>
-        <tr>
-          <td>Checksum verification</td>
-          <td class="curie">SHA-256, default</td>
-          <td>Extra config</td>
-          <td>Extra config</td>
-        </tr>
-        <tr>
-          <td>Docker support</td>
-          <td class="curie">First-class</td>
-          <td>External plugin</td>
-          <td>External plugin</td>
-        </tr>
-        <tr>
-          <td>Maven publishing</td>
-          <td class="curie">curie publish</td>
-          <td>mvn deploy</td>
-          <td>publish task</td>
-        </tr>
-        <tr>
-          <td>Vulnerability scan</td>
-          <td class="curie">curie audit (built-in)</td>
-          <td>External plugin</td>
-          <td>External plugin</td>
-        </tr>
-      </tbody>
-    </table>
   </div>
 </section>
 
@@ -435,9 +439,9 @@
 <section>
   <div class="container" style="text-align: center;">
     <span class="eyebrow">Status</span>
-    <h2 style="margin: 1rem 0 1.5rem;">Research project — and shipping.</h2>
+    <h2 style="margin: 1rem 0 1.5rem;">In active development.</h2>
     <p class="lede" style="margin-inline: auto;">
-      Curie is an experiment in what a Java build tool looks like if it followed the conventions the rest of the modern toolchain has settled on — lockfile, workspace, reproducible by default, zero plugins. The core build pipeline works end-to-end — resolve, compile, test, package, optionally containerise — and is in active development.
+      The core build pipeline works end-to-end — resolve, compile, test, package, optionally containerise. Curie is in active development, with new features and stability improvements shipping regularly.
     </p>
     <div class="hero-ctas" style="justify-content: center; margin-top: 2rem;">
       <a class="btn btn-primary" href="/getting-started.html">Try it →</a>
@@ -453,7 +457,7 @@
         <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
         <span>Curie</span>
       </a>
-      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org</p>
     </div>
     <div style="display: flex; gap: 1.5rem;">
       <a href="/getting-started.html">Get started</a>
