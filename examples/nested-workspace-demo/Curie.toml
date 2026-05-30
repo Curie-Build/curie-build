@@ -1,0 +1,49 @@
+# Nested workspace demo — 3 levels of workspace nesting.
+#
+# Level 0 (this file): root workspace
+#   members: core-lib (library) + services/ (nested workspace)
+#
+# Level 1 (services/Curie.toml): intermediate workspace
+#   members: greeter-lib (library) + apps/ (nested workspace)
+#
+# Level 2 (services/apps/Curie.toml): innermost workspace
+#   members: hello-app (application)
+#
+# Configuration inheritance:
+#   - [java] sourceCompatibility flows from L0 to all members
+#   - [bom-imports] from L0 are inherited by all leaf members
+#   - [test-bom-imports] from L1 are inherited by greeter-lib and hello-app
+#
+# Workspace dependencies cross nesting levels:
+#   - greeter-lib  depends on core-lib  (L1 member → L0 member)
+#   - hello-app    depends on greeter-lib and core-lib (L2 → L1 and L2 → L0)
+#
+# Build from this directory:
+#   curie build --no-docker --no-native
+#
+# Build from a nested member (discovers this workspace automatically):
+#   curie --project services/apps/hello-app build --no-docker --no-native
+#
+# Build from an intermediate sub-workspace directory (resolves to this root,
+# then builds only that subtree + its transitive deps — e.g. services/ builds
+# greeter-lib + hello-app, pulling in core-lib as a dependency):
+#   curie --project services build --no-docker --no-native
+
+[workspace]
+members = ["core-lib", "services"]
+
+[java]
+sourceCompatibility = "21"
+
+[bom-imports]
+"com.fasterxml.jackson:jackson-bom" = "2.17.2"
+"com.google.guava:guava-bom" = "33.4.1.2-jre"
+
+[test-bom-imports]
+"org.junit:junit-bom" = "5.11.0"
+
+[test]
+junitPlatformVersion = "6.0.3"
+
+[kotlin]
+version = "2.1.21"

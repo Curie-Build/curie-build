@@ -1,0 +1,7 @@
+# core-lib — a simple utility library at the root nesting level.
+#
+# No explicit [java] or [bom-imports] — inherits from the workspace root.
+
+[library]
+name    = "nested-core"
+version = "0.1.0"

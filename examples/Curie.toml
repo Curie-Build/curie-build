@@ -28,6 +28,7 @@ members = [
     "hello-kotlin",
     "hello-mixed",
     "graalvm-hello",
+    "nested-workspace-demo",
 ]
 
 [java]

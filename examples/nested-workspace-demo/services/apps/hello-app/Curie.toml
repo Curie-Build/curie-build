@@ -1,0 +1,19 @@
+# hello-app — application at the deepest nesting level (level 2).
+#
+# Depends on both greeter-lib (level 1) and core-lib (level 0),
+# demonstrating workspace dependencies that cross multiple nesting
+# levels.
+#
+# Inherits configuration from all three workspace levels:
+#   - sourceCompatibility = "21" from level 0
+#   - guava-bom from level 1
+#   - jackson-bom, junit-bom, test config from level 0
+
+[application]
+name      = "nested-hello"
+version   = "0.1.0"
+mainClass = "com.example.app.Main"
+
+[workspace-dependencies]
+greeter = { path = "../../greeter-lib" }
+core    = { path = "../../../core-lib" }

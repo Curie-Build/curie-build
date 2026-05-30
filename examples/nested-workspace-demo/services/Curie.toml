@@ -1,0 +1,13 @@
+# services — level 1 nested workspace.
+#
+# Demonstrates configuration layering: this workspace adds its own
+# [bom-imports] entry.  Members inherit both this workspace's config
+# and the root workspace's config (sourceCompatibility, etc.).
+
+[workspace]
+members = ["greeter-lib", "apps"]
+
+# This BOM is inherited by greeter-lib and hello-app (via apps/), but
+# NOT by core-lib (which is a direct member of the root workspace).
+[bom-imports]
+"com.google.guava:guava-bom" = "33.4.8-jre"

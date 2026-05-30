@@ -162,6 +162,42 @@
   utils  library      v0.1.0</pre>
     </div>
 
+    <h2>Nested workspaces</h2>
+    <p>A workspace member can itself be a workspace. Curie recursively flattens nested workspaces into a single member list, and configuration inheritance cascades through all levels — from the outermost root, through each intermediate workspace, down to every leaf member.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>3-level nested workspace</span>
+      </header>
+<pre><span class="dim"># root/ — level 0</span>
+<span class="kw">[workspace]</span>
+<span class="kw">members</span> = [<span class="str">"core-lib"</span>, <span class="str">"services"</span>]
+
+<span class="dim"># root/services/ — level 1</span>
+<span class="kw">[workspace]</span>
+<span class="kw">members</span> = [<span class="str">"greeter-lib"</span>, <span class="str">"apps"</span>]
+
+<span class="dim"># root/services/apps/ — level 2</span>
+<span class="kw">[workspace]</span>
+<span class="kw">members</span> = [<span class="str">"hello-app"</span>]</pre>
+    </div>
+
+    <p>Workspace dependencies can cross nesting levels.  When <code>curie build</code> runs from the root, all leaf members are visible and built in topo order.</p>
+    <p><strong>Running from any directory:</strong> a command invoked from anywhere inside the tree resolves to the <em>outermost</em> enclosing workspace — so the full inheritance chain applies and cross-level <code>workspace-dependencies</code> resolve. From a leaf member, only that member and its transitive deps build. From an <em>intermediate</em> sub-workspace directory (e.g. <code>services/</code>), Curie builds only that subtree's members plus their transitive deps — for example <code>greeter-lib</code> + <code>hello-app</code>, pulling in <code>core-lib</code> as a dependency, while leaving unrelated root-level siblings untouched.</p>
+    <p><strong>Duplicate detection:</strong> if the same project directory appears more than once (directly or through nesting), Curie errors immediately. This also catches cycles — a nested workspace that references its parent triggers the duplicate check.</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie list  # from root</span>
+      </header>
+<pre><span class="dim">Workspace . (3 members)</span>
+  core-lib                 library      v0.1.0
+  services/greeter-lib     library      v0.1.0
+  services/apps/hello-app  application  v0.1.0</pre>
+    </div>
+
     <h2>Parallel formatting</h2>
     <p><code>curie fmt</code> at the workspace root fans out across every member in parallel. palantir-java-format is resolved once, then the JAR list is shared across the worker threads so there's no contention on the local cache.</p>
 

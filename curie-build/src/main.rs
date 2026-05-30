@@ -239,6 +239,9 @@ fn main() {
                 workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
                     workspace::build_one(workspace_root, *member_index, opts)
                 }
+                workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
+                    workspace::build_subtree(workspace_root, member_indices, opts)
+                }
                 workspace::WorkspaceContext::Standalone(project) => {
                     build::build(project, opts)
                 }
@@ -251,12 +254,16 @@ fn main() {
             workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
                 workspace::test_one(workspace_root, *member_index, filter.as_deref(), offline)
             }
+            workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
+                workspace::test_subtree(workspace_root, member_indices, filter.as_deref(), offline)
+            }
             workspace::WorkspaceContext::Standalone(project) => {
                 test_single_module(project, filter.as_deref(), offline)
             }
         },
         Cmd::Run { no_docker, offline, args } => match &ctx {
-            workspace::WorkspaceContext::WorkspaceRoot(_) => Err(anyhow::anyhow!(
+            workspace::WorkspaceContext::WorkspaceRoot(_)
+            | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
                 "`curie run` is ambiguous in a workspace.  Re-run with \
                  --project <member> to choose one, e.g.\n  \
                  curie --project examples/hello-world run"
@@ -284,6 +291,9 @@ fn main() {
         },
         Cmd::Clean {} => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(root) => workspace::clean_all(root),
+            workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
+                workspace::clean_subtree(workspace_root, member_indices)
+            }
             workspace::WorkspaceContext::WorkspaceMember { .. } => {
                 // just the targeted member's `target/`, not the whole
                 // workspace's.
@@ -292,7 +302,8 @@ fn main() {
             workspace::WorkspaceContext::Standalone(project) => build::clean(project),
         },
         Cmd::Native { offline } => match &ctx {
-            workspace::WorkspaceContext::WorkspaceRoot(_) => Err(anyhow::anyhow!(
+            workspace::WorkspaceContext::WorkspaceRoot(_)
+            | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
                 "`curie native` is ambiguous in a workspace — native binaries are \
                  per-application.  Re-run with --project <member>, e.g.\n  \
                  curie --project examples/graalvm-hello native"
@@ -304,7 +315,8 @@ fn main() {
         },
         Cmd::List {} => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(root)
-            | workspace::WorkspaceContext::WorkspaceMember { workspace_root: root, .. } => {
+            | workspace::WorkspaceContext::WorkspaceMember { workspace_root: root, .. }
+            | workspace::WorkspaceContext::WorkspaceSubtree { workspace_root: root, .. } => {
                 workspace::list(root)
             }
             workspace::WorkspaceContext::Standalone(_) => Err(anyhow::anyhow!(
@@ -317,6 +329,9 @@ fn main() {
             workspace::WorkspaceContext::WorkspaceRoot(root) => {
                 workspace::fmt_all(root, check, offline)
             }
+            workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
+                workspace::fmt_subtree(workspace_root, member_indices, check, offline)
+            }
             workspace::WorkspaceContext::WorkspaceMember { .. } => {
                 fmt::run_fmt(&cli.project, check, offline)
             }
@@ -325,7 +340,8 @@ fn main() {
             }
         },
         Cmd::Deps { why, tests, offline } => match &ctx {
-            workspace::WorkspaceContext::WorkspaceRoot(_) => Err(anyhow::anyhow!(
+            workspace::WorkspaceContext::WorkspaceRoot(_)
+            | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
                 "`curie deps` cannot run on a workspace root; \
                  target a member with --project"
             )),
@@ -340,7 +356,8 @@ fn main() {
         },
         Cmd::Publish { repo, no_sign, no_javadoc, dry_run } => {
             let target = match &ctx {
-                workspace::WorkspaceContext::WorkspaceRoot(_) => {
+                workspace::WorkspaceContext::WorkspaceRoot(_)
+                | workspace::WorkspaceContext::WorkspaceSubtree { .. } => {
                     Err(anyhow::anyhow!(
                         "`curie publish` cannot run on a workspace root; target a member with --project"
                     ))
@@ -375,6 +392,9 @@ fn main() {
                 workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
                     workspace::update_one(workspace_root, *member_index, &opts)
                 }
+                workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
+                    workspace::update_subtree(workspace_root, member_indices, &opts)
+                }
                 workspace::WorkspaceContext::Standalone(project) => {
                     match update::run_update(project, &opts) {
                         Ok(report) => Ok(report.has_updates()),
@@ -404,6 +424,9 @@ fn main() {
                 }
                 workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
                     workspace::audit_one(workspace_root, *member_index, &opts)
+                }
+                workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
+                    workspace::audit_subtree(workspace_root, member_indices, &opts)
                 }
                 workspace::WorkspaceContext::Standalone(project) => {
                     match audit::run_audit(project, &opts) {

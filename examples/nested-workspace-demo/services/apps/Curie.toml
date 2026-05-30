@@ -1,0 +1,8 @@
+# apps — level 2 (innermost) nested workspace.
+#
+# Its sole member (hello-app) inherits configuration from all three
+# workspace levels: this workspace, services/ (level 1), and the
+# root (level 0).
+
+[workspace]
+members = ["hello-app"]

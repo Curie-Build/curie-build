@@ -1,0 +1,12 @@
+# greeter-lib — library at level 1, depends on core-lib at level 0.
+#
+# Demonstrates a workspace dependency that crosses nesting levels:
+# greeter-lib lives inside the services/ workspace, but core-lib
+# is a direct member of the root workspace.
+
+[library]
+name    = "nested-greeter"
+version = "0.1.0"
+
+[workspace-dependencies]
+core = { path = "../../core-lib" }
