@@ -395,16 +395,7 @@ fn print_update_table(entries: &[UpdateEntry]) {
 }
 
 fn use_color() -> bool {
-    if std::env::var_os("NO_COLOR").is_some() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        extern "C" { fn isatty(fd: i32) -> i32; }
-        unsafe { isatty(1) != 0 }
-    }
-    #[cfg(not(unix))]
-    { false }
+    crate::term::use_color()
 }
 
 // ---------------------------------------------------------------------------

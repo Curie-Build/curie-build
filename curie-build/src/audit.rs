@@ -596,31 +596,8 @@ fn vuln_link(id: &str) -> String {
     format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, id)
 }
 
-/// Returns `true` when stdout is a terminal and `NO_COLOR` is not set.
 fn use_color() -> bool {
-    if std::env::var_os("NO_COLOR").is_some() {
-        return false;
-    }
-    // Check if stdout is a tty via the TERM / isatty heuristic.
-    // We use the `libc` approach via a raw fd check without adding a dep:
-    // on Unix fd 1 is stdout; on Windows we just skip colors.
-    #[cfg(unix)]
-    {
-        // SAFETY: isatty is always safe to call with a valid fd.
-        unsafe { libc_isatty(1) }
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
-}
-
-#[cfg(unix)]
-fn libc_isatty(fd: i32) -> bool {
-    extern "C" {
-        fn isatty(fd: i32) -> i32;
-    }
-    unsafe { isatty(fd) != 0 }
+    crate::term::use_color()
 }
 
 /// ANSI color for a CVSS score (or the bracket when score is unknown).

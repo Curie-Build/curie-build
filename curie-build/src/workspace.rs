@@ -16,7 +16,7 @@ use crate::update::{self, UpdateOptions};
 use crate::{build, compile, fmt, jar, run, test};
 use anyhow::{bail, Context, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -498,30 +498,379 @@ fn topo_sort(n: usize, edges: &[Vec<usize>]) -> std::result::Result<Vec<usize>, 
     }
 }
 
-/// Print the workspace's members to stdout: one line per member with the
-/// declared name, kind, and version.  Format is stable enough to grep
-/// without being a committed-API contract.
-pub fn list(workspace_root: &Path) -> Result<()> {
-    let ws = load(workspace_root)?;
-    println!(
-        "Workspace {} ({} member{})",
-        ws.root.display(),
-        ws.members.len(),
-        if ws.members.len() == 1 { "" } else { "s" },
-    );
+// ---------------------------------------------------------------------------
+// curie list — tree view
+// ---------------------------------------------------------------------------
 
-    // Pad the declared-name column so the kind/version columns line up.
-    let name_w = ws.members.iter().map(|m| m.declared.len()).max().unwrap_or(0);
+/// Kind of a list-tree node.
+#[derive(Debug)]
+enum ListKind {
+    Workspace,
+    Project { label: &'static str, version: String },
+}
 
-    for m in &ws.members {
-        println!(
-            "  {:<width$}  {:<11}  v{}",
-            m.declared,
-            m.descriptor.kind_label(),
-            m.descriptor.buildable_version(),
-            width = name_w,
-        );
+/// A node in the list-tree hierarchy.  Workspace nodes contain their declared
+/// members as `children`; project nodes are leaves (children is empty).
+#[derive(Debug)]
+struct ListNode {
+    /// Last path component — the name shown in the tree.
+    name: String,
+    /// Canonical absolute path for identity and ancestor tracking.
+    abs_path: PathBuf,
+    /// Canonical abs path of the immediately enclosing workspace (or own
+    /// abs_path for the outermost root).  Used to relativize `required by`
+    /// paths.
+    parent_ws_abs: PathBuf,
+    kind: ListKind,
+    /// Resolved canonical paths of this project's `[workspace-dependencies]`.
+    /// Always empty for workspace nodes.
+    dep_targets: Vec<PathBuf>,
+    children: Vec<ListNode>,
+}
+
+/// Recursively build the list-tree rooted at `root`.  Does not flatten
+/// nested workspaces — workspace nodes appear as interior nodes with their
+/// children intact, preserving the visual hierarchy.
+fn build_list_tree(root: &Path, parent_ws_abs: &Path, name: &str) -> Result<ListNode> {
+    let abs_path = root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", root.display()))?;
+    let desc = descriptor::load(root)
+        .with_context(|| format!("failed to load {}", root.display()))?;
+
+    if desc.is_workspace() {
+        let ws = desc.workspace().unwrap();
+        let mut children = Vec::new();
+        for member_name in &ws.members {
+            let child_path = root.join(member_name);
+            children.push(
+                build_list_tree(&child_path, &abs_path, member_name)
+                    .with_context(|| format!("loading member \"{}\"", member_name))?,
+            );
+        }
+        Ok(ListNode {
+            name: name.to_string(),
+            abs_path,
+            parent_ws_abs: parent_ws_abs.to_path_buf(),
+            kind: ListKind::Workspace,
+            dep_targets: Vec::new(),
+            children,
+        })
+    } else {
+        let dep_targets: Vec<PathBuf> = desc
+            .workspace_dependencies
+            .values()
+            .filter_map(|wd| {
+                let p = root.join(&wd.path);
+                p.canonicalize().ok()
+            })
+            .collect();
+        Ok(ListNode {
+            name: name.to_string(),
+            abs_path,
+            parent_ws_abs: parent_ws_abs.to_path_buf(),
+            kind: ListKind::Project {
+                label: desc.kind_label(),
+                version: desc
+                    .project_version()
+                    .unwrap_or("?")
+                    .to_string(),
+            },
+            dep_targets,
+            children: Vec::new(),
+        })
     }
+}
+
+/// Computed view for rendering: which nodes to show and each dependency
+/// node's `required by` annotation.
+#[derive(Debug)]
+pub(crate) struct ListView {
+    /// Abs paths of nodes that should be rendered.
+    pub kept: HashSet<PathBuf>,
+    /// Dep target abs_path → list of requirer paths
+    /// (each relative to the dep target's parent workspace).
+    pub required_by: HashMap<PathBuf, Vec<String>>,
+    /// Current project/workspace abs_path (for the `← current` marker).
+    pub current: PathBuf,
+}
+
+/// Compute a path from `base` to `target` using `..` as needed.
+/// Both paths must be canonical (no symlinks, no `.`).
+pub(crate) fn rel_from(base: &Path, target: &Path) -> String {
+    // Find how many components of `base` and `target` diverge.
+    let base_comps: Vec<_> = base.components().collect();
+    let tgt_comps: Vec<_> = target.components().collect();
+    let common = base_comps
+        .iter()
+        .zip(tgt_comps.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let up = base_comps.len() - common;
+    let mut parts: Vec<String> = std::iter::repeat("..".to_string()).take(up).collect();
+    parts.extend(
+        tgt_comps[common..]
+            .iter()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+    );
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
+/// Walk the list-tree recursively, collecting all nodes into `out`.
+fn walk_nodes<'a>(node: &'a ListNode, out: &mut Vec<&'a ListNode>) {
+    out.push(node);
+    for c in &node.children {
+        walk_nodes(c, out);
+    }
+}
+
+/// Return the abs_paths of all ancestors of `target` in the tree (nearest
+/// first), not including `target` itself.
+fn ancestors_of(target: &Path, root: &ListNode) -> Vec<PathBuf> {
+    fn find(target: &Path, node: &ListNode, stack: &mut Vec<PathBuf>) -> bool {
+        if node.abs_path == target {
+            return true;
+        }
+        stack.push(node.abs_path.clone());
+        for c in &node.children {
+            if find(target, c, stack) {
+                return true;
+            }
+        }
+        stack.pop();
+        false
+    }
+    let mut stack = Vec::new();
+    find(target, root, &mut stack);
+    stack.reverse(); // nearest first
+    stack
+}
+
+/// Return all abs_paths of nodes in the subtree rooted at the node with
+/// `target_abs` (inclusive).
+fn subtree_abs_paths(node: &ListNode, target_abs: &Path) -> Option<HashSet<PathBuf>> {
+    fn collect(node: &ListNode, out: &mut HashSet<PathBuf>) {
+        out.insert(node.abs_path.clone());
+        for c in &node.children {
+            collect(c, out);
+        }
+    }
+    fn find<'a>(node: &'a ListNode, target: &Path) -> Option<&'a ListNode> {
+        if node.abs_path == target {
+            return Some(node);
+        }
+        for c in &node.children {
+            if let Some(n) = find(c, target) {
+                return Some(n);
+            }
+        }
+        None
+    }
+    find(node, target_abs).map(|n| {
+        let mut out = HashSet::new();
+        collect(n, &mut out);
+        out
+    })
+}
+
+/// Look up the parent_ws_abs of the node with `target_abs`.
+fn parent_ws_of(root: &ListNode, target_abs: &Path) -> Option<PathBuf> {
+    let mut all = Vec::new();
+    walk_nodes(root, &mut all);
+    all.iter()
+        .find(|n| n.abs_path == target_abs)
+        .map(|n| n.parent_ws_abs.clone())
+}
+
+/// Compute which nodes to show and which `required by` strings to attach.
+pub(crate) fn compute_view(root: &ListNode, current: &Path, all: bool) -> ListView {
+    let mut all_nodes = Vec::new();
+    walk_nodes(root, &mut all_nodes);
+    let node_by_abs: HashMap<&PathBuf, &&ListNode> = all_nodes
+        .iter()
+        .map(|n| (&n.abs_path, n))
+        .collect();
+
+    // Build required_by: for each project node, for each dep_target, record
+    // the requirer path relative to the dep target's parent workspace.
+    let mut required_by: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    for n in &all_nodes {
+        for dep_abs in &n.dep_targets {
+            let dep_parent = parent_ws_of(root, dep_abs)
+                .unwrap_or_else(|| root.abs_path.clone());
+            let rel = rel_from(&dep_parent, &n.abs_path);
+            required_by
+                .entry(dep_abs.clone())
+                .or_default()
+                .push(rel);
+        }
+    }
+    // Sort for deterministic output.
+    for v in required_by.values_mut() {
+        v.sort();
+    }
+
+    if all {
+        let kept = all_nodes.iter().map(|n| n.abs_path.clone()).collect();
+        return ListView { kept, required_by, current: current.to_path_buf() };
+    }
+
+    // Focused keep-set.
+    let mut kept: HashSet<PathBuf> = HashSet::new();
+
+    // 1. Current subtree (current + all descendants).
+    let subtree = subtree_abs_paths(root, current).unwrap_or_else(|| {
+        let mut s = HashSet::new();
+        s.insert(current.to_path_buf());
+        s
+    });
+    kept.extend(subtree.iter().cloned());
+
+    // 2. Transitive dep_targets from every project in the subtree.
+    let mut dep_queue: Vec<PathBuf> = all_nodes
+        .iter()
+        .filter(|n| subtree.contains(&n.abs_path) && !n.dep_targets.is_empty())
+        .flat_map(|n| n.dep_targets.iter().cloned())
+        .collect();
+    let mut visited_deps: HashSet<PathBuf> = HashSet::new();
+    while let Some(dep) = dep_queue.pop() {
+        if !visited_deps.insert(dep.clone()) {
+            continue;
+        }
+        kept.insert(dep.clone());
+        if let Some(&&dep_node) = node_by_abs.get(&dep) {
+            dep_queue.extend(dep_node.dep_targets.iter().cloned());
+        }
+    }
+
+    // 3. All ancestors of every kept node (to connect the tree).
+    let kept_snapshot: Vec<PathBuf> = kept.iter().cloned().collect();
+    for abs in &kept_snapshot {
+        kept.extend(ancestors_of(abs, root));
+    }
+
+    // Always keep root.
+    kept.insert(root.abs_path.clone());
+
+    ListView { kept, required_by, current: current.to_path_buf() }
+}
+
+// ANSI escapes — all gated on use_color().
+const DIM: &str = "\x1b[2m";
+const BOLD_CYAN: &str = "\x1b[1;36m";
+const BOLD_YELLOW: &str = "\x1b[1;33m";
+const RESET: &str = "\x1b[0m";
+
+fn render_node(
+    node: &ListNode,
+    view: &ListView,
+    prefix: &str,      // indent prefix for this node's line
+    child_prefix: &str, // indent prefix for this node's children
+    color: bool,
+) {
+    let pipe   = if color { format!("{DIM}│  {RESET}") } else { "│  ".to_string() };
+    let tee    = if color { format!("{DIM}├─ {RESET}") } else { "├─ ".to_string() };
+    let elbow  = if color { format!("{DIM}└─ {RESET}") } else { "└─ ".to_string() };
+    let gap    = "   ";
+
+    let label_line = match &node.kind {
+        ListKind::Workspace => {
+            if color {
+                format!("{BOLD_CYAN}{}{RESET}", node.name)
+            } else {
+                node.name.clone()
+            }
+        }
+        ListKind::Project { label, version } => {
+            let meta = if color {
+                format!("  {DIM}{label} v{version}{RESET}")
+            } else {
+                format!("  {label} v{version}")
+            };
+            format!("{}{meta}", node.name)
+        }
+    };
+
+    let current_tag = if node.abs_path == view.current {
+        if color {
+            format!("  {BOLD_YELLOW}← current{RESET}")
+        } else {
+            "  ← current".to_string()
+        }
+    } else {
+        String::new()
+    };
+
+    let req_tag = if let Some(requirers) = view.required_by.get(&node.abs_path) {
+        if !requirers.is_empty() {
+            let req_line = requirers.join(", ");
+            if color {
+                format!("  {DIM}(required by: {req_line}){RESET}")
+            } else {
+                format!("  (required by: {req_line})")
+            }
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    println!("{prefix}{label_line}{current_tag}{req_tag}");
+
+    // Recurse into visible children.
+    let visible: Vec<&ListNode> = node
+        .children
+        .iter()
+        .filter(|c| view.kept.contains(&c.abs_path))
+        .collect();
+
+    for (i, child) in visible.iter().enumerate() {
+        let last = i == visible.len() - 1;
+        let (c_prefix, c_child_prefix) = if last {
+            (
+                format!("{child_prefix}{elbow}"),
+                format!("{child_prefix}{gap}"),
+            )
+        } else {
+            (
+                format!("{child_prefix}{tee}"),
+                format!("{child_prefix}{pipe}"),
+            )
+        };
+        render_node(child, view, &c_prefix, &c_child_prefix, color);
+    }
+}
+
+/// Print the workspace/project tree.
+///
+/// `root` is the outermost workspace to use as the tree root.
+/// `current` is the project/workspace the user invoked the command from.
+/// `all` shows the entire tree instead of the focused subtree.
+pub fn list(root: &Path, current: &Path, all: bool) -> Result<()> {
+    let current_canon = current
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", current.display()))?;
+
+    let root_name = root
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root.display().to_string());
+
+    let root_abs = root
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", root.display()))?;
+
+    let tree = build_list_tree(root, &root_abs, &root_name)?;
+    let view = compute_view(&tree, &current_canon, all);
+    let color = crate::term::use_color();
+
+    render_node(&tree, &view, "", "", color);
     Ok(())
 }
 
@@ -2227,5 +2576,105 @@ mod tests {
             !ws.members[0].descriptor.java.preview_enabled(),
             "member enablePreview=false must override workspace true",
         );
+    }
+
+    // -- list tree ----------------------------------------------------------
+
+    #[test]
+    fn list_tree_has_workspace_and_project_nodes() {
+        let dir = make_nested_workspace();
+        let root = dir.path();
+        let root_abs = root.canonicalize().unwrap();
+        let tree = build_list_tree(root, &root_abs, "root").unwrap();
+
+        // Root is a workspace.
+        assert!(matches!(tree.kind, ListKind::Workspace));
+        // Should have 2 direct children: core-lib and services.
+        assert_eq!(tree.children.len(), 2);
+        let core = &tree.children[0];
+        assert!(matches!(&core.kind, ListKind::Project { label, .. } if *label == "library"));
+        let services = &tree.children[1];
+        assert!(matches!(services.kind, ListKind::Workspace));
+        // services has 2 children: mid-lib and apps.
+        assert_eq!(services.children.len(), 2);
+    }
+
+    #[test]
+    fn list_view_focused_on_services_prunes_unrelated() {
+        let dir = make_nested_workspace();
+        let root = dir.path();
+        let root_abs = root.canonicalize().unwrap();
+        let services_abs = root.join("services").canonicalize().unwrap();
+        let core_abs = root.join("core-lib").canonicalize().unwrap();
+        let tree = build_list_tree(root, &root_abs, "root").unwrap();
+        let view = compute_view(&tree, &services_abs, false);
+
+        // root, core-lib, services (+ all its descendants) must be kept.
+        assert!(view.kept.contains(&root_abs));
+        assert!(view.kept.contains(&services_abs));
+        assert!(
+            view.kept.contains(&core_abs),
+            "core-lib is a dep of subtree members so it must be in kept",
+        );
+        // services is current.
+        assert_eq!(view.current, services_abs);
+    }
+
+    #[test]
+    fn list_view_required_by_reverse_edges() {
+        let dir = make_nested_workspace();
+        let root = dir.path();
+        let root_abs = root.canonicalize().unwrap();
+        let core_abs = root.join("core-lib").canonicalize().unwrap();
+        let mid_abs = root.join("services").join("mid-lib").canonicalize().unwrap();
+        let leaf_abs = root.join("services").join("apps").join("leaf-app").canonicalize().unwrap();
+        let tree = build_list_tree(root, &root_abs, "root").unwrap();
+        let view = compute_view(&tree, &root_abs, false);
+
+        // core-lib is required by mid-lib and leaf-app (paths relative to core-lib's parent = root).
+        let core_reqs = view.required_by.get(&core_abs).expect("core-lib must have required_by");
+        let mid_rel  = rel_from(&root_abs, &mid_abs);   // "services/mid-lib"
+        let leaf_rel = rel_from(&root_abs, &leaf_abs);  // "services/apps/leaf-app"
+        assert!(core_reqs.contains(&mid_rel),  "missing {mid_rel} in core-lib required_by: {core_reqs:?}");
+        assert!(core_reqs.contains(&leaf_rel), "missing {leaf_rel} in core-lib required_by: {core_reqs:?}");
+
+        // mid-lib is required by leaf-app (relative to mid-lib's parent = services/).
+        let services_abs = root.join("services").canonicalize().unwrap();
+        let mid_reqs = view.required_by.get(&mid_abs).expect("mid-lib must have required_by");
+        let leaf_from_services = rel_from(&services_abs, &leaf_abs);  // "apps/leaf-app"
+        assert!(mid_reqs.contains(&leaf_from_services), "missing {leaf_from_services}: {mid_reqs:?}");
+    }
+
+    #[test]
+    fn list_view_all_keeps_everything() {
+        let dir = make_nested_workspace();
+        let root = dir.path();
+        let root_abs = root.canonicalize().unwrap();
+        let tree = build_list_tree(root, &root_abs, "root").unwrap();
+        let view = compute_view(&tree, &root_abs, true);
+
+        // 7 nodes: root, core-lib, services, mid-lib, apps, leaf-app = 6 per make_nested_workspace
+        // (root + 5 = 6 — root/core-lib/services/mid-lib/apps/leaf-app).
+        assert_eq!(view.kept.len(), 6);
+    }
+
+    #[test]
+    fn rel_from_child() {
+        let base = PathBuf::from("/a/b");
+        let target = PathBuf::from("/a/b/c/d");
+        assert_eq!(rel_from(&base, &target), "c/d");
+    }
+
+    #[test]
+    fn rel_from_sibling() {
+        let base = PathBuf::from("/a/b");
+        let target = PathBuf::from("/a/c");
+        assert_eq!(rel_from(&base, &target), "../c");
+    }
+
+    #[test]
+    fn rel_from_self() {
+        let p = PathBuf::from("/a/b");
+        assert_eq!(rel_from(&p, &p), ".");
     }
 }

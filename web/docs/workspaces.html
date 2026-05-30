@@ -188,15 +188,22 @@
     <p><strong>Running from any directory:</strong> a command invoked from anywhere inside the tree resolves to the <em>outermost</em> enclosing workspace — so the full inheritance chain applies and cross-level <code>workspace-dependencies</code> resolve. From a leaf member, only that member and its transitive deps build. From an <em>intermediate</em> sub-workspace directory (e.g. <code>services/</code>), Curie builds only that subtree's members plus their transitive deps — for example <code>greeter-lib</code> + <code>hello-app</code>, pulling in <code>core-lib</code> as a dependency, while leaving unrelated root-level siblings untouched.</p>
     <p><strong>Duplicate detection:</strong> if the same project directory appears more than once (directly or through nesting), Curie errors immediately. This also catches cycles — a nested workspace that references its parent triggers the duplicate check.</p>
 
+    <p><code>curie list</code> shows a focused tree rooted at the outermost workspace, highlighting the current project/workspace with <code>← current</code>.  Nodes outside the current subtree are pruned unless they are workspace dependencies (or their ancestors).  Each dependency target shows a reverse <code>required by</code> annotation listing its requirers, with paths relative to the target's parent workspace.  <code>curie list --all</code> shows the complete tree including unrelated siblings.</p>
+
     <div class="term">
       <header>
         <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-        <span>$ curie list  # from root</span>
+        <span>$ curie --project services list  # focused on the services sub-workspace</span>
       </header>
-<pre><span class="dim">Workspace . (3 members)</span>
-  core-lib                 library      v0.1.0
-  services/greeter-lib     library      v0.1.0
-  services/apps/hello-app  application  v0.1.0</pre>
+<pre>examples  (workspace)
+└─ nested-workspace-demo  (workspace)
+   ├─ core-lib  library v0.1.0
+   │        (required by: services/greeter-lib, services/apps/hello-app)
+   └─ services  (workspace)  ← current
+      ├─ greeter-lib  library v0.1.0
+      │        (required by: apps/hello-app)
+      └─ apps  (workspace)
+         └─ hello-app  application v0.1.0</pre>
     </div>
 
     <h2>Parallel formatting</h2>

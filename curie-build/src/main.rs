@@ -18,6 +18,7 @@ mod pom_writer;
 mod publish;
 mod run;
 mod sources_jar;
+mod term;
 mod test;
 mod update;
 mod workspace;
@@ -93,8 +94,12 @@ enum Cmd {
         #[arg(long)]
         offline: bool,
     },
-    /// List the members of a workspace (project must be a workspace root)
-    List {},
+    /// Show the workspace tree (focused on the current project by default)
+    List {
+        /// Show the full workspace tree including unrelated siblings
+        #[arg(long)]
+        all: bool,
+    },
     /// Format Java source files with palantir-java-format
     Fmt {
         /// Check formatting without modifying files; exit non-zero if any
@@ -313,17 +318,15 @@ fn main() {
                 native_single_module(&cli.project, offline)
             }
         },
-        Cmd::List {} => match &ctx {
+        Cmd::List { all } => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(root)
             | workspace::WorkspaceContext::WorkspaceMember { workspace_root: root, .. }
             | workspace::WorkspaceContext::WorkspaceSubtree { workspace_root: root, .. } => {
-                workspace::list(root)
+                workspace::list(root, &cli.project, all)
             }
-            workspace::WorkspaceContext::Standalone(_) => Err(anyhow::anyhow!(
-                "`curie list` only makes sense inside a workspace.  Add a \
-                 [workspace] Curie.toml at the project root, or invoke \
-                 from a workspace member's directory."
-            )),
+            workspace::WorkspaceContext::Standalone(project) => {
+                workspace::list(project, project, all)
+            }
         },
         Cmd::Fmt { check, offline } => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(root) => {
