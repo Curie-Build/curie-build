@@ -99,6 +99,7 @@
       <li><code>[java]</code> — applies to every member that does not declare its own.</li>
       <li><code>[bom-imports]</code> / <code>[test-bom-imports]</code> — merged with each member's own imports. <strong>Member entries take precedence</strong> on a name collision.</li>
       <li><code>[repositories]</code> — also inherited; member entries appended.</li>
+      <li>Boolean flags (<code>[java] enablePreview</code>, <code>[spock] enabled</code>) — a member's explicit value wins, including <code>false</code>. A member can set <code>enablePreview = false</code> or <code>[spock] enabled = false</code> to <strong>opt out</strong> of a flag the workspace turned on.</li>
     </ul>
 
     <p>Members declare dependencies with empty version strings (<code>""</code>) to defer to the inherited BOMs:</p>

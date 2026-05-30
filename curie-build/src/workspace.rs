@@ -390,7 +390,9 @@ fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
     if member.java.source_compatibility.is_none() {
         member.java.source_compatibility = ws.java.source_compatibility.clone();
     }
-    if !member.java.enable_preview {
+    // enablePreview: member's explicit value (including `false`) wins; only
+    // inherit when the member left the key out.
+    if member.java.enable_preview.is_none() {
         member.java.enable_preview = ws.java.enable_preview;
     }
     if member.test.junit_platform_version.is_none() {
@@ -402,11 +404,15 @@ fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
     if member.groovy.version.is_none() {
         member.groovy.version = ws.groovy.version.clone();
     }
-    if !member.spock.enabled {
-        member.spock.enabled = ws.spock.enabled;
-        if member.spock.version.is_none() {
-            member.spock.version = ws.spock.version.clone();
-        }
+    // spock: inherit the workspace's enabled state only when the member is
+    // silent — neither an explicit `enabled` key nor a `[spock]` section.  An
+    // explicit `enabled = false` therefore opts out of workspace-enabled Spock.
+    let member_speaks = member.spock.enabled.is_some() || member.spock.section_present;
+    if !member_speaks {
+        member.spock.enabled = Some(ws.spock.enabled());
+    }
+    if member.spock.version.is_none() {
+        member.spock.version = ws.spock.version.clone();
     }
     if !ws.repositories.is_empty() {
         let mut combined = ws.repositories.clone();
@@ -1729,8 +1735,33 @@ mod tests {
         )
         .unwrap();
         let ws = crate::workspace::load(ws_path).unwrap();
-        assert!(ws.members[0].descriptor.spock.enabled, "spock.enabled must inherit from workspace");
+        assert!(ws.members[0].descriptor.spock.enabled(), "spock must inherit from workspace");
         assert_eq!(ws.members[0].descriptor.spock.version(), "2.3-groovy-4.0");
+    }
+
+    #[test]
+    fn spock_member_opts_out_with_explicit_false() {
+        // Workspace enables Spock; member sets `enabled = false` to opt out
+        // while still inheriting the workspace version default.
+        let dir = tempfile::tempdir().unwrap();
+        let ws_path = dir.path();
+        std::fs::write(
+            ws_path.join("Curie.toml"),
+            "[workspace]\nmembers = [\"m\"]\n\n[spock]\nversion = \"2.3-groovy-4.0\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir(ws_path.join("m")).unwrap();
+        std::fs::write(
+            ws_path.join("m").join("Curie.toml"),
+            "[application]\nname = \"m\"\nversion = \"0.0.0\"\nmainClass = \"M\"\n\
+             [spock]\nenabled = false\n",
+        )
+        .unwrap();
+        let ws = crate::workspace::load(ws_path).unwrap();
+        assert!(
+            !ws.members[0].descriptor.spock.enabled(),
+            "member's explicit enabled=false must opt out of workspace Spock",
+        );
     }
 
     #[test]
@@ -2173,13 +2204,28 @@ mod tests {
             "[workspace]\nmembers = [\"a\"]\n[java]\nenablePreview = true\n",
             &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
         ).unwrap();
-        assert!(ws.members[0].descriptor.java.enable_preview);
+        assert!(ws.members[0].descriptor.java.preview_enabled());
 
         // Member that does not set it, workspace false → stays false.
         let ws2 = load_ws_with_content(
             "[workspace]\nmembers = [\"a\"]\n",
             &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
         ).unwrap();
-        assert!(!ws2.members[0].descriptor.java.enable_preview);
+        assert!(!ws2.members[0].descriptor.java.preview_enabled());
+    }
+
+    #[test]
+    fn enable_preview_member_opts_out_with_explicit_false() {
+        // Workspace enables preview; member sets `enablePreview = false` to
+        // opt out — the explicit false must win over the inherited true.
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n[java]\nenablePreview = true\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                    [java]\nenablePreview = false\n")],
+        ).unwrap();
+        assert!(
+            !ws.members[0].descriptor.java.preview_enabled(),
+            "member enablePreview=false must override workspace true",
+        );
     }
 }

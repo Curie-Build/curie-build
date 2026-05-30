@@ -642,7 +642,7 @@ pub fn compile(
             javac
                 .arg("--release")
                 .arg(desc.java.effective());
-            if desc.java.enable_preview {
+            if desc.java.preview_enabled() {
                 javac.arg("--enable-preview");
             }
             javac

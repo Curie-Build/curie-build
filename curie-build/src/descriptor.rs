@@ -260,8 +260,13 @@ pub struct Java {
     /// sourceCompatibility = "21"
     /// enablePreview = true
     /// ```
-    #[serde(rename = "enablePreview", default)]
-    pub enable_preview: bool,
+    /// `None` when `enablePreview` was absent — meaningful, so it can be
+    /// distinguished from an explicit `false`: a workspace member that omits
+    /// the key inherits the workspace value, whereas `enablePreview = false`
+    /// opts out even when the workspace enabled it.  Use
+    /// [`Self::preview_enabled`] to read the resolved boolean.
+    #[serde(rename = "enablePreview")]
+    pub enable_preview: Option<bool>,
 }
 
 impl Java {
@@ -271,6 +276,13 @@ impl Java {
     /// has already been populated with the workspace value if applicable.
     pub fn effective(&self) -> &str {
         self.source_compatibility.as_deref().unwrap_or("21")
+    }
+
+    /// Resolved `--enable-preview` flag (default `false`).  Like
+    /// [`Self::effective`], member/workspace inheritance has already been
+    /// applied by the time the build pipeline reads this.
+    pub fn preview_enabled(&self) -> bool {
+        self.enable_preview.unwrap_or(false)
     }
 }
 
@@ -441,15 +453,26 @@ pub const DEFAULT_SPOCK_VERSION: &str = "2.4-groovy-5.0";
 pub struct Spock {
     #[serde(default)]
     pub version: Option<String>,
-    /// `true` when `[spock]` appeared in `Curie.toml`.  Set by [`load`];
-    /// never written by serde.
+    /// Explicit `enabled = true/false` from `[spock]`.  `None` when the key
+    /// was absent → fall back to section presence.  Lets a workspace member
+    /// write `enabled = false` to opt out of Spock that the workspace enabled.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// `true` when the `[spock]` section appeared in `Curie.toml`.  Set by
+    /// [`load`]; never written by serde.
     #[serde(skip)]
-    pub enabled: bool,
+    pub section_present: bool,
 }
 
 impl Spock {
     pub fn version(&self) -> &str {
         self.version.as_deref().unwrap_or(DEFAULT_SPOCK_VERSION)
+    }
+
+    /// Resolved enabled state: an explicit `enabled` key wins, otherwise the
+    /// mere presence of the `[spock]` section activates Spock.
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(self.section_present)
     }
 }
 
@@ -957,7 +980,7 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
 
     let spock_section_present = table.map(|t| t.contains_key("spock")).unwrap_or(false);
     let mut spock = parsed.spock;
-    spock.enabled = spock_section_present;
+    spock.section_present = spock_section_present;
 
     let descriptor = Descriptor {
         kind,
@@ -1839,7 +1862,22 @@ version = "0.1"
 mainClass = "X"
 "#;
         let d = load_str(toml).unwrap();
-        assert!(!d.spock.enabled, "absent [spock] must leave enabled = false");
+        assert!(!d.spock.enabled(), "absent [spock] must leave enabled = false");
+    }
+
+    #[test]
+    fn spock_section_present_but_enabled_false_is_disabled() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[spock]
+enabled = false
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(!d.spock.enabled(), "explicit enabled=false must override section presence");
     }
 
     #[test]
@@ -1853,7 +1891,7 @@ mainClass = "X"
 [spock]
 "#;
         let d = load_str(toml).unwrap();
-        assert!(d.spock.enabled, "[spock] present must set enabled = true");
+        assert!(d.spock.enabled(), "[spock] present must set enabled = true");
         assert_eq!(d.spock.version(), crate::descriptor::DEFAULT_SPOCK_VERSION);
     }
 
@@ -1869,7 +1907,7 @@ mainClass = "X"
 version = "2.4-groovy-4.0"
 "#;
         let d = load_str(toml).unwrap();
-        assert!(d.spock.enabled);
+        assert!(d.spock.enabled());
         assert_eq!(d.spock.version(), "2.4-groovy-4.0");
     }
 
@@ -1911,7 +1949,24 @@ version = "0.1"
 mainClass = "X"
 "#;
         let d = load_str(toml).unwrap();
-        assert!(!d.java.enable_preview, "enablePreview must default to false");
+        assert!(!d.java.preview_enabled(), "enablePreview must default to false");
+        assert!(d.java.enable_preview.is_none(), "absent key must stay None for inheritance");
+    }
+
+    #[test]
+    fn enable_preview_explicit_false_is_distinguished_from_absent() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[java]
+enablePreview = false
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(!d.java.preview_enabled());
+        assert_eq!(d.java.enable_preview, Some(false), "explicit false must be Some(false), not None");
     }
 
     #[test]
@@ -1927,7 +1982,7 @@ sourceCompatibility = "21"
 enablePreview = true
 "#;
         let d = load_str(toml).unwrap();
-        assert!(d.java.enable_preview);
+        assert!(d.java.preview_enabled());
         assert_eq!(d.java.effective(), "21");
     }
 

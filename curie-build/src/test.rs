@@ -77,7 +77,7 @@ pub fn run_tests(
     // standalone runner is JUnit 6 (Platform 2.x) which has an incompatible
     // `--scan-class-path` discovery protocol.  When Spock is enabled and the
     // user hasn't overridden the version, use the latest 1.x standalone.
-    let junit_version = if desc.spock.enabled && !desc.test.junit_platform_version_is_user_set() {
+    let junit_version = if desc.spock.enabled() && !desc.test.junit_platform_version_is_user_set() {
         "1.14.4"
     } else {
         desc.test.junit_platform_version()
@@ -119,7 +119,7 @@ pub fn run_tests(
     // which spock-bom imports.  We pass spock-bom as an extra bom_import so
     // those managed versions land in global_managed and the resolver can
     // resolve the full transitive closure.
-    let spock_jars: Vec<PathBuf> = if desc.spock.enabled {
+    let spock_jars: Vec<PathBuf> = if desc.spock.enabled() {
         let spock_version = desc.spock.version();
         let spock_bom = curie_deps::Gav::from_key_version(
             "org.spockframework:spock-bom",
@@ -361,7 +361,7 @@ pub fn run_tests(
             javac
                 .arg("--release")
                 .arg(desc.java.effective());
-            if desc.java.enable_preview {
+            if desc.java.preview_enabled() {
                 javac.arg("--enable-preview");
             }
             javac
@@ -526,7 +526,7 @@ pub fn run_tests(
     println!();
 
     let mut java = Command::new("java");
-    if desc.java.enable_preview {
+    if desc.java.preview_enabled() {
         java.arg("--enable-preview");
     }
     java.arg("-jar")

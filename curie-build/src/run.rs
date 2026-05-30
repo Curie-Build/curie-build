@@ -38,7 +38,7 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
         docker::docker_run(project_root, &desc, &output.jar, &output.dep_jars, extra_args)?;
     } else {
         let mut java = Command::new("java");
-        if desc.java.enable_preview {
+        if desc.java.preview_enabled() {
             java.arg("--enable-preview");
         }
 
