@@ -206,6 +206,30 @@
          └─ hello-app  application v0.1.0</pre>
     </div>
 
+    <h2>Parallel build and test</h2>
+    <p>When a workspace has more than one member to build (or test/clean), Curie runs them in parallel — bounded by <code>--jobs</code> (default: CPU count) and respecting the dependency DAG so no member starts before its upstream dependencies are ready.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Parallel build</span>
+      </header>
+<pre><span class="dim"># Build all members across 8 cores.</span>
+curie build -j8 --no-docker --no-native
+
+<span class="dim"># Run tests in parallel (default: all available cores).</span>
+curie test
+
+<span class="dim"># Clean everything in parallel.</span>
+curie clean -j4</pre>
+    </div>
+
+    <p>Each member's external-command output (javac, kotlinc, junit) is captured on a PTY, buffered per-member, and written to stdout in contiguous blocks prefixed with the member name — for example <code>string-utils | ✔ isBlank_empty_returns_true()</code>. Raw output (including ANSI color codes) is also saved to <code>target/build.log</code> (or <code>test.log</code>, <code>clean.log</code>) inside each member's directory.</p>
+
+    <p>If any member fails, Curie stops dispatching new jobs (fail-early) but lets already-running jobs complete. The final error lists every failed member.</p>
+
+    <p>Single-member invocations (<code>curie --project services/greeter-lib build</code> where <code>greeter-lib</code> has no dependencies) keep today's direct output with no prefix overhead.</p>
+
     <h2>Parallel formatting</h2>
     <p><code>curie fmt</code> at the workspace root fans out across every member in parallel. palantir-java-format is resolved once, then the JAR list is shared across the worker threads so there's no contention on the local cache.</p>
 

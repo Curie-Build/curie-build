@@ -343,8 +343,7 @@ pub fn run_tests(
                 kotlinc.arg(src);
             }
 
-            let status = kotlinc
-                .status()
+            let status = crate::proc::spawn_cmd(&mut kotlinc)
                 .context("failed to invoke kotlinc for test compilation")?;
 
             if !status.success() {
@@ -398,8 +397,7 @@ pub fn run_tests(
                 javac.arg(src);
             }
 
-            let status = javac
-                .status()
+            let status = crate::proc::spawn_cmd(&mut javac)
                 .context("failed to invoke java — is a JRE installed?")?;
 
             if !status.success() {
@@ -478,8 +476,7 @@ pub fn run_tests(
                 for src in &java_test_sources { groovyc.arg(src); }
             }
             for src in &groovy_test_sources { groovyc.arg(src); }
-            let status = groovyc
-                .status()
+            let status = crate::proc::spawn_cmd(&mut groovyc)
                 .context("failed to invoke groovyc for test compilation")?;
             if !status.success() {
                 bail!("Groovy test compilation failed");
@@ -548,8 +545,7 @@ pub fn run_tests(
         java.arg("--include-classname=.*Tests?$|^Test.*|.*TestCase$|.*Spec$");
     }
 
-    let status = java
-        .status()
+    let status = crate::proc::spawn_cmd(&mut java)
         .context("failed to invoke java — is a JRE installed?")?;
 
     println!();

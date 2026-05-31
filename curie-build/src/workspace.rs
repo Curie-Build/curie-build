@@ -990,100 +990,90 @@ where
     Ok(())
 }
 
-/// Convenience: load + fan_out over every member, in topo order.
-fn fan_out_all<F>(workspace_root: &Path, action: &str, run: F) -> Result<()>
-where
-    F: FnMut(&Member, &[PathBuf]) -> Result<Vec<PathBuf>>,
-{
-    let ws = load(workspace_root)?;
-    let all: Vec<usize> = (0..ws.members.len()).collect();
-    fan_out(&ws, action, &all, run)
-}
 
-/// Convenience: load + fan_out over `target` plus its transitive
-/// workspace-deps, in topo order.  Used when the user invokes a command
-/// from inside a workspace member directory.
-fn fan_out_one<F>(workspace_root: &Path, target: usize, action: &str, run: F) -> Result<()>
-where
-    F: FnMut(&Member, &[PathBuf]) -> Result<Vec<PathBuf>>,
-{
+/// Fan `curie build` out over every member in topo order.  When `jobs > 1`
+/// and there are multiple members, runs them in parallel with PTY output.
+pub fn build_all(workspace_root: &Path, opts: build::BuildOptions, jobs: usize) -> Result<()> {
     let ws = load(workspace_root)?;
-    let subset = transitive_closure(&ws, target);
-    fan_out(&ws, action, &subset, run)
-}
-
-/// Convenience: load + fan_out over `targets` plus their transitive
-/// workspace-deps, in topo order.  Used when the user invokes a command from
-/// inside an intermediate nested-workspace directory (`WorkspaceSubtree`).
-fn fan_out_subtree<F>(
-    workspace_root: &Path,
-    targets: &[usize],
-    action: &str,
-    run: F,
-) -> Result<()>
-where
-    F: FnMut(&Member, &[PathBuf]) -> Result<Vec<PathBuf>>,
-{
-    let ws = load(workspace_root)?;
-    let subset = transitive_closure_multi(&ws, targets);
-    fan_out(&ws, action, &subset, run)
-}
-
-/// Fan `curie build` out over every member in topo order.  Each member's
-/// build receives its workspace-deps' classes_dir + transitive Maven JARs
-/// on the compile/test classpath; produces a JAR; stops at first failure.
-pub fn build_all(workspace_root: &Path, opts: build::BuildOptions) -> Result<()> {
-    fan_out_all(workspace_root, "build", |m, extra_cp| {
-        let output = build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp)?;
-        Ok(output.dep_jars)
+    let subset: Vec<usize> = (0..ws.members.len()).collect();
+    if subset.len() > 1 {
+        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, |m, extra_cp| {
+            build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
+        });
+    }
+    fan_out(&ws, "build", &subset, |m, extra_cp| {
+        build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
     })
 }
 
-/// Build only `member_index` + its transitive workspace-deps (in topo
-/// order).  Used by `curie build` invoked inside a workspace member.
+/// Build only `member_index` + its transitive workspace-deps (in topo order).
 pub fn build_one(
     workspace_root: &Path,
     member_index: usize,
     opts: build::BuildOptions,
+    jobs: usize,
 ) -> Result<()> {
-    fan_out_one(workspace_root, member_index, "build", |m, extra_cp| {
-        let output = build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp)?;
-        Ok(output.dep_jars)
+    let ws = load(workspace_root)?;
+    let subset = transitive_closure(&ws, member_index);
+    if subset.len() > 1 {
+        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, |m, extra_cp| {
+            build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
+        });
+    }
+    fan_out(&ws, "build", &subset, |m, extra_cp| {
+        build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
     })
 }
 
-/// Build a nested workspace's members (`member_indices`) + their transitive
-/// workspace-deps, in topo order.  Used by `curie build` invoked inside an
-/// intermediate nested-workspace directory.
+/// Build a nested workspace's members + their transitive workspace-deps.
 pub fn build_subtree(
     workspace_root: &Path,
     member_indices: &[usize],
     opts: build::BuildOptions,
+    jobs: usize,
 ) -> Result<()> {
-    fan_out_subtree(workspace_root, member_indices, "build", |m, extra_cp| {
-        let output = build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp)?;
-        Ok(output.dep_jars)
+    let ws = load(workspace_root)?;
+    let subset = transitive_closure_multi(&ws, member_indices);
+    if subset.len() > 1 {
+        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, |m, extra_cp| {
+            build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
+        });
+    }
+    fan_out(&ws, "build", &subset, |m, extra_cp| {
+        build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
     })
 }
 
-/// Fan `curie test` out over every member in topo order.  Same threading
-/// as build, but skips packaging and Docker — using upstream `classes_dir`
-/// as the workspace-dep entry means downstream tests don't need the
-/// upstream JAR to exist.
-pub fn test_all(workspace_root: &Path, filter: Option<&str>, offline: bool) -> Result<()> {
-    fan_out_all(workspace_root, "test", |m, extra_cp| {
+/// Fan `curie test` out over every member in topo order (or in parallel).
+pub fn test_all(workspace_root: &Path, filter: Option<&str>, offline: bool, jobs: usize) -> Result<()> {
+    let ws = load(workspace_root)?;
+    let subset: Vec<usize> = (0..ws.members.len()).collect();
+    if subset.len() > 1 {
+        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, |m, extra_cp| {
+            test_one_member(m, filter, offline, extra_cp)
+        });
+    }
+    fan_out(&ws, "test", &subset, |m, extra_cp| {
         test_one_member(m, filter, offline, extra_cp)
     })
 }
 
-/// Test only `member_index` + its transitive workspace-deps' tests.
+/// Test only `member_index` + its transitive workspace-deps.
 pub fn test_one(
     workspace_root: &Path,
     member_index: usize,
     filter: Option<&str>,
     offline: bool,
+    jobs: usize,
 ) -> Result<()> {
-    fan_out_one(workspace_root, member_index, "test", |m, extra_cp| {
+    let ws = load(workspace_root)?;
+    let subset = transitive_closure(&ws, member_index);
+    if subset.len() > 1 {
+        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, |m, extra_cp| {
+            test_one_member(m, filter, offline, extra_cp)
+        });
+    }
+    fan_out(&ws, "test", &subset, |m, extra_cp| {
         test_one_member(m, filter, offline, extra_cp)
     })
 }
@@ -1094,8 +1084,16 @@ pub fn test_subtree(
     member_indices: &[usize],
     filter: Option<&str>,
     offline: bool,
+    jobs: usize,
 ) -> Result<()> {
-    fan_out_subtree(workspace_root, member_indices, "test", |m, extra_cp| {
+    let ws = load(workspace_root)?;
+    let subset = transitive_closure_multi(&ws, member_indices);
+    if subset.len() > 1 {
+        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, |m, extra_cp| {
+            test_one_member(m, filter, offline, extra_cp)
+        });
+    }
+    fan_out(&ws, "test", &subset, |m, extra_cp| {
         test_one_member(m, filter, offline, extra_cp)
     })
 }
@@ -1269,23 +1267,32 @@ pub fn run_one(
     Ok(())
 }
 
-/// Fan `curie clean` out over every member.  Order doesn't matter for
-/// clean, but reusing `fan_out_all` keeps banner output consistent.
-pub fn clean_all(workspace_root: &Path) -> Result<()> {
-    fan_out_all(workspace_root, "clean", |m, _extra_cp| {
-        build::clean(&m.path)?;
-        Ok(Vec::new())
+/// Fan `curie clean` out over every member.  Clean ignores DAG order and
+/// runs all members in parallel when `jobs > 1`.
+pub fn clean_all(workspace_root: &Path, jobs: usize) -> Result<()> {
+    let ws = load(workspace_root)?;
+    let subset: Vec<usize> = (0..ws.members.len()).collect();
+    if subset.len() > 1 {
+        return crate::parallel::run_jobs(&ws, &subset, "clean", jobs, false, |m, _extra_cp| {
+            build::clean(&m.path).map(|_| Vec::new())
+        });
+    }
+    fan_out(&ws, "clean", &subset, |m, _extra_cp| {
+        build::clean(&m.path).map(|_| Vec::new())
     })
 }
 
-/// Clean a nested workspace's own members.  Unlike build/test, this does NOT
-/// follow workspace-deps — cleaning a subtree shouldn't wipe an out-of-subtree
-/// dependency's `target/`.
-pub fn clean_subtree(workspace_root: &Path, member_indices: &[usize]) -> Result<()> {
+/// Clean a nested workspace's own members (no transitive closure — only the
+/// subtree's own `target/` dirs are removed).
+pub fn clean_subtree(workspace_root: &Path, member_indices: &[usize], jobs: usize) -> Result<()> {
     let ws = load(workspace_root)?;
+    if member_indices.len() > 1 {
+        return crate::parallel::run_jobs(&ws, member_indices, "clean", jobs, false, |m, _| {
+            build::clean(&m.path).map(|_| Vec::new())
+        });
+    }
     fan_out(&ws, "clean", member_indices, |m, _extra_cp| {
-        build::clean(&m.path)?;
-        Ok(Vec::new())
+        build::clean(&m.path).map(|_| Vec::new())
     })
 }
 

@@ -565,8 +565,7 @@ pub fn compile(
                 kotlinc.arg(src);
             }
 
-            let status = kotlinc
-                .status()
+            let status = crate::proc::spawn_cmd(&mut kotlinc)
                 .context("failed to invoke kotlinc — is a JRE installed?")?;
 
             if !status.success() {
@@ -622,8 +621,7 @@ pub fn compile(
             for src in &groovy_sources {
                 groovyc.arg(src);
             }
-            let status = groovyc
-                .status()
+            let status = crate::proc::spawn_cmd(&mut groovyc)
                 .context("failed to invoke groovyc — is a JRE installed?")?;
             if !status.success() {
                 bail!("Groovy compilation failed");
@@ -680,8 +678,7 @@ pub fn compile(
                 javac.arg(src);
             }
 
-            let status = javac
-                .status()
+            let status = crate::proc::spawn_cmd(&mut javac)
                 .context("failed to invoke java — is a JRE installed?")?;
 
             if !status.success() {

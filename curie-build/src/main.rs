@@ -14,7 +14,9 @@ mod kt_stale;
 mod main_class;
 mod native;
 mod new;
+mod parallel;
 mod pom_writer;
+mod proc;
 mod publish;
 mod run;
 mod sources_jar;
@@ -53,6 +55,10 @@ enum Cmd {
         /// Do not access the network; use only locally cached artifacts
         #[arg(long)]
         offline: bool,
+
+        /// Maximum number of workspace members to build in parallel (default: CPU count)
+        #[arg(short = 'j', long)]
+        jobs: Option<usize>,
     },
     /// Compile the project and run its tests (no JAR or Docker build)
     Test {
@@ -63,6 +69,10 @@ enum Cmd {
         /// Do not access the network; use only locally cached artifacts
         #[arg(long)]
         offline: bool,
+
+        /// Maximum number of workspace members to test in parallel (default: CPU count)
+        #[arg(short = 'j', long)]
+        jobs: Option<usize>,
     },
     /// Build the project and run it (via Docker or java -jar)
     Run {
@@ -79,7 +89,11 @@ enum Cmd {
         args: Vec<String>,
     },
     /// Remove the target/ build directory
-    Clean {},
+    Clean {
+        /// Maximum number of workspace members to clean in parallel (default: CPU count)
+        #[arg(short = 'j', long)]
+        jobs: Option<usize>,
+    },
     /// Compile the project and produce a GraalVM native binary (skips tests)
     ///
     /// Runs the full build pipeline (compile, package JAR) and then invokes
@@ -235,37 +249,41 @@ fn main() {
     };
 
     let result = match cli.command {
-        Cmd::Build { no_docker, no_native, offline } => {
+        Cmd::Build { no_docker, no_native, offline, jobs } => {
             let opts = build::BuildOptions { no_docker, no_native, offline };
+            let jobs = resolve_jobs(jobs);
             match &ctx {
                 workspace::WorkspaceContext::WorkspaceRoot(root) => {
-                    workspace::build_all(root, opts)
+                    workspace::build_all(root, opts, jobs)
                 }
                 workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
-                    workspace::build_one(workspace_root, *member_index, opts)
+                    workspace::build_one(workspace_root, *member_index, opts, jobs)
                 }
                 workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
-                    workspace::build_subtree(workspace_root, member_indices, opts)
+                    workspace::build_subtree(workspace_root, member_indices, opts, jobs)
                 }
                 workspace::WorkspaceContext::Standalone(project) => {
                     build::build(project, opts)
                 }
             }
         }
-        Cmd::Test { filter, offline } => match &ctx {
-            workspace::WorkspaceContext::WorkspaceRoot(root) => {
-                workspace::test_all(root, filter.as_deref(), offline)
+        Cmd::Test { filter, offline, jobs } => {
+            let jobs = resolve_jobs(jobs);
+            match &ctx {
+                workspace::WorkspaceContext::WorkspaceRoot(root) => {
+                    workspace::test_all(root, filter.as_deref(), offline, jobs)
+                }
+                workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+                    workspace::test_one(workspace_root, *member_index, filter.as_deref(), offline, jobs)
+                }
+                workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
+                    workspace::test_subtree(workspace_root, member_indices, filter.as_deref(), offline, jobs)
+                }
+                workspace::WorkspaceContext::Standalone(project) => {
+                    test_single_module(project, filter.as_deref(), offline)
+                }
             }
-            workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
-                workspace::test_one(workspace_root, *member_index, filter.as_deref(), offline)
-            }
-            workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
-                workspace::test_subtree(workspace_root, member_indices, filter.as_deref(), offline)
-            }
-            workspace::WorkspaceContext::Standalone(project) => {
-                test_single_module(project, filter.as_deref(), offline)
-            }
-        },
+        }
         Cmd::Run { no_docker, offline, args } => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(_)
             | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
@@ -294,18 +312,19 @@ fn main() {
                 run::run(project, run::RunOptions { no_docker, offline }, &args)
             }
         },
-        Cmd::Clean {} => match &ctx {
-            workspace::WorkspaceContext::WorkspaceRoot(root) => workspace::clean_all(root),
-            workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
-                workspace::clean_subtree(workspace_root, member_indices)
+        Cmd::Clean { jobs } => {
+            let jobs = resolve_jobs(jobs);
+            match &ctx {
+                workspace::WorkspaceContext::WorkspaceRoot(root) => workspace::clean_all(root, jobs),
+                workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
+                    workspace::clean_subtree(workspace_root, member_indices, jobs)
+                }
+                workspace::WorkspaceContext::WorkspaceMember { .. } => {
+                    build::clean(&cli.project)
+                }
+                workspace::WorkspaceContext::Standalone(project) => build::clean(project),
             }
-            workspace::WorkspaceContext::WorkspaceMember { .. } => {
-                // just the targeted member's `target/`, not the whole
-                // workspace's.
-                build::clean(&cli.project)
-            }
-            workspace::WorkspaceContext::Standalone(project) => build::clean(project),
-        },
+        }
         Cmd::Native { offline } => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(_)
             | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
@@ -517,4 +536,13 @@ fn native_single_module(project: &std::path::Path, offline: bool) -> anyhow::Res
     native::build_native(project, &desc, &output.jar, &output.dep_jars)?;
 
     Ok(())
+}
+
+/// Resolve `--jobs` option: explicit value wins; default to available parallelism.
+fn resolve_jobs(jobs: Option<usize>) -> usize {
+    jobs.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    })
 }
