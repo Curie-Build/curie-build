@@ -348,50 +348,45 @@ fn render_frame(f: &mut Frame, state: &RenderState) {
 
 /// Render the title bar for one pane.
 ///
-/// The entire bar has a coloured background:
-///   running  → blue background
-///   success  → green background
-///   failure  → red background
+/// No background colour — only text colour changes with state:
+///   running  → cyan name, dim dashes
+///   success  → green name + ✓
+///   failure  → red   name + ✗
 ///
 /// Format:  ` member-name ────────────────────── ✓ `
 fn render_title(f: &mut Frame, area: Rect, name: &str, done: Option<bool>) {
-    let (bg, fg) = match done {
-        None           => (Color::Blue,  Color::White),
-        Some(true)     => (Color::Green, Color::Black),
-        Some(false)    => (Color::Red,   Color::White),
+    let name_color = match done {
+        None        => Color::Cyan,
+        Some(true)  => Color::Green,
+        Some(false) => Color::Red,
     };
 
-    let bar   = Style::new().bg(bg).fg(fg);
-    let bold  = Style::new().bg(bg).fg(fg).add_modifier(Modifier::BOLD);
-    let dim   = Style::new().bg(bg).fg(fg).add_modifier(Modifier::DIM);
+    let name_style = Style::new().fg(name_color).add_modifier(Modifier::BOLD);
+    let dim        = Style::new().add_modifier(Modifier::DIM);
 
-    // " name " with bold name
     let mut spans = vec![
-        Span::styled(" ", bar),
-        Span::styled(name.to_string(), bold),
-        Span::styled(" ", bar),
+        Span::styled(" ", dim),
+        Span::styled(name.to_string(), name_style),
+        Span::styled(" ", dim),
     ];
 
-    // Status symbol on the right, or nothing while running.
     let (status_str, status_cols) = match done {
-        None           => ("",    0usize),
-        Some(true)     => ("✓ ",  2),
-        Some(false)    => ("✗ ",  2),
+        None           => ("",   0usize),
+        Some(true)     => ("✓ ", 2),
+        Some(false)    => ("✗ ", 2),
     };
 
-    // Dim dash fill between name and status.
-    let used = 1 + name.len() + 1 + status_cols; // " name " + status
+    let used = 1 + name.len() + 1 + status_cols;
     let fill_cols = (area.width as usize).saturating_sub(used);
     if fill_cols > 0 {
         spans.push(Span::styled("─".repeat(fill_cols), dim));
     }
 
     if !status_str.is_empty() {
-        spans.push(Span::styled(status_str, bold));
+        spans.push(Span::styled(status_str, name_style));
     }
 
-    let line = Line::from(spans);
-    f.render_widget(Paragraph::new(line), area);
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Render the content area of one pane from its ring buffer.
