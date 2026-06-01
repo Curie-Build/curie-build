@@ -181,6 +181,7 @@ fn build_with_user_dockerfile(
     let mut build_cmd = Command::new("docker");
     build_cmd
         .arg("build")
+        .arg("--progress=plain")
         .arg("--build-arg")
         .arg(format!("JAR_FILE={}", jar_rel))
         .arg("-t")
@@ -289,7 +290,7 @@ fn build_with_generated_dockerfile(
 
     crate::parallel::emit(&crate::style::active("Docker image", &format!("building {}", image_ref)));
     let mut build_cmd2 = Command::new("docker");
-    build_cmd2.arg("build").arg("-t").arg(image_ref).arg(&target_dir);
+    build_cmd2.arg("build").arg("--progress=plain").arg("-t").arg(image_ref).arg(&target_dir);
     let status = crate::proc::spawn_cmd(&mut build_cmd2)
         .context("failed to invoke docker build — is Docker installed?")?;
 
