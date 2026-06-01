@@ -1,9 +1,5 @@
-//! Terminal capability helpers.
-//!
-//! Thin wrappers around [`crossterm`] so the rest of the codebase does not
-//! import crossterm directly for these basic queries.
-
 use std::io::IsTerminal as _;
+use terminal_size::{terminal_size, Height, Width};
 
 /// Returns `true` when stdout is connected to a terminal.
 ///
@@ -24,14 +20,18 @@ pub(crate) fn use_color() -> bool {
 
 /// The width (in columns) of the controlling terminal on stdout.
 ///
-/// Returns `None` when stdout is not a terminal or the query fails.
+/// Queried via the `terminal_size` crate rather than the `COLUMNS` env var,
+/// because `COLUMNS` is a shell-local variable that is usually *not* exported
+/// to child processes — relying on it silently falls back to a default and
+/// produces a too-wide value.  Returns `None` when stdout is not a terminal
+/// (e.g. piped to a file) or the query fails.
 pub(crate) fn width() -> Option<u16> {
-    crossterm::terminal::size().ok().map(|(w, _)| w).filter(|&w| w > 0)
+    terminal_size().map(|(Width(w), _)| w).filter(|&w| w > 0)
 }
 
 /// The height (in rows) of the controlling terminal on stdout.
 ///
 /// Returns `None` when stdout is not a terminal or the query fails.
 pub(crate) fn height() -> Option<u16> {
-    crossterm::terminal::size().ok().map(|(_, h)| h).filter(|&h| h > 0)
+    terminal_size().map(|(_, Height(h))| h).filter(|&h| h > 0)
 }

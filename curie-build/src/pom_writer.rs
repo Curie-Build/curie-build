@@ -1,13 +1,16 @@
 //! Generate Maven POM XML from a Curie descriptor + resolved declared deps.
 //!
-//! Hand-written formatter — POM 4.0.0 schema is fully known and we control
-//! every value, so a small `Write`-based emitter is simpler than pulling in
-//! an XML library.
+//! Uses the `quick-xml` writer for correct XML serialisation (automatic
+//! character escaping, well-formed structure).
 
 use crate::descriptor::{Descriptor, PublishConfig};
 use anyhow::Result;
 use curie_deps::Gav;
-use std::fmt::Write as _;
+use quick_xml::{
+    events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event},
+    Writer,
+};
+use std::io::Cursor;
 use std::path::Path;
 
 /// Build a POM XML document for the given descriptor and its declared
@@ -20,36 +23,44 @@ pub fn build_pom(desc: &Descriptor, declared_deps: &[Gav]) -> Result<String> {
     let version = desc.buildable_version();
     let pub_cfg = &desc.publish;
 
-    let mut out = String::new();
-    writeln!(out, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>").unwrap();
-    writeln!(out, "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"").unwrap();
-    writeln!(out, "         xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"").unwrap();
-    writeln!(
-        out,
-        "         xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd\">"
-    )
-    .unwrap();
-    writeln!(out, "  <modelVersion>4.0.0</modelVersion>").unwrap();
-    writeln!(out, "  <groupId>{}</groupId>", xml_escape(group_id)).unwrap();
-    writeln!(out, "  <artifactId>{}</artifactId>", xml_escape(artifact_id)).unwrap();
-    writeln!(out, "  <version>{}</version>", xml_escape(version)).unwrap();
-    writeln!(out, "  <packaging>jar</packaging>").unwrap();
-    writeln!(out, "  <name>{}</name>", xml_escape(artifact_id)).unwrap();
+    let mut buf = Vec::new();
+    let mut w = Writer::new_with_indent(Cursor::new(&mut buf), b' ', 2);
+
+    // <?xml version="1.0" encoding="UTF-8"?>
+    w.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))?;
+
+    // <project ...>
+    let mut project = BytesStart::new("project");
+    project.push_attribute(("xmlns", "http://maven.apache.org/POM/4.0.0"));
+    project.push_attribute(("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance"));
+    project.push_attribute((
+        "xsi:schemaLocation",
+        "http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd",
+    ));
+    w.write_event(Event::Start(project))?;
+
+    text_elem(&mut w, "modelVersion", "4.0.0")?;
+    text_elem(&mut w, "groupId", group_id)?;
+    text_elem(&mut w, "artifactId", artifact_id)?;
+    text_elem(&mut w, "version", version)?;
+    text_elem(&mut w, "packaging", "jar")?;
+    text_elem(&mut w, "name", artifact_id)?;
 
     if let Some(desc_text) = &pub_cfg.description {
-        writeln!(out, "  <description>{}</description>", xml_escape(desc_text)).unwrap();
+        text_elem(&mut w, "description", desc_text)?;
     }
     if let Some(homepage) = &pub_cfg.homepage {
-        writeln!(out, "  <url>{}</url>", xml_escape(homepage)).unwrap();
+        text_elem(&mut w, "url", homepage)?;
     }
 
-    write_licenses(&mut out, &pub_cfg.licenses);
-    write_developers(&mut out, pub_cfg);
-    write_scm(&mut out, pub_cfg);
-    write_dependencies(&mut out, declared_deps);
+    write_licenses(&mut w, &pub_cfg.licenses)?;
+    write_developers(&mut w, pub_cfg)?;
+    write_scm(&mut w, pub_cfg)?;
+    write_dependencies(&mut w, declared_deps)?;
 
-    writeln!(out, "</project>").unwrap();
-    Ok(out)
+    w.write_event(Event::End(BytesEnd::new("project")))?;
+
+    Ok(String::from_utf8(buf)?)
 }
 
 /// Convenience wrapper: build the POM and write it to `path`.
@@ -60,89 +71,90 @@ pub fn write_pom(desc: &Descriptor, declared_deps: &[Gav], path: &Path) -> Resul
     Ok(())
 }
 
-fn write_licenses(out: &mut String, licenses: &[String]) {
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+type XmlWriter<'a> = Writer<Cursor<&'a mut Vec<u8>>>;
+
+/// Write `<name>text</name>` — `BytesText::new` escapes the content.
+fn text_elem(w: &mut XmlWriter<'_>, name: &str, text: &str) -> Result<()> {
+    w.create_element(name)
+        .write_text_content(BytesText::new(text))?;
+    Ok(())
+}
+
+fn write_licenses(w: &mut XmlWriter<'_>, licenses: &[String]) -> Result<()> {
     if licenses.is_empty() {
-        return;
+        return Ok(());
     }
-    writeln!(out, "  <licenses>").unwrap();
+    w.write_event(Event::Start(BytesStart::new("licenses")))?;
     for spdx in licenses {
         let (name, url) = spdx_lookup(spdx);
-        writeln!(out, "    <license>").unwrap();
-        writeln!(out, "      <name>{}</name>", xml_escape(name)).unwrap();
+        w.write_event(Event::Start(BytesStart::new("license")))?;
+        text_elem(w, "name", name)?;
         if let Some(u) = url {
-            writeln!(out, "      <url>{}</url>", xml_escape(u)).unwrap();
+            text_elem(w, "url", u)?;
         }
-        writeln!(out, "    </license>").unwrap();
+        w.write_event(Event::End(BytesEnd::new("license")))?;
     }
-    writeln!(out, "  </licenses>").unwrap();
+    w.write_event(Event::End(BytesEnd::new("licenses")))?;
+    Ok(())
 }
 
-fn write_developers(out: &mut String, pub_cfg: &PublishConfig) {
+fn write_developers(w: &mut XmlWriter<'_>, pub_cfg: &PublishConfig) -> Result<()> {
     if pub_cfg.developers.is_empty() {
-        return;
+        return Ok(());
     }
-    writeln!(out, "  <developers>").unwrap();
+    w.write_event(Event::Start(BytesStart::new("developers")))?;
     for dev in &pub_cfg.developers {
-        writeln!(out, "    <developer>").unwrap();
+        w.write_event(Event::Start(BytesStart::new("developer")))?;
         if let Some(id) = &dev.id {
-            writeln!(out, "      <id>{}</id>", xml_escape(id)).unwrap();
+            text_elem(w, "id", id)?;
         }
         if let Some(name) = &dev.name {
-            writeln!(out, "      <name>{}</name>", xml_escape(name)).unwrap();
+            text_elem(w, "name", name)?;
         }
         if let Some(email) = &dev.email {
-            writeln!(out, "      <email>{}</email>", xml_escape(email)).unwrap();
+            text_elem(w, "email", email)?;
         }
-        writeln!(out, "    </developer>").unwrap();
+        w.write_event(Event::End(BytesEnd::new("developer")))?;
     }
-    writeln!(out, "  </developers>").unwrap();
+    w.write_event(Event::End(BytesEnd::new("developers")))?;
+    Ok(())
 }
 
-fn write_scm(out: &mut String, pub_cfg: &PublishConfig) {
-    let Some(scm) = &pub_cfg.scm else { return };
-    writeln!(out, "  <scm>").unwrap();
+fn write_scm(w: &mut XmlWriter<'_>, pub_cfg: &PublishConfig) -> Result<()> {
+    let Some(scm) = &pub_cfg.scm else { return Ok(()) };
+    w.write_event(Event::Start(BytesStart::new("scm")))?;
     if let Some(u) = &scm.url {
-        writeln!(out, "    <url>{}</url>", xml_escape(u)).unwrap();
+        text_elem(w, "url", u)?;
     }
     if let Some(c) = &scm.connection {
-        writeln!(out, "    <connection>{}</connection>", xml_escape(c)).unwrap();
+        text_elem(w, "connection", c)?;
     }
     if let Some(dc) = &scm.developer_connection {
-        writeln!(out, "    <developerConnection>{}</developerConnection>", xml_escape(dc)).unwrap();
+        text_elem(w, "developerConnection", dc)?;
     }
-    writeln!(out, "  </scm>").unwrap();
+    w.write_event(Event::End(BytesEnd::new("scm")))?;
+    Ok(())
 }
 
-fn write_dependencies(out: &mut String, deps: &[Gav]) {
+fn write_dependencies(w: &mut XmlWriter<'_>, deps: &[Gav]) -> Result<()> {
     if deps.is_empty() {
-        return;
+        return Ok(());
     }
-    writeln!(out, "  <dependencies>").unwrap();
+    w.write_event(Event::Start(BytesStart::new("dependencies")))?;
     for gav in deps {
-        writeln!(out, "    <dependency>").unwrap();
-        writeln!(out, "      <groupId>{}</groupId>", xml_escape(&gav.group)).unwrap();
-        writeln!(out, "      <artifactId>{}</artifactId>", xml_escape(&gav.artifact)).unwrap();
-        writeln!(out, "      <version>{}</version>", xml_escape(&gav.version)).unwrap();
-        writeln!(out, "      <scope>compile</scope>").unwrap();
-        writeln!(out, "    </dependency>").unwrap();
+        w.write_event(Event::Start(BytesStart::new("dependency")))?;
+        text_elem(w, "groupId", &gav.group)?;
+        text_elem(w, "artifactId", &gav.artifact)?;
+        text_elem(w, "version", &gav.version)?;
+        text_elem(w, "scope", "compile")?;
+        w.write_event(Event::End(BytesEnd::new("dependency")))?;
     }
-    writeln!(out, "  </dependencies>").unwrap();
-}
-
-/// XML-escape `&`, `<`, `>`, `"`, `'` in a borrowed string.
-fn xml_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            other => out.push(other),
-        }
-    }
-    out
+    w.write_event(Event::End(BytesEnd::new("dependencies")))?;
+    Ok(())
 }
 
 /// SPDX-id → `(<name>, Some(<url>))` for common licenses.  Unknown ids
