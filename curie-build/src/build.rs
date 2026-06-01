@@ -51,9 +51,8 @@ pub fn build_with_desc(
     opts: BuildOptions,
     extra_cp: &[PathBuf],
 ) -> Result<BuildOutput> {
-    crate::parallel::emit(&format!(
-        "Building {} v{}",
-        desc.buildable_name(), desc.buildable_version()
+    crate::parallel::emit(&crate::style::headline(
+        "Building", desc.buildable_name(), desc.buildable_version(),
     ));
 
     // Library projects must not have a Dockerfile at the project root.
@@ -65,13 +64,12 @@ pub fn build_with_desc(
 
     let output = do_build(project_root, desc, opts.offline, extra_cp)?;
 
-    crate::parallel::emit(&format!(
-        "  Done            {}",
-        output
-            .jar
+    crate::parallel::emit(&crate::style::done(
+        &output.jar
             .strip_prefix(project_root)
             .unwrap_or(&output.jar)
             .display()
+            .to_string(),
     ));
 
     if !desc.is_library() && !opts.no_docker && descriptor::docker_enabled(project_root, desc) {
@@ -163,7 +161,7 @@ pub fn do_build(
                         &compiled.classes_dir,
                         &compiled.dep_jars,
                     )?;
-                    crate::parallel::emit(&format!("  Detected        mainClass = {}", detected));
+                    crate::parallel::emit(&crate::style::info("Detected", &format!("mainClass = {}", detected)));
                     detected
                 }
             };
@@ -172,7 +170,7 @@ pub fn do_build(
             None // library
         };
 
-        crate::parallel::emit(&format!("  Package         {}", compiled.jar_name));
+        crate::parallel::emit(&crate::style::active("Package", &compiled.jar_name));
         // Effective runtime deps = user deps + Groovy stdlib (when Groovy sources present).
         // Kotlin stdlib is NOT included because simple Kotlin programs compile to bytecode
         // that doesn't reference stdlib classes — Groovy always does.
@@ -190,7 +188,7 @@ pub fn do_build(
 
         main_class
     } else {
-        crate::parallel::emit("  Package         up to date");
+        crate::parallel::emit(&crate::style::up_to_date("Package"));
         // JAR is up to date. Prefer the declared mainClass from the descriptor;
         // if absent (auto-detected on a previous build), read it back from the
         // JAR manifest so `curie run` doesn't panic.
@@ -258,9 +256,8 @@ fn read_main_class_from_jar(jar_path: &Path) -> Option<String> {
 pub fn clean(project_root: &Path) -> Result<()> {
     let desc = descriptor::load(project_root)?;
 
-    crate::parallel::emit(&format!(
-        "Cleaning {} v{}",
-        desc.buildable_name(), desc.buildable_version()
+    crate::parallel::emit(&crate::style::headline(
+        "Cleaning", desc.buildable_name(), desc.buildable_version(),
     ));
 
     let target_dir = project_root.join("target");
@@ -269,9 +266,9 @@ pub fn clean(project_root: &Path) -> Result<()> {
         std::fs::remove_dir_all(&target_dir).with_context(|| {
             format!("failed to remove {}", target_dir.display())
         })?;
-        crate::parallel::emit("  Target dir      removed");
+        crate::parallel::emit(&crate::style::stale("Target dir", "removed"));
     } else {
-        crate::parallel::emit("  Target dir      nothing to clean");
+        crate::parallel::emit(&crate::style::neutral("Target dir", "nothing to clean"));
     }
 
     Ok(())

@@ -1107,10 +1107,8 @@ fn test_one_member(
     offline: bool,
     extra_cp: &[PathBuf],
 ) -> Result<Vec<PathBuf>> {
-    crate::parallel::emit(&format!(
-        "Testing {} v{}",
-        m.descriptor.buildable_name(),
-        m.descriptor.buildable_version(),
+    crate::parallel::emit(&crate::style::headline(
+        "Testing", m.descriptor.buildable_name(), m.descriptor.buildable_version(),
     ));
     let compiled = compile::compile(&m.path, &m.descriptor, offline, extra_cp)?;
     test::run_tests(

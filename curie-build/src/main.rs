@@ -20,6 +20,7 @@ mod proc;
 mod publish;
 mod run;
 mod sources_jar;
+mod style;
 mod term;
 mod test;
 mod update;

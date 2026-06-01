@@ -118,7 +118,7 @@ pub(crate) fn populate_libs_dir(libs_dir: &Path, dep_jars: &[PathBuf]) -> Result
         }
     }
 
-    crate::parallel::emit(&format!("  Libs            {} JAR(s) → target/libs/", dep_jars.len()));
+    crate::parallel::emit(&crate::style::info("Libs", &format!("{} JAR(s) → target/libs/", dep_jars.len())));
     Ok(())
 }
 
