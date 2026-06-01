@@ -216,8 +216,6 @@ fn render_loop(
     let mut background_queue: VecDeque<usize> = (visible..n).collect();
 
     // ── Initial draw ──────────────────────────────────────────────────────
-    // Hide cursor and disable line-wrap to prevent pane bleed.
-    let _ = write!(out, "\x1b[?25l\x1b[?7l");
     clear_screen(&mut out);
     for pane_idx in 0..visible {
         draw_title(&mut out, pane_idx, pane_h, &slots[pane_idx].name, None, term_w);
@@ -303,8 +301,10 @@ fn render_loop(
     // ── Cleanup: park cursor below all drawn content ───────────────────────
     let overflow_rows = if n > visible { 1 } else { 0 };
     let total_rows = visible * pane_h + overflow_rows;
-    // Restore: full scroll region, line-wrap, cursor visibility.
-    let _ = write!(out, "\x1b[r\x1b[?7h\x1b[?25h");
+    // Restore full scroll region, line-wrap, cursor visibility.
+    // \x1b]8;;\x07 closes any OSC 8 hyperlink left open by process output
+    // so the shell prompt does not render as a clickable link.
+    let _ = write!(out, "\x1b[r\x1b[?7h\x1b[?25h\x1b]8;;\x07");
     move_to(&mut out, total_rows + 1, 1);
     let _ = out.flush();
 }
@@ -326,22 +326,7 @@ fn erase_to_eol(out: &mut impl Write) {
     let _ = write!(out, "\x1b[K");
 }
 
-/// Set the terminal scroll region to [top, bottom] (both 1-based, inclusive).
-/// While this region is active, scroll operations (including auto-scroll when
-/// writing past the last line) are confined to those rows only — content in
-/// other panes is never pushed up or down.
-///
-/// Call `reset_scroll_region` when done to restore the full-screen region.
-fn set_scroll_region(out: &mut impl Write, top: usize, bottom: usize) {
-    let _ = write!(out, "\x1b[{};{}r", top, bottom);
-}
-
-/// Restore the terminal to a full-screen scroll region.
-fn reset_scroll_region(out: &mut impl Write) {
-    let _ = write!(out, "\x1b[r");
-}
-
-
+// ── Pane drawing ──────────────────────────────────────────────────────────
 
 /// Draw (or redraw) the title bar for pane `pane_idx`.
 ///
@@ -391,13 +376,10 @@ fn draw_title(
 fn blank_content(out: &mut impl Write, pane_idx: usize, pane_h: usize) {
     let content_rows = pane_h - 1;
     let first_content_row = pane_idx * pane_h + 2;
-    let last_content_row = first_content_row + content_rows - 1;
-    set_scroll_region(out, first_content_row, last_content_row);
     for i in 0..content_rows {
         move_to(out, first_content_row + i, 1);
         erase_to_eol(out);
     }
-    reset_scroll_region(out);
 }
 
 /// Redraw the content area of pane `pane_idx` from `ring`.
@@ -405,11 +387,6 @@ fn blank_content(out: &mut impl Write, pane_idx: usize, pane_h: usize) {
 /// Content rows are `pane_h - 1` lines tall.  Lines are shown newest-at-bottom:
 /// for row index `i` (0 = top of content area), display `ring[i + ring_len - rows]`
 /// when `i + ring_len >= rows`, otherwise leave the row blank.
-///
-/// A per-pane DECSTBM scroll region is set for the duration of the write so
-/// that any accidental terminal auto-scroll (e.g. writing at the very last
-/// content row) only scrolls within this pane and never pushes adjacent pane
-/// titles off screen.
 fn redraw_content(
     out: &mut impl Write,
     pane_idx: usize,
@@ -421,10 +398,6 @@ fn redraw_content(
     let ring_len = ring.len();
     // Title is at screen row `pane_idx * pane_h + 1`; content starts one below.
     let first_content_row = pane_idx * pane_h + 2;
-    let last_content_row = first_content_row + content_rows - 1;
-
-    // Restrict scroll region to this pane's content rows only.
-    set_scroll_region(out, first_content_row, last_content_row);
 
     for i in 0..content_rows {
         let screen_row = first_content_row + i;
@@ -435,15 +408,14 @@ fn redraw_content(
         if i + ring_len >= content_rows {
             let ring_idx = i + ring_len - content_rows;
             if ring_idx < ring_len {
-                let truncated = truncate_to_cols(&ring[ring_idx], term_w);
-                let _ = write!(out, "{}\x1b[0m\x1b[K", truncated);
-            }
+                    let truncated = truncate_to_cols(&ring[ring_idx], term_w);
+                    // \x1b]8;;\x07 closes any OSC 8 hyperlink that may have
+                    // leaked through despite sanitization in truncate_to_cols.
+                    let _ = write!(out, "{}\x1b[0m\x1b]8;;\x07\x1b[K", truncated);
+                }
         }
         // else: row stays blank
     }
-
-    // Restore full-screen scroll region so subsequent moves aren't confined.
-    reset_scroll_region(out);
 }
 
 /// Draw (or redraw) the overflow summary line below all panes.
@@ -555,12 +527,23 @@ fn more_suffix(first_shown: usize, count: usize) -> String {
 
 // ── Text truncation ───────────────────────────────────────────────────────
 
-/// Truncate `s` to at most `max` visible columns.
+/// Truncate `s` to at most `max` visible columns, stripping dangerous escape
+/// sequences.
 ///
-/// ANSI CSI escape sequences (e.g. `\x1b[32m`) are passed through without
-/// consuming column budget.  The first non-ANSI character that would exceed
-/// `max` columns terminates the string.  A final `\x1b[0m` is always appended
-/// to prevent colour bleed from the last coloured segment into the next line.
+/// **Kept:** ANSI SGR (colour/attribute) sequences — `\x1b[…m`.  These are
+/// safe to confine within a pane because `\x1b[0m` (always appended) resets
+/// them.
+///
+/// **Dropped:** everything else that could corrupt terminal state outside the
+/// pane:
+/// * OSC sequences (`\x1b]…\x07` or `\x1b]…\x1b\`) — hyperlinks, title sets,
+///   etc.  A mis-terminated OSC 8 hyperlink is the canonical cause of an
+///   entire pane (and the shell prompt) rendering as a clickable link.
+/// * Non-SGR CSI sequences — cursor movement, erase, scroll, etc.
+/// * All other ESC introducer sequences (DCS, PM, APC, …).
+///
+/// The first non-ANSI character that would exceed `max` columns terminates the
+/// string.  `\x1b[0m` is always appended to prevent colour bleed.
 pub(crate) fn truncate_to_cols(s: &str, max: usize) -> String {
     if max == 0 {
         return "\x1b[0m".to_string();
@@ -568,26 +551,85 @@ pub(crate) fn truncate_to_cols(s: &str, max: usize) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     let mut cols = 0usize;
     let mut chars = s.chars().peekable();
+
     while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            // Pass the escape character through.
-            out.push(ch);
-            // Collect subsequent characters until a terminating letter.
-            // Most ANSI sequences end with a single ASCII letter (e.g. 'm').
-            for ec in chars.by_ref() {
-                out.push(ec);
-                if ec.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
+        if ch != '\x1b' {
             if cols >= max {
                 break;
             }
             out.push(ch);
             cols += 1;
+            continue;
+        }
+
+        // ch == '\x1b': classify the sequence by the introducer character.
+        match chars.peek().copied() {
+            // ── CSI: \x1b[ … <final byte 0x40–0x7E> ──────────────────────
+            Some('[') => {
+                chars.next(); // consume '['
+                let mut seq = String::from("\x1b[");
+                let mut final_byte = ' ';
+                for ec in chars.by_ref() {
+                    seq.push(ec);
+                    // CSI final byte range: 0x40–0x7E (@ through ~).
+                    if ('\x40'..='\x7e').contains(&ec) {
+                        final_byte = ec;
+                        break;
+                    }
+                }
+                // Only keep SGR (ends with 'm').
+                if final_byte == 'm' {
+                    out.push_str(&seq);
+                }
+                // All other CSI sequences (cursor movement, erase, …) dropped.
+            }
+
+            // ── OSC: \x1b] … ST ────────────────────────────────────────────
+            // ST is either BEL (\x07) or ESC \ (\x1b\x5c).
+            // Consume and drop the entire sequence.
+            Some(']') => {
+                chars.next(); // consume ']'
+                loop {
+                    match chars.next() {
+                        None | Some('\x07') => break, // BEL terminator or EOF
+                        Some('\x1b') => {
+                            // Possible ESC \ terminator.
+                            if chars.peek() == Some(&'\\') {
+                                chars.next(); // consume '\'
+                            }
+                            break;
+                        }
+                        Some(_) => {} // interior byte, keep consuming
+                    }
+                }
+                // Entire OSC sequence dropped.
+            }
+
+            // ── Other ESC sequences (DCS \x1bP, PM \x1b^, APC \x1b_, …) ──
+            // Consume until ST or a bare ASCII letter, then drop.
+            Some(_) => {
+                chars.next(); // consume the introducer
+                loop {
+                    match chars.next() {
+                        None | Some('\x07') => break,
+                        Some('\x1b') => {
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                        Some(ec) if ec.is_ascii_alphabetic() => break,
+                        Some(_) => {}
+                    }
+                }
+                // Dropped.
+            }
+
+            // Bare ESC at end of string — drop.
+            None => {}
         }
     }
+
     out.push_str("\x1b[0m");
     out
 }
@@ -743,6 +785,36 @@ mod tests {
     fn truncate_ansi_at_start_no_visible_chars() {
         let input = "\x1b[1m";
         assert_eq!(truncate_to_cols(input, 5), "\x1b[1m\x1b[0m");
+    }
+
+    #[test]
+    fn truncate_non_sgr_csi_is_dropped() {
+        // Cursor-up sequence \x1b[1A must not pass through.
+        let input = "\x1b[1Ahello";
+        assert_eq!(truncate_to_cols(input, 10), "hello\x1b[0m");
+    }
+
+    #[test]
+    fn truncate_osc8_hyperlink_bel_terminated_is_dropped() {
+        // OSC 8 hyperlink with BEL terminator: the visible text "click" should
+        // appear but the OSC sequences must be stripped so the link does not
+        // leak into surrounding terminal output.
+        let input = "\x1b]8;;https://example.com\x07click\x1b]8;;\x07";
+        assert_eq!(truncate_to_cols(input, 20), "click\x1b[0m");
+    }
+
+    #[test]
+    fn truncate_osc8_hyperlink_st_terminated_is_dropped() {
+        // OSC 8 hyperlink with ESC \ (ST) terminator.
+        let input = "\x1b]8;;https://example.com\x1b\\click\x1b]8;;\x1b\\";
+        assert_eq!(truncate_to_cols(input, 20), "click\x1b[0m");
+    }
+
+    #[test]
+    fn truncate_osc_mid_line_strips_only_osc() {
+        // Colour before OSC hyperlink: colour is kept, OSC is dropped.
+        let input = "\x1b[33mfile: \x1b]8;;file:///tmp/F.java\x07F.java\x1b]8;;\x07\x1b[0m";
+        assert_eq!(truncate_to_cols(input, 40), "\x1b[33mfile: F.java\x1b[0m\x1b[0m");
     }
 
     #[test]
