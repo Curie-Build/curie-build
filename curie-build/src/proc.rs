@@ -105,8 +105,7 @@ fn spawn_pty(
             Ok(0) | Err(_) => break, // EOF or EIO (macOS)
             Ok(n) => {
                 let bytes = &byte_buf[..n];
-                slot.write_raw(bytes);
-                // Split into lines and forward to the mux slot.
+                // Split into lines and forward to the mux slot (push_line logs them).
                 for ch in String::from_utf8_lossy(bytes).chars() {
                     if ch == '\n' {
                         let line = std::mem::take(&mut line_buf);

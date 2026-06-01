@@ -145,6 +145,7 @@ const PALETTE: &[&str] = &[
     "\x1b[95m",  // bright magenta
 ];
 const RESET: &str = "\x1b[0m";
+const DIM:   &str = "\x1b[2m";
 
 // ── MuxSlot ────────────────────────────────────────────────────────────────
 
@@ -180,8 +181,9 @@ impl MuxSlot {
         flush_timeout: Duration,
     ) -> Self {
         let prefix = if crate::term::use_color() {
+            // Member name in its color, then a dim gray │ separator.
             format!(
-                "{}{:<width$}{} │ ",
+                "{}{:<width$}{} {DIM}│{RESET} ",
                 PALETTE[color_idx % PALETTE.len()],
                 declared,
                 RESET,
@@ -205,20 +207,20 @@ impl MuxSlot {
         }
     }
 
-    /// Push one line of output (stripped of the trailing newline) from the PTY.
+    /// Push one line of output (stripped of the trailing newline).
+    ///
+    /// The line is written to the member's log file immediately and buffered
+    /// for prefixed display on stdout (flushed contiguously on completion or
+    /// after the stale timeout).
     pub fn push_line(&self, line: String) {
+        if let Ok(mut f) = self.log.lock() {
+            let _ = writeln!(f, "{}", line);
+        }
         let mut st = self.pending.lock().unwrap();
         if st.first_at.is_none() {
             st.first_at = Some(Instant::now());
         }
         st.lines.push(line);
-    }
-
-    /// Append raw PTY bytes to the member's log file (color codes preserved).
-    pub fn write_raw(&self, bytes: &[u8]) {
-        if let Ok(mut f) = self.log.lock() {
-            let _ = f.write_all(bytes);
-        }
     }
 
     /// Flush all buffered lines to the shared stdout sink with the member prefix.
@@ -788,5 +790,61 @@ mod tests {
         slot.flush(); // second flush: nothing to write
         let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         assert_eq!(text, "lib │ hello\n"); // only one copy
+    }
+
+    // ── Log file tests ─────────────────────────────────────────────────────
+
+    fn read_log(slot: &MuxSlot) -> String {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = slot.log.lock().unwrap();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        let mut s = String::new();
+        f.read_to_string(&mut s).unwrap();
+        s
+    }
+
+    #[test]
+    fn push_line_writes_to_log_immediately() {
+        let (_, sink) = vec_sink();
+        let slot = make_slot("mylib │ ", sink);
+
+        slot.push_line("Building mylib v1.0".to_string());
+        slot.push_line("  Compile  3 source file(s)".to_string());
+
+        // Log is written at push_line time, before flush.
+        assert_eq!(
+            read_log(&slot),
+            "Building mylib v1.0\n  Compile  3 source file(s)\n",
+        );
+    }
+
+    #[test]
+    fn log_contains_all_lines_after_flush() {
+        let (_, sink) = vec_sink();
+        let slot = make_slot("app │ ", sink);
+
+        slot.push_line("line 1".to_string());
+        slot.push_line("line 2".to_string());
+        slot.push_line("line 3".to_string());
+        slot.flush();
+
+        // flush doesn't add extra content to the log.
+        assert_eq!(read_log(&slot), "line 1\nline 2\nline 3\n");
+    }
+
+    #[test]
+    fn log_is_separate_from_stdout_sink() {
+        // Screen output goes to the shared sink (prefixed); log has plain text.
+        let (screen_buf, sink) = vec_sink();
+        let slot = make_slot("svc │ ", sink);
+
+        slot.push_line("hello world".to_string());
+        slot.flush();
+
+        let screen = String::from_utf8(screen_buf.lock().unwrap().clone()).unwrap();
+        let log = read_log(&slot);
+
+        assert_eq!(screen, "svc │ hello world\n");  // prefixed on screen
+        assert_eq!(log, "hello world\n");            // plain in log
     }
 }
