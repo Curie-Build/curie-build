@@ -212,7 +212,7 @@ struct DepItem {
 }
 
 /// Pick the base URL for a dep: named-repo override → first default repo.
-fn resolve_repo_url(
+pub fn resolve_repo_url(
     repo_id: &Option<String>,
     named: &[Repository],
     default: &[Repository],
@@ -229,7 +229,7 @@ fn resolve_repo_url(
 }
 
 /// Construct the `maven-metadata.xml` URL for a `group:artifact` coordinate.
-fn metadata_url(repo_base: &str, coord: &str) -> Option<String> {
+pub fn metadata_url(repo_base: &str, coord: &str) -> Option<String> {
     let (group, artifact) = coord.split_once(':')?;
     let group_path = group.replace('.', "/");
     Some(format!("{}/{}/{}/maven-metadata.xml", repo_base, group_path, artifact))
@@ -237,7 +237,7 @@ fn metadata_url(repo_base: &str, coord: &str) -> Option<String> {
 
 /// Fetch `maven-metadata.xml` and return the latest stable version, or `None`
 /// on any error (network failure, parse error, no stable versions).
-fn fetch_latest_stable(
+pub fn fetch_latest_stable(
     client: &reqwest::blocking::Client,
     repo_base: &str,
     coord: &str,

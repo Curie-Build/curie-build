@@ -1,3 +1,4 @@
+mod add_remove;
 mod audit;
 mod build;
 mod class_manifest;
@@ -192,6 +193,37 @@ enum Cmd {
         /// Override the SBOM output path (default: target/sbom.cdx.json)
         #[arg(long)]
         output: Option<std::path::PathBuf>,
+    },
+    /// Add a dependency to Curie.toml
+    Add {
+        /// Coordinate: "group:artifact" or "group:artifact@version"
+        coord: String,
+        /// Add to [test-dependencies] instead of [dependencies]
+        #[arg(long)]
+        test: bool,
+        /// Add to [annotation-processors] (combine with --test for [test-annotation-processors])
+        #[arg(long = "annotation-processor")]
+        annotation_processor: bool,
+        /// Add to [bom-imports] (combine with --test for [test-bom-imports]); requires @version
+        #[arg(long)]
+        bom: bool,
+        /// Do not access the network; fail if a version must be resolved
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Remove a dependency from Curie.toml
+    Remove {
+        /// Coordinate: "group:artifact" (a trailing @version is accepted but ignored)
+        coord: String,
+        /// Remove from [test-dependencies]
+        #[arg(long)]
+        test: bool,
+        /// Remove from [annotation-processors] (combine with --test for [test-annotation-processors])
+        #[arg(long = "annotation-processor")]
+        annotation_processor: bool,
+        /// Remove from [bom-imports] (combine with --test for [test-bom-imports])
+        #[arg(long)]
+        bom: bool,
     },
     /// Scaffold a new Curie project in a new subdirectory
     New {
@@ -469,6 +501,36 @@ fn main() {
         }
         // Handled above in the early-exit block; unreachable at runtime.
         Cmd::New { .. } | Cmd::Init { .. } => unreachable!(),
+        Cmd::Add { coord, test, annotation_processor, bom, offline } => match &ctx {
+            workspace::WorkspaceContext::WorkspaceRoot(_)
+            | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
+                "`curie add` cannot run on a workspace root; \
+                 target a member with --project"
+            )),
+            workspace::WorkspaceContext::WorkspaceMember { .. }
+            | workspace::WorkspaceContext::Standalone(_) => {
+                add_remove::run_add(
+                    &cli.project,
+                    &coord,
+                    add_remove::AddOptions { test, annotation_processor, bom, offline },
+                )
+            }
+        },
+        Cmd::Remove { coord, test, annotation_processor, bom } => match &ctx {
+            workspace::WorkspaceContext::WorkspaceRoot(_)
+            | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
+                "`curie remove` cannot run on a workspace root; \
+                 target a member with --project"
+            )),
+            workspace::WorkspaceContext::WorkspaceMember { .. }
+            | workspace::WorkspaceContext::Standalone(_) => {
+                add_remove::run_remove(
+                    &cli.project,
+                    &coord,
+                    add_remove::RemoveOptions { test, annotation_processor, bom },
+                )
+            }
+        },
     };
 
     if let Err(e) = result {

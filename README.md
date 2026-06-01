@@ -68,6 +68,15 @@ curie clean             # remove target/
 curie list              # list the members of a workspace
 curie audit             # emit CycloneDX SBOM and scan dependencies against OSV
 
+curie add com.google.guava:guava            # add latest stable version of a dependency
+curie add com.google.guava:guava@33.2.1-jre # add a specific version
+curie add --test org.assertj:assertj-core   # add a test dependency
+curie add --annotation-processor org.projectlombok:lombok@1.18.32  # add an annotation processor
+curie add --bom com.fasterxml.jackson:jackson-bom@2.17.2            # add a BOM
+curie remove com.google.guava:guava         # remove a dependency
+curie remove --test org.assertj:assertj-core
+curie update            # upgrade all versioned dependencies to latest stable
+
 curie build --no-docker # suppress Docker even if Curie.toml enables it
 curie build --offline   # use only locally cached artifacts; fail on any cache miss
 curie run   --no-docker
@@ -282,6 +291,50 @@ enabled = false
 ```
 
 No configuration is needed to enable it — the file is generated automatically whenever `git` is on `PATH` and the project is inside a Git repository.
+
+### Managing dependencies (`curie add` / `curie remove`)
+
+`curie add` adds a single entry to `Curie.toml`; `curie remove` removes one.
+Both commands edit `Curie.toml` in place with format-preserving writes
+(comments and whitespace are kept).
+
+```
+# Add the latest stable release (resolved from Maven metadata)
+curie add com.google.guava:guava
+
+# Add a specific version
+curie add com.google.guava:guava@33.2.1-jre
+
+# Add a test dependency
+curie add --test org.assertj:assertj-core@3.26.0
+
+# Add an annotation processor
+curie add --annotation-processor org.projectlombok:lombok@1.18.32
+
+# Combine with --test for test-annotation-processors
+curie add --test --annotation-processor com.example:my-proc@1.0.0
+
+# Add a BOM (always requires an explicit @version)
+curie add --bom com.fasterxml.jackson:jackson-bom@2.17.2
+
+# After adding a BOM, add a BOM-managed dependency.
+# Curie resolves the BOM and writes "" as the version (no version pinned).
+curie add com.fasterxml.jackson.core:jackson-databind
+
+# Remove a dependency
+curie remove com.google.guava:guava
+curie remove --test org.assertj:assertj-core
+curie remove --bom com.fasterxml.jackson:jackson-bom
+```
+
+**Version resolution for `curie add`** (when `@version` is omitted):
+
+1. Curie resolves all declared `[bom-imports]` and checks whether the coordinate is managed by a BOM.  If it is, the entry is written with an empty version string (`""`) — the same convention used when editing `Curie.toml` by hand.
+2. If the coordinate is not BOM-managed, Curie fetches `maven-metadata.xml` from Maven Central and selects the latest *stable* release (no SNAPSHOT, alpha, beta, RC, CR, or milestone suffixes) using the same algorithm as `curie update`.
+
+`--offline` is accepted by `curie add`.  With it, automatic version resolution
+is disabled: you must supply an explicit `@version`, or the coordinate must
+be managed by an already-cached BOM.
 
 ### Formatting (`curie fmt`)
 

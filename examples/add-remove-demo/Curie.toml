@@ -1,0 +1,32 @@
+# add-remove-demo
+#
+# Demonstrates `curie add` and `curie remove`.
+#
+# This file is intentionally sparse — dependencies are meant to be managed
+# with the curie add / curie remove commands rather than edited by hand.
+#
+# Quick-start:
+#
+#   # Add a dependency (version resolved automatically from Maven metadata)
+#   curie add com.google.guava:guava
+#
+#   # Add with an explicit version
+#   curie add com.google.guava:guava@33.2.1-jre
+#
+#   # Add a test dependency
+#   curie add --test org.assertj:assertj-core@3.26.0
+#
+#   # Add a BOM, then add a BOM-managed dependency (version will be "")
+#   curie add --bom com.fasterxml.jackson:jackson-bom@2.17.2
+#   curie add com.fasterxml.jackson.core:jackson-databind
+#
+#   # Add an annotation processor
+#   curie add --annotation-processor org.projectlombok:lombok@1.18.32
+#
+#   # Remove a dependency
+#   curie remove com.google.guava:guava
+
+[application]
+name = "add-remove-demo"
+version = "0.1.0"
+mainClass = "com.example.Demo"

@@ -287,7 +287,7 @@ fn fetch_and_parse_pom(
     Ok(pom)
 }
 
-fn resolve_boms(
+pub fn resolve_boms(
     bom_gavs: &[Gav],
     repos: &[Repository],
     client: &reqwest::blocking::Client,

@@ -1,0 +1,975 @@
+diff --git a/curie-build/src/workspace.rs b/curie-build/src/workspace.rs
+index 9dcb2f9..8bfeedb 100644
+--- a/curie-build/src/workspace.rs
++++ b/curie-build/src/workspace.rs
+@@ -16,7 +16,7 @@ use crate::update::{self, UpdateOptions};
+ use crate::{build, compile, fmt, jar, run, test};
+ use anyhow::{bail, Context, Result};
+ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+-use std::collections::VecDeque;
++use std::collections::{HashSet, VecDeque};
+ use std::path::{Path, PathBuf};
+ use std::process::Command;
+ 
+@@ -86,32 +86,30 @@ pub fn discover(project: &Path) -> Result<WorkspaceContext> {
+         .canonicalize()
+         .with_context(|| format!("failed to canonicalize {}", project.display()))?;
+ 
+-    let mut cur = project.parent();
++    // Walk upward, looking for the nearest enclosing workspace whose
++    // *flattened* member list (after recursive nested-workspace expansion)
++    // contains this project.  Using `load()` instead of the raw `members`
++    // list ensures that projects inside nested workspaces are discovered
++    // correctly.  If an ancestor workspace fails to load (e.g. because a
++    // cross-level dep is unresolvable at that level), it is silently
++    // skipped and the walk continues to the next ancestor.
++    //
++    // We walk the canonicalized path (not the raw `project` arg) because
++    // `".".parent()` yields `""` and stops — the upward walk would never
++    // leave the project directory.
++    let mut cur = project_canon.parent();
+     while let Some(dir) = cur {
+         if dir.join("Curie.toml").exists() {
+             if let Ok(d) = descriptor::load(dir) {
+-                if let Some(ws) = d.workspace() {
+-                    // Match by canonical path so `members = ["./foo"]` and
+-                    // a member at `./foo/` both resolve to the same place.
+-                    for declared in &ws.members {
+-                        if let Ok(canon) = dir.join(declared).canonicalize() {
+-                            if canon == project_canon {
+-                                // Re-resolve via the topo-sorted `load`
+-                                // because the index in the raw declaration
+-                                // list may differ from the post-sort index.
+-                                let ws_loaded = load(dir)?;
+-                                let topo_idx = ws_loaded
+-                                    .members
+-                                    .iter()
+-                                    .position(|m| {
+-                                        m.path.canonicalize().ok() == Some(canon.clone())
+-                                    })
+-                                    .expect("member existed at raw-list time, must exist post-sort");
+-                                return Ok(WorkspaceContext::WorkspaceMember {
+-                                    workspace_root: dir.to_path_buf(),
+-                                    member_index: topo_idx,
+-                                });
+-                            }
++                if d.is_workspace() {
++                    if let Ok(ws_loaded) = load(dir) {
++                        if let Some(topo_idx) = ws_loaded.members.iter().position(|m| {
++                            m.path.canonicalize().ok() == Some(project_canon.clone())
++                        }) {
++                            return Ok(WorkspaceContext::WorkspaceMember {
++                                workspace_root: dir.to_path_buf(),
++                                member_index: topo_idx,
++                            });
+                         }
+                     }
+                 }
+@@ -140,36 +138,27 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
+         ))?;
+ 
+     // Phase 1: load every member descriptor (sans workspace_deps) and
+-    // merge in inherited workspace-level config.
+-    let mut raw_members: Vec<Member> = Vec::with_capacity(ws.members.len());
+-    for declared in &ws.members {
+-        let path = workspace_root.join(declared);
+-        if !path.exists() {
+-            bail!(
+-                "workspace member \"{}\" not found at {}",
+-                declared,
+-                path.display(),
+-            );
+-        }
+-        let mut descriptor = descriptor::load(&path)
+-            .with_context(|| format!("failed to load workspace member \"{}\"", declared))?;
+-        if descriptor.is_workspace() {
+-            bail!(
+-                "workspace member \"{}\" is itself a workspace; nested workspaces are not supported",
+-                declared,
+-            );
+-        }
+-        inherit_from_workspace(&mut descriptor, &root_desc);
+-        // Validate after inheritance so workspace-level repos are visible.
+-        descriptor::validate_dep_repo_refs(&descriptor)
+-            .with_context(|| format!("invalid repository reference in member \"{}\"", declared))?;
+-        raw_members.push(Member {
+-            path,
+-            declared: declared.clone(),
+-            descriptor,
+-            workspace_deps: Vec::new(),
+-        });
+-    }
++    // merge in inherited workspace-level config.  Nested workspaces are
++    // recursively flattened: their leaf (non-workspace) members are
++    // collected into this workspace with configuration inheritance
++    // cascading from outer to inner.
++    let mut raw_members: Vec<Member> = Vec::new();
++    let mut seen_canonical: HashSet<PathBuf> = HashSet::new();
++    // Seed with the root's own canonical path so that a cycle back to the
++    // root (e.g. inner workspace listing ".." as a member) is caught.
++    seen_canonical.insert(
++        workspace_root
++            .canonicalize()
++            .unwrap_or_else(|_| workspace_root.to_path_buf()),
++    );
++    expand_members(
++        workspace_root,
++        &root_desc,
++        &ws.members,
++        "",
++        &mut raw_members,
++        &mut seen_canonical,
++    )?;
+ 
+     // Phase 2: resolve each member's [workspace-dependencies] path entries
+     // to indices into raw_members.  Canonical-path equality is the matcher
+@@ -236,6 +225,104 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
+     })
+ }
+ 
++/// Recursively expand workspace members.  Non-workspace members are added
++/// to `out` directly; workspace members are recursed into and their own
++/// members are flattened.  At each level, configuration inheritance from the
++/// enclosing workspace is applied.
++///
++/// `ws_root` is the directory containing the enclosing `Curie.toml`.
++/// `ws_desc` is that workspace's loaded descriptor (for inheritance).
++/// `member_names` is the `[workspace].members` list of that workspace.
++/// `prefix` is the path prefix for `declared` names of nested members
++/// (empty at the top level, e.g. `"services/"` for members of a nested
++/// workspace called `services`).
++///
++/// `seen` tracks canonical paths of every project and workspace encountered
++/// so far.  If a path appears twice, the function bails — this covers both
++/// explicit duplicates and dependency cycles.
++fn expand_members(
++    ws_root: &Path,
++    ws_desc: &Descriptor,
++    member_names: &[String],
++    prefix: &str,
++    out: &mut Vec<Member>,
++    seen: &mut HashSet<PathBuf>,
++) -> Result<()> {
++    for name in member_names {
++        let path = ws_root.join(name);
++        if !path.exists() {
++            bail!(
++                "workspace member \"{}\" not found at {}",
++                name,
++                path.display(),
++            );
++        }
++
++        let canon = path
++            .canonicalize()
++            .with_context(|| format!("failed to canonicalize {}", path.display()))?;
++        if !seen.insert(canon) {
++            bail!(
++                "project \"{}\" is included more than once in the workspace \
++                 (nested workspaces that share a member, or a cycle, will trigger this)",
++                path.display(),
++            );
++        }
++
++        let mut descriptor = descriptor::load(&path)
++            .with_context(|| format!("failed to load workspace member \"{}\"", name))?;
++
++        if descriptor.is_workspace() {
++            // Nested workspace: recursively flatten its members.
++            let inner_ws = descriptor.workspace().unwrap();
++            let inner_members = inner_ws.members.clone();
++            let inner_prefix = if prefix.is_empty() {
++                format!("{}/", name)
++            } else {
++                format!("{}{}/", prefix, name)
++            };
++
++            // First expand inner members with the inner workspace's config.
++            let before_len = out.len();
++            expand_members(&path, &descriptor, &inner_members, &inner_prefix, out, seen)?;
++
++            // Then layer the outer workspace's config on top.  Scalar
++            // fields already set by the inner workspace survive (the
++            // is_none guard), and collection fields are merged with the
++            // inner values taking priority on key conflicts.
++            for m in &mut out[before_len..] {
++                inherit_from_workspace(&mut m.descriptor, ws_desc);
++                descriptor::validate_dep_repo_refs(&m.descriptor).with_context(|| {
++                    format!(
++                        "invalid repository reference in nested member \"{}\"",
++                        m.declared,
++                    )
++                })?;
++            }
++        } else {
++            // Regular (leaf) member: apply inheritance from the enclosing
++            // workspace and add to the flat list.
++            inherit_from_workspace(&mut descriptor, ws_desc);
++            descriptor::validate_dep_repo_refs(&descriptor)
++                .with_context(|| format!("invalid repository reference in member \"{}\"", name))?;
++
++            let declared = if prefix.is_empty() {
++                name.clone()
++            } else {
++                format!("{}{}", prefix, name)
++            };
++
++            out.push(Member {
++                path,
++                declared,
++                descriptor,
++                workspace_deps: Vec::new(),
++            });
++        }
++    }
++    Ok(())
++}
++
+ /// Merge workspace-level inheritable config into a member descriptor.
+ /// Called once per member during [`load`] so the build pipeline always sees
+ /// a fully-resolved descriptor; in single-module mode this never runs and
+@@ -286,13 +373,52 @@ fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
+         combined.append(&mut member.repositories);
+         member.repositories = combined;
+     }
+-    member.inherited_bom_imports = ws.bom_imports.clone();
+-    member.inherited_test_bom_imports = ws.test_bom_imports.clone();
+-    member.inherited_annotation_processors = ws.annotation_processors.clone();
+-    member.inherited_test_annotation_processors = ws.test_annotation_processors.clone();
+-    member.inherited_annotation_processor_options = ws.annotation_processor_options.clone();
+-    member.inherited_test_annotation_processor_options =
+-        ws.test_annotation_processor_options.clone();
++    // Merge inherited BOM imports: workspace entries go first (lower
++    // priority), any already-inherited entries (from an inner workspace)
++    // are layered on top so they win on key conflict.
++    merge_btree(&mut member.inherited_bom_imports, &ws.bom_imports);
++    merge_btree(&mut member.inherited_test_bom_imports, &ws.test_bom_imports);
++    merge_btree(&mut member.inherited_annotation_processors, &ws.annotation_processors);
++    merge_btree(
++        &mut member.inherited_test_annotation_processors,
++        &ws.test_annotation_processors,
++    );
++    merge_nested_btree(
++        &mut member.inherited_annotation_processor_options,
++        &ws.annotation_processor_options,
++    );
++    merge_nested_btree(
++        &mut member.inherited_test_annotation_processor_options,
++        &ws.test_annotation_processor_options,
++    );
++}
++
++/// Merge `base` entries into `target`.  Existing entries in `target`
++/// (from a nearer/inner workspace) take precedence over `base` entries
++/// (from a farther/outer workspace).
++fn merge_btree<V: Clone>(target: &mut std::collections::BTreeMap<String, V>, base: &std::collections::BTreeMap<String, V>) {
++    let existing = std::mem::take(target);
++    *target = base.clone();
++    for (k, v) in existing {
++        target.insert(k, v);
++    }
++}
++
++/// Like [`merge_btree`] but for the nested `BTreeMap<String, BTreeMap<String, String>>`
++/// used by annotation-processor-options.  Inner keys from `target` override
++/// `base` per `(prefix, key)`.
++fn merge_nested_btree(
++    target: &mut std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
++    base: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
++) {
++    let existing = std::mem::take(target);
++    *target = base.clone();
++    for (prefix, inner) in existing {
++        let dst = target.entry(prefix).or_default();
++        for (k, v) in inner {
++            dst.insert(k, v);
++        }
++    }
+ }
+ 
+ /// Kahn's algorithm.  `edges[v]` is the set of nodes `v` depends on.
+@@ -940,21 +1066,47 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn load_nested_workspace_fails() {
++    fn load_nested_workspace_flattens_members() {
+         let dir = tempfile::tempdir().unwrap();
++        // Root workspace with one direct member and one nested workspace.
+         std::fs::write(
+             dir.path().join("Curie.toml"),
+-            "[workspace]\nmembers = [\"inner\"]\n",
++            "[workspace]\nmembers = [\"direct\", \"inner\"]\n",
+         )
+         .unwrap();
+-        std::fs::create_dir_all(dir.path().join("inner")).unwrap();
++        let direct = dir.path().join("direct");
++        std::fs::create_dir_all(&direct).unwrap();
+         std::fs::write(
+-            dir.path().join("inner").join("Curie.toml"),
+-            "[workspace]\nmembers = []\n",
++            direct.join("Curie.toml"),
++            "[library]\nname = \"direct\"\nversion = \"0.1.0\"\n",
+         )
+         .unwrap();
+-        let err = load(dir.path()).unwrap_err().to_string();
+-        assert!(err.contains("nested"), "got: {err}");
++        let inner = dir.path().join("inner");
++        std::fs::create_dir_all(&inner).unwrap();
++        std::fs::write(
++            inner.join("Curie.toml"),
++            "[workspace]\nmembers = [\"leaf-a\", \"leaf-b\"]\n",
++        )
++        .unwrap();
++        let leaf_a = inner.join("leaf-a");
++        std::fs::create_dir_all(&leaf_a).unwrap();
++        std::fs::write(
++            leaf_a.join("Curie.toml"),
++            "[library]\nname = \"leaf-a\"\nversion = \"0.1.0\"\n",
++        )
++        .unwrap();
++        let leaf_b = inner.join("leaf-b");
++        std::fs::create_dir_all(&leaf_b).unwrap();
++        std::fs::write(
++            leaf_b.join("Curie.toml"),
++            "[library]\nname = \"leaf-b\"\nversion = \"0.1.0\"\n",
++        )
++        .unwrap();
++
++        let ws = load(dir.path()).unwrap();
++        assert_eq!(ws.members.len(), 3, "direct + leaf-a + leaf-b");
++        let names: Vec<&str> = ws.members.iter().map(|m| m.declared.as_str()).collect();
++        assert_eq!(names, vec!["direct", "inner/leaf-a", "inner/leaf-b"]);
+     }
+ 
+     #[test]
+@@ -1416,4 +1568,338 @@ mod tests {
+         let ws = crate::workspace::load(ws_path).unwrap();
+         assert_eq!(ws.members[0].descriptor.groovy.version(), "4.0.20");
+     }
++
++    // -- nested workspaces --------------------------------------------------
++
++    /// Helper: create a 3-level nested workspace on disk.
++    ///
++    /// Layout:
++    /// ```text
++    /// <root>/
++    ///   Curie.toml          workspace L0, members = ["core-lib", "services"]
++    ///                       [java] sourceCompatibility = "17"
++    ///                       [bom-imports] "ws:bom" = "1.0"
++    ///   core-lib/           library
++    ///   services/
++    ///     Curie.toml        workspace L1, members = ["mid-lib", "apps"]
++    ///                       [test-bom-imports] "ws:test-bom" = "2.0"
++    ///     mid-lib/          library, depends on core-lib
++    ///     apps/
++    ///       Curie.toml      workspace L2, members = ["leaf-app"]
++    ///       leaf-app/       application, depends on mid-lib and core-lib
++    /// ```
++    fn make_nested_workspace() -> tempfile::TempDir {
++        let dir = tempfile::tempdir().unwrap();
++        let r = dir.path();
++
++        // L0 root
++        std::fs::write(
++            r.join("Curie.toml"),
++            "[workspace]\nmembers = [\"core-lib\", \"services\"]\n\
++             [java]\nsourceCompatibility = \"17\"\n\
++             [bom-imports]\n\"ws:bom\" = \"1.0\"\n",
++        ).unwrap();
++
++        // core-lib (direct member of L0)
++        std::fs::create_dir_all(r.join("core-lib")).unwrap();
++        std::fs::write(
++            r.join("core-lib").join("Curie.toml"),
++            "[library]\nname = \"core-lib\"\nversion = \"0.1.0\"\n",
++        ).unwrap();
++
++        // services/ (L1 workspace)
++        std::fs::create_dir_all(r.join("services")).unwrap();
++        std::fs::write(
++            r.join("services").join("Curie.toml"),
++            "[workspace]\nmembers = [\"mid-lib\", \"apps\"]\n\
++             [test-bom-imports]\n\"ws:test-bom\" = \"2.0\"\n",
++        ).unwrap();
++
++        // mid-lib (member of L1, depends on core-lib from L0)
++        std::fs::create_dir_all(r.join("services").join("mid-lib")).unwrap();
++        std::fs::write(
++            r.join("services").join("mid-lib").join("Curie.toml"),
++            "[library]\nname = \"mid-lib\"\nversion = \"0.1.0\"\n\
++             [workspace-dependencies]\ncore = { path = \"../../core-lib\" }\n",
++        ).unwrap();
++
++        // apps/ (L2 workspace)
++        std::fs::create_dir_all(r.join("services").join("apps")).unwrap();
++        std::fs::write(
++            r.join("services").join("apps").join("Curie.toml"),
++            "[workspace]\nmembers = [\"leaf-app\"]\n",
++        ).unwrap();
++
++        // leaf-app (member of L2, depends on mid-lib and core-lib)
++        std::fs::create_dir_all(r.join("services").join("apps").join("leaf-app")).unwrap();
++        std::fs::write(
++            r.join("services").join("apps").join("leaf-app").join("Curie.toml"),
++            "[application]\nname = \"leaf-app\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n\
++             [workspace-dependencies]\n\
++             mid = { path = \"../../mid-lib\" }\n\
++             core = { path = \"../../../core-lib\" }\n",
++        ).unwrap();
++
++        dir
++    }
++
++    #[test]
++    fn nested_3_level_loads_all_leaf_members() {
++        let dir = make_nested_workspace();
++        let ws = load(dir.path()).unwrap();
++        assert_eq!(ws.members.len(), 3, "core-lib, mid-lib, leaf-app");
++        let names: Vec<&str> = ws.members.iter().map(|m| m.declared.as_str()).collect();
++        // Topo order: core-lib first (no deps), then mid-lib (depends on
++        // core-lib), then leaf-app (depends on both).
++        assert_eq!(names, vec!["core-lib", "services/mid-lib", "services/apps/leaf-app"]);
++    }
++
++    #[test]
++    fn nested_config_inheritance_cascades_through_levels() {
++        let dir = make_nested_workspace();
++        let ws = load(dir.path()).unwrap();
++
++        // leaf-app should inherit sourceCompatibility from L0 (through L1 and L2)
++        let leaf = ws.members.iter().find(|m| m.declared.contains("leaf-app")).unwrap();
++        assert_eq!(leaf.descriptor.java.effective(), "17");
++
++        // leaf-app should inherit [bom-imports] from L0
++        assert_eq!(
++            leaf.descriptor.inherited_bom_imports.get("ws:bom").map(String::as_str),
++            Some("1.0"),
++        );
++
++        // leaf-app should inherit [test-bom-imports] from L1
++        assert_eq!(
++            leaf.descriptor.inherited_test_bom_imports.get("ws:test-bom").map(String::as_str),
++            Some("2.0"),
++        );
++
++        // mid-lib should also inherit sourceCompatibility from L0
++        let mid = ws.members.iter().find(|m| m.declared.contains("mid-lib")).unwrap();
++        assert_eq!(mid.descriptor.java.effective(), "17");
++    }
++
++    #[test]
++    fn nested_workspace_deps_resolve_across_levels() {
++        let dir = make_nested_workspace();
++        let ws = load(dir.path()).unwrap();
++
++        // leaf-app depends on mid-lib and core-lib
++        let leaf_idx = ws.members.iter().position(|m| m.declared.contains("leaf-app")).unwrap();
++        let leaf = &ws.members[leaf_idx];
++        assert_eq!(leaf.workspace_deps.len(), 2);
++
++        // mid-lib depends on core-lib
++        let mid_idx = ws.members.iter().position(|m| m.declared.contains("mid-lib")).unwrap();
++        let mid = &ws.members[mid_idx];
++        assert_eq!(mid.workspace_deps.len(), 1);
++    }
++
++    #[test]
++    fn nested_duplicate_project_is_rejected() {
++        let dir = tempfile::tempdir().unwrap();
++        let r = dir.path();
++
++        // Root lists "shared" directly AND via an inner workspace that
++        // also includes it (same canonical path).
++        std::fs::write(
++            r.join("Curie.toml"),
++            "[workspace]\nmembers = [\"shared\", \"inner\"]\n",
++        ).unwrap();
++        std::fs::create_dir_all(r.join("shared")).unwrap();
++        std::fs::write(
++            r.join("shared").join("Curie.toml"),
++            "[library]\nname = \"shared\"\nversion = \"0.1.0\"\n",
++        ).unwrap();
++        std::fs::create_dir_all(r.join("inner")).unwrap();
++        // inner workspace lists "../shared" which resolves to the same dir
++        std::fs::write(
++            r.join("inner").join("Curie.toml"),
++            "[workspace]\nmembers = [\"../shared\"]\n",
++        ).unwrap();
++
++        let err = load(r).unwrap_err().to_string();
++        assert!(err.contains("more than once"), "got: {err}");
++    }
++
++    #[test]
++    fn nested_same_member_listed_twice_is_rejected() {
++        let dir = tempfile::tempdir().unwrap();
++        let r = dir.path();
++        std::fs::write(
++            r.join("Curie.toml"),
++            "[workspace]\nmembers = [\"a\", \"a\"]\n",
++        ).unwrap();
++        std::fs::create_dir_all(r.join("a")).unwrap();
++        std::fs::write(
++            r.join("a").join("Curie.toml"),
++            "[library]\nname = \"a\"\nversion = \"0.1.0\"\n",
++        ).unwrap();
++
++        let err = load(r).unwrap_err().to_string();
++        assert!(err.contains("more than once"), "got: {err}");
++    }
++
++    #[test]
++    fn nested_cycle_via_workspace_back_reference_is_rejected() {
++        let dir = tempfile::tempdir().unwrap();
++        let r = dir.path();
++
++        // Root includes inner; inner's member list points back to root
++        // (which is a workspace → recursive expansion → hits seen set).
++        std::fs::write(
++            r.join("Curie.toml"),
++            "[workspace]\nmembers = [\"inner\"]\n",
++        ).unwrap();
++        std::fs::create_dir_all(r.join("inner")).unwrap();
++        std::fs::write(
++            r.join("inner").join("Curie.toml"),
++            "[workspace]\nmembers = [\"..\"]\n",
++        ).unwrap();
++
++        let err = load(r).unwrap_err().to_string();
++        assert!(err.contains("more than once"), "got: {err}");
++    }
++
++    #[test]
++    fn nested_empty_inner_workspace_loads_ok() {
++        let dir = tempfile::tempdir().unwrap();
++        let r = dir.path();
++        std::fs::write(
++            r.join("Curie.toml"),
++            "[workspace]\nmembers = [\"inner\"]\n",
++        ).unwrap();
++        std::fs::create_dir_all(r.join("inner")).unwrap();
++        std::fs::write(
++            r.join("inner").join("Curie.toml"),
++            "[workspace]\nmembers = []\n",
++        ).unwrap();
++
++        let ws = load(r).unwrap();
++        assert_eq!(ws.members.len(), 0);
++    }
++
++    #[test]
++    fn nested_inner_workspace_inherits_outer_config_for_leaf() {
++        // Two-level: outer sets sourceCompatibility=17 and bom, inner sets
++        // test-bom.  Leaf member at inner level should see both.
++        let dir = tempfile::tempdir().unwrap();
++        let r = dir.path();
++        std::fs::write(
++            r.join("Curie.toml"),
++            "[workspace]\nmembers = [\"inner\"]\n\
++             [java]\nsourceCompatibility = \"17\"\n\
++             [bom-imports]\n\"outer:bom\" = \"1.0\"\n",
++        ).unwrap();
++        std::fs::create_dir_all(r.join("inner")).unwrap();
++        std::fs::write(
++            r.join("inner").join("Curie.toml"),
++            "[workspace]\nmembers = [\"leaf\"]\n\
++             [bom-imports]\n\"inner:bom\" = \"2.0\"\n",
++        ).unwrap();
++        std::fs::create_dir_all(r.join("inner").join("leaf")).unwrap();
++        std::fs::write(
++            r.join("inner").join("leaf").join("Curie.toml"),
++            "[library]\nname = \"leaf\"\nversion = \"0.1.0\"\n",
++        ).unwrap();
++
++        let ws = load(r).unwrap();
++        let leaf = &ws.members[0].descriptor;
++        assert_eq!(leaf.java.effective(), "17");
++        // Both outer and inner BOMs should be inherited
++        assert_eq!(leaf.inherited_bom_imports.get("outer:bom").map(String::as_str), Some("1.0"));
++        assert_eq!(leaf.inherited_bom_imports.get("inner:bom").map(String::as_str), Some("2.0"));
++    }
++
++    #[test]
++    fn nested_inner_bom_overrides_outer_bom_on_conflict() {
++        let dir = tempfile::tempdir().unwrap();
++        let r = dir.path();
++        std::fs::write(
++            r.join("Curie.toml"),
++            "[workspace]\nmembers = [\"inner\"]\n\
++             [bom-imports]\n\"shared:bom\" = \"1.0\"\n",
++        ).unwrap();
++        std::fs::create_dir_all(r.join("inner")).unwrap();
++        std::fs::write(
++            r.join("inner").join("Curie.toml"),
++            "[workspace]\nmembers = [\"leaf\"]\n\
++             [bom-imports]\n\"shared:bom\" = \"2.0\"\n",
++        ).unwrap();
++        std::fs::create_dir_all(r.join("inner").join("leaf")).unwrap();
++        std::fs::write(
++            r.join("inner").join("leaf").join("Curie.toml"),
++            "[library]\nname = \"leaf\"\nversion = \"0.1.0\"\n",
++        ).unwrap();
++
++        let ws = load(r).unwrap();
++        let leaf = &ws.members[0].descriptor;
++        // Inner workspace's version should win because it's nearer.
++        assert_eq!(
++            leaf.inherited_bom_imports.get("shared:bom").map(String::as_str),
++            Some("2.0"),
++        );
++    }
++
++    #[test]
++    fn nested_repos_cascade_outer_before_inner_before_member() {
++        let dir = tempfile::tempdir().unwrap();
++        let r = dir.path();
++        std::fs::write(
++            r.join("Curie.toml"),
++            "[workspace]\nmembers = [\"inner\"]\n\
++             [[repositories]]\nid = \"outer-repo\"\nurl = \"https://outer.example.com\"\n",
++        ).unwrap();
++        std::fs::create_dir_all(r.join("inner")).unwrap();
++        std::fs::write(
++            r.join("inner").join("Curie.toml"),
++            "[workspace]\nmembers = [\"leaf\"]\n\
++             [[repositories]]\nid = \"inner-repo\"\nurl = \"https://inner.example.com\"\n",
++        ).unwrap();
++        std::fs::create_dir_all(r.join("inner").join("leaf")).unwrap();
++        std::fs::write(
++            r.join("inner").join("leaf").join("Curie.toml"),
++            "[library]\nname = \"leaf\"\nversion = \"0.1.0\"\n\
++             [[repositories]]\nid = \"leaf-repo\"\nurl = \"https://leaf.example.com\"\n",
++        ).unwrap();
++
++        let ws = load(r).unwrap();
++        let repos: Vec<&str> = ws.members[0].descriptor.repositories.iter()
++            .map(|r| r.id.as_str()).collect();
++        // Outer repos first (tried first by resolver), then inner, then member.
++        assert_eq!(repos, vec!["outer-repo", "inner-repo", "leaf-repo"]);
++    }
++
++    #[test]
++    fn discover_finds_member_inside_nested_workspace() {
++        let dir = make_nested_workspace();
++        let leaf_path = dir.path().join("services").join("apps").join("leaf-app");
++
++        match discover(&leaf_path).unwrap() {
++            WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
++                // Should discover the root workspace (first ancestor whose
++                // flattened load succeeds and contains leaf-app).
++                assert_eq!(
++                    workspace_root.canonicalize().unwrap(),
++                    dir.path().canonicalize().unwrap(),
++                );
++                let ws = load(&workspace_root).unwrap();
++                assert_eq!(ws.members[member_index].declared, "services/apps/leaf-app");
++            }
++            other => panic!("expected WorkspaceMember, got {:?}", other),
++        }
++    }
++
++    #[test]
++    fn nested_transitive_closure_includes_cross_level_deps() {
++        let dir = make_nested_workspace();
++        let ws = load(dir.path()).unwrap();
++        let leaf_idx = ws.members.iter()
++            .position(|m| m.declared.contains("leaf-app")).unwrap();
++        let subset = transitive_closure(&ws, leaf_idx);
++        // leaf-app depends on mid-lib and core-lib, so the closure should
++        // include all three members.
++        assert_eq!(subset.len(), 3);
++    }
+ }
+diff --git a/examples/Curie.toml b/examples/Curie.toml
+index 94477fd..7bb2d9b 100644
+--- a/examples/Curie.toml
++++ b/examples/Curie.toml
+@@ -28,6 +28,7 @@ members = [
+     "hello-kotlin",
+     "hello-mixed",
+     "graalvm-hello",
++    "nested-workspace-demo",
+ ]
+ 
+ [java]
+diff --git a/examples/nested-workspace-demo/Curie.toml b/examples/nested-workspace-demo/Curie.toml
+new file mode 100644
+index 0000000..efcc5d8
+--- /dev/null
++++ b/examples/nested-workspace-demo/Curie.toml
+@@ -0,0 +1,43 @@
++# Nested workspace demo — 3 levels of workspace nesting.
++#
++# Level 0 (this file): root workspace
++#   members: core-lib (library) + services/ (nested workspace)
++#
++# Level 1 (services/Curie.toml): intermediate workspace
++#   members: greeter-lib (library) + apps/ (nested workspace)
++#
++# Level 2 (services/apps/Curie.toml): innermost workspace
++#   members: hello-app (application)
++#
++# Configuration inheritance:
++#   - [java] sourceCompatibility flows from L0 to all members
++#   - [bom-imports] from L0 are inherited by all leaf members
++#   - [test-bom-imports] from L1 are inherited by greeter-lib and hello-app
++#
++# Workspace dependencies cross nesting levels:
++#   - greeter-lib  depends on core-lib  (L1 member → L0 member)
++#   - hello-app    depends on greeter-lib and core-lib (L2 → L1 and L2 → L0)
++#
++# Build from this directory:
++#   curie build --no-docker --no-native
++#
++# Build from a nested member (discovers this workspace automatically):
++#   curie --project services/apps/hello-app build --no-docker --no-native
++
++[workspace]
++members = ["core-lib", "services"]
++
++[java]
++sourceCompatibility = "21"
++
++[bom-imports]
++"com.fasterxml.jackson:jackson-bom" = "2.17.2"
++
++[test-bom-imports]
++"org.junit:junit-bom" = "5.11.0"
++
++[test]
++junitPlatformVersion = "6.0.3"
++
++[kotlin]
++version = "2.1.21"
+\ No newline at end of file
+diff --git a/examples/nested-workspace-demo/core-lib/Curie.toml b/examples/nested-workspace-demo/core-lib/Curie.toml
+new file mode 100644
+index 0000000..f1ae3ef
+--- /dev/null
++++ b/examples/nested-workspace-demo/core-lib/Curie.toml
+@@ -0,0 +1,7 @@
++# core-lib — a simple utility library at the root nesting level.
++#
++# No explicit [java] or [bom-imports] — inherits from the workspace root.
++
++[library]
++name    = "nested-core"
++version = "0.1.0"
+\ No newline at end of file
+diff --git a/examples/nested-workspace-demo/core-lib/src/com.example.core/CoreUtils.java b/examples/nested-workspace-demo/core-lib/src/com.example.core/CoreUtils.java
+new file mode 100644
+index 0000000..f4b9d42
+--- /dev/null
++++ b/examples/nested-workspace-demo/core-lib/src/com.example.core/CoreUtils.java
+@@ -0,0 +1,22 @@
++package com.example.core;
++
++/**
++ * Simple utility class at the root workspace level.
++ * Demonstrates that a library at level 0 can be depended upon
++ * by members at deeper nesting levels.
++ */
++public final class CoreUtils {
++
++    private CoreUtils() {}
++
++    /** Returns the input string reversed. */
++    public static String reverse(String s) {
++        if (s == null) return null;
++        return new StringBuilder(s).reverse().toString();
++    }
++
++    /** Returns true when the input is null or blank. */
++    public static boolean isBlank(String s) {
++        return s == null || s.isBlank();
++    }
++}
+\ No newline at end of file
+diff --git a/examples/nested-workspace-demo/services/Curie.toml b/examples/nested-workspace-demo/services/Curie.toml
+new file mode 100644
+index 0000000..c5a968b
+--- /dev/null
++++ b/examples/nested-workspace-demo/services/Curie.toml
+@@ -0,0 +1,13 @@
++# services — level 1 nested workspace.
++#
++# Demonstrates configuration layering: this workspace adds its own
++# [bom-imports] entry.  Members inherit both this workspace's config
++# and the root workspace's config (sourceCompatibility, etc.).
++
++[workspace]
++members = ["greeter-lib", "apps"]
++
++# This BOM is inherited by greeter-lib and hello-app (via apps/), but
++# NOT by core-lib (which is a direct member of the root workspace).
++[bom-imports]
++"com.google.guava:guava-bom" = "33.4.8-jre"
+\ No newline at end of file
+diff --git a/examples/nested-workspace-demo/services/apps/Curie.toml b/examples/nested-workspace-demo/services/apps/Curie.toml
+new file mode 100644
+index 0000000..6834405
+--- /dev/null
++++ b/examples/nested-workspace-demo/services/apps/Curie.toml
+@@ -0,0 +1,8 @@
++# apps — level 2 (innermost) nested workspace.
++#
++# Its sole member (hello-app) inherits configuration from all three
++# workspace levels: this workspace, services/ (level 1), and the
++# root (level 0).
++
++[workspace]
++members = ["hello-app"]
+\ No newline at end of file
+diff --git a/examples/nested-workspace-demo/services/apps/hello-app/Curie.toml b/examples/nested-workspace-demo/services/apps/hello-app/Curie.toml
+new file mode 100644
+index 0000000..8ccd786
+--- /dev/null
++++ b/examples/nested-workspace-demo/services/apps/hello-app/Curie.toml
+@@ -0,0 +1,19 @@
++# hello-app — application at the deepest nesting level (level 2).
++#
++# Depends on both greeter-lib (level 1) and core-lib (level 0),
++# demonstrating workspace dependencies that cross multiple nesting
++# levels.
++#
++# Inherits configuration from all three workspace levels:
++#   - sourceCompatibility = "21" from level 0
++#   - guava-bom from level 1
++#   - jackson-bom, junit-bom, test config from level 0
++
++[application]
++name      = "nested-hello"
++version   = "0.1.0"
++mainClass = "com.example.app.Main"
++
++[workspace-dependencies]
++greeter = { path = "../../greeter-lib" }
++core    = { path = "../../../core-lib" }
+\ No newline at end of file
+diff --git a/examples/nested-workspace-demo/services/apps/hello-app/src/com.example.app/Main.java b/examples/nested-workspace-demo/services/apps/hello-app/src/com.example.app/Main.java
+new file mode 100644
+index 0000000..4679739
+--- /dev/null
++++ b/examples/nested-workspace-demo/services/apps/hello-app/src/com.example.app/Main.java
+@@ -0,0 +1,20 @@
++package com.example.app;
++
++import com.example.core.CoreUtils;
++import com.example.greeter.Greeter;
++
++/**
++ * Application at the deepest nesting level (level 2) that depends on
++ * libraries from level 1 ({@link Greeter}) and level 0 ({@link CoreUtils}).
++ */
++public class Main {
++    public static void main(String[] args) {
++        String name = args.length > 0 ? String.join(" ", args) : "Curie";
++
++        Greeter greeter = new Greeter(name);
++        System.out.println(greeter.greet());
++        System.out.println(greeter.greetReversed());
++        System.out.println("isBlank(\"\"): " + CoreUtils.isBlank(""));
++        System.out.println("reverse(\"" + name + "\"): " + CoreUtils.reverse(name));
++    }
++}
+\ No newline at end of file
+diff --git a/examples/nested-workspace-demo/services/greeter-lib/Curie.toml b/examples/nested-workspace-demo/services/greeter-lib/Curie.toml
+new file mode 100644
+index 0000000..bac614f
+--- /dev/null
++++ b/examples/nested-workspace-demo/services/greeter-lib/Curie.toml
+@@ -0,0 +1,12 @@
++# greeter-lib — library at level 1, depends on core-lib at level 0.
++#
++# Demonstrates a workspace dependency that crosses nesting levels:
++# greeter-lib lives inside the services/ workspace, but core-lib
++# is a direct member of the root workspace.
++
++[library]
++name    = "nested-greeter"
++version = "0.1.0"
++
++[workspace-dependencies]
++core = { path = "../../core-lib" }
+\ No newline at end of file
+diff --git a/examples/nested-workspace-demo/services/greeter-lib/src/com.example.greeter/Greeter.java b/examples/nested-workspace-demo/services/greeter-lib/src/com.example.greeter/Greeter.java
+new file mode 100644
+index 0000000..081d637
+--- /dev/null
++++ b/examples/nested-workspace-demo/services/greeter-lib/src/com.example.greeter/Greeter.java
+@@ -0,0 +1,26 @@
++package com.example.greeter;
++
++import com.example.core.CoreUtils;
++
++/**
++ * A greeter that uses {@link CoreUtils} from the root-level core-lib.
++ * Demonstrates cross-level workspace dependencies: this library lives
++ * inside the services/ nested workspace, but depends on core-lib from
++ * the root workspace.
++ */
++public final class Greeter {
++
++    private final String name;
++
++    public Greeter(String name) {
++        this.name = CoreUtils.isBlank(name) ? "World" : name;
++    }
++
++    public String greet() {
++        return "Hello, " + name + "!";
++    }
++
++    public String greetReversed() {
++        return "Hello, " + CoreUtils.reverse(name) + "!";
++    }
++}
+\ No newline at end of file
+diff --git a/web/docs/workspaces.html b/web/docs/workspaces.html
+index 5979927..8aaab70 100644
+--- a/web/docs/workspaces.html
++++ b/web/docs/workspaces.html
+@@ -162,6 +162,41 @@
+   utils  library      v0.1.0</pre>
+     </div>
+ 
++    <h2>Nested workspaces</h2>
++    <p>A workspace member can itself be a workspace. Curie recursively flattens nested workspaces into a single member list, and configuration inheritance cascades through all levels — from the outermost root, through each intermediate workspace, down to every leaf member.</p>
++
++    <div class="code">
++      <header>
++        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
++        <span>3-level nested workspace</span>
++      </header>
++<pre><span class="dim"># root/ — level 0</span>
++<span class="kw">[workspace]</span>
++<span class="kw">members</span> = [<span class="str">"core-lib"</span>, <span class="str">"services"</span>]
++
++<span class="dim"># root/services/ — level 1</span>
++<span class="kw">[workspace]</span>
++<span class="kw">members</span> = [<span class="str">"greeter-lib"</span>, <span class="str">"apps"</span>]
++
++<span class="dim"># root/services/apps/ — level 2</span>
++<span class="kw">[workspace]</span>
++<span class="kw">members</span> = [<span class="str">"hello-app"</span>]</pre>
++    </div>
++
++    <p>Workspace dependencies can cross nesting levels.  When <code>curie build</code> runs from the root, all leaf members are visible and built in topo order.</p>
++    <p><strong>Duplicate detection:</strong> if the same project directory appears more than once (directly or through nesting), Curie errors immediately. This also catches cycles — a nested workspace that references its parent triggers the duplicate check.</p>
++
++    <div class="term">
++      <header>
++        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
++        <span>$ curie list  # from root</span>
++      </header>
++<pre><span class="dim">Workspace . (3 members)</span>
++  core-lib                 library      v0.1.0
++  services/greeter-lib     library      v0.1.0
++  services/apps/hello-app  application  v0.1.0</pre>
++    </div>
++
+     <h2>Parallel formatting</h2>
+     <p><code>curie fmt</code> at the workspace root fans out across every member in parallel. palantir-java-format is resolved once, then the JAR list is shared across the worker threads so there's no contention on the local cache.</p>
+ 
