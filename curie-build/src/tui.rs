@@ -233,7 +233,9 @@ fn render_loop(
     // \x1b[?7l (DECAWM off) has no crossterm equivalent.
     let _ = execute!(io::stdout(), cursor::Hide);
     let _ = write!(io::stdout(), "\x1b[?7l");
-    let _ = io::stdout().flush();
+    // Clear the screen so previous terminal content doesn't show through
+    // the initial pane layout.
+    let _ = terminal.clear();
 
     let mut state = RenderState {
         slots: names
