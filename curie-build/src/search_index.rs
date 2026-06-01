@@ -25,7 +25,7 @@ const NEXUS_INDEX_URL: &str =
     "https://repo1.maven.org/maven2/.index/nexus-maven-repository-index.gz";
 const NEXUS_PROPS_URL: &str =
     "https://repo1.maven.org/maven2/.index/nexus-maven-repository-index.properties";
-const WRITER_HEAP_BYTES: usize = 128 * 1024 * 1024;
+const WRITER_HEAP_BYTES: usize = 256 * 1024 * 1024;
 const INDEX_STALENESS_DAYS: i64 = 30;
 /// Integer.MIN_VALUE written by Java's DataOutputStream as the end-of-stream marker.
 const NEXUS_EOF_MARKER: i32 = i32::MIN;
@@ -400,7 +400,7 @@ fn build_index_from_gz() -> Result<()> {
 
     let pb = make_parse_bar(gz_size);
     let gz_dec = GzDecoder::new(ProgressReader { inner: file, pb: pb.clone() });
-    let mut rdr = BufReader::new(gz_dec);
+    let mut rdr = BufReader::with_capacity(1 << 20, gz_dec); // 1 MiB
 
     // ── Nexus binary format (Java DataOutputStream) ───────────────────────
     // Header:
