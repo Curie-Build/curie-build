@@ -216,6 +216,8 @@ fn render_loop(
     let mut background_queue: VecDeque<usize> = (visible..n).collect();
 
     // ── Initial draw ──────────────────────────────────────────────────────
+    // Hide cursor and disable line-wrap to prevent pane bleed.
+    let _ = write!(out, "\x1b[?25l\x1b[?7l");
     clear_screen(&mut out);
     for pane_idx in 0..visible {
         draw_title(&mut out, pane_idx, pane_h, &slots[pane_idx].name, None, term_w);
@@ -301,6 +303,8 @@ fn render_loop(
     // ── Cleanup: park cursor below all drawn content ───────────────────────
     let overflow_rows = if n > visible { 1 } else { 0 };
     let total_rows = visible * pane_h + overflow_rows;
+    // Restore: full scroll region, line-wrap, cursor visibility.
+    let _ = write!(out, "\x1b[r\x1b[?7h\x1b[?25h");
     move_to(&mut out, total_rows + 1, 1);
     let _ = out.flush();
 }
@@ -322,7 +326,22 @@ fn erase_to_eol(out: &mut impl Write) {
     let _ = write!(out, "\x1b[K");
 }
 
-// ── Pane drawing ──────────────────────────────────────────────────────────
+/// Set the terminal scroll region to [top, bottom] (both 1-based, inclusive).
+/// While this region is active, scroll operations (including auto-scroll when
+/// writing past the last line) are confined to those rows only — content in
+/// other panes is never pushed up or down.
+///
+/// Call `reset_scroll_region` when done to restore the full-screen region.
+fn set_scroll_region(out: &mut impl Write, top: usize, bottom: usize) {
+    let _ = write!(out, "\x1b[{};{}r", top, bottom);
+}
+
+/// Restore the terminal to a full-screen scroll region.
+fn reset_scroll_region(out: &mut impl Write) {
+    let _ = write!(out, "\x1b[r");
+}
+
+
 
 /// Draw (or redraw) the title bar for pane `pane_idx`.
 ///
@@ -372,10 +391,13 @@ fn draw_title(
 fn blank_content(out: &mut impl Write, pane_idx: usize, pane_h: usize) {
     let content_rows = pane_h - 1;
     let first_content_row = pane_idx * pane_h + 2;
+    let last_content_row = first_content_row + content_rows - 1;
+    set_scroll_region(out, first_content_row, last_content_row);
     for i in 0..content_rows {
         move_to(out, first_content_row + i, 1);
         erase_to_eol(out);
     }
+    reset_scroll_region(out);
 }
 
 /// Redraw the content area of pane `pane_idx` from `ring`.
@@ -383,6 +405,11 @@ fn blank_content(out: &mut impl Write, pane_idx: usize, pane_h: usize) {
 /// Content rows are `pane_h - 1` lines tall.  Lines are shown newest-at-bottom:
 /// for row index `i` (0 = top of content area), display `ring[i + ring_len - rows]`
 /// when `i + ring_len >= rows`, otherwise leave the row blank.
+///
+/// A per-pane DECSTBM scroll region is set for the duration of the write so
+/// that any accidental terminal auto-scroll (e.g. writing at the very last
+/// content row) only scrolls within this pane and never pushes adjacent pane
+/// titles off screen.
 fn redraw_content(
     out: &mut impl Write,
     pane_idx: usize,
@@ -394,6 +421,10 @@ fn redraw_content(
     let ring_len = ring.len();
     // Title is at screen row `pane_idx * pane_h + 1`; content starts one below.
     let first_content_row = pane_idx * pane_h + 2;
+    let last_content_row = first_content_row + content_rows - 1;
+
+    // Restrict scroll region to this pane's content rows only.
+    set_scroll_region(out, first_content_row, last_content_row);
 
     for i in 0..content_rows {
         let screen_row = first_content_row + i;
@@ -410,6 +441,9 @@ fn redraw_content(
         }
         // else: row stays blank
     }
+
+    // Restore full-screen scroll region so subsequent moves aren't confined.
+    reset_scroll_region(out);
 }
 
 /// Draw (or redraw) the overflow summary line below all panes.
