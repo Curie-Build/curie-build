@@ -1,10 +1,14 @@
 //! Tantivy-based local index of Maven Central artifacts for interactive `curie add` search.
 //!
-//! Index directory: `~/.curie/artifact-index/`
-//! Meta sidecar:    `~/.curie/artifact-index.meta.json`
+//! Paths (all under `~/.curie/`):
+//!   `nexus-index.gz`      — cached compressed index (kept after build)
+//!   `nexus-index.gz.tmp`  — in-progress download (deleted on completion)
+//!   `artifact-index/`     — Tantivy segment directory
+//!   `artifact-index.tmp/` — build workspace (renamed atomically on success)
+//!   `artifact-index.meta.json` — timestamp + artifact count sidecar
 
 use std::collections::HashMap;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -12,7 +16,9 @@ use flate2::read::GzDecoder;
 use indicatif::{ProgressBar, ProgressStyle};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, Query, TermQuery};
-use tantivy::schema::{IndexRecordOption, NamedFieldDocument, OwnedValue, Schema, STORED, STRING, TEXT};
+use tantivy::schema::{
+    IndexRecordOption, NamedFieldDocument, OwnedValue, Schema, STORED, STRING, TEXT,
+};
 use tantivy::{doc, Document, Index, TantivyDocument, Term};
 
 const NEXUS_INDEX_URL: &str =
@@ -21,22 +27,24 @@ const NEXUS_PROPS_URL: &str =
     "https://repo1.maven.org/maven2/.index/nexus-maven-repository-index.properties";
 const WRITER_HEAP_BYTES: usize = 128 * 1024 * 1024;
 const INDEX_STALENESS_DAYS: i64 = 30;
+/// Integer.MIN_VALUE written by Java's DataOutputStream as the end-of-stream marker.
+const NEXUS_EOF_MARKER: i32 = i32::MIN;
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Fields and reader for the Tantivy artifact index.
+/// Open handle to the Tantivy artifact index used by [`search`] and [`total_count`].
 pub struct IndexHandle {
     pub reader: tantivy::IndexReader,
     pub schema: Schema,
-    /// Stored for direct document lookups; search queries use `f_coord_text`.
+    /// Stored for possible direct lookups; queries use `f_coord_text`.
     #[allow(dead_code)]
     pub f_coord: tantivy::schema::Field,
     pub f_coord_text: tantivy::schema::Field,
     pub f_name: tantivy::schema::Field,
     pub f_description: tantivy::schema::Field,
-    /// Stored for potential direct queries; retrieved via field name in search results.
+    /// Stored for possible direct queries; results retrieved via field name.
     #[allow(dead_code)]
     pub f_version: tantivy::schema::Field,
 }
@@ -50,7 +58,7 @@ pub struct ArtifactRecord {
 }
 
 // ---------------------------------------------------------------------------
-// Serde metadata sidecar
+// Metadata sidecar
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -83,6 +91,18 @@ pub fn index_dir() -> PathBuf {
     curie_home().join("artifact-index")
 }
 
+fn index_tmp_dir() -> PathBuf {
+    curie_home().join("artifact-index.tmp")
+}
+
+fn gz_cache_path() -> PathBuf {
+    curie_home().join("nexus-index.gz")
+}
+
+fn gz_tmp_path() -> PathBuf {
+    curie_home().join("nexus-index.gz.tmp")
+}
+
 fn meta_path() -> PathBuf {
     curie_home().join("artifact-index.meta.json")
 }
@@ -96,6 +116,22 @@ fn curie_home() -> PathBuf {
 fn read_meta() -> Option<IndexMeta> {
     let content = std::fs::read_to_string(meta_path()).ok()?;
     serde_json::from_str(&content).ok()
+}
+
+fn is_dir_empty(path: &std::path::Path) -> bool {
+    std::fs::read_dir(path)
+        .map(|mut d| d.next().is_none())
+        .unwrap_or(true)
+}
+
+fn gz_present() -> bool {
+    let p = gz_cache_path();
+    p.exists() && p.metadata().map(|m| m.len() > 1024).unwrap_or(false)
+}
+
+fn index_present() -> bool {
+    let d = index_dir();
+    d.exists() && !is_dir_empty(&d)
 }
 
 // ---------------------------------------------------------------------------
@@ -123,37 +159,57 @@ fn make_schema() -> (
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Return an open `IndexHandle`, downloading and building the index if needed.
+/// Return an open `IndexHandle`, downloading and/or building the index as needed.
+///
+/// Strategy:
+/// * If `force_refresh`: re-download the gzip (unless `offline`), then rebuild.
+/// * If index is absent but the cached gzip exists: rebuild without re-downloading.
+/// * If index is absent and gzip is absent: download then build.
+/// * If index is present: open it, warn if stale.
 pub fn ensure_index(force_refresh: bool, offline: bool) -> Result<IndexHandle> {
-    let dir = index_dir();
-    let is_absent = !dir.exists()
-        || std::fs::read_dir(&dir)
-            .map(|mut d| d.next().is_none())
-            .unwrap_or(true);
+    let home = curie_home();
+    std::fs::create_dir_all(&home).context("failed to create ~/.curie")?;
 
-    if force_refresh || is_absent {
-        if offline {
+    if force_refresh {
+        if !offline {
+            download_gz()?;
+        } else if !gz_present() {
             anyhow::bail!(
-                "No artifact index found at {}.\n\
-                 Run `curie add` without --offline to download it.",
-                dir.display()
+                "No cached index file at {}.\n\
+                 Run `curie add --refresh-index` without --offline to download it.",
+                gz_cache_path().display()
             );
         }
-        download_and_build_index()?;
-    } else if let Some(meta) = read_meta() {
-        let age = meta.age_days();
-        if age > INDEX_STALENESS_DAYS {
-            eprintln!(
-                "  Index is {} days old. Run `curie add --refresh-index` to update.",
-                age
-            );
+        build_index_from_gz()?;
+    } else if !index_present() {
+        if !gz_present() {
+            if offline {
+                anyhow::bail!(
+                    "No artifact index found. Run `curie add` without --offline to download it."
+                );
+            }
+            download_gz()?;
+        } else {
+            eprintln!("  Rebuilding index from cached download…");
+        }
+        build_index_from_gz()?;
+    } else {
+        // Index is present; check staleness
+        if let Some(meta) = read_meta() {
+            let age = meta.age_days();
+            if age > INDEX_STALENESS_DAYS {
+                eprintln!(
+                    "  Index is {} days old. Run `curie add --refresh-index` to update.",
+                    age
+                );
+            }
         }
     }
 
     open_index()
 }
 
-/// Search the artifact index.  Returns up to `limit` results ordered by BM25 relevance.
+/// Search the artifact index. Returns up to `limit` results ordered by BM25 relevance.
 pub fn search(handle: &IndexHandle, query_str: &str, limit: usize) -> Result<Vec<ArtifactRecord>> {
     let q = query_str.trim().to_lowercase();
     let tokens: Vec<&str> = q.split_whitespace().collect();
@@ -259,7 +315,7 @@ fn open_index() -> Result<IndexHandle> {
 }
 
 // ---------------------------------------------------------------------------
-// Index download + build
+// Download
 // ---------------------------------------------------------------------------
 
 fn fetch_timestamp_ms() -> Option<i64> {
@@ -277,8 +333,19 @@ fn fetch_timestamp_ms() -> Option<i64> {
     None
 }
 
-fn download_and_build_index() -> Result<()> {
-    let timestamp_ms = fetch_timestamp_ms().unwrap_or(0);
+/// Download the Nexus index gzip to `~/.curie/nexus-index.gz`.
+/// Uses a `.tmp` file to avoid leaving a partial file on interruption.
+fn download_gz() -> Result<()> {
+    let home = curie_home();
+    std::fs::create_dir_all(&home).context("failed to create ~/.curie")?;
+
+    let gz = gz_cache_path();
+    let tmp = gz_tmp_path();
+
+    // Remove leftover .tmp from a previous interrupted download
+    if tmp.exists() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 
     eprintln!("  Downloading Maven Central artifact index (this only happens once)…");
 
@@ -288,29 +355,82 @@ fn download_and_build_index() -> Result<()> {
         .build()
         .context("failed to build HTTP client")?;
 
-    let response = client
+    let mut response = client
         .get(NEXUS_INDEX_URL)
         .send()
         .context("failed to connect to Maven Central")?;
 
-    let pb = make_download_bar(response.content_length());
-    let gz = GzDecoder::new(ProgressReader { inner: response, pb: pb.clone() });
-    let mut rdr = BufReader::new(gz);
+    let content_length = response.content_length();
+    let pb = make_download_bar(content_length);
 
-    let version_byte = read_u8(&mut rdr).context("failed to read index version")?;
-    anyhow::ensure!(version_byte == 1, "unexpected Nexus index version {}", version_byte);
-    let _header_ts = read_i64(&mut rdr)?;
+    let mut file =
+        std::fs::File::create(&tmp).with_context(|| format!("failed to create {}", tmp.display()))?;
 
-    // First pass: collect best record per (groupId:artifactId)
+    let mut pr = ProgressReader { inner: &mut response, pb: pb.clone() };
+    std::io::copy(&mut pr, &mut file).context("download failed")?;
+    file.flush().context("failed to flush gz file")?;
+    drop(file);
+
+    std::fs::rename(&tmp, &gz).context("failed to finalise download")?;
+    pb.finish_with_message("Downloaded");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Index build
+// ---------------------------------------------------------------------------
+
+/// Parse `~/.curie/nexus-index.gz` and write the Tantivy index.
+///
+/// Builds into a temp directory and renames atomically, so a failed build
+/// never corrupts an existing good index.
+fn build_index_from_gz() -> Result<()> {
+    let gz = gz_cache_path();
+    anyhow::ensure!(
+        gz.exists(),
+        "Cached index file not found at {}. Re-run without --offline.",
+        gz.display()
+    );
+
+    let timestamp_ms = fetch_timestamp_ms().unwrap_or(0);
+
+    let file = std::fs::File::open(&gz)
+        .with_context(|| format!("failed to open {}", gz.display()))?;
+    let gz_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+
+    let pb = make_parse_bar(gz_size);
+    let gz_dec = GzDecoder::new(ProgressReader { inner: file, pb: pb.clone() });
+    let mut rdr = BufReader::new(gz_dec);
+
+    // ── Nexus binary format (Java DataOutputStream) ───────────────────────
+    // Header:
+    //   [1 byte]  format version (= 1)
+    //   [8 bytes] timestamp (ms, big-endian long)
+    //
+    // Records — repeat until terminator:
+    //   [4 bytes] field_count  (> 0 for real records; 0 or Integer.MIN_VALUE = end)
+    //   per field:
+    //     writeUTF(name)  → [2 bytes big-endian u16 len] + [N bytes]
+    //     writeUTF(value) → [2 bytes big-endian u16 len] + [M bytes]
+    //
+    // NOTE: there is NO per-record "type" integer — only field_count.
+
+    let _version = read_u8(&mut rdr).context("failed to read index header byte")?;
+    let _header_ts = read_i64(&mut rdr).context("failed to read index timestamp")?;
+
+    // First pass: accumulate best (latest) record per coord
     let mut map: HashMap<String, BestRecord> = HashMap::with_capacity(600_000);
 
     loop {
-        let rec_type = match read_i32(&mut rdr) {
-            Ok(t) => t,
+        let field_count: usize = match read_i32(&mut rdr) {
+            // 0 and Integer.MIN_VALUE are end-of-stream markers
+            Ok(0) | Ok(NEXUS_EOF_MARKER) => break,
+            // Any other negative value is also treated as EOF
+            Ok(fc) if fc < 0 => break,
+            Ok(fc) => fc as usize,
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e).context("error reading field count"),
         };
-        let field_count = read_i32(&mut rdr)? as usize;
 
         let mut g = String::new();
         let mut a = String::new();
@@ -321,9 +441,24 @@ fn download_and_build_index() -> Result<()> {
         let mut d_fld = String::new();
         let mut u_fld = String::new();
 
+        let mut ok = true;
         for _ in 0..field_count {
-            let fname = read_utf(&mut rdr)?;
-            let fval = read_utf(&mut rdr)?;
+            let fname = match read_utf(&mut rdr) {
+                Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    ok = false;
+                    break;
+                }
+                Err(e) => return Err(e).context("error reading field name"),
+            };
+            let fval = match read_utf(&mut rdr) {
+                Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    ok = false;
+                    break;
+                }
+                Err(e) => return Err(e).context("error reading field value"),
+            };
             match fname.as_str() {
                 "g" => g = fval,
                 "a" => a = fval,
@@ -336,12 +471,11 @@ fn download_and_build_index() -> Result<()> {
                 _ => {}
             }
         }
-
-        if rec_type != 1 {
-            continue; // only ADD/UPDATE
+        if !ok {
+            break;
         }
 
-        // Fall back to `u` field when individual fields are absent
+        // Fall back to `u` field: "groupId|artifactId|version|classifier|packaging"
         if (g.is_empty() || a.is_empty()) && !u_fld.is_empty() {
             let parts: Vec<&str> = u_fld.splitn(5, '|').collect();
             if parts.len() >= 2 {
@@ -386,20 +520,21 @@ fn download_and_build_index() -> Result<()> {
         }
     }
 
-    pb.finish_with_message("Downloaded");
+    pb.finish_with_message("Parsed");
 
     let artifact_count = map.len() as u64;
     eprintln!("  Indexing {} artifacts…", artifact_count);
 
-    // Second pass: write to Tantivy
-    let dir = index_dir();
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).context("failed to remove old index")?;
+    // Build Tantivy index into a temp dir, then atomically rename
+    let tmp_dir = index_tmp_dir();
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir).context("failed to remove old temp index")?;
     }
-    std::fs::create_dir_all(&dir).context("failed to create index directory")?;
+    std::fs::create_dir_all(&tmp_dir).context("failed to create temp index directory")?;
 
     let (schema, f_coord, f_coord_text, f_name, f_description, f_version) = make_schema();
-    let index = Index::create_in_dir(&dir, schema).context("failed to create Tantivy index")?;
+    let index =
+        Index::create_in_dir(&tmp_dir, schema).context("failed to create Tantivy index")?;
 
     let idx_pb = ProgressBar::new(artifact_count);
     idx_pb.set_style(
@@ -429,9 +564,16 @@ fn download_and_build_index() -> Result<()> {
     }
     writer.commit().context("failed to commit index")?;
     idx_pb.finish_with_message("Indexed");
+    drop(writer);
 
-    let home = curie_home();
-    std::fs::create_dir_all(&home).context("failed to create ~/.curie")?;
+    // Atomic replace: remove old index dir (if any), rename temp into place
+    let final_dir = index_dir();
+    if final_dir.exists() {
+        std::fs::remove_dir_all(&final_dir).context("failed to remove old index")?;
+    }
+    std::fs::rename(&tmp_dir, &final_dir).context("failed to install new index")?;
+
+    // Write metadata sidecar
     let meta = IndexMeta { index_timestamp_ms: timestamp_ms, artifact_count };
     std::fs::write(meta_path(), serde_json::to_string_pretty(&meta)?)
         .context("failed to write index metadata")?;
@@ -441,7 +583,7 @@ fn download_and_build_index() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Binary-format helpers (Java DataOutputStream)
+// Binary-format helpers (Java DataOutputStream / writeUTF)
 // ---------------------------------------------------------------------------
 
 fn read_u8<R: Read>(r: &mut R) -> std::io::Result<u8> {
@@ -493,6 +635,30 @@ fn make_download_bar(content_length: Option<u64>) -> ProgressBar {
         pb.set_style(
             ProgressStyle::default_spinner()
                 .template("{spinner:.green} [{elapsed_precise}] {bytes} downloaded")
+                .unwrap(),
+        );
+        pb
+    }
+}
+
+fn make_parse_bar(gz_size: u64) -> ProgressBar {
+    if gz_size > 0 {
+        let pb = ProgressBar::new(gz_size);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] \
+                     {bytes}/{total_bytes} parsed ({eta})",
+                )
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        pb
+    } else {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} [{elapsed_precise}] {bytes} parsed")
                 .unwrap(),
         );
         pb
@@ -599,23 +765,26 @@ mod tests {
 
     #[test]
     fn parse_nexus_header_version() {
-        let bytes: &[u8] = &[1, 0, 0, 0, 0, 0, 0, 0, 0, 42];
+        // 1 byte version, 8 bytes timestamp
+        let bytes: &[u8] = &[1, 0, 0, 0, 0, 0, 0, 0, 42, 99];
         let mut cur = std::io::Cursor::new(bytes);
         assert_eq!(read_u8(&mut cur).unwrap(), 1);
+        // timestamp bytes follow
+        let ts = read_i64(&mut cur).unwrap();
+        assert_eq!(ts, 0x_00_00_00_00_00_00_00_2a_i64); // 42
     }
 
     #[test]
     fn parse_nexus_single_record() {
+        // field_count=1, name="g", value="com.example"  (no record-type prefix)
         let mut bytes: Vec<u8> = Vec::new();
-        bytes.extend_from_slice(&1i32.to_be_bytes()); // type = ADD
-        bytes.extend_from_slice(&1i32.to_be_bytes()); // 1 field
+        bytes.extend_from_slice(&1i32.to_be_bytes()); // field_count = 1
         bytes.extend_from_slice(&1u16.to_be_bytes()); // name len = 1
         bytes.push(b'g');
         bytes.extend_from_slice(&11u16.to_be_bytes()); // value len = 11
         bytes.extend_from_slice(b"com.example");
         let mut cur = std::io::Cursor::new(&bytes[..]);
-        assert_eq!(read_i32(&mut cur).unwrap(), 1);
-        assert_eq!(read_i32(&mut cur).unwrap(), 1);
+        assert_eq!(read_i32(&mut cur).unwrap(), 1); // field count
         assert_eq!(read_utf(&mut cur).unwrap(), "g");
         assert_eq!(read_utf(&mut cur).unwrap(), "com.example");
     }
