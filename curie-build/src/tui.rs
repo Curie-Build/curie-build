@@ -34,14 +34,14 @@ use crossterm::{cursor, execute};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
-/// Minimum pane height (1 title row + 8 content rows).
+/// Minimum pane height (2 border rows + 7 content rows).
 pub(crate) const MIN_PANE_HEIGHT: usize = 9;
 
 // ── Layout ────────────────────────────────────────────────────────────────
@@ -326,15 +326,7 @@ fn render_frame(f: &mut Frame, state: &RenderState) {
     for (pane_idx, &slot_idx) in state.pane_to_slot.iter().enumerate() {
         let pane_area = chunks[pane_idx];
         let slot = &state.slots[slot_idx];
-
-        // Split pane into title row + content area.
-        let pane_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(pane_area);
-
-        render_title(f, pane_chunks[0], &slot.name, slot.done);
-        render_content(f, pane_chunks[1], &slot.ring);
+        render_pane(f, pane_area, &slot.name, slot.done, &slot.ring);
     }
 
     // Draw overflow line.
@@ -346,47 +338,48 @@ fn render_frame(f: &mut Frame, state: &RenderState) {
 
 // ── Pane widgets ──────────────────────────────────────────────────────────
 
-/// Render the title bar for one pane.
+/// Render one pane: a bordered box with a styled title and content inside.
 ///
-/// No background colour — only text colour changes with state:
-///   running  → cyan name, dim dashes
-///   success  → green name + ✓
-///   failure  → red   name + ✗
-///
-/// Format:  ` member-name ────────────────────── ✓ `
-fn render_title(f: &mut Frame, area: Rect, name: &str, done: Option<bool>) {
-    let name_color = match done {
-        None        => Color::Cyan,
-        Some(true)  => Color::Green,
-        Some(false) => Color::Red,
+/// Border + title colour changes with state:
+///   running  → dim border, bold cyan name
+///   success  → bold green border + name + ✓
+///   failure  → bold red border + name + ✗
+fn render_pane(
+    f: &mut Frame,
+    area: Rect,
+    name: &str,
+    done: Option<bool>,
+    ring: &VecDeque<String>,
+) {
+    let (color, status) = match done {
+        None           => (Color::Cyan,  ""),
+        Some(true)     => (Color::Green, " ✓"),
+        Some(false)    => (Color::Red,   " ✗"),
     };
 
-    let name_style = Style::new().fg(name_color).add_modifier(Modifier::BOLD);
-    let dim        = Style::new().add_modifier(Modifier::DIM);
-
-    let mut spans = vec![
-        Span::styled(" ", dim),
-        Span::styled(name.to_string(), name_style),
-        Span::styled(" ", dim),
-    ];
-
-    let (status_str, status_cols) = match done {
-        None           => ("",   0usize),
-        Some(true)     => ("✓ ", 2),
-        Some(false)    => ("✗ ", 2),
+    let border_style = match done {
+        None  => Style::new().fg(color).add_modifier(Modifier::DIM),
+        _     => Style::new().fg(color).add_modifier(Modifier::BOLD),
     };
+    let title_style = Style::new().fg(color).add_modifier(Modifier::BOLD);
 
-    let used = 1 + name.len() + 1 + status_cols;
-    let fill_cols = (area.width as usize).saturating_sub(used);
-    if fill_cols > 0 {
-        spans.push(Span::styled("─".repeat(fill_cols), dim));
-    }
+    let title_left  = Line::from(vec![
+        Span::styled(format!(" {} ", name), title_style),
+    ]);
+    let title_right = Line::from(vec![
+        Span::styled(format!("{} ", status), title_style),
+    ]);
 
-    if !status_str.is_empty() {
-        spans.push(Span::styled(status_str, name_style));
-    }
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(title_left)
+        .title_alignment(Alignment::Left)
+        .title_bottom(title_right.alignment(Alignment::Right));
 
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    render_content(f, inner, ring);
 }
 
 /// Render the content area of one pane from its ring buffer.
