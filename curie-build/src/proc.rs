@@ -80,6 +80,10 @@ fn spawn_pty(
         .map(|d| d.to_path_buf())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     cb.cwd(&cwd);
+    // Override COLUMNS so tools that read it (docker, native-image progress
+    // bars, etc.) also use the reduced content width rather than the parent's
+    // full-terminal value.
+    cb.env("COLUMNS", cols.to_string());
 
     let mut child = pair
         .slave
