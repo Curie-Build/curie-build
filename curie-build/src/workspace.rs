@@ -997,7 +997,7 @@ pub fn build_all(workspace_root: &Path, opts: build::BuildOptions, jobs: usize) 
     let ws = load(workspace_root)?;
     let subset: Vec<usize> = (0..ws.members.len()).collect();
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, |m, extra_cp| {
+        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, true, |m, extra_cp| {
             build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
         });
     }
@@ -1016,7 +1016,7 @@ pub fn build_one(
     let ws = load(workspace_root)?;
     let subset = transitive_closure(&ws, member_index);
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, |m, extra_cp| {
+        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, true, |m, extra_cp| {
             build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
         });
     }
@@ -1035,7 +1035,7 @@ pub fn build_subtree(
     let ws = load(workspace_root)?;
     let subset = transitive_closure_multi(&ws, member_indices);
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, |m, extra_cp| {
+        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, true, |m, extra_cp| {
             build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
         });
     }
@@ -1049,7 +1049,7 @@ pub fn test_all(workspace_root: &Path, filter: Option<&str>, offline: bool, jobs
     let ws = load(workspace_root)?;
     let subset: Vec<usize> = (0..ws.members.len()).collect();
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, |m, extra_cp| {
+        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, true, |m, extra_cp| {
             test_one_member(m, filter, offline, extra_cp)
         });
     }
@@ -1069,7 +1069,7 @@ pub fn test_one(
     let ws = load(workspace_root)?;
     let subset = transitive_closure(&ws, member_index);
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, |m, extra_cp| {
+        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, true, |m, extra_cp| {
             test_one_member(m, filter, offline, extra_cp)
         });
     }
@@ -1089,7 +1089,7 @@ pub fn test_subtree(
     let ws = load(workspace_root)?;
     let subset = transitive_closure_multi(&ws, member_indices);
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, |m, extra_cp| {
+        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, true, |m, extra_cp| {
             test_one_member(m, filter, offline, extra_cp)
         });
     }
@@ -1271,7 +1271,7 @@ pub fn clean_all(workspace_root: &Path, jobs: usize) -> Result<()> {
     let ws = load(workspace_root)?;
     let subset: Vec<usize> = (0..ws.members.len()).collect();
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "clean", jobs, false, |m, _extra_cp| {
+        return crate::parallel::run_jobs(&ws, &subset, "clean", jobs, false, false, |m, _extra_cp| {
             build::clean(&m.path).map(|_| Vec::new())
         });
     }
@@ -1285,7 +1285,7 @@ pub fn clean_all(workspace_root: &Path, jobs: usize) -> Result<()> {
 pub fn clean_subtree(workspace_root: &Path, member_indices: &[usize], jobs: usize) -> Result<()> {
     let ws = load(workspace_root)?;
     if member_indices.len() > 1 {
-        return crate::parallel::run_jobs(&ws, member_indices, "clean", jobs, false, |m, _| {
+        return crate::parallel::run_jobs(&ws, member_indices, "clean", jobs, false, false, |m, _| {
             build::clean(&m.path).map(|_| Vec::new())
         });
     }

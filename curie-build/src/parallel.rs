@@ -401,6 +401,7 @@ pub fn run_jobs<F>(
     action_name: &str,
     jobs: usize,
     respect_dag: bool,
+    allow_tui: bool,
     run: F,
 ) -> Result<()>
 where
@@ -443,7 +444,7 @@ where
     // output, --no-color, tiny terminals) falls through to the prefix-mux.
 
     let term_h = crate::term::height().unwrap_or(0) as usize;
-    let use_tui = crate::term::is_tty() && {
+    let use_tui = allow_tui && crate::term::is_tty() && {
         let (vis, _) = crate::tui::tui_layout(n, term_h);
         vis > 0
     };
