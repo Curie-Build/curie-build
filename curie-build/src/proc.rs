@@ -43,10 +43,16 @@ fn spawn_pty(
     use std::io::Read;
 
     let pty_system = native_pty_system();
+    // Report a narrower PTY width so child output doesn't wrap past the edge
+    // of the terminal: subtract the prefix column ("name │ ") and keep a
+    // floor of 40 so very-long prefixes don't produce unusably narrow output.
+    let cols = terminal_cols()
+        .saturating_sub(slot.prefix_visual_len as u16)
+        .max(40);
     let pair = pty_system
         .openpty(PtySize {
             rows: 50,
-            cols: terminal_cols(),
+            cols,
             pixel_width: 0,
             pixel_height: 0,
         })

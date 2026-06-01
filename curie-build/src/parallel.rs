@@ -115,8 +115,12 @@ const RESET: &str = "\x1b[0m";
 /// [`MuxSlot::push_line`] and [`MuxSlot::write_raw`]; flushed contiguously to
 /// the shared stdout sink.
 pub struct MuxSlot {
-    /// Pre-formatted prefix string: `"[color]declared   [reset] | "` or `"declared    | "`.
+    /// Pre-formatted prefix string: `"[color]declared   [reset] │ "` or `"declared    │ "`.
     prefix: String,
+    /// Visual column width of the prefix (ANSI codes excluded).
+    /// Used by [`crate::proc::spawn_pty`] to report a reduced PTY width so
+    /// child tool output fits without wrapping past the right margin.
+    pub(crate) prefix_visual_len: usize,
     pending: Mutex<SlotState>,
     log: Mutex<std::fs::File>,
     shared_out: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -133,24 +137,27 @@ impl MuxSlot {
     fn new(
         declared: &str,
         color_idx: usize,
-        pad_to: usize, // width to pad `declared` to so all `|` separators align
+        pad_to: usize, // width to pad `declared` to so all │ separators align
         log_file: std::fs::File,
         shared_out: Arc<Mutex<Box<dyn Write + Send>>>,
         flush_timeout: Duration,
     ) -> Self {
         let prefix = if crate::term::use_color() {
             format!(
-                "{}{:<width$}{} | ",
+                "{}{:<width$}{} │ ",
                 PALETTE[color_idx % PALETTE.len()],
                 declared,
                 RESET,
                 width = pad_to,
             )
         } else {
-            format!("{:<width$} | ", declared, width = pad_to)
+            format!("{:<width$} │ ", declared, width = pad_to)
         };
+        // Visual width = pad_to + " │ " (3 columns; │ is a single-width char).
+        let prefix_visual_len = pad_to + 3;
         MuxSlot {
             prefix,
+            prefix_visual_len,
             pending: Mutex::new(SlotState {
                 lines: Vec::new(),
                 first_at: None,
@@ -501,6 +508,7 @@ mod tests {
         let log = tempfile::tempfile().unwrap();
         MuxSlot {
             prefix: prefix.to_string(),
+            prefix_visual_len: prefix.chars().count(), // approximate; fine for tests
             pending: Mutex::new(SlotState { lines: Vec::new(), first_at: None }),
             log: Mutex::new(log),
             shared_out: sink,
@@ -655,7 +663,7 @@ mod tests {
     #[test]
     fn mux_slot_buffers_then_flushes() {
         let (buf, sink) = vec_sink();
-        let slot = make_slot("proj | ", sink);
+        let slot = make_slot("proj │ ", sink);
 
         slot.push_line("line one".to_string());
         slot.push_line("line two".to_string());
@@ -669,42 +677,42 @@ mod tests {
         let text = std::str::from_utf8(&bytes).unwrap();
         assert!(text.contains("line one"), "got: {text:?}");
         assert!(text.contains("line two"), "got: {text:?}");
-        assert!(text.contains("proj | "), "prefix missing: {text:?}");
+        assert!(text.contains("proj │ "), "prefix missing: {text:?}");
     }
 
     #[test]
     fn mux_slot_immediate_flush_on_completion() {
         let (buf, sink) = vec_sink();
-        let slot = make_slot("svc | ", sink);
+        let slot = make_slot("svc │ ", sink);
 
         slot.push_line("build output".to_string());
         assert!(buf.lock().unwrap().is_empty(), "should not flush until called");
 
         slot.flush(); // simulates job completion
         let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-        assert_eq!(text, "svc | build output\n");
+        assert_eq!(text, "svc │ build output\n");
     }
 
     #[test]
     fn prefix_colored_line_plain() {
         let (buf, sink) = vec_sink();
-        let slot = make_slot("myapp | ", sink);
+        let slot = make_slot("myapp │ ", sink);
 
         slot.push_line("compiler error here".to_string());
         slot.flush();
 
         let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-        assert_eq!(text, "myapp | compiler error here\n");
+        assert_eq!(text, "myapp │ compiler error here\n");
     }
 
     #[test]
     fn double_flush_is_idempotent() {
         let (buf, sink) = vec_sink();
-        let slot = make_slot("lib | ", sink);
+        let slot = make_slot("lib │ ", sink);
         slot.push_line("hello".to_string());
         slot.flush();
         slot.flush(); // second flush: nothing to write
         let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-        assert_eq!(text, "lib | hello\n"); // only one copy
+        assert_eq!(text, "lib │ hello\n"); // only one copy
     }
 }
