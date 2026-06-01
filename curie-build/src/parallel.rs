@@ -56,6 +56,33 @@ pub(crate) fn try_get_sink() -> Option<Arc<MuxSlot>> {
 ///   Blank lines are suppressed (they serve as separators in sequential output
 ///   but add noise when interleaved across members).
 /// - Sequential path (no sink): plain `println!`.
+/// Shorten a workspace-member declared path for use as a mux prefix.
+///
+/// The last path component (the project name itself) is kept in full.
+/// Every intermediate directory component is truncated to its first 3
+/// characters so that long monorepo paths don't push the `|` separator
+/// too far to the right.
+///
+/// Examples:
+///   `"hello-world"`                              → `"hello-world"`
+///   `"platform/core-lib"`                        → `"pla/core-lib"`
+///   `"nested-ws/services/apps/hello-app"`        → `"nes/ser/app/hello-app"`
+pub(crate) fn shorten_declared(declared: &str) -> String {
+    let mut parts: Vec<&str> = declared.split('/').collect();
+    if parts.len() <= 1 {
+        return declared.to_string();
+    }
+    let name = parts.pop().unwrap(); // last component kept verbatim
+    let short_dirs: Vec<&str> = parts
+        .iter()
+        .map(|d| {
+            let end = d.char_indices().nth(3).map(|(i, _)| i).unwrap_or(d.len());
+            &d[..end]
+        })
+        .collect();
+    format!("{}/{}", short_dirs.join("/"), name)
+}
+
 pub(crate) fn emit(line: &str) {
     if let Some(slot) = try_get_sink() {
         if !line.is_empty() {
@@ -299,12 +326,13 @@ where
     let n = subset.len();
     let log_name = format!("{}.log", action_name);
 
-    // Pad all declared names to the same width so the `|` separators align.
-    let pad_to = subset
+    // Shorten nested paths (intermediate dirs → 3-char prefix) for the prefix
+    // column, then pad all display names to the same width so `|` aligns.
+    let display_names: Vec<String> = subset
         .iter()
-        .map(|&i| ws.members[i].declared.len())
-        .max()
-        .unwrap_or(0);
+        .map(|&i| shorten_declared(&ws.members[i].declared))
+        .collect();
+    let pad_to = display_names.iter().map(|s| s.len()).max().unwrap_or(0);
 
     // Shared stdout sink (all prefixed lines go here).
     let shared_out: Arc<Mutex<Box<dyn Write + Send>>> =
@@ -327,7 +355,7 @@ where
                 .open(&log_path)
                 .with_context(|| format!("failed to open {}", log_path.display()))?;
             Ok(Arc::new(MuxSlot::new(
-                &m.declared,
+                &display_names[color_idx],
                 color_idx,
                 pad_to,
                 log_file,
@@ -510,6 +538,41 @@ mod tests {
         }
         let ws = crate::workspace::load(dir.path()).unwrap();
         (dir, ws)
+    }
+
+    // ── shorten_declared tests ────────────────────────────────────────────
+
+    #[test]
+    fn shorten_declared_flat_name_unchanged() {
+        assert_eq!(shorten_declared("hello-world"), "hello-world");
+    }
+
+    #[test]
+    fn shorten_declared_one_level() {
+        // One directory component → 3-char prefix, full project name.
+        assert_eq!(shorten_declared("platform/core-lib"), "pla/core-lib");
+    }
+
+    #[test]
+    fn shorten_declared_two_levels() {
+        assert_eq!(
+            shorten_declared("nested-workspace-demo/services/greeter-lib"),
+            "nes/ser/greeter-lib"
+        );
+    }
+
+    #[test]
+    fn shorten_declared_three_levels() {
+        assert_eq!(
+            shorten_declared("nested-workspace-demo/services/apps/hello-app"),
+            "nes/ser/app/hello-app"
+        );
+    }
+
+    #[test]
+    fn shorten_declared_short_component_not_truncated() {
+        // Directory component shorter than 3 chars → kept as-is.
+        assert_eq!(shorten_declared("a/b/my-lib"), "a/b/my-lib");
     }
 
     // ── Scheduler logic tests ──────────────────────────────────────────────
