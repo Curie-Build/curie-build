@@ -254,8 +254,6 @@ fn read_main_class_from_jar(jar_path: &Path) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 pub fn clean(project_root: &Path) -> Result<()> {
-    let desc = descriptor::load(project_root)?;
-
     let target_dir = project_root.join("target");
 
     if target_dir.exists() {

@@ -74,6 +74,7 @@ pub struct Finding {
 #[derive(Debug)]
 pub struct AuditReport {
     /// Path where the SBOM was written.
+    #[allow(dead_code)]
     pub sbom_path: std::path::PathBuf,
     /// All findings, in the order returned by OSV.
     pub findings: Vec<Finding>,
@@ -175,7 +176,7 @@ impl Component {
 }
 
 fn resolve_components(
-    project_root: &Path,
+    _project_root: &Path,
     desc: &Descriptor,
     opts: &AuditOptions,
 ) -> Result<Vec<Component>> {
@@ -439,6 +440,7 @@ struct OsvVulnRef {
 // Full vuln detail (used with --full).
 #[derive(Deserialize)]
 struct OsvFullVuln {
+    #[allow(dead_code)]
     id: String,
     #[serde(default)]
     summary: Option<String>,

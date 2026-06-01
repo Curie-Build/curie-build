@@ -512,7 +512,7 @@ enum ListKind {
 /// A node in the list-tree hierarchy.  Workspace nodes contain their declared
 /// members as `children`; project nodes are leaves (children is empty).
 #[derive(Debug)]
-struct ListNode {
+pub(crate) struct ListNode {
     /// Last path component — the name shown in the tree.
     name: String,
     /// Canonical absolute path for identity and ancestor tracking.
