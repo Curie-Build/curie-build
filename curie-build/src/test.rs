@@ -520,7 +520,7 @@ pub fn run_tests(
     run_cp.extend_from_slice(groovy_jars);
     run_cp.extend_from_slice(&spock_jars);
 
-    println!();
+    crate::parallel::emit("");
 
     let mut java = Command::new("java");
     if desc.java.preview_enabled() {
@@ -548,7 +548,7 @@ pub fn run_tests(
     let status = crate::proc::spawn_cmd(&mut java)
         .context("failed to invoke java — is a JRE installed?")?;
 
-    println!();
+    crate::parallel::emit("");
 
     if !status.success() {
         bail!("tests failed");
