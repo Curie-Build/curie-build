@@ -141,8 +141,9 @@ fn spawn_pty(
 }
 
 fn terminal_cols() -> u16 {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(220)
+    // Prefer the real terminal width (TIOCGWINSZ); fall back to COLUMNS, then
+    // to a sane default when stdout is not a TTY (e.g. piped to a file).
+    crate::term::width()
+        .or_else(|| std::env::var("COLUMNS").ok().and_then(|v| v.parse().ok()))
+        .unwrap_or(120)
 }
