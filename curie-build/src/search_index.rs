@@ -407,13 +407,14 @@ fn build_index_from_gz() -> Result<()> {
     //   [1 byte]  format version (= 1)
     //   [8 bytes] timestamp (ms, big-endian long)
     //
-    // Records — repeat until terminator:
-    //   [4 bytes] field_count  (> 0 for real records; 0 or Integer.MIN_VALUE = end)
+    // Records — repeat:
+    //   [4 bytes] rec_type   0=DESCRIPTOR  1=ADD/UPDATE  2=DELETE
+    //                        Integer.MIN_VALUE (0x80000000) = end-of-stream; NO
+    //                        field_count follows this sentinel value.
+    //   [4 bytes] field_count
     //   per field:
     //     writeUTF(name)  → [2 bytes big-endian u16 len] + [N bytes]
     //     writeUTF(value) → [2 bytes big-endian u16 len] + [M bytes]
-    //
-    // NOTE: there is NO per-record "type" integer — only field_count.
 
     let _version = read_u8(&mut rdr).context("failed to read index header byte")?;
     let _header_ts = read_i64(&mut rdr).context("failed to read index timestamp")?;
@@ -422,10 +423,16 @@ fn build_index_from_gz() -> Result<()> {
     let mut map: HashMap<String, BestRecord> = HashMap::with_capacity(600_000);
 
     loop {
+        // rec_type must be read before field_count; Integer.MIN_VALUE is the
+        // end-of-stream sentinel with NO following field_count.
+        let rec_type = match read_i32(&mut rdr) {
+            Ok(NEXUS_EOF_MARKER) => break,
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e).context("error reading record type"),
+        };
+
         let field_count: usize = match read_i32(&mut rdr) {
-            // 0 and Integer.MIN_VALUE are end-of-stream markers
-            Ok(0) | Ok(NEXUS_EOF_MARKER) => break,
-            // Any other negative value is also treated as EOF
             Ok(fc) if fc < 0 => break,
             Ok(fc) => fc as usize,
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
@@ -495,6 +502,13 @@ fn build_index_from_gz() -> Result<()> {
                     p = parts[4].to_string();
                 }
             }
+        }
+
+        // Only ADD/UPDATE records contain artifact data worth indexing.
+        // DESCRIPTOR (0) and DELETE (2) records are skipped after their fields
+        // have been consumed to maintain stream alignment.
+        if rec_type != 1 {
+            continue;
         }
 
         if g.is_empty() || a.is_empty() {
@@ -776,15 +790,17 @@ mod tests {
 
     #[test]
     fn parse_nexus_single_record() {
-        // field_count=1, name="g", value="com.example"  (no record-type prefix)
+        // rec_type=1 (ADD), field_count=1, name="g", value="com.example"
         let mut bytes: Vec<u8> = Vec::new();
-        bytes.extend_from_slice(&1i32.to_be_bytes()); // field_count = 1
-        bytes.extend_from_slice(&1u16.to_be_bytes()); // name len = 1
+        bytes.extend_from_slice(&1i32.to_be_bytes());  // rec_type = 1 (ADD)
+        bytes.extend_from_slice(&1i32.to_be_bytes());  // field_count = 1
+        bytes.extend_from_slice(&1u16.to_be_bytes());  // name len = 1
         bytes.push(b'g');
         bytes.extend_from_slice(&11u16.to_be_bytes()); // value len = 11
         bytes.extend_from_slice(b"com.example");
         let mut cur = std::io::Cursor::new(&bytes[..]);
-        assert_eq!(read_i32(&mut cur).unwrap(), 1); // field count
+        assert_eq!(read_i32(&mut cur).unwrap(), 1); // rec_type
+        assert_eq!(read_i32(&mut cur).unwrap(), 1); // field_count
         assert_eq!(read_utf(&mut cur).unwrap(), "g");
         assert_eq!(read_utf(&mut cur).unwrap(), "com.example");
     }
