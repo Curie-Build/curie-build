@@ -23,6 +23,7 @@ mod sources_jar;
 mod style;
 mod term;
 mod test;
+mod tui;
 mod update;
 mod workspace;
 mod wrapper;

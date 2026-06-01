@@ -28,14 +28,36 @@ use std::time::{Duration, Instant};
 
 use crate::workspace::{Member, Workspace};
 
+// ── LineSink trait ─────────────────────────────────────────────────────────
+
+/// Common interface shared by [`MuxSlot`] (prefix-mux path) and
+/// [`crate::tui::TuiSlot`] (TUI split-screen path).
+///
+/// Both paths implement the same contract:
+/// * `push_line` — called by worker threads for each line of process output.
+///   Must write the line to the member's log file immediately and queue it
+///   for display.
+/// * `flush` — called once by the worker thread after the job completes.
+///   Drains any buffered lines to the shared output.  A no-op for the TUI
+///   path (lines are never buffered there).
+/// * `prefix_visual_len` — the number of visible columns taken by the display
+///   prefix.  Used by [`crate::proc::spawn_pty`] to reduce the reported PTY
+///   width so child output fits without wrapping.  Returns `0` for the TUI
+///   path (full terminal width is available).
+pub(crate) trait LineSink: Send + Sync {
+    fn push_line(&self, line: String);
+    fn flush(&self);
+    fn prefix_visual_len(&self) -> usize;
+}
+
 // ── Thread-local output sink ───────────────────────────────────────────────
 
 thread_local! {
-    static OUTPUT_SINK: std::cell::RefCell<Option<Arc<MuxSlot>>> =
+    static OUTPUT_SINK: std::cell::RefCell<Option<Arc<dyn LineSink + Send + Sync>>> =
         std::cell::RefCell::new(None);
 }
 
-pub(crate) fn set_thread_sink(slot: Arc<MuxSlot>) {
+pub(crate) fn set_thread_sink(slot: Arc<dyn LineSink + Send + Sync>) {
     OUTPUT_SINK.with(|s| *s.borrow_mut() = Some(slot));
 }
 
@@ -43,9 +65,9 @@ pub(crate) fn clear_thread_sink() {
     OUTPUT_SINK.with(|s| *s.borrow_mut() = None);
 }
 
-/// Returns the active [`MuxSlot`] for this thread, or `None` when running on
-/// the sequential single-member path.
-pub(crate) fn try_get_sink() -> Option<Arc<MuxSlot>> {
+/// Returns the active sink for this thread, or `None` when running on the
+/// sequential single-member path.
+pub(crate) fn try_get_sink() -> Option<Arc<dyn LineSink + Send + Sync>> {
     OUTPUT_SINK.with(|s| s.borrow().clone())
 }
 
@@ -207,12 +229,23 @@ impl MuxSlot {
         }
     }
 
+    fn is_stale(&self) -> bool {
+        self.pending
+            .lock()
+            .unwrap()
+            .first_at
+            .as_ref()
+            .is_some_and(|t| t.elapsed() >= self.flush_timeout)
+    }
+}
+
+impl LineSink for MuxSlot {
     /// Push one line of output (stripped of the trailing newline).
     ///
     /// The line is written to the member's log file immediately and buffered
     /// for prefixed display on stdout (flushed contiguously on completion or
     /// after the stale timeout).
-    pub fn push_line(&self, line: String) {
+    fn push_line(&self, line: String) {
         if let Ok(mut f) = self.log.lock() {
             let _ = writeln!(f, "{}", line);
         }
@@ -225,7 +258,7 @@ impl MuxSlot {
 
     /// Flush all buffered lines to the shared stdout sink with the member prefix.
     /// Called on job completion (always) and by the flusher thread (on timeout).
-    pub fn flush(&self) {
+    fn flush(&self) {
         let mut st = self.pending.lock().unwrap();
         if st.lines.is_empty() {
             return;
@@ -241,13 +274,8 @@ impl MuxSlot {
         }
     }
 
-    fn is_stale(&self) -> bool {
-        self.pending
-            .lock()
-            .unwrap()
-            .first_at
-            .as_ref()
-            .is_some_and(|t| t.elapsed() >= self.flush_timeout)
+    fn prefix_visual_len(&self) -> usize {
+        self.prefix_visual_len
     }
 }
 
@@ -381,47 +409,110 @@ where
     let display_names = make_display_names(&declared_names);
     let pad_to = display_names.iter().map(|s| s.len()).max().unwrap_or(0);
 
-    // Shared stdout sink (all prefixed lines go here).
-    let shared_out: Arc<Mutex<Box<dyn Write + Send>>> =
-        Arc::new(Mutex::new(Box::new(std::io::stdout())));
-
-    // Create one MuxSlot per member in the subset.
-    let slots: Vec<Arc<MuxSlot>> = subset
+    // Build per-member log files (used by both TUI and prefix-mux paths).
+    let log_files: Vec<std::fs::File> = subset
         .iter()
-        .enumerate()
-        .map(|(color_idx, &idx)| -> Result<Arc<MuxSlot>> {
+        .map(|&idx| -> Result<std::fs::File> {
             let m = &ws.members[idx];
             let target_dir = m.path.join("target");
             std::fs::create_dir_all(&target_dir)
                 .with_context(|| format!("failed to create {}", target_dir.display()))?;
             let log_path = target_dir.join(&log_name);
-            let log_file = std::fs::OpenOptions::new()
+            std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
                 .truncate(true)
                 .open(&log_path)
-                .with_context(|| format!("failed to open {}", log_path.display()))?;
-            Ok(Arc::new(MuxSlot::new(
-                &display_names[color_idx],
-                color_idx,
-                pad_to,
-                log_file,
-                Arc::clone(&shared_out),
-                Duration::from_secs(5),
-            )))
+                .with_context(|| format!("failed to open {}", log_path.display()))
         })
         .collect::<Result<_>>()?;
 
-    let mux = Arc::new(Mux { slots: slots.clone() });
+    // ── Choose between TUI split-screen and prefix-mux ─────────────────────
+    //
+    // TUI activates when stdout is a TTY and the terminal is tall enough for
+    // at least one pane (MIN_PANE_HEIGHT = 9 rows).  Everything else (piped
+    // output, --no-color, tiny terminals) falls through to the prefix-mux.
 
-    println!(
-        "Workspace {} {} ({} member{})",
-        ws.root.display(),
-        action_name,
-        n,
-        if n == 1 { "" } else { "s" }
-    );
-    println!();
+    let term_h = crate::term::height().unwrap_or(0) as usize;
+    let use_tui = crate::term::is_tty() && {
+        let (vis, _) = crate::tui::tui_layout(n, term_h);
+        vis > 0
+    };
+
+    // Internal enum — lives only for the duration of this function.
+    // Holding it here ensures the TuiRenderer's Drop runs (sending Shutdown
+    // and joining the render thread) before we return.
+    enum JobMode {
+        Mux {
+            mux: Arc<Mux>,
+            stop: Arc<std::sync::atomic::AtomicBool>,
+            flusher: std::thread::JoinHandle<()>,
+        },
+        Tui {
+            // The renderer is held only for its Drop side-effect.
+            _renderer: crate::tui::TuiRenderer,
+        },
+    }
+
+    let (sinks, job_mode) = if use_tui {
+        let (vis, pane_h) = crate::tui::tui_layout(n, term_h);
+        let names: Vec<String> = display_names.clone();
+        let (renderer, tui_slots) =
+            crate::tui::TuiRenderer::new(names, log_files, vis, pane_h);
+        let sinks: Vec<Arc<dyn LineSink + Send + Sync>> = tui_slots
+            .into_iter()
+            .map(|s| s as Arc<dyn LineSink + Send + Sync>)
+            .collect();
+        (sinks, JobMode::Tui { _renderer: renderer })
+    } else {
+        // Prefix-mux: shared stdout sink protected by a Mutex.
+        let shared_out: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(Box::new(std::io::stdout())));
+        let mux_slots: Vec<Arc<MuxSlot>> = display_names
+            .iter()
+            .zip(log_files)
+            .enumerate()
+            .map(|(color_idx, (name, log_file))| {
+                Arc::new(MuxSlot::new(
+                    name,
+                    color_idx,
+                    pad_to,
+                    log_file,
+                    Arc::clone(&shared_out),
+                    Duration::from_secs(5),
+                ))
+            })
+            .collect();
+        let mux = Arc::new(Mux { slots: mux_slots.clone() });
+        // Background flusher: every 250 ms flush slots with stale buffered lines.
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop2 = Arc::clone(&stop);
+        let mux_flusher = Arc::clone(&mux);
+        let flusher = std::thread::spawn(move || {
+            while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(250));
+                mux_flusher.flush_stale();
+            }
+        });
+        let sinks: Vec<Arc<dyn LineSink + Send + Sync>> = mux_slots
+            .into_iter()
+            .map(|s| s as Arc<dyn LineSink + Send + Sync>)
+            .collect();
+        (sinks, JobMode::Mux { mux, stop, flusher })
+    };
+
+    // Header printed only for the prefix-mux path; the TUI renderer clears
+    // the screen itself when it draws the initial pane layout.
+    if matches!(job_mode, JobMode::Mux { .. }) {
+        println!(
+            "Workspace {} {} ({} member{})",
+            ws.root.display(),
+            action_name,
+            n,
+            if n == 1 { "" } else { "s" }
+        );
+        println!();
+    }
 
     // Scheduler state (all accessed only on the coordinator thread).
     let mut pending = initial_pending(ws, subset, respect_dag);
@@ -440,19 +531,8 @@ where
 
     let (tx, rx) = std::sync::mpsc::channel::<(usize, Result<Vec<PathBuf>>)>();
 
-    // Background flusher: every 250 ms flush slots with stale buffered lines.
-    let mux_flusher = Arc::clone(&mux);
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stop2 = Arc::clone(&stop);
-    let flusher = std::thread::spawn(move || {
-        while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(250));
-            mux_flusher.flush_stale();
-        }
-    });
-
     let run_ref = &run;
-    let slots_ref = &slots;
+    let sinks_ref = &sinks;
     std::thread::scope(|s| -> Result<()> {
         loop {
             // Dispatch all ready jobs up to the concurrency limit.
@@ -463,14 +543,14 @@ where
 
                 let m = &ws.members[idx];
                 let extra_cp = collect_extra_cp(&m.workspace_deps, &artifacts);
-                let slot = Arc::clone(&slots_ref[pos]);
+                let sink = Arc::clone(&sinks_ref[pos]);
                 let tx = tx.clone();
 
                 s.spawn(move || {
-                    set_thread_sink(Arc::clone(&slot));
+                    set_thread_sink(Arc::clone(&sink));
                     let result = run_ref(m, &extra_cp);
                     clear_thread_sink();
-                    slot.flush(); // flush remaining output immediately
+                    sink.flush(); // flush remaining output immediately
                     tx.send((pos, result)).ok();
                 });
                 in_flight += 1;
@@ -508,9 +588,19 @@ where
         Ok(())
     })?;
 
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    flusher.join().ok();
-    mux.flush_all();
+    // ── Shutdown ───────────────────────────────────────────────────────────
+    match job_mode {
+        JobMode::Mux { mux, stop, flusher } => {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            flusher.join().ok();
+            mux.flush_all();
+        }
+        JobMode::Tui { _renderer } => {
+            // Dropping _renderer sends TuiMsg::Shutdown to the render thread
+            // and joins it — this restores the cursor and parks it below the
+            // panes before we print errors or return to the caller.
+        }
+    }
 
     if !errors.is_empty() {
         anyhow::bail!("{}", errors.join("\n"));

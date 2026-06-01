@@ -24,8 +24,8 @@ impl Status {
 /// Run `cmd`, routing its output to the per-thread parallel mux slot (via PTY)
 /// when one is active, or running it normally otherwise.
 pub fn spawn_cmd(cmd: &mut Command) -> Result<Status> {
-    if let Some(slot) = crate::parallel::try_get_sink() {
-        spawn_pty(cmd, &slot)
+    if let Some(sink) = crate::parallel::try_get_sink() {
+        spawn_pty(cmd, &sink)
     } else {
         let s = cmd.status().context("command failed to start")?;
         Ok(Status(s.success()))
@@ -37,7 +37,7 @@ pub fn spawn_cmd(cmd: &mut Command) -> Result<Status> {
 #[cfg(unix)]
 fn spawn_pty(
     cmd: &mut Command,
-    slot: &std::sync::Arc<crate::parallel::MuxSlot>,
+    sink: &std::sync::Arc<dyn crate::parallel::LineSink + Send + Sync>,
 ) -> Result<Status> {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::io::Read;
@@ -47,7 +47,7 @@ fn spawn_pty(
     // of the terminal: subtract the prefix column ("name │ ") and keep a
     // floor of 40 so very-long prefixes don't produce unusably narrow output.
     let cols = terminal_cols()
-        .saturating_sub(slot.prefix_visual_len as u16)
+        .saturating_sub(sink.prefix_visual_len() as u16)
         .max(40);
     let pair = pty_system
         .openpty(PtySize {
@@ -111,7 +111,7 @@ fn spawn_pty(
                         let line = std::mem::take(&mut line_buf);
                         let line = line.trim_end_matches('\r').to_string();
                         if !line.is_empty() {
-                            slot.push_line(line);
+                            sink.push_line(line);
                         }
                     } else if ch != '\r' {
                         line_buf.push(ch);
@@ -121,7 +121,7 @@ fn spawn_pty(
         }
     }
     if !line_buf.is_empty() {
-        slot.push_line(line_buf);
+        sink.push_line(line_buf);
     }
 
     let exit = child.wait().context("failed to wait for child process")?;
@@ -133,7 +133,7 @@ fn spawn_pty(
 #[cfg(not(unix))]
 fn spawn_pty(
     cmd: &mut Command,
-    _slot: &std::sync::Arc<crate::parallel::MuxSlot>,
+    _sink: &std::sync::Arc<dyn crate::parallel::LineSink + Send + Sync>,
 ) -> Result<Status> {
     let s = cmd.status().context("command failed to start")?;
     Ok(Status(s.success()))
