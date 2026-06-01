@@ -29,6 +29,12 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, SyncSender};
 
+use crossterm::{
+    cursor,
+    execute,
+    terminal::{self, ClearType},
+};
+
 /// Minimum pane height (1 title row + 8 content rows).
 pub(crate) const MIN_PANE_HEIGHT: usize = 9;
 
@@ -216,6 +222,9 @@ fn render_loop(
     let mut background_queue: VecDeque<usize> = (visible..n).collect();
 
     // ── Initial draw ──────────────────────────────────────────────────────
+    // Hide cursor and disable line-wrap to prevent pane bleed.
+    let _ = execute!(out, cursor::Hide);
+    let _ = write!(out, "\x1b[?7l"); // DECAWM off — no crossterm equivalent
     clear_screen(&mut out);
     for pane_idx in 0..visible {
         draw_title(&mut out, pane_idx, pane_h, &slots[pane_idx].name, None, term_w);
@@ -304,26 +313,32 @@ fn render_loop(
     // Restore full scroll region, line-wrap, cursor visibility.
     // \x1b]8;;\x07 closes any OSC 8 hyperlink left open by process output
     // so the shell prompt does not render as a clickable link.
-    let _ = write!(out, "\x1b[r\x1b[?7h\x1b[?25h\x1b]8;;\x07");
+    let _ = write!(out, "\x1b[r\x1b[?7h\x1b]8;;\x07"); // no crossterm for these
+    let _ = execute!(out, cursor::Show);
     move_to(&mut out, total_rows + 1, 1);
     let _ = out.flush();
 }
 
-// ── ANSI primitives ───────────────────────────────────────────────────────
+// ── Terminal primitives ───────────────────────────────────────────────────
 
 /// Move the cursor to the given 1-based (row, col).
 fn move_to(out: &mut impl Write, row: usize, col: usize) {
-    let _ = write!(out, "\x1b[{};{}H", row, col);
+    // crossterm uses 0-based (col, row); our API uses 1-based (row, col).
+    let _ = execute!(out, cursor::MoveTo((col - 1) as u16, (row - 1) as u16));
 }
 
 /// Erase the entire screen and move cursor to top-left.
 fn clear_screen(out: &mut impl Write) {
-    let _ = write!(out, "\x1b[2J\x1b[H");
+    let _ = execute!(
+        out,
+        terminal::Clear(ClearType::All),
+        cursor::MoveTo(0, 0),
+    );
 }
 
 /// Erase from cursor to end of line (without moving cursor).
 fn erase_to_eol(out: &mut impl Write) {
-    let _ = write!(out, "\x1b[K");
+    let _ = execute!(out, terminal::Clear(ClearType::UntilNewLine));
 }
 
 // ── Pane drawing ──────────────────────────────────────────────────────────
