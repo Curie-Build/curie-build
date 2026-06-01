@@ -256,10 +256,6 @@ fn read_main_class_from_jar(jar_path: &Path) -> Option<String> {
 pub fn clean(project_root: &Path) -> Result<()> {
     let desc = descriptor::load(project_root)?;
 
-    crate::parallel::emit(&crate::style::headline(
-        "Cleaning", desc.buildable_name(), desc.buildable_version(),
-    ));
-
     let target_dir = project_root.join("target");
 
     if target_dir.exists() {
