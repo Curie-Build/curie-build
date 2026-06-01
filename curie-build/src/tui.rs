@@ -348,33 +348,46 @@ fn render_frame(f: &mut Frame, state: &RenderState) {
 
 /// Render the title bar for one pane.
 ///
-/// Format:  `── member-name ──────────────── ✓`
+/// The entire bar has a coloured background:
+///   running  → blue background
+///   success  → green background
+///   failure  → red background
+///
+/// Format:  ` member-name ────────────────────── ✓ `
 fn render_title(f: &mut Frame, area: Rect, name: &str, done: Option<bool>) {
-    let dim  = Style::new().add_modifier(Modifier::DIM);
-    let bold = Style::new().add_modifier(Modifier::BOLD);
+    let (bg, fg) = match done {
+        None           => (Color::Blue,  Color::White),
+        Some(true)     => (Color::Green, Color::Black),
+        Some(false)    => (Color::Red,   Color::White),
+    };
 
-    // "── " prefix (3 cols)
+    let bar   = Style::new().bg(bg).fg(fg);
+    let bold  = Style::new().bg(bg).fg(fg).add_modifier(Modifier::BOLD);
+    let dim   = Style::new().bg(bg).fg(fg).add_modifier(Modifier::DIM);
+
+    // " name " with bold name
     let mut spans = vec![
-        Span::styled("── ", dim),
+        Span::styled(" ", bar),
         Span::styled(name.to_string(), bold),
+        Span::styled(" ", bar),
     ];
 
-    // Status symbol (3 cols) or nothing.
+    // Status symbol on the right, or nothing while running.
     let (status_str, status_cols) = match done {
         None           => ("",    0usize),
-        Some(true)     => (" ✓ ", 3),
-        Some(false)    => (" ✗ ", 3),
+        Some(true)     => ("✓ ",  2),
+        Some(false)    => ("✗ ",  2),
     };
-    if !status_str.is_empty() {
-        let status_color = if done == Some(true) { Color::Green } else { Color::Red };
-        spans.push(Span::styled(status_str, Style::new().fg(status_color)));
-    }
 
-    // Dim dash fill to end of area.
-    let used = 3 + name.len() + status_cols; // "── " + name + status
+    // Dim dash fill between name and status.
+    let used = 1 + name.len() + 1 + status_cols; // " name " + status
     let fill_cols = (area.width as usize).saturating_sub(used);
     if fill_cols > 0 {
         spans.push(Span::styled("─".repeat(fill_cols), dim));
+    }
+
+    if !status_str.is_empty() {
+        spans.push(Span::styled(status_str, bold));
     }
 
     let line = Line::from(spans);
