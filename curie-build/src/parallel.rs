@@ -145,7 +145,7 @@ const PALETTE: &[&str] = &[
     "\x1b[95m",  // bright magenta
 ];
 const RESET: &str = "\x1b[0m";
-const DIM:   &str = "\x1b[2m";
+const DIM:   &str = "\x1b[38;5;240m"; // 256-colour dark-gray
 
 // ── MuxSlot ────────────────────────────────────────────────────────────────
 
