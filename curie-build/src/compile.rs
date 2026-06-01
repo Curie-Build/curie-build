@@ -218,7 +218,7 @@ pub fn compile(
             &ResolveOptions {
                 default_repos: central_repos(),
                 named_repos: extra_repos(desc),
-                progress: true,
+                progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: bom_gavs.clone(),
                 offline,
             },
@@ -246,7 +246,7 @@ pub fn compile(
             &ResolveOptions {
                 default_repos: central_repos(),
                 named_repos: extra_repos(desc),
-                progress: true,
+                progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: bom_gavs.clone(),
                 offline,
             },
@@ -396,7 +396,7 @@ pub fn compile(
             &ResolveOptions {
                 default_repos: central_repos(),
                 named_repos: extra_repos(desc),
-                progress: true,
+                progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: bom_gavs.clone(),
                 offline,
             },
@@ -432,7 +432,7 @@ pub fn compile(
             &ResolveOptions {
                 default_repos: central_repos(),
                 named_repos: extra_repos(desc),
-                progress: true,
+                progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: bom_gavs.clone(),
                 offline,
             },
