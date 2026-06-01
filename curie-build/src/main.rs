@@ -1,5 +1,7 @@
 mod add_remove;
 mod audit;
+mod search_index;
+mod search_ui;
 mod build;
 mod class_manifest;
 mod compile;
@@ -196,8 +198,9 @@ enum Cmd {
     },
     /// Add a dependency to Curie.toml
     Add {
-        /// Coordinate: "group:artifact" or "group:artifact@version"
-        coord: String,
+        /// Coordinate: "group:artifact" or "group:artifact@version".
+        /// Omit to open the interactive artifact search UI.
+        coord: Option<String>,
         /// Add to [test-dependencies] instead of [dependencies]
         #[arg(long)]
         test: bool,
@@ -210,6 +213,9 @@ enum Cmd {
         /// Do not access the network; fail if a version must be resolved
         #[arg(long)]
         offline: bool,
+        /// Re-download the local Maven Central artifact index
+        #[arg(long = "refresh-index")]
+        refresh_index: bool,
     },
     /// Remove a dependency from Curie.toml
     Remove {
@@ -501,7 +507,7 @@ fn main() {
         }
         // Handled above in the early-exit block; unreachable at runtime.
         Cmd::New { .. } | Cmd::Init { .. } => unreachable!(),
-        Cmd::Add { coord, test, annotation_processor, bom, offline } => match &ctx {
+        Cmd::Add { coord, test, annotation_processor, bom, offline, refresh_index } => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(_)
             | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
                 "`curie add` cannot run on a workspace root; \
@@ -511,8 +517,8 @@ fn main() {
             | workspace::WorkspaceContext::Standalone(_) => {
                 add_remove::run_add(
                     &cli.project,
-                    &coord,
-                    add_remove::AddOptions { test, annotation_processor, bom, offline },
+                    coord.as_deref(),
+                    add_remove::AddOptions { test, annotation_processor, bom, offline, refresh_index },
                 )
             }
         },
