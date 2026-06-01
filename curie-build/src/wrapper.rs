@@ -39,12 +39,21 @@ pub fn ensure() -> Result<PathBuf> {
         .with_context(|| format!("failed to create {}", cache.display()))?;
 
     // Atomic write: stage at .part and rename so a crashed extraction
-    // can't leave a half-written wrapper in the cache.
-    let tmp = path.with_extension("jar.part");
+    // can't leave a half-written wrapper in the cache.  The unique tmp name
+    // includes the PID so parallel builds don't clobber each other's stage file.
+    let tmp = path.with_extension(format!("jar.part.{}", std::process::id()));
     std::fs::write(&tmp, WRAPPER_JAR)
         .with_context(|| format!("failed to write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("failed to rename {} → {}", tmp.display(), path.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        // Another thread/process may have won the race and already written the
+        // final file.  If it now exists we can silently drop our copy.
+        if !path.exists() {
+            return Err(e).with_context(|| {
+                format!("failed to rename {} → {}", tmp.display(), path.display())
+            });
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
     Ok(path)
 }
 

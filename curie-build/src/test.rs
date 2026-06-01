@@ -62,7 +62,7 @@ pub fn run_tests(
     };
 
     if all_test_sources.is_empty() {
-        println!("  Tests           no test sources found");
+        crate::parallel::emit("  Tests           no test sources found");
         return Ok(());
     }
 
@@ -143,7 +143,7 @@ pub fn run_tests(
             },
         )
         .context("Spock resolution failed")?;
-        println!("  Resolve Spock   {} JAR(s)", jars.len());
+        crate::parallel::emit(&format!("  Resolve Spock   {} JAR(s)", jars.len()));
         jars
     } else {
         vec![]
@@ -300,11 +300,11 @@ pub fn run_tests(
 
     if needs_recompile_tests {
         let reason = if pre_pruned_tests > 0 { "  [stale classes removed]" } else { "" };
-        println!(
+        crate::parallel::emit(&format!(
             "  Compile tests   {} source file(s){}",
             all_test_sources.len(),
             reason,
-        );
+        ));
 
         // Shared classpath for both phases:
         //   production classes + src/main/resources + prod deps + test deps
@@ -412,11 +412,11 @@ pub fn run_tests(
                     );
                     let n = crate::class_manifest::delete_classes(&test_classes_dir, &stale)?;
                     if n > 0 {
-                        println!(
+                        crate::parallel::emit(&format!(
                             "  Stale tests     removed {} orphaned class file{}",
                             n,
                             if n == 1 { "" } else { "s" },
-                        );
+                        ));
                     }
                 }
             }
@@ -488,14 +488,14 @@ pub fn run_tests(
             write_javac_version_stamp(&project_root.join("target"), &version)?;
         }
     } else {
-        println!("  Compile tests   up to date");
+        crate::parallel::emit("  Compile tests   up to date");
     }
 
     // --- skip if stamp is newer than all inputs ------------------------------
     let stamp_path = project_root.join("target").join(".test-stamp");
 
     if filter.is_none() && !needs_test_run(&all_test_sources, classes_dir, &toml_path, &stamp_path, resources_dir, test_resources_dir) {
-        println!("  Tests           up to date");
+        crate::parallel::emit("  Tests           up to date");
         return Ok(());
     }
 

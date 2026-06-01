@@ -49,6 +49,23 @@ pub(crate) fn try_get_sink() -> Option<Arc<MuxSlot>> {
     OUTPUT_SINK.with(|s| s.borrow().clone())
 }
 
+/// Emit one line of pipeline output.
+///
+/// - Parallel path (sink active): pushes the line to the per-member mux slot
+///   so it is prefixed and flushed contiguously with the member's other output.
+///   Blank lines are suppressed (they serve as separators in sequential output
+///   but add noise when interleaved across members).
+/// - Sequential path (no sink): plain `println!`.
+pub(crate) fn emit(line: &str) {
+    if let Some(slot) = try_get_sink() {
+        if !line.is_empty() {
+            slot.push_line(line.to_string());
+        }
+    } else {
+        println!("{}", line);
+    }
+}
+
 // ── Color palette ──────────────────────────────────────────────────────────
 
 const PALETTE: &[&str] = &[
@@ -71,7 +88,7 @@ const RESET: &str = "\x1b[0m";
 /// [`MuxSlot::push_line`] and [`MuxSlot::write_raw`]; flushed contiguously to
 /// the shared stdout sink.
 pub struct MuxSlot {
-    /// Pre-formatted prefix string: `"[color]declared[reset] "` or `"declared | "`.
+    /// Pre-formatted prefix string: `"[color]declared   [reset] | "` or `"declared    | "`.
     prefix: String,
     pending: Mutex<SlotState>,
     log: Mutex<std::fs::File>,
@@ -89,14 +106,21 @@ impl MuxSlot {
     fn new(
         declared: &str,
         color_idx: usize,
+        pad_to: usize, // width to pad `declared` to so all `|` separators align
         log_file: std::fs::File,
         shared_out: Arc<Mutex<Box<dyn Write + Send>>>,
         flush_timeout: Duration,
     ) -> Self {
         let prefix = if crate::term::use_color() {
-            format!("{}{}{} ", PALETTE[color_idx % PALETTE.len()], declared, RESET)
+            format!(
+                "{}{:<width$}{} | ",
+                PALETTE[color_idx % PALETTE.len()],
+                declared,
+                RESET,
+                width = pad_to,
+            )
         } else {
-            format!("{} | ", declared)
+            format!("{:<width$} | ", declared, width = pad_to)
         };
         MuxSlot {
             prefix,
@@ -275,6 +299,13 @@ where
     let n = subset.len();
     let log_name = format!("{}.log", action_name);
 
+    // Pad all declared names to the same width so the `|` separators align.
+    let pad_to = subset
+        .iter()
+        .map(|&i| ws.members[i].declared.len())
+        .max()
+        .unwrap_or(0);
+
     // Shared stdout sink (all prefixed lines go here).
     let shared_out: Arc<Mutex<Box<dyn Write + Send>>> =
         Arc::new(Mutex::new(Box::new(std::io::stdout())));
@@ -298,6 +329,7 @@ where
             Ok(Arc::new(MuxSlot::new(
                 &m.declared,
                 color_idx,
+                pad_to,
                 log_file,
                 Arc::clone(&shared_out),
                 Duration::from_secs(5),

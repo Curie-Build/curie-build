@@ -225,7 +225,7 @@ pub fn compile(
         )
         .context("dependency resolution failed")?;
 
-        println!("  Resolve deps    {} JAR(s)", jars.len());
+        crate::parallel::emit(&format!("  Resolve deps    {} JAR(s)", jars.len()));
         jars
     };
 
@@ -252,7 +252,7 @@ pub fn compile(
             },
         )
         .context("annotation-processor resolution failed")?;
-        println!("  Resolve APs     {} JAR(s)", jars.len());
+        crate::parallel::emit(&format!("  Resolve APs     {} JAR(s)", jars.len()));
 
         // Each ap_pairs entry yields a transitive closure starting with
         // the entry's own jar (declared deps first, BFS).  Match the
@@ -402,7 +402,7 @@ pub fn compile(
             },
         )
         .context("Kotlin compiler/stdlib resolution failed")?;
-        println!("  Resolve Kotlin  {} JAR(s)", kotlin_jars.len());
+        crate::parallel::emit(&format!("  Resolve Kotlin  {} JAR(s)", kotlin_jars.len()));
 
         // Stdlib jars: everything except the compiler embeddable itself.
         // These are threaded into the compile and test runtime classpaths.
@@ -438,7 +438,7 @@ pub fn compile(
             },
         )
         .context("Groovy compiler/runtime resolution failed")?;
-        println!("  Resolve Groovy  {} JAR(s)", jars.len());
+        crate::parallel::emit(&format!("  Resolve Groovy  {} JAR(s)", jars.len()));
         groovy_jars = jars;
     } else {
         groovy_jars = Vec::new();
@@ -496,11 +496,11 @@ pub fn compile(
     };
 
     if compile_status.needs_recompile() {
-        println!(
+        crate::parallel::emit(&format!(
             "  Compile         {} source file(s)  [{}]",
             sources.len(),
             compile_status.reason()
-        );
+        ));
 
         // Wipe Kotlin-derived classes ahead of kotlinc.  kotlinc re-emits
         // every class the current Kotlin source set still produces, so any
@@ -578,21 +578,21 @@ pub fn compile(
             // kotlinc just re-emitted are back, so they're filtered out.
             let kotlin_orphans = wiped_kotlin_classes.iter().filter(|p| !p.exists()).count();
             if kotlin_orphans > 0 {
-                println!(
+                crate::parallel::emit(&format!(
                     "  Stale (Kotlin)  removed {} orphan class file{}",
                     kotlin_orphans,
                     if kotlin_orphans == 1 { "" } else { "s" },
-                );
+                ));
             }
         } else if !wiped_kotlin_classes.is_empty() {
             // Project transitioned away from Kotlin entirely (last build had
             // .kt sources, this one doesn't): kotlinc didn't run, so every
             // wiped class is an orphan by definition.
-            println!(
+            crate::parallel::emit(&format!(
                 "  Stale (Kotlin)  removed {} orphan class file{}",
                 wiped_kotlin_classes.len(),
                 if wiped_kotlin_classes.len() == 1 { "" } else { "s" },
-            );
+            ));
         }
 
         if has_groovy {
@@ -699,11 +699,11 @@ pub fn compile(
                     );
                     let n = crate::class_manifest::delete_classes(&classes_dir, &stale)?;
                     if n > 0 {
-                        println!(
+                        crate::parallel::emit(&format!(
                             "  Stale           removed {} orphaned class file{}",
                             n,
                             if n == 1 { "" } else { "s" },
-                        );
+                        ));
                     }
                 }
             }
@@ -729,7 +729,7 @@ pub fn compile(
         // pure deletions (which leave no surviving mtime to compare against).
         kt_stale::write_kt_sources(&output_dir, &kt_set)?;
     } else {
-        println!("  Compile         up to date");
+        crate::parallel::emit("  Compile         up to date");
     }
 
     let jar_name = format!(
