@@ -529,10 +529,15 @@ fn build_index_from_gz() -> Result<()> {
 
         if should_update {
             map.insert(coord, BestRecord { version: v, name: n_fld, description: d_fld });
+            let n = map.len() as u64;
+            if n.is_power_of_two() {
+                pb.set_message(format!("{} artifacts", n));
+            }
         }
     }
 
-    pb.finish_with_message("Parsed");
+    pb.set_message(format!("{} artifacts", map.len()));
+    pb.finish_with_message(format!("{} artifacts", map.len()));
 
     let artifact_count = map.len() as u64;
     eprintln!("  Indexing {} artifacts…", artifact_count);
@@ -675,7 +680,7 @@ fn make_parse_bar(gz_size: u64) -> ProgressBar {
             ProgressStyle::default_bar()
                 .template(
                     "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] \
-                     {bytes}/{total_bytes} parsed ({eta})",
+                     {bytes}/{total_bytes} parsed ({eta})  {msg}",
                 )
                 .unwrap()
                 .progress_chars("#>-"),
@@ -685,7 +690,7 @@ fn make_parse_bar(gz_size: u64) -> ProgressBar {
         let pb = ProgressBar::new_spinner();
         pb.set_style(
             ProgressStyle::default_spinner()
-                .template("{spinner:.green} [{elapsed_precise}] {bytes} parsed")
+                .template("{spinner:.green} [{elapsed_precise}] {bytes} parsed  {msg}")
                 .unwrap(),
         );
         pb
