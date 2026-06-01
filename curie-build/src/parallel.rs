@@ -83,6 +83,43 @@ pub(crate) fn shorten_declared(declared: &str) -> String {
     format!("{}/{}", short_dirs.join("/"), name)
 }
 
+/// Choose the display name for each member prefix.
+///
+/// Each member shows only its project name (the last path component) — short
+/// and unambiguous in the common case.  When two or more members in the subset
+/// share the same project name, those members fall back to `shorten_declared`
+/// (3-char directory abbreviations + full project name) so they can be told
+/// apart.
+///
+/// Examples with a subset `["core-lib", "platform/core-lib", "app"]`:
+///   `"core-lib"`          → `"nes/core-lib"`  (collision → abbreviated path)
+///   `"platform/core-lib"` → `"pla/core-lib"`  (collision → abbreviated path)
+///   `"app"`               → `"app"`            (unique → just the name)
+fn make_display_names(declared_names: &[&str]) -> Vec<String> {
+    let project_names: Vec<&str> = declared_names
+        .iter()
+        .map(|d| d.rfind('/').map_or(*d, |pos| &d[pos + 1..]))
+        .collect();
+
+    let mut counts: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    for &name in &project_names {
+        *counts.entry(name).or_insert(0) += 1;
+    }
+
+    declared_names
+        .iter()
+        .zip(project_names.iter())
+        .map(|(declared, &project)| {
+            if counts[project] == 1 {
+                project.to_string()
+            } else {
+                shorten_declared(declared)
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn emit(line: &str) {
     if let Some(slot) = try_get_sink() {
         if !line.is_empty() {
@@ -333,12 +370,13 @@ where
     let n = subset.len();
     let log_name = format!("{}.log", action_name);
 
-    // Shorten nested paths (intermediate dirs → 3-char prefix) for the prefix
-    // column, then pad all display names to the same width so `|` aligns.
-    let display_names: Vec<String> = subset
+    // Build the per-member prefix label: project name only when unique within
+    // the subset; abbreviated directory path when there is a collision.
+    let declared_names: Vec<&str> = subset
         .iter()
-        .map(|&i| shorten_declared(&ws.members[i].declared))
+        .map(|&i| ws.members[i].declared.as_str())
         .collect();
+    let display_names = make_display_names(&declared_names);
     let pad_to = display_names.iter().map(|s| s.len()).max().unwrap_or(0);
 
     // Shared stdout sink (all prefixed lines go here).
@@ -581,6 +619,42 @@ mod tests {
     fn shorten_declared_short_component_not_truncated() {
         // Directory component shorter than 3 chars → kept as-is.
         assert_eq!(shorten_declared("a/b/my-lib"), "a/b/my-lib");
+    }
+
+    // ── make_display_names tests ───────────────────────────────────────────
+
+    #[test]
+    fn display_names_all_unique_project_names() {
+        let declared = ["hello-world", "platform/core-lib", "services/app"];
+        let names = make_display_names(&declared);
+        assert_eq!(names, vec!["hello-world", "core-lib", "app"]);
+    }
+
+    #[test]
+    fn display_names_collision_falls_back_to_shortened_path() {
+        // Two members share the project name "core-lib".
+        let declared = ["core-lib", "platform/core-lib"];
+        let names = make_display_names(&declared);
+        // Both get the directory-qualified form.
+        assert_eq!(names, vec!["core-lib", "pla/core-lib"]);
+    }
+
+    #[test]
+    fn display_names_mixed_unique_and_colliding() {
+        let declared = ["app", "platform/core-lib", "services/core-lib"];
+        let names = make_display_names(&declared);
+        assert_eq!(names, vec![
+            "app",           // unique → just the name
+            "pla/core-lib",  // collision → abbreviated path
+            "ser/core-lib",  // collision → abbreviated path
+        ]);
+    }
+
+    #[test]
+    fn display_names_flat_all_unique() {
+        let declared = ["alpha", "beta", "gamma"];
+        let names = make_display_names(&declared);
+        assert_eq!(names, vec!["alpha", "beta", "gamma"]);
     }
 
     // ── Scheduler logic tests ──────────────────────────────────────────────
