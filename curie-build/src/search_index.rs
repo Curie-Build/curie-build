@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
@@ -81,6 +81,22 @@ struct BestRecord {
     version: String,
     name: String,
     description: String,
+}
+
+/// Raw fields extracted from one Nexus index record.
+#[derive(Default)]
+struct NexusFields {
+    group_id: String,
+    artifact_id: String,
+    version: String,
+    /// "jar", "pom", etc.; empty means the default "jar".
+    packaging: String,
+    /// Empty or "NA" = main artifact jar; "sources", "javadoc", etc. = skip.
+    classifier: String,
+    artifact_name: String,
+    description: String,
+    /// Fallback field: "groupId|artifactId|version|classifier[|packaging]".
+    unified_coord: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -380,181 +396,275 @@ fn download_gz() -> Result<()> {
 // Index build
 // ---------------------------------------------------------------------------
 
-/// Parse `~/.curie/nexus-index.gz` and write the Tantivy index.
+/// Top-level orchestrator: parse the cached gz, write the Tantivy index, save metadata.
 ///
-/// Builds into a temp directory and renames atomically, so a failed build
-/// never corrupts an existing good index.
+/// The Tantivy index is built in a temp directory and renamed into place atomically,
+/// so a failed build never corrupts an existing good index.
 fn build_index_from_gz() -> Result<()> {
-    let gz = gz_cache_path();
+    let gz_path = gz_cache_path();
     anyhow::ensure!(
-        gz.exists(),
+        gz_path.exists(),
         "Cached index file not found at {}. Re-run without --offline.",
-        gz.display()
+        gz_path.display()
     );
 
     let timestamp_ms = fetch_timestamp_ms().unwrap_or(0);
 
-    let file = std::fs::File::open(&gz)
-        .with_context(|| format!("failed to open {}", gz.display()))?;
-    let gz_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let compressed_size = std::fs::metadata(&gz_path).map(|m| m.len()).unwrap_or(0);
+    let parse_progress = make_parse_bar(compressed_size);
 
-    let pb = make_parse_bar(gz_size);
-    let gz_dec = GzDecoder::new(ProgressReader { inner: file, pb: pb.clone() });
-    let mut rdr = BufReader::with_capacity(1 << 20, gz_dec); // 1 MiB
+    let artifact_map = parse_gz_to_artifact_map(&gz_path, &parse_progress)?;
+    let artifact_count = artifact_map.len() as u64;
 
-    // ── Nexus binary format ───────────────────────────────────────────────
-    // Verified empirically against the actual Maven Central index file.
-    //
-    // Header:
-    //   [1 byte]  format version (= 1)
-    //   [8 bytes] timestamp (ms, big-endian long)
-    //
-    // Records — repeat until terminator:
-    //   [4 bytes i32] field_count   (0 or Integer.MIN_VALUE = end-of-stream)
-    //   per field:
-    //     [1 byte]        field type tag (Lucene field encoding; we skip it)
-    //     [2 bytes u16]   name length  (big-endian, writeUTF format)
-    //     [name_len bytes] name  (ASCII: "u", "g", "a", "v", "p", "l", "n", "d", …)
-    //     [4 bytes i32]   value length (big-endian; NOT writeUTF's 2-byte length)
-    //     [value_len bytes] value (UTF-8)
-    //
-    // There is NO per-record type integer.  All records in the full index are
-    // artifact records; they differ only in which named fields they carry.
+    parse_progress.finish_with_message(format!("{} artifacts", artifact_count));
 
-    let _version = read_u8(&mut rdr).context("failed to read index header byte")?;
-    let _header_ts = read_i64(&mut rdr).context("failed to read index timestamp")?;
+    write_artifacts_to_tantivy(&artifact_map)?;
+    save_index_metadata(timestamp_ms, artifact_count)?;
 
-    // First pass: accumulate best (latest) record per coord
-    let mut map: HashMap<String, BestRecord> = HashMap::with_capacity(600_000);
+    eprintln!("  Artifact index ready ({} artifacts).", artifact_count);
+    Ok(())
+}
 
-    loop {
-        let field_count: usize = match read_i32(&mut rdr) {
-            Ok(0) | Ok(NEXUS_EOF_MARKER) => break,
-            Ok(fc) if fc < 0 => break,
-            Ok(fc) => fc as usize,
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(e).context("error reading field count"),
-        };
+// ── Parse phase ──────────────────────────────────────────────────────────────
 
-        let mut g = String::new();
-        let mut a = String::new();
-        let mut v = String::new();
-        let mut p = String::new();
-        let mut l = String::new();
-        let mut n_fld = String::new();
-        let mut d_fld = String::new();
-        let mut u_fld = String::new();
+/// Open the cached gz, decompress it, and return a map of `"group:artifact"` →
+/// the record with the highest version seen across all raw Nexus entries.
+fn parse_gz_to_artifact_map(
+    gz_path: &Path,
+    parse_progress: &ProgressBar,
+) -> Result<HashMap<String, BestRecord>> {
+    let file = std::fs::File::open(gz_path)
+        .with_context(|| format!("failed to open {}", gz_path.display()))?;
+    let decoder = GzDecoder::new(ProgressReader { inner: file, pb: parse_progress.clone() });
+    let mut reader = BufReader::with_capacity(1 << 20, decoder); // 1 MiB buffer
+    parse_records_to_artifact_map(&mut reader, parse_progress)
+}
 
-        let mut ok = true;
-        for _ in 0..field_count {
-            // Skip the 1-byte Lucene field type tag
-            match read_u8(&mut rdr) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => { ok = false; break; }
-                Err(e) => return Err(e).context("error reading field tag"),
-            }
-            // Field name uses writeUTF: [2-byte u16 len][bytes]
-            let fname = match read_utf(&mut rdr) {
-                Ok(s) => s,
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    ok = false;
-                    break;
-                }
-                Err(e) => return Err(e).context("error reading field name"),
-            };
-            // Field value uses a 4-byte i32 length (NOT writeUTF's 2-byte length)
-            let fval = match read_value(&mut rdr) {
-                Ok(s) => s,
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    ok = false;
-                    break;
-                }
-                Err(e) => return Err(e).context("error reading field value"),
-            };
-            match fname.as_str() {
-                "g" => g = fval,
-                "a" => a = fval,
-                "v" => v = fval,
-                "p" => p = fval,
-                "l" => l = fval,
-                "n" => n_fld = fval,
-                "d" => d_fld = fval,
-                "u" => u_fld = fval,
-                _ => {}
-            }
-        }
-        if !ok {
-            break;
-        }
+/// Read every record from `reader`, resolve coordinates, filter, and deduplicate.
+///
+/// Accepts any `Read` so that unit tests can pass an in-memory cursor without
+/// a real gzip file.
+fn parse_records_to_artifact_map<R: Read>(
+    reader: &mut R,
+    progress: &ProgressBar,
+) -> Result<HashMap<String, BestRecord>> {
+    skip_nexus_header(reader)?;
 
-        // Fall back to `u` field: "groupId|artifactId|version|classifier[|packaging]"
-        if (g.is_empty() || a.is_empty()) && !u_fld.is_empty() {
-            let parts: Vec<&str> = u_fld.splitn(5, '|').collect();
-            if parts.len() >= 2 {
-                if g.is_empty() {
-                    g = parts[0].to_string();
-                }
-                if a.is_empty() {
-                    a = parts[1].to_string();
-                }
-                if v.is_empty() && parts.len() >= 3 {
-                    v = parts[2].to_string();
-                }
-                if l.is_empty() && parts.len() >= 4 && parts[3] != "NA" {
-                    l = parts[3].to_string();
-                }
-                if p.is_empty() && parts.len() >= 5 {
-                    p = parts[4].to_string();
-                }
-            }
-        }
+    let mut best_by_coord: HashMap<String, BestRecord> = HashMap::with_capacity(600_000);
 
-        if g.is_empty() || a.is_empty() {
-            continue;
-        }
+    while let Some(nexus_fields) = read_next_record(reader)? {
+        let Some((coord, record)) = resolve_artifact(nexus_fields) else { continue };
 
-        let packaging = if p.is_empty() { "jar" } else { p.as_str() };
-        if packaging != "jar" {
-            continue;
-        }
-        if !l.is_empty() && l != "NA" {
-            continue; // skip -sources, -javadoc, etc.
-        }
-
-        let coord = format!("{}:{}", g, a);
-        let should_update = map
+        let is_newer = best_by_coord
             .get(&coord)
-            .map(|existing| version_gt(&v, &existing.version))
+            .map(|existing| version_gt(&record.version, &existing.version))
             .unwrap_or(true);
 
-        if should_update {
-            map.insert(coord, BestRecord { version: v, name: n_fld, description: d_fld });
-            let n = map.len() as u64;
-            if n.is_power_of_two() {
-                pb.set_message(format!("{} artifacts", n));
+        if is_newer {
+            best_by_coord.insert(coord, record);
+            let artifact_count = best_by_coord.len() as u64;
+            if artifact_count.is_power_of_two() {
+                progress.set_message(format!("{} artifacts", artifact_count));
             }
         }
     }
 
-    pb.set_message(format!("{} artifacts", map.len()));
-    pb.finish_with_message(format!("{} artifacts", map.len()));
+    Ok(best_by_coord)
+}
 
-    let artifact_count = map.len() as u64;
+/// Skip the 9-byte stream header: 1-byte format version + 8-byte timestamp.
+fn skip_nexus_header<R: Read>(reader: &mut R) -> Result<()> {
+    read_u8(reader).context("failed to read index version byte")?;
+    read_i64(reader).context("failed to read index timestamp")?;
+    Ok(())
+}
+
+/// Read one complete record from the Nexus binary stream.
+///
+/// Returns `None` when the end-of-stream marker (`0` or `Integer.MIN_VALUE`
+/// as `field_count`) or an unexpected EOF is reached.
+///
+/// # Format (verified against the real Maven Central index)
+/// ```text
+/// [4 bytes i32]  field_count  (0 or i32::MIN = end-of-stream)
+/// per field:
+///   [1 byte]       Lucene field type tag  (skipped)
+///   [2 bytes u16]  name length            (writeUTF big-endian)
+///   [name_len]     name bytes             (ASCII: "g", "a", "v", "u", …)
+///   [4 bytes i32]  value length           (big-endian; wider than writeUTF)
+///   [value_len]    value bytes            (UTF-8)
+/// ```
+fn read_next_record<R: Read>(reader: &mut R) -> Result<Option<NexusFields>> {
+    let field_count = match read_i32(reader) {
+        Ok(0) | Ok(NEXUS_EOF_MARKER) => return Ok(None),
+        Ok(fc) if fc < 0 => return Ok(None),
+        Ok(fc) => fc as usize,
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e).context("error reading field count"),
+    };
+
+    let mut fields = NexusFields::default();
+    for _ in 0..field_count {
+        let (field_name, field_value) = match read_field(reader) {
+            Ok(pair) => pair,
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        match field_name.as_str() {
+            "g" => fields.group_id = field_value,
+            "a" => fields.artifact_id = field_value,
+            "v" => fields.version = field_value,
+            "p" => fields.packaging = field_value,
+            "l" => fields.classifier = field_value,
+            "n" => fields.artifact_name = field_value,
+            "d" => fields.description = field_value,
+            "u" => fields.unified_coord = field_value,
+            _ => {}
+        }
+    }
+    Ok(Some(fields))
+}
+
+/// Read one field: skip 1-byte Lucene tag, read name via writeUTF, read value
+/// with 4-byte length prefix.  Returns `(name, value)`.
+fn read_field<R: Read>(reader: &mut R) -> std::io::Result<(String, String)> {
+    let _lucene_type_tag = read_u8(reader)?;
+    let field_name = read_utf(reader)?;
+    let field_value = read_value(reader)?;
+    Ok((field_name, field_value))
+}
+
+/// Populate `group_id`, `artifact_id`, `version`, `classifier`, and `packaging`
+/// from the `u` (unified coordinate) field when the individual fields are absent.
+///
+/// The `u` field format is `"groupId|artifactId|version|classifier[|packaging]"`.
+/// A classifier of `"NA"` means no classifier (primary jar).
+fn fill_from_unified_coord(fields: &mut NexusFields) {
+    if (fields.group_id.is_empty() || fields.artifact_id.is_empty())
+        && !fields.unified_coord.is_empty()
+    {
+        let parts: Vec<&str> = fields.unified_coord.splitn(5, '|').collect();
+        if parts.len() >= 2 {
+            if fields.group_id.is_empty() {
+                fields.group_id = parts[0].to_string();
+            }
+            if fields.artifact_id.is_empty() {
+                fields.artifact_id = parts[1].to_string();
+            }
+            if fields.version.is_empty() && parts.len() >= 3 {
+                fields.version = parts[2].to_string();
+            }
+            if fields.classifier.is_empty() && parts.len() >= 4 && parts[3] != "NA" {
+                fields.classifier = parts[3].to_string();
+            }
+            if fields.packaging.is_empty() && parts.len() >= 5 {
+                fields.packaging = parts[4].to_string();
+            }
+        }
+    }
+}
+
+/// Return `true` when the record represents a primary jar artifact.
+///
+/// Excludes: POMs, checksums (non-jar packaging), classifier jars (`-sources`,
+/// `-javadoc`, etc.), and records with no usable coordinates.
+fn is_jar_artifact(fields: &NexusFields) -> bool {
+    if fields.group_id.is_empty() || fields.artifact_id.is_empty() {
+        return false;
+    }
+    let effective_packaging = if fields.packaging.is_empty() { "jar" } else { &fields.packaging };
+    if effective_packaging != "jar" {
+        return false;
+    }
+    if !fields.classifier.is_empty() && fields.classifier != "NA" {
+        return false;
+    }
+    true
+}
+
+/// Resolve coordinates and apply the jar filter.
+///
+/// Returns `Some((coord, record))` for indexable jar artifacts, `None` otherwise.
+fn resolve_artifact(mut fields: NexusFields) -> Option<(String, BestRecord)> {
+    fill_from_unified_coord(&mut fields);
+    if !is_jar_artifact(&fields) {
+        return None;
+    }
+    let coord = format!("{}:{}", fields.group_id, fields.artifact_id);
+    let record = BestRecord {
+        version: fields.version,
+        name: fields.artifact_name,
+        description: fields.description,
+    };
+    Some((coord, record))
+}
+
+// ── Tantivy write phase ───────────────────────────────────────────────────────
+
+/// Write every entry in `artifact_map` to a fresh Tantivy index and install it
+/// atomically, replacing any previous index.
+fn write_artifacts_to_tantivy(artifact_map: &HashMap<String, BestRecord>) -> Result<()> {
+    let artifact_count = artifact_map.len() as u64;
     eprintln!("  Indexing {} artifacts…", artifact_count);
 
-    // Build Tantivy index into a temp dir, then atomically rename
     let tmp_dir = index_tmp_dir();
-    if tmp_dir.exists() {
-        std::fs::remove_dir_all(&tmp_dir).context("failed to remove old temp index")?;
-    }
-    std::fs::create_dir_all(&tmp_dir).context("failed to create temp index directory")?;
+    prepare_build_directory(&tmp_dir)?;
 
     let (schema, f_coord, f_coord_text, f_name, f_description, f_version) = make_schema();
     let index =
         Index::create_in_dir(&tmp_dir, schema).context("failed to create Tantivy index")?;
 
-    let idx_pb = ProgressBar::new(artifact_count);
-    idx_pb.set_style(
+    let index_progress = make_index_progress_bar(artifact_count);
+    let mut writer = index
+        .writer(WRITER_HEAP_BYTES)
+        .context("failed to create index writer")?;
+
+    for (coord, record) in artifact_map {
+        writer
+            .add_document(doc!(
+                f_coord       => coord.as_str(),
+                f_coord_text  => coord.as_str(),
+                f_name        => record.name.as_str(),
+                f_description => record.description.as_str(),
+                f_version     => record.version.as_str(),
+            ))
+            .context("failed to add document")?;
+        index_progress.inc(1);
+    }
+    writer.commit().context("failed to commit index")?;
+    drop(writer);
+    index_progress.finish_with_message("Indexed");
+
+    install_index_atomically(&tmp_dir)
+}
+
+/// Clear and (re)create the temp build directory.
+fn prepare_build_directory(tmp_dir: &Path) -> Result<()> {
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(tmp_dir).context("failed to remove old temp index")?;
+    }
+    std::fs::create_dir_all(tmp_dir).context("failed to create temp index directory")
+}
+
+/// Atomically replace the live index directory with the freshly built one.
+fn install_index_atomically(tmp_dir: &Path) -> Result<()> {
+    let final_dir = index_dir();
+    if final_dir.exists() {
+        std::fs::remove_dir_all(&final_dir).context("failed to remove old index")?;
+    }
+    std::fs::rename(tmp_dir, &final_dir).context("failed to install new index")
+}
+
+/// Persist the index timestamp and artifact count to the JSON sidecar file.
+fn save_index_metadata(timestamp_ms: i64, artifact_count: u64) -> Result<()> {
+    let meta = IndexMeta { index_timestamp_ms: timestamp_ms, artifact_count };
+    std::fs::write(meta_path(), serde_json::to_string_pretty(&meta)?)
+        .context("failed to write index metadata")
+}
+
+fn make_index_progress_bar(artifact_count: u64) -> ProgressBar {
+    let pb = ProgressBar::new(artifact_count);
+    pb.set_style(
         ProgressStyle::default_bar()
             .template(
                 "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} artifacts",
@@ -562,41 +672,7 @@ fn build_index_from_gz() -> Result<()> {
             .unwrap()
             .progress_chars("#>-"),
     );
-
-    let mut writer = index
-        .writer(WRITER_HEAP_BYTES)
-        .context("failed to create index writer")?;
-
-    for (coord, rec) in &map {
-        writer
-            .add_document(doc!(
-                f_coord       => coord.as_str(),
-                f_coord_text  => coord.as_str(),
-                f_name        => rec.name.as_str(),
-                f_description => rec.description.as_str(),
-                f_version     => rec.version.as_str(),
-            ))
-            .context("failed to add document")?;
-        idx_pb.inc(1);
-    }
-    writer.commit().context("failed to commit index")?;
-    idx_pb.finish_with_message("Indexed");
-    drop(writer);
-
-    // Atomic replace: remove old index dir (if any), rename temp into place
-    let final_dir = index_dir();
-    if final_dir.exists() {
-        std::fs::remove_dir_all(&final_dir).context("failed to remove old index")?;
-    }
-    std::fs::rename(&tmp_dir, &final_dir).context("failed to install new index")?;
-
-    // Write metadata sidecar
-    let meta = IndexMeta { index_timestamp_ms: timestamp_ms, artifact_count };
-    std::fs::write(meta_path(), serde_json::to_string_pretty(&meta)?)
-        .context("failed to write index metadata")?;
-
-    eprintln!("  Artifact index ready ({} artifacts).", artifact_count);
-    Ok(())
+    pb
 }
 
 // ---------------------------------------------------------------------------
@@ -1020,70 +1096,14 @@ mod tests {
         assert_eq!(map["com.example:lib"].version, "2.0");
     }
 
-    /// Parse a raw decompressed byte slice (no gzip) into a map, using the same
-    /// logic as `build_index_from_gz` but operating on an in-memory cursor so
-    /// tests don't need actual files on disk.
+    /// Drive the production parse pipeline on an in-memory byte slice.
     fn parse_stream_into_map(raw: &[u8], map: &mut HashMap<String, BestRecord>) {
-        use std::io::BufReader;
-        let mut rdr = BufReader::new(std::io::Cursor::new(raw));
-
-        let _version = read_u8(&mut rdr).unwrap_or(0);
-        let _ts = read_i64(&mut rdr).unwrap_or(0);
-
-        loop {
-            let field_count: usize = match read_i32(&mut rdr) {
-                Ok(0) | Ok(NEXUS_EOF_MARKER) => break,
-                Ok(fc) if fc < 0 => break,
-                Ok(fc) => fc as usize,
-                Err(_) => break,
-            };
-
-            let mut g = String::new();
-            let mut a = String::new();
-            let mut v = String::new();
-            let mut p = String::new();
-            let mut l = String::new();
-            let mut n_fld = String::new();
-            let mut d_fld = String::new();
-            let mut u_fld = String::new();
-            let mut ok = true;
-
-            for _ in 0..field_count {
-                if read_u8(&mut rdr).is_err() { ok = false; break; }
-                let fname = match read_utf(&mut rdr) { Ok(s) => s, Err(_) => { ok = false; break; } };
-                let fval  = match read_value(&mut rdr) { Ok(s) => s, Err(_) => { ok = false; break; } };
-                match fname.as_str() {
-                    "g" => g = fval, "a" => a = fval, "v" => v = fval,
-                    "p" => p = fval, "l" => l = fval,
-                    "n" => n_fld = fval, "d" => d_fld = fval, "u" => u_fld = fval,
-                    _ => {}
-                }
-            }
-            if !ok { break; }
-
-            if (g.is_empty() || a.is_empty()) && !u_fld.is_empty() {
-                let parts: Vec<&str> = u_fld.splitn(5, '|').collect();
-                if parts.len() >= 2 {
-                    if g.is_empty() { g = parts[0].to_string(); }
-                    if a.is_empty() { a = parts[1].to_string(); }
-                    if v.is_empty() && parts.len() >= 3 { v = parts[2].to_string(); }
-                    if l.is_empty() && parts.len() >= 4 && parts[3] != "NA" { l = parts[3].to_string(); }
-                    if p.is_empty() && parts.len() >= 5 { p = parts[4].to_string(); }
-                }
-            }
-
-            if g.is_empty() || a.is_empty() { continue; }
-            let packaging = if p.is_empty() { "jar" } else { p.as_str() };
-            if packaging != "jar" { continue; }
-            if !l.is_empty() && l != "NA" { continue; }
-            let coord = format!("{}:{}", g, a);
-            let should_update = map.get(&coord)
-                .map(|e| version_gt(&v, &e.version))
-                .unwrap_or(true);
-            if should_update {
-                map.insert(coord, BestRecord { version: v, name: n_fld, description: d_fld });
-            }
-        }
+        let pb = ProgressBar::hidden();
+        let result = parse_records_to_artifact_map(
+            &mut BufReader::new(std::io::Cursor::new(raw)),
+            &pb,
+        );
+        map.extend(result.unwrap_or_default());
     }
 
     #[test]
