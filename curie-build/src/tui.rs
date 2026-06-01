@@ -7,16 +7,17 @@
 //! # Layout
 //!
 //! ```text
-//! ┌─ member-a ──────────────────────────────────────────────────────────────┐
-//! │ … last N lines of output …                                              │
-//! ├─ member-b ──────────────────────────────────────────────────────────────┤
-//! │ … last N lines of output …                                              │
-//! └─────────────────────────────────────────────────────────────────────────┘
-//!   · Background: member-c, member-d  (1/4)
+//! ── member-a ──────────────────────────────────────────────────────── ✓
+//!   … last N lines of output …
+//! ── member-b ─────────────────────────────────────────────────────────
+//!   … last N lines of output …
+//!   · Background: member-c, member-d  and 2 more
 //! ```
 //!
 //! When more members exist than can fit on screen, the extra members are
-//! listed on a single overflow line at the bottom.
+//! listed on a single overflow line at the bottom.  When a visible pane
+//! finishes successfully, it is immediately reused for the next waiting
+//! background job.
 //!
 //! # Fallback
 //!
@@ -67,7 +68,10 @@ pub(crate) fn tui_layout(n: usize, term_h: usize) -> (usize, usize) {
 
 enum TuiMsg {
     Line { slot_idx: usize, line: String },
-    SlotDone { slot_idx: usize },
+    /// Job finished.  `success` controls whether the pane is eligible for
+    /// reuse: on success the pane is immediately handed to the next waiting
+    /// background job; on failure the pane keeps the error output visible.
+    SlotDone { slot_idx: usize, success: bool },
     Shutdown,
 }
 
@@ -93,12 +97,18 @@ impl crate::parallel::LineSink for TuiSlot {
         let _ = self.sender.send(TuiMsg::Line { slot_idx: self.slot_idx, line });
     }
 
-    /// Mark this slot as finished in the render thread.
+    /// No-op: the TUI path never buffers lines; everything goes straight to
+    /// the render thread via the channel.  The stale flusher is not started
+    /// in TUI mode, so this is never called in practice.
+    fn flush(&self) {}
+
+    /// Signal the render thread that this job is done.
     ///
-    /// Called by `run_jobs` immediately after the member's job completes.
-    /// No buffering exists in the TUI path, so there is nothing to drain.
-    fn flush(&self) {
-        let _ = self.sender.send(TuiMsg::SlotDone { slot_idx: self.slot_idx });
+    /// On success the render thread may immediately replace this pane with the
+    /// next waiting background job.  On failure the pane retains its current
+    /// output so the error stays visible.
+    fn complete(&self, success: bool) {
+        let _ = self.sender.send(TuiMsg::SlotDone { slot_idx: self.slot_idx, success });
     }
 
     /// TUI slots occupy the full terminal width; no prefix is subtracted.
@@ -125,7 +135,7 @@ impl TuiRenderer {
     ///
     /// * `names`         — display name for each member (in slot order).
     /// * `log_files`     — per-member log files (same order).
-    /// * `visible_count` — number of panes to show on screen.
+    /// * `visible_count` — number of panes to show on screen initially.
     /// * `pane_height`   — rows per pane (title + content).
     ///
     /// Returns `(renderer, slots)`.  The caller assigns each `Arc<TuiSlot>`
@@ -177,7 +187,8 @@ impl Drop for TuiRenderer {
 
 struct SlotData {
     name: String,
-    done: bool,
+    /// `None` = still running, `Some(true)` = success, `Some(false)` = failed.
+    done: Option<bool>,
     /// Ring buffer of received lines, newest last.
     ring: VecDeque<String>,
 }
@@ -194,23 +205,24 @@ fn render_loop(
 
     let mut slots: Vec<SlotData> = names
         .into_iter()
-        .map(|name| SlotData { name, done: false, ring: VecDeque::new() })
+        .map(|name| SlotData { name, done: None, ring: VecDeque::new() })
         .collect();
+
+    // pane_to_slot[pane_idx] = slot_idx currently displayed in that pane.
+    // Initially pane 0 → slot 0, pane 1 → slot 1, etc.
+    let mut pane_to_slot: Vec<usize> = (0..visible).collect();
+
+    // Background slots not yet assigned to any pane.
+    let mut background_queue: VecDeque<usize> = (visible..n).collect();
 
     // ── Initial draw ──────────────────────────────────────────────────────
     clear_screen(&mut out);
     for pane_idx in 0..visible {
-        draw_title(&mut out, pane_idx, pane_h, &slots[pane_idx].name, false, term_w);
-        // Blank out all content rows.
-        let content_rows = pane_h - 1;
-        for row_offset in 0..content_rows {
-            let screen_row = pane_idx * pane_h + 2 + row_offset; // 1-indexed; +1 title, +1 for 1-based
-            move_to(&mut out, screen_row, 1);
-            erase_line(&mut out);
-        }
+        draw_title(&mut out, pane_idx, pane_h, &slots[pane_idx].name, None, term_w);
+        blank_content(&mut out, pane_idx, pane_h);
     }
-    if n > visible {
-        draw_overflow_line(&mut out, visible, pane_h, &slots, 0, n, term_w);
+    if !background_queue.is_empty() {
+        draw_overflow_line(&mut out, &background_queue, &slots, visible, pane_h, term_w);
     }
     let _ = out.flush();
 
@@ -219,44 +231,76 @@ fn render_loop(
         match msg {
             TuiMsg::Line { slot_idx, line } => {
                 slots[slot_idx].ring.push_back(line);
-                if slot_idx < visible {
+                // Only redraw if this slot is currently in a visible pane.
+                if let Some(pane_idx) =
+                    pane_to_slot.iter().position(|&s| s == slot_idx)
+                {
                     redraw_content(
                         &mut out,
-                        slot_idx,
+                        pane_idx,
                         pane_h,
                         &slots[slot_idx].ring,
                         term_w,
                     );
-                } else if n > visible {
-                    let done_count = slots.iter().filter(|s| s.done).count();
-                    draw_overflow_line(&mut out, visible, pane_h, &slots, done_count, n, term_w);
                 }
+                // Background slots: lines accumulate in the ring and will be
+                // shown when the slot is promoted to a pane.
                 let _ = out.flush();
             }
-            TuiMsg::SlotDone { slot_idx } => {
-                slots[slot_idx].done = true;
-                if slot_idx < visible {
-                    draw_title(
-                        &mut out,
-                        slot_idx,
-                        pane_h,
-                        &slots[slot_idx].name,
-                        true,
-                        term_w,
+
+            TuiMsg::SlotDone { slot_idx, success } => {
+                slots[slot_idx].done = Some(success);
+
+                if let Some(pane_idx) =
+                    pane_to_slot.iter().position(|&s| s == slot_idx)
+                {
+                    // This slot was in a visible pane.
+                    if success && !background_queue.is_empty() {
+                        // Hand the pane to the next waiting job immediately.
+                        let next = background_queue.pop_front().unwrap();
+                        pane_to_slot[pane_idx] = next;
+                        draw_title(
+                            &mut out, pane_idx, pane_h,
+                            &slots[next].name, None, term_w,
+                        );
+                        // Show whatever the background job has accumulated so far.
+                        // We need to borrow `slots[next].ring` but we also need
+                        // `slots` mutably above — clone the ring for the redraw.
+                        let ring_snapshot: VecDeque<String> =
+                            slots[next].ring.iter().cloned().collect();
+                        redraw_content(
+                            &mut out, pane_idx, pane_h, &ring_snapshot, term_w,
+                        );
+                    } else {
+                        // Keep the pane, update the title to show the outcome.
+                        draw_title(
+                            &mut out, pane_idx, pane_h,
+                            &slots[slot_idx].name, Some(success), term_w,
+                        );
+                    }
+                } else {
+                    // This slot was in the background queue — it finished before
+                    // being promoted.  Remove it from the queue so it no longer
+                    // appears in the overflow line.
+                    background_queue.retain(|&s| s != slot_idx);
+                }
+
+                // Redraw overflow line (queue may have shrunk).
+                if n > visible {
+                    draw_overflow_line(
+                        &mut out, &background_queue, &slots, visible, pane_h, term_w,
                     );
                 }
-                if n > visible {
-                    let done_count = slots.iter().filter(|s| s.done).count();
-                    draw_overflow_line(&mut out, visible, pane_h, &slots, done_count, n, term_w);
-                }
                 let _ = out.flush();
             }
+
             TuiMsg::Shutdown => break,
         }
     }
 
     // ── Cleanup: park cursor below all drawn content ───────────────────────
-    let total_rows = visible * pane_h + if n > visible { 1 } else { 0 };
+    let overflow_rows = if n > visible { 1 } else { 0 };
+    let total_rows = visible * pane_h + overflow_rows;
     move_to(&mut out, total_rows + 1, 1);
     let _ = out.flush();
 }
@@ -274,7 +318,7 @@ fn clear_screen(out: &mut impl Write) {
 }
 
 /// Erase from cursor to end of line (without moving cursor).
-fn erase_line(out: &mut impl Write) {
+fn erase_to_eol(out: &mut impl Write) {
     let _ = write!(out, "\x1b[K");
 }
 
@@ -282,27 +326,59 @@ fn erase_line(out: &mut impl Write) {
 
 /// Draw (or redraw) the title bar for pane `pane_idx`.
 ///
-/// Title bar is reverse-video, padded to `term_w`, with a ` ✓` suffix when
-/// `done` is true.
+/// Format (no reverse-video background):
+/// ```text
+/// ── member-name ──────────────────────────────────── ✓
+/// ```
+/// * `done = None`        → running (plain dashes)
+/// * `done = Some(true)`  → green ✓ before the right-hand dashes
+/// * `done = Some(false)` → red ✗ before the right-hand dashes
 fn draw_title(
     out: &mut impl Write,
     pane_idx: usize,
     pane_h: usize,
     name: &str,
-    done: bool,
+    done: Option<bool>,
     term_w: usize,
 ) {
-    // Row 1 of pane is the title row (1-indexed screen rows).
     let screen_row = pane_idx * pane_h + 1;
     move_to(out, screen_row, 1);
-    let suffix = if done { " ✓" } else { "" };
-    let label = format!(" {}{}", name, suffix);
-    // Pad to fill the full width so the reverse bar stretches edge-to-edge.
-    let pad = term_w.saturating_sub(label.len());
-    let _ = write!(out, "\x1b[7m{}{}\x1b[0m", label, " ".repeat(pad));
+
+    // Left prefix: "── " (3 visible columns)
+    // Name: bold
+    // Status: " ✓ " or " ✗ " or nothing (each 3 visible cols: space + symbol + space)
+    // Fill: dim "─" characters to pad to term_w
+
+    let left_prefix = "\x1b[2m\u{2500}\u{2500} \x1b[0m"; // dim "── "
+    let left_cols: usize = 3;
+
+    let name_bold = format!("\x1b[1m{}\x1b[0m", name);
+    let name_cols = name.len(); // names are ASCII
+
+    let (status_str, status_cols) = match done {
+        None           => ("".to_string(),                          0),
+        Some(true)     => (" \x1b[32m\u{2713}\x1b[0m ".to_string(), 3), // " ✓ "
+        Some(false)    => (" \x1b[31m\u{2717}\x1b[0m ".to_string(), 3), // " ✗ "
+    };
+
+    let used = left_cols + name_cols + status_cols;
+    let fill_cols = term_w.saturating_sub(used);
+    let fill = format!("\x1b[2m{}\x1b[0m", "\u{2500}".repeat(fill_cols));
+
+    let _ = write!(out, "{}{}{}{}\x1b[K", left_prefix, name_bold, status_str, fill);
 }
 
-/// Redraw the content area of pane `pane_idx` from the slot's ring buffer.
+/// Clear all content rows of a pane (used when first drawn or when reused).
+fn blank_content(out: &mut impl Write, pane_idx: usize, pane_h: usize) {
+    let content_rows = pane_h - 1;
+    let first_content_row = pane_idx * pane_h + 2;
+    for i in 0..content_rows {
+        move_to(out, first_content_row + i, 1);
+        erase_to_eol(out);
+    }
+}
+
+/// Redraw the content area of pane `pane_idx` from `ring`.
 ///
 /// Content rows are `pane_h - 1` lines tall.  Lines are shown newest-at-bottom:
 /// for row index `i` (0 = top of content area), display `ring[i + ring_len - rows]`
@@ -338,25 +414,109 @@ fn redraw_content(
 
 /// Draw (or redraw) the overflow summary line below all panes.
 ///
-/// Format: `  · Background: name1, name2  (done/total)`
+/// Format: `  · Background: name1, name2  and 3 more`
+///
+/// Names are listed until the line would overflow, at which point the
+/// remaining count is shown as `  and N more`.
 fn draw_overflow_line(
     out: &mut impl Write,
+    background_queue: &VecDeque<usize>,
+    slots: &[SlotData],
     visible: usize,
     pane_h: usize,
-    slots: &[SlotData],
-    done_count: usize,
-    total: usize,
     term_w: usize,
 ) {
     let overflow_row = visible * pane_h + 1;
     move_to(out, overflow_row, 1);
-    erase_line(out);
+    erase_to_eol(out);
 
-    let bg_names: Vec<&str> = slots[visible..].iter().map(|s| s.name.as_str()).collect();
-    let names_str = bg_names.join(", ");
-    let text = format!("  \u{00b7} Background: {}  ({}/{})", names_str, done_count, total);
-    let truncated = truncate_to_cols(&text, term_w);
-    let _ = write!(out, "{}", truncated);
+    if background_queue.is_empty() {
+        return;
+    }
+
+    let names: Vec<&str> = background_queue
+        .iter()
+        .map(|&i| slots[i].name.as_str())
+        .collect();
+
+    let prefix = "  \u{00b7} Background: "; // "  · Background: " — 16 visible cols
+    let prefix_cols = 16;
+    let budget = term_w.saturating_sub(prefix_cols);
+    let body = build_overflow_names(&names, budget);
+
+    let _ = write!(out, "{}{}", prefix, body);
+}
+
+// ── Overflow name list builder ─────────────────────────────────────────────
+
+/// Build the names portion of the overflow line, fitting within `budget`
+/// visible columns.
+///
+/// Scans all possible cut points (0 names shown … all names shown) and
+/// picks the **largest** k such that:
+///   `names[0..k].join(", ") + "  and (N-k) more"` ≤ `budget` columns.
+///
+/// * `k == N`: all names fit, no suffix emitted.
+/// * `k == 0`: no individual name fits; emits `"and N more"` alone (no
+///   leading spaces).
+/// * Nothing fits (not even `"and N more"`): returns an empty string.
+///
+/// All inputs are treated as ASCII (project names are restricted to
+/// alphanumerics and hyphens in Curie), so `str::len()` == visible columns.
+pub(crate) fn build_overflow_names(names: &[&str], budget: usize) -> String {
+    let total = names.len();
+    if total == 0 || budget == 0 {
+        return String::new();
+    }
+
+    // Visible length of the first k names joined by ", ".
+    let names_len = |k: usize| -> usize {
+        names[..k]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| if i == 0 { n.len() } else { 2 + n.len() })
+            .sum()
+    };
+
+    // Total length of: first-k names + suffix for the (total-k) remaining.
+    let text_len = |k: usize| -> usize {
+        let nl = names_len(k);
+        let rem = total - k;
+        nl + if rem == 0 { 0 } else { more_suffix(k, rem).len() }
+    };
+
+    // Find the *largest* k in [0, total] such that text_len(k) ≤ budget.
+    // Iterating from the top (most names) means we stop at the first match.
+    let best_k = match (0..=total).rev().find(|&k| text_len(k) <= budget) {
+        Some(k) => k,
+        None => return String::new(), // nothing fits, not even "and N more"
+    };
+
+    // Build the result.
+    let mut out = String::new();
+    for (i, &name) in names[..best_k].iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(name);
+    }
+    let rem = total - best_k;
+    if rem > 0 {
+        out.push_str(&more_suffix(best_k, rem));
+    }
+    out
+}
+
+/// Format the `and N more` suffix.
+///
+/// When `first_shown == 0` no preceding text exists, so no leading separator
+/// is added.  Otherwise two spaces separate it from the last visible name.
+fn more_suffix(first_shown: usize, count: usize) -> String {
+    if first_shown == 0 {
+        format!("and {} more", count)
+    } else {
+        format!("  and {} more", count)
+    }
 }
 
 // ── Text truncation ───────────────────────────────────────────────────────
@@ -445,17 +605,86 @@ mod tests {
         assert_eq!(tui_layout(0, 40), (0, MIN_PANE_HEIGHT));
     }
 
+    // ── build_overflow_names ──────────────────────────────────────────────
+
+    #[test]
+    fn overflow_all_fit() {
+        let names = ["alpha", "beta", "gamma"];
+        assert_eq!(build_overflow_names(&names, 40), "alpha, beta, gamma");
+    }
+
+    #[test]
+    fn overflow_longest_fitting_prefix_shown() {
+        // "alpha" + "  and 2 more"(12) = 17 ≤ 18.
+        // "alpha, beta-long"(16) + "  and 1 more"(12) = 28 > 18.
+        // "alpha, beta-long, gamma"(23) > 18.
+        // → best is k=1: "alpha  and 2 more".
+        let names = ["alpha", "beta-long", "gamma"];
+        assert_eq!(build_overflow_names(&names, 18), "alpha  and 2 more");
+    }
+
+    #[test]
+    fn overflow_first_name_too_long_shows_and_more() {
+        // "very-long-name"(14) > 10; "and 1 more"(10) == 10 → fits.
+        let names = ["very-long-name"];
+        assert_eq!(build_overflow_names(&names, 10), "and 1 more");
+    }
+
+    #[test]
+    fn overflow_nothing_fits_returns_empty() {
+        // Even "and 2 more"(10) > 3.
+        let names = ["a", "b"];
+        assert_eq!(build_overflow_names(&names, 3), "");
+    }
+
+    #[test]
+    fn overflow_single_name_fits() {
+        assert_eq!(build_overflow_names(&["hello"], 20), "hello");
+    }
+
+    #[test]
+    fn overflow_single_name_too_long_and_suffix_also_too_long_returns_empty() {
+        // "hello-world"(11) > 5; "and 1 more"(10) > 5.
+        let names = ["hello-world"];
+        assert_eq!(build_overflow_names(&names, 5), "");
+    }
+
+    #[test]
+    fn overflow_empty_names() {
+        assert_eq!(build_overflow_names(&[], 40), "");
+    }
+
+    #[test]
+    fn overflow_two_names_both_fit() {
+        // "a, b" = 4 ≤ 10.
+        let names = ["a", "b"];
+        assert_eq!(build_overflow_names(&names, 10), "a, b");
+    }
+
+    #[test]
+    fn overflow_and_more_standalone_when_no_names_fit() {
+        // "alpha"(5) + "  and 3 more"(12) = 17 > 12.
+        // "and 4 more"(10) ≤ 12 and k=4 text_len = 14 > 12.  Best k=0.
+        let names = ["alpha", "beta", "gamma", "delta"];
+        assert_eq!(build_overflow_names(&names, 12), "and 4 more");
+    }
+
+    #[test]
+    fn overflow_all_names_fit_no_suffix() {
+        // "a, b, c, d"(10) ≤ 15 → show all, no suffix.
+        let names = ["a", "b", "c", "d"];
+        assert_eq!(build_overflow_names(&names, 15), "a, b, c, d");
+    }
+
     // ── truncate_to_cols ──────────────────────────────────────────────────
 
     #[test]
     fn truncate_plain_text_at_max() {
-        // "hello world" → first 5 chars + reset.
         assert_eq!(truncate_to_cols("hello world", 5), "hello\x1b[0m");
     }
 
     #[test]
     fn truncate_plain_text_fits() {
-        // Shorter than max → full string + reset.
         assert_eq!(truncate_to_cols("hi", 10), "hi\x1b[0m");
     }
 
@@ -471,8 +700,6 @@ mod tests {
 
     #[test]
     fn truncate_ansi_sequences_dont_count_columns() {
-        // "\x1b[32m" is 5 bytes but 0 visible columns.
-        // "hello" = 5 columns; " w" adds 2 more → 7 total.
         let input = "\x1b[32mhello\x1b[0m world";
         let result = truncate_to_cols(input, 7);
         assert_eq!(result, "\x1b[32mhello\x1b[0m w\x1b[0m");
@@ -480,7 +707,6 @@ mod tests {
 
     #[test]
     fn truncate_ansi_at_start_no_visible_chars() {
-        // Only escape sequence, no visible content.
         let input = "\x1b[1m";
         assert_eq!(truncate_to_cols(input, 5), "\x1b[1m\x1b[0m");
     }

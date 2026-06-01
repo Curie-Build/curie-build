@@ -37,9 +37,11 @@ use crate::workspace::{Member, Workspace};
 /// * `push_line` — called by worker threads for each line of process output.
 ///   Must write the line to the member's log file immediately and queue it
 ///   for display.
-/// * `flush` — called once by the worker thread after the job completes.
-///   Drains any buffered lines to the shared output.  A no-op for the TUI
-///   path (lines are never buffered there).
+/// * `flush` — intermediate flush called by the stale-flusher (mux path only).
+///   A no-op for the TUI path (lines are delivered directly to the render thread).
+/// * `complete` — called exactly once per job, after the closure returns.
+///   Drains any buffered lines (mux) or signals the render thread with the
+///   success/failure outcome (TUI).
 /// * `prefix_visual_len` — the number of visible columns taken by the display
 ///   prefix.  Used by [`crate::proc::spawn_pty`] to reduce the reported PTY
 ///   width so child output fits without wrapping.  Returns `0` for the TUI
@@ -47,6 +49,7 @@ use crate::workspace::{Member, Workspace};
 pub(crate) trait LineSink: Send + Sync {
     fn push_line(&self, line: String);
     fn flush(&self);
+    fn complete(&self, success: bool);
     fn prefix_visual_len(&self) -> usize;
 }
 
@@ -257,7 +260,7 @@ impl LineSink for MuxSlot {
     }
 
     /// Flush all buffered lines to the shared stdout sink with the member prefix.
-    /// Called on job completion (always) and by the flusher thread (on timeout).
+    /// Called by the stale flusher (on timeout) and by `complete` (on job finish).
     fn flush(&self) {
         let mut st = self.pending.lock().unwrap();
         if st.lines.is_empty() {
@@ -272,6 +275,12 @@ impl LineSink for MuxSlot {
                 let _ = writeln!(out, "{}{}", self.prefix, line);
             }
         }
+    }
+
+    /// Drain buffered output on job completion.  `success` is unused for the
+    /// mux path — it is only meaningful for the TUI split-screen path.
+    fn complete(&self, _success: bool) {
+        self.flush();
     }
 
     fn prefix_visual_len(&self) -> usize {
@@ -550,7 +559,7 @@ where
                     set_thread_sink(Arc::clone(&sink));
                     let result = run_ref(m, &extra_cp);
                     clear_thread_sink();
-                    sink.flush(); // flush remaining output immediately
+                    sink.complete(result.is_ok());
                     tx.send((pos, result)).ok();
                 });
                 in_flight += 1;
