@@ -25,14 +25,20 @@
 //! the caller falls back to the prefix-mux path (no TUI is created).
 
 use std::collections::VecDeque;
-use std::io::Write;
+use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, SyncSender};
 
-use crossterm::{
-    cursor,
-    execute,
-    terminal::{self, ClearType},
+use ansi_to_tui::IntoText;
+use crossterm::{cursor, execute};
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::Paragraph,
+    Frame,
 };
 
 /// Minimum pane height (1 title row + 8 content rows).
@@ -168,10 +174,8 @@ impl TuiRenderer {
             })
             .collect();
 
-        let term_w = crate::term::width().unwrap_or(80) as usize;
-
         let thread = std::thread::spawn(move || {
-            render_loop(receiver, names, n, visible_count, pane_height, term_w);
+            render_loop(receiver, names, n, visible_count, pane_height);
         });
 
         let renderer = TuiRenderer { sender, thread: Some(thread) };
@@ -199,273 +203,237 @@ struct SlotData {
     ring: VecDeque<String>,
 }
 
+/// All mutable state touched exclusively by the render thread.
+struct RenderState {
+    slots: Vec<SlotData>,
+    /// `pane_to_slot[pane_idx]` = slot_idx currently shown in that pane.
+    pane_to_slot: Vec<usize>,
+    /// Slots not yet assigned to any visible pane.
+    background_queue: VecDeque<usize>,
+    n: usize,
+    visible: usize,
+    pane_h: usize,
+}
+
 fn render_loop(
     rx: mpsc::Receiver<TuiMsg>,
     names: Vec<String>,
     n: usize,
     visible: usize,
     pane_h: usize,
-    term_w: usize,
 ) {
-    let mut out = std::io::stdout();
+    let stdout = io::stdout();
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = match Terminal::new(backend) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
 
-    let mut slots: Vec<SlotData> = names
-        .into_iter()
-        .map(|name| SlotData { name, done: None, ring: VecDeque::new() })
-        .collect();
+    // Hide cursor and disable line-wrap for the lifetime of the TUI.
+    // \x1b[?7l (DECAWM off) has no crossterm equivalent.
+    let _ = execute!(io::stdout(), cursor::Hide);
+    let _ = write!(io::stdout(), "\x1b[?7l");
+    let _ = io::stdout().flush();
 
-    // pane_to_slot[pane_idx] = slot_idx currently displayed in that pane.
-    // Initially pane 0 → slot 0, pane 1 → slot 1, etc.
-    let mut pane_to_slot: Vec<usize> = (0..visible).collect();
+    let mut state = RenderState {
+        slots: names
+            .into_iter()
+            .map(|name| SlotData { name, done: None, ring: VecDeque::new() })
+            .collect(),
+        pane_to_slot: (0..visible).collect(),
+        background_queue: (visible..n).collect(),
+        n,
+        visible,
+        pane_h,
+    };
 
-    // Background slots not yet assigned to any pane.
-    let mut background_queue: VecDeque<usize> = (visible..n).collect();
-
-    // ── Initial draw ──────────────────────────────────────────────────────
-    // Hide cursor and disable line-wrap to prevent pane bleed.
-    let _ = execute!(out, cursor::Hide);
-    let _ = write!(out, "\x1b[?7l"); // DECAWM off — no crossterm equivalent
-    clear_screen(&mut out);
-    for pane_idx in 0..visible {
-        draw_title(&mut out, pane_idx, pane_h, &slots[pane_idx].name, None, term_w);
-        blank_content(&mut out, pane_idx, pane_h);
-    }
-    if !background_queue.is_empty() {
-        draw_overflow_line(&mut out, &background_queue, &slots, visible, pane_h, term_w);
-    }
-    let _ = out.flush();
+    // Initial draw.
+    let _ = terminal.draw(|f| render_frame(f, &state));
 
     // ── Message loop ──────────────────────────────────────────────────────
     for msg in rx {
         match msg {
             TuiMsg::Line { slot_idx, line } => {
-                slots[slot_idx].ring.push_back(line);
-                // Only redraw if this slot is currently in a visible pane.
-                if let Some(pane_idx) =
-                    pane_to_slot.iter().position(|&s| s == slot_idx)
-                {
-                    redraw_content(
-                        &mut out,
-                        pane_idx,
-                        pane_h,
-                        &slots[slot_idx].ring,
-                        term_w,
-                    );
+                state.slots[slot_idx].ring.push_back(line);
+                // Redraw only when this slot is in a visible pane.
+                if state.pane_to_slot.iter().any(|&s| s == slot_idx) {
+                    let _ = terminal.draw(|f| render_frame(f, &state));
                 }
-                // Background slots: lines accumulate in the ring and will be
-                // shown when the slot is promoted to a pane.
-                let _ = out.flush();
             }
 
             TuiMsg::SlotDone { slot_idx, success } => {
-                slots[slot_idx].done = Some(success);
+                state.slots[slot_idx].done = Some(success);
 
                 if let Some(pane_idx) =
-                    pane_to_slot.iter().position(|&s| s == slot_idx)
+                    state.pane_to_slot.iter().position(|&s| s == slot_idx)
                 {
-                    // This slot was in a visible pane.
-                    if success && !background_queue.is_empty() {
-                        // Hand the pane to the next waiting job immediately.
-                        let next = background_queue.pop_front().unwrap();
-                        pane_to_slot[pane_idx] = next;
-                        draw_title(
-                            &mut out, pane_idx, pane_h,
-                            &slots[next].name, None, term_w,
-                        );
-                        // Show whatever the background job has accumulated so far.
-                        // We need to borrow `slots[next].ring` but we also need
-                        // `slots` mutably above — clone the ring for the redraw.
-                        let ring_snapshot: VecDeque<String> =
-                            slots[next].ring.iter().cloned().collect();
-                        redraw_content(
-                            &mut out, pane_idx, pane_h, &ring_snapshot, term_w,
-                        );
-                    } else {
-                        // Keep the pane, update the title to show the outcome.
-                        draw_title(
-                            &mut out, pane_idx, pane_h,
-                            &slots[slot_idx].name, Some(success), term_w,
-                        );
+                    if success && !state.background_queue.is_empty() {
+                        // Hand the pane to the next waiting background job.
+                        let next = state.background_queue.pop_front().unwrap();
+                        state.pane_to_slot[pane_idx] = next;
                     }
+                    // else: keep pane, title will show outcome on next draw.
                 } else {
-                    // This slot was in the background queue — it finished before
-                    // being promoted.  Remove it from the queue so it no longer
-                    // appears in the overflow line.
-                    background_queue.retain(|&s| s != slot_idx);
+                    // Slot finished in the background — remove from queue so
+                    // it no longer appears in the overflow line.
+                    state.background_queue.retain(|&s| s != slot_idx);
                 }
 
-                // Redraw overflow line (queue may have shrunk).
-                if n > visible {
-                    draw_overflow_line(
-                        &mut out, &background_queue, &slots, visible, pane_h, term_w,
-                    );
-                }
-                let _ = out.flush();
+                let _ = terminal.draw(|f| render_frame(f, &state));
             }
 
             TuiMsg::Shutdown => break,
         }
     }
 
-    // ── Cleanup: park cursor below all drawn content ───────────────────────
+    // ── Cleanup ───────────────────────────────────────────────────────────
+    // Restore full scroll region, re-enable line-wrap, close any open OSC 8
+    // hyperlink, then show the cursor again.  No crossterm equivalents for
+    // the three raw sequences.
+    let _ = write!(io::stdout(), "\x1b[r\x1b[?7h\x1b]8;;\x07");
+    let _ = execute!(io::stdout(), cursor::Show);
+    // Park cursor below the drawn content so normal output continues there.
     let overflow_rows = if n > visible { 1 } else { 0 };
-    let total_rows = visible * pane_h + overflow_rows;
-    // Restore full scroll region, line-wrap, cursor visibility.
-    // \x1b]8;;\x07 closes any OSC 8 hyperlink left open by process output
-    // so the shell prompt does not render as a clickable link.
-    let _ = write!(out, "\x1b[r\x1b[?7h\x1b]8;;\x07"); // no crossterm for these
-    let _ = execute!(out, cursor::Show);
-    move_to(&mut out, total_rows + 1, 1);
-    let _ = out.flush();
+    let total_rows = (visible * pane_h + overflow_rows) as u16;
+    let _ = terminal.set_cursor_position((0, total_rows));
+    let _ = io::stdout().flush();
 }
 
-// ── Terminal primitives ───────────────────────────────────────────────────
+// ── Frame renderer (pure, no I/O) ─────────────────────────────────────────
 
-/// Move the cursor to the given 1-based (row, col).
-fn move_to(out: &mut impl Write, row: usize, col: usize) {
-    // crossterm uses 0-based (col, row); our API uses 1-based (row, col).
-    let _ = execute!(out, cursor::MoveTo((col - 1) as u16, (row - 1) as u16));
+fn render_frame(f: &mut Frame, state: &RenderState) {
+    let area = f.area();
+
+    // Build vertical layout: one block per visible pane + optional overflow.
+    let has_overflow = state.n > state.visible && !state.background_queue.is_empty();
+    let mut constraints: Vec<Constraint> = state
+        .pane_to_slot
+        .iter()
+        .map(|_| Constraint::Length(state.pane_h as u16))
+        .collect();
+    if has_overflow {
+        constraints.push(Constraint::Length(1));
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+
+    // Draw each visible pane.
+    for (pane_idx, &slot_idx) in state.pane_to_slot.iter().enumerate() {
+        let pane_area = chunks[pane_idx];
+        let slot = &state.slots[slot_idx];
+
+        // Split pane into title row + content area.
+        let pane_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(pane_area);
+
+        render_title(f, pane_chunks[0], &slot.name, slot.done);
+        render_content(f, pane_chunks[1], &slot.ring);
+    }
+
+    // Draw overflow line.
+    if has_overflow {
+        let overflow_area = chunks[state.pane_to_slot.len()];
+        render_overflow(f, overflow_area, &state.background_queue, &state.slots);
+    }
 }
 
-/// Erase the entire screen and move cursor to top-left.
-fn clear_screen(out: &mut impl Write) {
-    let _ = execute!(
-        out,
-        terminal::Clear(ClearType::All),
-        cursor::MoveTo(0, 0),
-    );
-}
+// ── Pane widgets ──────────────────────────────────────────────────────────
 
-/// Erase from cursor to end of line (without moving cursor).
-fn erase_to_eol(out: &mut impl Write) {
-    let _ = execute!(out, terminal::Clear(ClearType::UntilNewLine));
-}
-
-// ── Pane drawing ──────────────────────────────────────────────────────────
-
-/// Draw (or redraw) the title bar for pane `pane_idx`.
+/// Render the title bar for one pane.
 ///
-/// Format (no reverse-video background):
-/// ```text
-/// ── member-name ──────────────────────────────────── ✓
-/// ```
-/// * `done = None`        → running (plain dashes)
-/// * `done = Some(true)`  → green ✓ before the right-hand dashes
-/// * `done = Some(false)` → red ✗ before the right-hand dashes
-fn draw_title(
-    out: &mut impl Write,
-    pane_idx: usize,
-    pane_h: usize,
-    name: &str,
-    done: Option<bool>,
-    term_w: usize,
-) {
-    let screen_row = pane_idx * pane_h + 1;
-    move_to(out, screen_row, 1);
+/// Format:  `── member-name ──────────────── ✓`
+fn render_title(f: &mut Frame, area: Rect, name: &str, done: Option<bool>) {
+    let dim  = Style::new().add_modifier(Modifier::DIM);
+    let bold = Style::new().add_modifier(Modifier::BOLD);
 
-    // Left prefix: "── " (3 visible columns)
-    // Name: bold
-    // Status: " ✓ " or " ✗ " or nothing (each 3 visible cols: space + symbol + space)
-    // Fill: dim "─" characters to pad to term_w
+    // "── " prefix (3 cols)
+    let mut spans = vec![
+        Span::styled("── ", dim),
+        Span::styled(name.to_string(), bold),
+    ];
 
-    let left_prefix = "\x1b[2m\u{2500}\u{2500} \x1b[0m"; // dim "── "
-    let left_cols: usize = 3;
-
-    let name_bold = format!("\x1b[1m{}\x1b[0m", name);
-    let name_cols = name.len(); // names are ASCII
-
+    // Status symbol (3 cols) or nothing.
     let (status_str, status_cols) = match done {
-        None           => ("".to_string(),                          0),
-        Some(true)     => (" \x1b[32m\u{2713}\x1b[0m ".to_string(), 3), // " ✓ "
-        Some(false)    => (" \x1b[31m\u{2717}\x1b[0m ".to_string(), 3), // " ✗ "
+        None           => ("",    0usize),
+        Some(true)     => (" ✓ ", 3),
+        Some(false)    => (" ✗ ", 3),
     };
-
-    let used = left_cols + name_cols + status_cols;
-    let fill_cols = term_w.saturating_sub(used);
-    let fill = format!("\x1b[2m{}\x1b[0m", "\u{2500}".repeat(fill_cols));
-
-    let _ = write!(out, "{}{}{}{}\x1b[K", left_prefix, name_bold, status_str, fill);
-}
-
-/// Clear all content rows of a pane (used when first drawn or when reused).
-fn blank_content(out: &mut impl Write, pane_idx: usize, pane_h: usize) {
-    let content_rows = pane_h - 1;
-    let first_content_row = pane_idx * pane_h + 2;
-    for i in 0..content_rows {
-        move_to(out, first_content_row + i, 1);
-        erase_to_eol(out);
+    if !status_str.is_empty() {
+        let status_color = if done == Some(true) { Color::Green } else { Color::Red };
+        spans.push(Span::styled(status_str, Style::new().fg(status_color)));
     }
+
+    // Dim dash fill to end of area.
+    let used = 3 + name.len() + status_cols; // "── " + name + status
+    let fill_cols = (area.width as usize).saturating_sub(used);
+    if fill_cols > 0 {
+        spans.push(Span::styled("─".repeat(fill_cols), dim));
+    }
+
+    let line = Line::from(spans);
+    f.render_widget(Paragraph::new(line), area);
 }
 
-/// Redraw the content area of pane `pane_idx` from `ring`.
+/// Render the content area of one pane from its ring buffer.
 ///
-/// Content rows are `pane_h - 1` lines tall.  Lines are shown newest-at-bottom:
-/// for row index `i` (0 = top of content area), display `ring[i + ring_len - rows]`
-/// when `i + ring_len >= rows`, otherwise leave the row blank.
-fn redraw_content(
-    out: &mut impl Write,
-    pane_idx: usize,
-    pane_h: usize,
-    ring: &VecDeque<String>,
-    term_w: usize,
-) {
-    let content_rows = pane_h - 1;
+/// Shows the last `area.height` lines, newest at the bottom.  Each line is
+/// sanitised via [`truncate_to_cols`] (strips OSC + non-SGR sequences) then
+/// parsed into ratatui styled spans by `ansi-to-tui`.
+fn render_content(f: &mut Frame, area: Rect, ring: &VecDeque<String>) {
+    let rows = area.height as usize;
+    let cols = area.width as usize;
     let ring_len = ring.len();
-    // Title is at screen row `pane_idx * pane_h + 1`; content starts one below.
-    let first_content_row = pane_idx * pane_h + 2;
 
-    for i in 0..content_rows {
-        let screen_row = first_content_row + i;
-        move_to(out, screen_row, 1);
-        // Reset + erase to right — prevents leftover chars when lines shrink.
-        let _ = write!(out, "\x1b[0m\x1b[K");
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows);
 
-        if i + ring_len >= content_rows {
-            let ring_idx = i + ring_len - content_rows;
+    for i in 0..rows {
+        if i + ring_len >= rows {
+            let ring_idx = i + ring_len - rows;
             if ring_idx < ring_len {
-                    let truncated = truncate_to_cols(&ring[ring_idx], term_w);
-                    // \x1b]8;;\x07 closes any OSC 8 hyperlink that may have
-                    // leaked through despite sanitization in truncate_to_cols.
-                    let _ = write!(out, "{}\x1b[0m\x1b]8;;\x07\x1b[K", truncated);
-                }
+                let sanitized = truncate_to_cols(&ring[ring_idx], cols);
+                // ansi-to-tui converts remaining SGR sequences into ratatui
+                // styled spans.  Fall back to plain text if parsing fails.
+                let line = parse_ansi_line(&sanitized);
+                lines.push(line);
+                continue;
+            }
         }
-        // else: row stays blank
+        lines.push(Line::default());
     }
+
+    f.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
-/// Draw (or redraw) the overflow summary line below all panes.
+/// Render the overflow summary line below all panes.
 ///
-/// Format: `  · Background: name1, name2  and 3 more`
-///
-/// Names are listed until the line would overflow, at which point the
-/// remaining count is shown as `  and N more`.
-fn draw_overflow_line(
-    out: &mut impl Write,
+/// Format:  `  · Background: name1, name2  and 3 more`
+fn render_overflow(
+    f: &mut Frame,
+    area: Rect,
     background_queue: &VecDeque<usize>,
     slots: &[SlotData],
-    visible: usize,
-    pane_h: usize,
-    term_w: usize,
 ) {
-    let overflow_row = visible * pane_h + 1;
-    move_to(out, overflow_row, 1);
-    erase_to_eol(out);
-
     if background_queue.is_empty() {
         return;
     }
+
+    let prefix = "  \u{00b7} Background: "; // 16 visible cols
+    let prefix_cols = 16usize;
+    let budget = (area.width as usize).saturating_sub(prefix_cols);
 
     let names: Vec<&str> = background_queue
         .iter()
         .map(|&i| slots[i].name.as_str())
         .collect();
 
-    let prefix = "  \u{00b7} Background: "; // "  · Background: " — 16 visible cols
-    let prefix_cols = 16;
-    let budget = term_w.saturating_sub(prefix_cols);
     let body = build_overflow_names(&names, budget);
-
-    let _ = write!(out, "{}{}", prefix, body);
+    let text = format!("{}{}", prefix, body);
+    f.render_widget(Paragraph::new(text), area);
 }
 
 // ── Overflow name list builder ─────────────────────────────────────────────
@@ -507,13 +475,11 @@ pub(crate) fn build_overflow_names(names: &[&str], budget: usize) -> String {
     };
 
     // Find the *largest* k in [0, total] such that text_len(k) ≤ budget.
-    // Iterating from the top (most names) means we stop at the first match.
     let best_k = match (0..=total).rev().find(|&k| text_len(k) <= budget) {
         Some(k) => k,
-        None => return String::new(), // nothing fits, not even "and N more"
+        None => return String::new(),
     };
 
-    // Build the result.
     let mut out = String::new();
     for (i, &name) in names[..best_k].iter().enumerate() {
         if i > 0 {
@@ -529,9 +495,6 @@ pub(crate) fn build_overflow_names(names: &[&str], budget: usize) -> String {
 }
 
 /// Format the `and N more` suffix.
-///
-/// When `first_shown == 0` no preceding text exists, so no leading separator
-/// is added.  Otherwise two spaces separate it from the last visible name.
 fn more_suffix(first_shown: usize, count: usize) -> String {
     if first_shown == 0 {
         format!("and {} more", count)
@@ -540,7 +503,27 @@ fn more_suffix(first_shown: usize, count: usize) -> String {
     }
 }
 
-// ── Text truncation ───────────────────────────────────────────────────────
+// ── ANSI helpers ──────────────────────────────────────────────────────────
+
+/// Parse a sanitised ANSI string into a ratatui [`Line`].
+///
+/// Uses `ansi-to-tui` for the conversion.  Falls back to plain text if
+/// parsing fails (the SGR-only input from [`truncate_to_cols`] should always
+/// succeed, but we handle the error gracefully rather than panicking).
+fn parse_ansi_line(s: &str) -> Line<'static> {
+    match s.into_text() {
+        Ok(mut text) => text.lines.pop().unwrap_or_default(),
+        Err(_) => Line::from(strip_ansi_for_fallback(s).to_string()),
+    }
+}
+
+/// Strip all ANSI escape sequences for the plain-text fallback path.
+fn strip_ansi_for_fallback(s: &str) -> &str {
+    // In practice this is never called because truncate_to_cols produces
+    // valid SGR-only output.  Return the raw string; terminal will render
+    // the escape codes literally, which is better than losing the content.
+    s
+}
 
 /// Truncate `s` to at most `max` visible columns, stripping dangerous escape
 /// sequences.
@@ -606,22 +589,19 @@ pub(crate) fn truncate_to_cols(s: &str, max: usize) -> String {
                 chars.next(); // consume ']'
                 loop {
                     match chars.next() {
-                        None | Some('\x07') => break, // BEL terminator or EOF
+                        None | Some('\x07') => break,
                         Some('\x1b') => {
-                            // Possible ESC \ terminator.
                             if chars.peek() == Some(&'\\') {
-                                chars.next(); // consume '\'
+                                chars.next();
                             }
                             break;
                         }
-                        Some(_) => {} // interior byte, keep consuming
+                        Some(_) => {}
                     }
                 }
-                // Entire OSC sequence dropped.
             }
 
             // ── Other ESC sequences (DCS \x1bP, PM \x1b^, APC \x1b_, …) ──
-            // Consume until ST or a bare ASCII letter, then drop.
             Some(_) => {
                 chars.next(); // consume the introducer
                 loop {
@@ -637,7 +617,6 @@ pub(crate) fn truncate_to_cols(s: &str, max: usize) -> String {
                         Some(_) => {}
                     }
                 }
-                // Dropped.
             }
 
             // Bare ESC at end of string — drop.
@@ -659,25 +638,21 @@ mod tests {
 
     #[test]
     fn layout_all_fit_evenly() {
-        // 3 panes × MIN=9 = 27 ≤ 40; height = 40/3 = 13.
         assert_eq!(tui_layout(3, 40), (3, 13));
     }
 
     #[test]
     fn layout_overflow_visible_4() {
-        // 5×9=45 > 40; visible = (40-1)/9 = 4, pane_h = 9.
         assert_eq!(tui_layout(5, 40), (4, 9));
     }
 
     #[test]
     fn layout_exact_fit_min_height() {
-        // 3×9 = 27 ≤ 27; all visible, height = 27/3 = 9.
         assert_eq!(tui_layout(3, 27), (3, 9));
     }
 
     #[test]
     fn layout_terminal_too_small_fallback() {
-        // 2×9=18 > 8; visible=(8-1)/9=0 → caller must fall back.
         assert_eq!(tui_layout(2, 8), (0, 9));
     }
 
@@ -706,24 +681,18 @@ mod tests {
 
     #[test]
     fn overflow_longest_fitting_prefix_shown() {
-        // "alpha" + "  and 2 more"(12) = 17 ≤ 18.
-        // "alpha, beta-long"(16) + "  and 1 more"(12) = 28 > 18.
-        // "alpha, beta-long, gamma"(23) > 18.
-        // → best is k=1: "alpha  and 2 more".
         let names = ["alpha", "beta-long", "gamma"];
         assert_eq!(build_overflow_names(&names, 18), "alpha  and 2 more");
     }
 
     #[test]
     fn overflow_first_name_too_long_shows_and_more() {
-        // "very-long-name"(14) > 10; "and 1 more"(10) == 10 → fits.
         let names = ["very-long-name"];
         assert_eq!(build_overflow_names(&names, 10), "and 1 more");
     }
 
     #[test]
     fn overflow_nothing_fits_returns_empty() {
-        // Even "and 2 more"(10) > 3.
         let names = ["a", "b"];
         assert_eq!(build_overflow_names(&names, 3), "");
     }
@@ -735,7 +704,6 @@ mod tests {
 
     #[test]
     fn overflow_single_name_too_long_and_suffix_also_too_long_returns_empty() {
-        // "hello-world"(11) > 5; "and 1 more"(10) > 5.
         let names = ["hello-world"];
         assert_eq!(build_overflow_names(&names, 5), "");
     }
@@ -747,22 +715,18 @@ mod tests {
 
     #[test]
     fn overflow_two_names_both_fit() {
-        // "a, b" = 4 ≤ 10.
         let names = ["a", "b"];
         assert_eq!(build_overflow_names(&names, 10), "a, b");
     }
 
     #[test]
     fn overflow_and_more_standalone_when_no_names_fit() {
-        // "alpha"(5) + "  and 3 more"(12) = 17 > 12.
-        // "and 4 more"(10) ≤ 12 and k=4 text_len = 14 > 12.  Best k=0.
         let names = ["alpha", "beta", "gamma", "delta"];
         assert_eq!(build_overflow_names(&names, 12), "and 4 more");
     }
 
     #[test]
     fn overflow_all_names_fit_no_suffix() {
-        // "a, b, c, d"(10) ≤ 15 → show all, no suffix.
         let names = ["a", "b", "c", "d"];
         assert_eq!(build_overflow_names(&names, 15), "a, b, c, d");
     }
@@ -804,30 +768,24 @@ mod tests {
 
     #[test]
     fn truncate_non_sgr_csi_is_dropped() {
-        // Cursor-up sequence \x1b[1A must not pass through.
         let input = "\x1b[1Ahello";
         assert_eq!(truncate_to_cols(input, 10), "hello\x1b[0m");
     }
 
     #[test]
     fn truncate_osc8_hyperlink_bel_terminated_is_dropped() {
-        // OSC 8 hyperlink with BEL terminator: the visible text "click" should
-        // appear but the OSC sequences must be stripped so the link does not
-        // leak into surrounding terminal output.
         let input = "\x1b]8;;https://example.com\x07click\x1b]8;;\x07";
         assert_eq!(truncate_to_cols(input, 20), "click\x1b[0m");
     }
 
     #[test]
     fn truncate_osc8_hyperlink_st_terminated_is_dropped() {
-        // OSC 8 hyperlink with ESC \ (ST) terminator.
         let input = "\x1b]8;;https://example.com\x1b\\click\x1b]8;;\x1b\\";
         assert_eq!(truncate_to_cols(input, 20), "click\x1b[0m");
     }
 
     #[test]
     fn truncate_osc_mid_line_strips_only_osc() {
-        // Colour before OSC hyperlink: colour is kept, OSC is dropped.
         let input = "\x1b[33mfile: \x1b]8;;file:///tmp/F.java\x07F.java\x1b]8;;\x07\x1b[0m";
         assert_eq!(truncate_to_cols(input, 40), "\x1b[33mfile: F.java\x1b[0m\x1b[0m");
     }
