@@ -52,7 +52,7 @@ pub fn docker_run(
 ) -> Result<()> {
     let image_ref = docker_build(project_root, desc, jar, dep_jars)?;
 
-    crate::parallel::emit(&format!("Running container {}  (--rm)", image_ref));
+    crate::parallel::emit(&crate::style::headline("Running", &image_ref, ""));
 
     let mut cmd = Command::new("docker");
     cmd.arg("run").arg("--rm").arg(&image_ref);
@@ -159,18 +159,18 @@ fn build_with_user_dockerfile(
     jar: &Path,
     image_ref: &str,
 ) -> Result<()> {
-    crate::parallel::emit("  Dockerfile      using project root Dockerfile");
+    crate::parallel::emit(&crate::style::info("Dockerfile", "using project root Dockerfile"));
 
     let target_dir = project_root.join("target");
     std::fs::create_dir_all(&target_dir).context("failed to create target/")?;
 
     let inputs = user_dockerfile_inputs(project_root, jar);
     if Stamp::of(&stamp_path(&target_dir)).covers(&inputs) {
-        crate::parallel::emit("  Docker image    up to date");
+        crate::parallel::emit(&crate::style::up_to_date("Docker image"));
         return Ok(());
     }
 
-    crate::parallel::emit(&format!("  Docker image    building {}", image_ref));
+    crate::parallel::emit(&crate::style::active("Docker image", &format!("building {}", image_ref)));
     // Make JAR path relative to project root for the build arg.
     let jar_rel = jar
         .strip_prefix(project_root)
@@ -194,7 +194,7 @@ fn build_with_user_dockerfile(
     }
 
     touch_stamp(&target_dir)?;
-    crate::parallel::emit(&format!("  Docker image    {}", image_ref));
+    crate::parallel::emit(&crate::style::info("Docker image", image_ref));
     Ok(())
 }
 
@@ -243,9 +243,9 @@ fn build_with_generated_dockerfile(
         }
 
         match (copied, skipped) {
-            (0, _) => crate::parallel::emit("  Docker dep JARs up to date"),
-            (c, 0) => crate::parallel::emit(&format!("  Docker dep JARs {} copied", c)),
-            (c, s) => crate::parallel::emit(&format!("  Docker dep JARs {} copied, {} up to date", c, s)),
+            (0, _) => crate::parallel::emit(&crate::style::up_to_date("Docker dep JARs")),
+            (c, 0) => crate::parallel::emit(&crate::style::info("Docker dep JARs", &format!("{} copied", c))),
+            (c, s) => crate::parallel::emit(&crate::style::info("Docker dep JARs", &format!("{} copied, {} up to date", c, s))),
         }
     }
 
@@ -255,11 +255,11 @@ fn build_with_generated_dockerfile(
     let dockerfile_path = target_dir.join("Dockerfile");
     let existing = std::fs::read_to_string(&dockerfile_path).unwrap_or_default();
     if existing == dockerfile_content {
-        crate::parallel::emit("  Dockerfile      up to date");
+        crate::parallel::emit(&crate::style::up_to_date("Dockerfile"));
     } else {
         std::fs::write(&dockerfile_path, &dockerfile_content)
             .context("failed to write generated Dockerfile")?;
-        crate::parallel::emit("  Dockerfile      generated  (target/Dockerfile)");
+        crate::parallel::emit(&crate::style::info("Dockerfile", "generated  (target/Dockerfile)"));
     }
 
     // Generate .dockerignore in target/ — skip write if content is unchanged.
@@ -267,11 +267,11 @@ fn build_with_generated_dockerfile(
     let dockerignore_path = target_dir.join(".dockerignore");
     let existing_ignore = std::fs::read_to_string(&dockerignore_path).unwrap_or_default();
     if existing_ignore == dockerignore_content {
-        crate::parallel::emit("  .dockerignore   up to date");
+        crate::parallel::emit(&crate::style::up_to_date(".dockerignore"));
     } else {
         std::fs::write(&dockerignore_path, &dockerignore_content)
             .context("failed to write .dockerignore")?;
-        crate::parallel::emit("  .dockerignore   generated  (target/.dockerignore)");
+        crate::parallel::emit(&crate::style::info(".dockerignore", "generated  (target/.dockerignore)"));
     }
 
     let has_libs = !dep_jars.is_empty();
@@ -283,11 +283,11 @@ fn build_with_generated_dockerfile(
     let stamp = stamp_path(&target_dir);
     let inputs = generated_dockerfile_inputs(&target_dir, &jar_filename, has_libs);
     if Stamp::of(&stamp).covers(&inputs) {
-        crate::parallel::emit("  Docker image    up to date");
+        crate::parallel::emit(&crate::style::up_to_date("Docker image"));
         return Ok(());
     }
 
-    crate::parallel::emit(&format!("  Docker image    building {}", image_ref));
+    crate::parallel::emit(&crate::style::active("Docker image", &format!("building {}", image_ref)));
     let mut build_cmd2 = Command::new("docker");
     build_cmd2.arg("build").arg("-t").arg(image_ref).arg(&target_dir);
     let status = crate::proc::spawn_cmd(&mut build_cmd2)
@@ -298,7 +298,7 @@ fn build_with_generated_dockerfile(
     }
 
     touch_stamp(&target_dir)?;
-    crate::parallel::emit(&format!("  Docker image    {}", image_ref));
+    crate::parallel::emit(&crate::style::info("Docker image", image_ref));
     Ok(())
 }
 

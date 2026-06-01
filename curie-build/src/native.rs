@@ -54,7 +54,7 @@ pub fn build_native(
     // --- incremental skip ---------------------------------------------------
     let inputs = native_inputs(jar, dep_jars, cfg, project_root);
     if Stamp::of(&stamp).covers(&inputs) {
-        crate::parallel::emit("  Native image    up to date");
+        crate::parallel::emit(&crate::style::up_to_date("Native image"));
         return Ok(());
     }
 
@@ -97,11 +97,7 @@ pub fn build_native(
         cmd.arg(extra);
     }
 
-    crate::parallel::emit(&format!(
-        "  Native image    {} -> target/{}",
-        exe.display(),
-        output_name
-    ));
+    crate::parallel::emit(&crate::style::active("Native image", &format!("{} -> target/{}", exe.display(), output_name)));
 
     let status = crate::proc::spawn_cmd(&mut cmd)
         .with_context(|| format!("failed to invoke {}", exe.display()))?;
@@ -112,7 +108,7 @@ pub fn build_native(
 
     // Write stamp so the next build can skip this step.
     touch_stamp(&target_dir)?;
-    crate::parallel::emit(&format!("  Native image    target/{}", output_name));
+    crate::parallel::emit(&crate::style::done(&format!("target/{}", output_name)));
 
     Ok(())
 }
