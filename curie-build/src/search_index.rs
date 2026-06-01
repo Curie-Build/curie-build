@@ -427,17 +427,107 @@ fn build_index_from_gz() -> Result<()> {
 
 // ── Parse phase ──────────────────────────────────────────────────────────────
 
-/// Open the cached gz, decompress it, and return a map of `"group:artifact"` →
-/// the record with the highest version seen across all raw Nexus entries.
+/// Chunk size sent through the decompressor → parser channel.
+const DECOMPRESS_CHUNK_BYTES: usize = 512 * 1024; // 512 KiB
+/// How many chunks may be buffered between the two threads.
+const CHANNEL_BUFFER_CHUNKS: usize = 4; // up to 2 MiB in flight
+
+/// Open the cached gz, decompress on a background thread, parse records on
+/// this thread, and return a map of `"group:artifact"` → best-version record.
+///
+/// Running decompression and parsing on separate threads lets the two CPU-heavy
+/// stages (DEFLATE decode and binary field parsing) overlap.
 fn parse_gz_to_artifact_map(
     gz_path: &Path,
     parse_progress: &ProgressBar,
 ) -> Result<HashMap<String, BestRecord>> {
     let file = std::fs::File::open(gz_path)
         .with_context(|| format!("failed to open {}", gz_path.display()))?;
-    let decoder = GzDecoder::new(ProgressReader { inner: file, pb: parse_progress.clone() });
-    let mut reader = BufReader::with_capacity(1 << 20, decoder); // 1 MiB buffer
-    parse_records_to_artifact_map(&mut reader, parse_progress)
+
+    let (chunk_sender, chunk_receiver) =
+        std::sync::mpsc::sync_channel::<Vec<u8>>(CHANNEL_BUFFER_CHUNKS);
+
+    // Decompressor thread: gz file → raw bytes → channel
+    let decompressor_progress = parse_progress.clone();
+    let decompressor = std::thread::spawn(move || {
+        decompress_to_channel(file, decompressor_progress, chunk_sender)
+    });
+
+    // Parser (this thread): channel → records → artifact map
+    let mut channel_reader = ChannelReader::new(chunk_receiver);
+    let parse_result = parse_records_to_artifact_map(&mut channel_reader, parse_progress);
+
+    // Always join so the decompressor thread doesn't leak on parse errors.
+    // Dropping channel_reader first ensures a blocked sender unblocks immediately.
+    drop(channel_reader);
+    let decompress_result = decompressor
+        .join()
+        .map_err(|_| anyhow::anyhow!("decompressor thread panicked"))?;
+
+    // Surface the parse error first; it is more actionable than a decompress error.
+    let artifact_map = parse_result.context("failed to parse Nexus index")?;
+    decompress_result.context("failed to decompress Nexus index")?;
+
+    Ok(artifact_map)
+}
+
+/// Decompress `file` and send 512 KiB chunks through `sender` until EOF.
+fn decompress_to_channel(
+    file: std::fs::File,
+    parse_progress: ProgressBar,
+    sender: std::sync::mpsc::SyncSender<Vec<u8>>,
+) -> Result<()> {
+    let decoder = GzDecoder::new(ProgressReader { inner: file, pb: parse_progress });
+    let mut reader = BufReader::with_capacity(1 << 20, decoder); // 1 MiB read buffer
+    let mut chunk = vec![0u8; DECOMPRESS_CHUNK_BYTES];
+
+    loop {
+        let bytes_decompressed = reader.read(&mut chunk).context("decompression error")?;
+        if bytes_decompressed == 0 {
+            break; // EOF
+        }
+        if sender.send(chunk[..bytes_decompressed].to_vec()).is_err() {
+            break; // Parser dropped its receiver (e.g., on error); stop early.
+        }
+    }
+    Ok(())
+}
+
+/// `Read` adapter over a channel of byte chunks.
+///
+/// The decompressor thread sends chunks; this reader reassembles them into a
+/// continuous byte stream for the record parser.
+struct ChannelReader {
+    receiver: std::sync::mpsc::Receiver<Vec<u8>>,
+    current_chunk: Vec<u8>,
+    position: usize,
+}
+
+impl ChannelReader {
+    fn new(receiver: std::sync::mpsc::Receiver<Vec<u8>>) -> Self {
+        Self { receiver, current_chunk: Vec::new(), position: 0 }
+    }
+}
+
+impl Read for ChannelReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // Refill from the channel whenever the current chunk is exhausted.
+        while self.position >= self.current_chunk.len() {
+            match self.receiver.recv() {
+                Ok(chunk) => {
+                    self.current_chunk = chunk;
+                    self.position = 0;
+                }
+                Err(_) => return Ok(0), // Channel closed → EOF for the parser.
+            }
+        }
+        let bytes_available = self.current_chunk.len() - self.position;
+        let bytes_to_copy = buf.len().min(bytes_available);
+        buf[..bytes_to_copy]
+            .copy_from_slice(&self.current_chunk[self.position..self.position + bytes_to_copy]);
+        self.position += bytes_to_copy;
+        Ok(bytes_to_copy)
+    }
 }
 
 /// Read every record from `reader`, resolve coordinates, filter, and deduplicate.
