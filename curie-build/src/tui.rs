@@ -266,22 +266,25 @@ fn render_loop(
             TuiMsg::SlotDone { slot_idx, success } => {
                 state.slots[slot_idx].done = Some(success);
 
+                // Redraw immediately so the green/red outcome is visible.
+                let _ = terminal.draw(|f| render_frame(f, &state));
+
                 if let Some(pane_idx) =
                     state.pane_to_slot.iter().position(|&s| s == slot_idx)
                 {
                     if success && !state.background_queue.is_empty() {
-                        // Hand the pane to the next waiting background job.
+                        // Hold the green pane for 1 second, then hand it over.
+                        std::thread::sleep(std::time::Duration::from_secs(1));
                         let next = state.background_queue.pop_front().unwrap();
                         state.pane_to_slot[pane_idx] = next;
+                        let _ = terminal.draw(|f| render_frame(f, &state));
                     }
-                    // else: keep pane, title will show outcome on next draw.
+                    // else: keep pane, border shows outcome.
                 } else {
                     // Slot finished in the background — remove from queue so
                     // it no longer appears in the overflow line.
                     state.background_queue.retain(|&s| s != slot_idx);
                 }
-
-                let _ = terminal.draw(|f| render_frame(f, &state));
             }
 
             TuiMsg::Shutdown => break,
