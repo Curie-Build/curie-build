@@ -316,6 +316,9 @@ fn render_loop(
                         } else {
                             state.pane_to_slot.remove(pane_idx);
                         }
+                        // Drain any lines already queued for the promoted slot
+                        // so the first draw shows content rather than a blank.
+                        drain_available(&rx, &mut state, &mut pending);
                         let _ = terminal.draw(|f| render_frame(f, &state));
                     } else if success {
                         // Rule 2: no replacement — hold 2 s then close.
@@ -397,6 +400,33 @@ fn drain_hold(
                 return None;
             }
             Ok(other) => return Some(other),
+        }
+    }
+}
+
+/// Drain all immediately-available messages from `rx` without blocking.
+///
+/// `Line` messages are stored in their slot rings.  The first non-`Line`
+/// message is stashed into `pending` (if `pending` is currently `None`) and
+/// draining stops — subsequent non-`Line` messages remain in the channel for
+/// the next iteration of the main loop.
+fn drain_available(
+    rx: &mpsc::Receiver<TuiMsg>,
+    state: &mut RenderState,
+    pending: &mut Option<TuiMsg>,
+) {
+    loop {
+        match rx.try_recv() {
+            Ok(TuiMsg::Line { slot_idx, line }) => {
+                state.slots[slot_idx].ring.push_back(line);
+            }
+            Ok(other) => {
+                if pending.is_none() {
+                    *pending = Some(other);
+                }
+                break;
+            }
+            Err(_) => break,
         }
     }
 }
