@@ -310,7 +310,9 @@ fn render_frame(f: &mut Frame, state: &RenderState) {
     let area = f.area();
 
     // Build vertical layout: one block per visible pane + optional overflow.
-    let has_overflow = state.n > state.visible && !state.background_queue.is_empty();
+    // Show overflow row whenever there are more slots than visible panes —
+    // background_queue may be empty while Done/Failed slots still need listing.
+    let has_overflow = state.n > state.visible;
     let mut constraints: Vec<Constraint> = state
         .pane_to_slot
         .iter()
