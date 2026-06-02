@@ -287,15 +287,33 @@ fn render_loop(
                         {
                             match stashed {
                                 TuiMsg::Shutdown => break,
-                                other            => pending = Some(other),
+                                // Background slot finished during hold — handle
+                                // fully now so it is removed from the queue and
+                                // won't be popped as the next promoted job.
+                                TuiMsg::SlotDone { slot_idx: s, success: ok }
+                                    if state.pane_to_slot.iter().all(|&x| x != s) =>
+                                {
+                                    state.slots[s].done = Some(ok);
+                                    state.background_queue.retain(|&x| x != s);
+                                    let _ = terminal.draw(|f| render_frame(f, &state));
+                                }
+                                // Visible pane slot finished — needs its own
+                                // hold/close cycle; re-process via pending.
+                                other => pending = Some(other),
                             }
                         }
-                        // background_queue may have shrunk if a background job
-                        // finished and was removed during the hold.
-                        if let Some(next) = state.background_queue.pop_front() {
+                        // Pop next still-running slot; skip any that finished
+                        // during the hold and were already removed from queue.
+                        let next = loop {
+                            match state.background_queue.pop_front() {
+                                None                                            => break None,
+                                Some(s) if state.slots[s].done.is_none()       => break Some(s),
+                                Some(_)                                         => continue,
+                            }
+                        };
+                        if let Some(next) = next {
                             state.pane_to_slot[pane_idx] = next;
                         } else {
-                            // Queue drained during hold — close pane instead.
                             state.pane_to_slot.remove(pane_idx);
                         }
                         let _ = terminal.draw(|f| render_frame(f, &state));
@@ -306,7 +324,14 @@ fn render_loop(
                         {
                             match stashed {
                                 TuiMsg::Shutdown => break,
-                                other            => pending = Some(other),
+                                TuiMsg::SlotDone { slot_idx: s, success: ok }
+                                    if state.pane_to_slot.iter().all(|&x| x != s) =>
+                                {
+                                    state.slots[s].done = Some(ok);
+                                    state.background_queue.retain(|&x| x != s);
+                                    let _ = terminal.draw(|f| render_frame(f, &state));
+                                }
+                                other => pending = Some(other),
                             }
                         }
                         state.pane_to_slot.remove(pane_idx);
