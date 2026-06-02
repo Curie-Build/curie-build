@@ -335,7 +335,7 @@ fn render_frame(f: &mut Frame, state: &RenderState) {
     // Draw overflow line.
     if has_overflow {
         let overflow_area = chunks[state.pane_to_slot.len()];
-        render_overflow(f, overflow_area, &state.background_queue, &state.slots);
+        render_overflow(f, overflow_area, state);
     }
 }
 
@@ -417,29 +417,106 @@ fn render_content(f: &mut Frame, area: Rect, ring: &VecDeque<String>) {
 
 /// Render the overflow summary line below all panes.
 ///
-/// Format:  `  · Background: name1, name2  and 3 more`
-fn render_overflow(
-    f: &mut Frame,
-    area: Rect,
-    background_queue: &VecDeque<usize>,
-    slots: &[SlotData],
-) {
-    if background_queue.is_empty() {
+/// Shows up to four labelled groups of non-visible slots:
+///
+/// ```text
+///   · Pending: a, b  · Running: c, d  · Done: e  · Failed: f
+/// ```
+///
+/// Each group is omitted when empty.  Names are truncated with "and N more"
+/// when they would overflow the terminal width.
+fn render_overflow(f: &mut Frame, area: Rect, state: &RenderState) {
+    let visible_set: std::collections::HashSet<usize> =
+        state.pane_to_slot.iter().copied().collect();
+
+    // Classify every non-visible slot into one of four buckets.
+    let mut pending:  Vec<&str> = Vec::new(); // not started (in background_queue, done=None)
+    let mut running:  Vec<&str> = Vec::new(); // running in background (background_queue, done=None)
+    let mut done_ok:  Vec<&str> = Vec::new(); // finished success (not in any pane)
+    let mut done_err: Vec<&str> = Vec::new(); // finished failure (not in any pane)
+
+    // background_queue holds slots not yet assigned to a pane and still running.
+    let in_queue: std::collections::HashSet<usize> =
+        state.background_queue.iter().copied().collect();
+
+    for (idx, slot) in state.slots.iter().enumerate() {
+        if visible_set.contains(&idx) {
+            continue; // shown in a pane
+        }
+        match slot.done {
+            None if in_queue.contains(&idx) => {
+                // Distinguish: the first slot in the queue is actively running;
+                // the rest haven't started yet (they're waiting for a pane).
+                // Actually all background_queue slots are running — jobs are
+                // spawned before the TUI is set up.  Show them all as Running.
+                running.push(&slot.name);
+            }
+            None => {
+                // Slot finished before being assigned a pane — shouldn't
+                // normally happen, but handle gracefully.
+                pending.push(&slot.name);
+            }
+            Some(true)  => done_ok.push(&slot.name),
+            Some(false) => done_err.push(&slot.name),
+        }
+    }
+
+    // Build styled spans for each non-empty group.
+    let dim    = Style::new().add_modifier(Modifier::DIM);
+    let cyan   = Style::new().fg(Color::Cyan);
+    let green  = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
+    let red    = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut cols_used: usize = 0;
+    let budget = area.width as usize;
+
+    /// Append one labelled group to `spans`, respecting the column budget.
+    /// Returns false when there is no room left.
+    fn push_group<'a>(
+        spans: &mut Vec<Span<'static>>,
+        cols_used: &mut usize,
+        budget: usize,
+        label: &'static str,
+        names: &[&str],
+        label_style: Style,
+        name_style: Style,
+        dim: Style,
+    ) -> bool {
+        if names.is_empty() {
+            return true;
+        }
+        // separator between groups
+        let sep = if *cols_used == 0 { "  \u{00b7} " } else { "  \u{00b7} " };
+        let sep_len = 4usize; // "  · "
+        let label_len = label.len();
+        let min_needed = sep_len + label_len + 1; // at least one char of names
+
+        if *cols_used + min_needed > budget {
+            return false;
+        }
+
+        spans.push(Span::styled(sep, dim));
+        spans.push(Span::styled(label, label_style));
+        *cols_used += sep_len + label_len;
+
+        let remaining = budget.saturating_sub(*cols_used);
+        let body = build_overflow_names(names, remaining);
+        *cols_used += body.len();
+        spans.push(Span::styled(body, name_style));
+        true
+    }
+
+    push_group(&mut spans, &mut cols_used, budget, "Running: ",  &running,  cyan,  dim,   dim);
+    push_group(&mut spans, &mut cols_used, budget, "Pending: ",  &pending,  dim,   dim,   dim);
+    push_group(&mut spans, &mut cols_used, budget, "Done: ",     &done_ok,  green, green, dim);
+    push_group(&mut spans, &mut cols_used, budget, "Failed: ",   &done_err, red,   red,   dim);
+
+    if spans.is_empty() {
         return;
     }
 
-    let prefix = "  \u{00b7} Background: "; // 16 visible cols
-    let prefix_cols = 16usize;
-    let budget = (area.width as usize).saturating_sub(prefix_cols);
-
-    let names: Vec<&str> = background_queue
-        .iter()
-        .map(|&i| slots[i].name.as_str())
-        .collect();
-
-    let body = build_overflow_names(&names, budget);
-    let text = format!("{}{}", prefix, body);
-    f.render_widget(Paragraph::new(text), area);
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 // ── Overflow name list builder ─────────────────────────────────────────────
