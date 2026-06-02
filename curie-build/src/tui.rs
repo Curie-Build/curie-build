@@ -309,12 +309,16 @@ fn render_loop(
                                 TuiMsg::Shutdown => break,
                                 // Background slot finished during hold — handle
                                 // fully now so it is removed from the queue and
-                                // won't be popped as the next promoted job.
+                                // won't be popped as the next promoted job.  A
+                                // failure takes over a running pane immediately.
                                 TuiMsg::SlotDone { slot_idx: s, success: ok }
                                     if state.pane_to_slot.iter().all(|&x| x != s) =>
                                 {
                                     state.slots[s].done = Some(ok);
                                     state.background_queue.retain(|&x| x != s);
+                                    if !ok {
+                                        place_failed_in_pane(&mut state, s);
+                                    }
                                     let _ = terminal.draw(|f| render_frame(f, &state));
                                 }
                                 // Visible pane slot finished — needs its own
@@ -352,6 +356,9 @@ fn render_loop(
                                 {
                                     state.slots[s].done = Some(ok);
                                     state.background_queue.retain(|&x| x != s);
+                                    if !ok {
+                                        place_failed_in_pane(&mut state, s);
+                                    }
                                     let _ = terminal.draw(|f| render_frame(f, &state));
                                 }
                                 other => pending = Some(other),
@@ -363,8 +370,13 @@ fn render_loop(
                     // Failure: keep pane showing red ✗ until shutdown.
                 } else {
                     // Slot finished in the background — remove from queue so
-                    // it no longer appears in the overflow line.
+                    // it no longer appears in the overflow line.  On failure,
+                    // surface it in a pane immediately (taking over a running
+                    // pane) so its error is visible right away.
                     state.background_queue.retain(|&s| s != slot_idx);
+                    if !success {
+                        place_failed_in_pane(&mut state, slot_idx);
+                    }
                     let _ = terminal.draw(|f| render_frame(f, &state));
                 }
             }
@@ -408,6 +420,35 @@ fn note_started(state: &mut RenderState, slot_idx: usize) {
         state.pane_to_slot.push(slot_idx);
     } else {
         state.background_queue.push_back(slot_idx);
+    }
+}
+
+/// Surface a background job that just failed by giving it a visible pane so its
+/// error is seen immediately rather than only in the "Failed" overflow line.
+///
+/// * If a pane slot is free, the failure simply opens a new pane.
+/// * Otherwise it takes over a pane that is still **running**, and that running
+///   job is moved to the front of the background queue (so it returns to a pane
+///   as soon as one frees up).  Panes already showing a finished result
+///   (success or failure) are never evicted.
+/// * If every pane already shows a result and none is running, the failure
+///   stays in the "Failed" overflow group until a pane frees up.
+///
+/// The caller must have already set `done` and removed `slot_idx` from the
+/// background queue.
+fn place_failed_in_pane(state: &mut RenderState, slot_idx: usize) {
+    if state.pane_to_slot.len() < state.visible {
+        state.pane_to_slot.push(slot_idx);
+        return;
+    }
+    if let Some(pane_idx) = state
+        .pane_to_slot
+        .iter()
+        .position(|&s| state.slots[s].done.is_none())
+    {
+        let demoted = state.pane_to_slot[pane_idx];
+        state.pane_to_slot[pane_idx] = slot_idx;
+        state.background_queue.push_front(demoted);
     }
 }
 
@@ -1006,6 +1047,92 @@ mod tests {
         note_started(&mut st, 2);
         assert_eq!(st.pane_to_slot, vec![1, 2]);
         assert!(st.background_queue.is_empty());
+    }
+
+    // ── place_failed_in_pane ──────────────────────────────────────────────
+
+    /// Mark a background slot as finished (as the SlotDone handler does) and
+    /// surface it if it failed.
+    fn finish_background(st: &mut RenderState, slot_idx: usize, success: bool) {
+        st.slots[slot_idx].done = Some(success);
+        st.background_queue.retain(|&s| s != slot_idx);
+        if !success {
+            place_failed_in_pane(st, slot_idx);
+        }
+    }
+
+    #[test]
+    fn failed_background_takes_over_running_pane() {
+        // visible=1: slot 0 runs in the pane, slot 1 runs in the background.
+        let mut st = empty_state(2, 1);
+        note_started(&mut st, 0);
+        note_started(&mut st, 1);
+        assert_eq!(st.pane_to_slot, vec![0]);
+        assert_eq!(st.background_queue, VecDeque::from(vec![1]));
+
+        // slot 1 fails in the background → it takes the pane, slot 0 (still
+        // running) is demoted to the front of the queue.
+        finish_background(&mut st, 1, false);
+        assert_eq!(st.pane_to_slot, vec![1]);
+        assert_eq!(st.background_queue, VecDeque::from(vec![0]));
+    }
+
+    #[test]
+    fn failed_background_uses_free_pane_without_demoting() {
+        // visible=2 but only one pane open; a failed background job fills the
+        // free slot rather than evicting the running job.
+        let mut st = empty_state(2, 2);
+        note_started(&mut st, 0);
+        st.background_queue.push_back(1); // slot 1 queued (running)
+
+        finish_background(&mut st, 1, false);
+        assert_eq!(st.pane_to_slot, vec![0, 1]);
+        assert!(st.background_queue.is_empty());
+    }
+
+    #[test]
+    fn failed_background_picks_first_running_pane() {
+        // Two panes: slot 0 already failed (red), slot 1 still running.  A new
+        // background failure must take over the running pane, not the failed one.
+        let mut st = empty_state(3, 2);
+        note_started(&mut st, 0);
+        note_started(&mut st, 1);
+        st.slots[0].done = Some(false); // pane 0 shows a failure
+        st.background_queue.push_back(2);
+
+        finish_background(&mut st, 2, false);
+        assert_eq!(st.pane_to_slot, vec![0, 2]); // pane 1 (running) replaced
+        assert_eq!(st.background_queue, VecDeque::from(vec![1]));
+    }
+
+    #[test]
+    fn failed_background_stays_in_overflow_when_no_pane_is_running() {
+        // The only pane already shows a failure; a second background failure has
+        // nowhere to go and stays in the "Failed" overflow group.
+        let mut st = empty_state(2, 1);
+        note_started(&mut st, 0);
+        st.slots[0].done = Some(false);
+        st.background_queue.push_back(1);
+
+        finish_background(&mut st, 1, false);
+        assert_eq!(st.pane_to_slot, vec![0]); // unchanged
+        assert!(st.background_queue.is_empty());
+        let groups = classify_overflow_slots(&st);
+        assert_eq!(groups.done_err, vec!["m1"]);
+    }
+
+    #[test]
+    fn successful_background_does_not_take_a_pane() {
+        // A background job that succeeds is just dropped from the queue.
+        let mut st = empty_state(2, 1);
+        note_started(&mut st, 0);
+        note_started(&mut st, 1);
+
+        finish_background(&mut st, 1, true);
+        assert_eq!(st.pane_to_slot, vec![0]);
+        assert!(st.background_queue.is_empty());
+        let groups = classify_overflow_slots(&st);
+        assert_eq!(groups.done_ok, vec!["m1"]);
     }
 
     // ── distribute_pane_heights ───────────────────────────────────────────
