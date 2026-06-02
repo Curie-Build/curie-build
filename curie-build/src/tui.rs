@@ -423,15 +423,23 @@ fn render_loop(
     // the three raw sequences.
     let _ = write!(io::stdout(), "\x1b[r\x1b[?7h\x1b]8;;\x07");
     let _ = execute!(io::stdout(), cursor::Show);
-    // Park cursor below the drawn content so normal output continues there.
-    // Open panes fill all height above the overflow lines, so the drawn content
-    // reaches the bottom of the screen; with no open panes only the overflow
-    // lines were drawn.
+    // Leave the cursor below the drawn content so the caller's following output
+    // (e.g. the "error: …" summary) continues on a clean line.
     let open_panes    = state.pane_to_slot.len();
     let overflow_rows = count_nonempty_groups(&classify_overflow_slots(&state)) as u16;
     let term_h        = terminal.size().map(|s| s.height).unwrap_or(0);
-    let total_rows    = if open_panes > 0 { term_h } else { overflow_rows };
-    let _ = terminal.set_cursor_position((0, total_rows));
+    match cursor_park(open_panes, overflow_rows, term_h) {
+        CursorPark::Below(row) => {
+            let _ = terminal.set_cursor_position((0, row));
+        }
+        CursorPark::ScrollFromBottom(row) => {
+            // The screen is full — move to the bottom row and emit a newline so
+            // the terminal scrolls up one line, opening a fresh line below the
+            // content rather than overwriting the last drawn row.
+            let _ = terminal.set_cursor_position((0, row));
+            let _ = write!(io::stdout(), "\r\n");
+        }
+    }
     let _ = io::stdout().flush();
 }
 
@@ -494,6 +502,31 @@ fn place_failed_in_pane(state: &mut RenderState, slot_idx: usize) {
         let demoted = state.pane_to_slot[pane_idx];
         state.pane_to_slot[pane_idx] = slot_idx;
         state.background_queue.push_front(demoted);
+    }
+}
+
+/// Where to leave the cursor after the final frame so the caller's following
+/// output (the "error: …" summary) doesn't overwrite a drawn row.
+#[derive(Debug, PartialEq, Eq)]
+enum CursorPark {
+    /// Blank rows remain below the content — park the cursor on this row.
+    Below(u16),
+    /// Open panes filled the whole screen, so there is no blank row: park on the
+    /// bottom row and scroll up one line to open a fresh line below.
+    ScrollFromBottom(u16),
+}
+
+/// Decide where to park the cursor at cleanup.
+///
+/// With open panes the layout always fills the terminal (panes take
+/// `term_h - overflow_rows`, the overflow lines take the rest), so we must
+/// scroll to make room.  With no open panes only the overflow lines were drawn
+/// and there is blank space below them to park in.
+fn cursor_park(open_panes: usize, overflow_rows: u16, term_h: u16) -> CursorPark {
+    if open_panes > 0 {
+        CursorPark::ScrollFromBottom(term_h.saturating_sub(1))
+    } else {
+        CursorPark::Below(overflow_rows)
     }
 }
 
@@ -1192,6 +1225,23 @@ mod tests {
         assert!(st.background_queue.is_empty());
         let groups = classify_overflow_slots(&st);
         assert_eq!(groups.done_ok, vec!["m1"]);
+    }
+
+    // ── cursor_park ───────────────────────────────────────────────────────
+
+    #[test]
+    fn cursor_parks_below_overflow_when_no_panes_open() {
+        // Only overflow lines drawn (all panes were successful and closed):
+        // park on the blank row right under them.
+        assert_eq!(cursor_park(0, 2, 40), CursorPark::Below(2));
+    }
+
+    #[test]
+    fn cursor_scrolls_when_open_panes_fill_screen() {
+        // A failed pane fills the screen → scroll up from the bottom row so the
+        // following "error: …" line doesn't overwrite the last drawn row.
+        assert_eq!(cursor_park(1, 2, 40), CursorPark::ScrollFromBottom(39));
+        assert_eq!(cursor_park(2, 0, 24), CursorPark::ScrollFromBottom(23));
     }
 
     // ── apply_shutdown ────────────────────────────────────────────────────
