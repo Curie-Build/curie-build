@@ -322,7 +322,13 @@ fn render_loop(
                             drain_hold(&rx, &mut terminal, &mut state, 1)
                         {
                             match stashed {
-                                TuiMsg::Shutdown => break,
+                                // Shutdown during the hold still runs the close
+                                // rules so a held-green pane isn't left open.
+                                TuiMsg::Shutdown => {
+                                    apply_shutdown(&mut state);
+                                    let _ = terminal.draw(|f| render_frame(f, &state));
+                                    break;
+                                }
                                 // Background slot finished during hold — handle
                                 // fully now so it is removed from the queue and
                                 // won't be popped as the next promoted job.  A
@@ -366,7 +372,13 @@ fn render_loop(
                             drain_hold(&rx, &mut terminal, &mut state, 2)
                         {
                             match stashed {
-                                TuiMsg::Shutdown => break,
+                                // Shutdown during the hold still runs the close
+                                // rules so this held-green pane isn't left open.
+                                TuiMsg::Shutdown => {
+                                    apply_shutdown(&mut state);
+                                    let _ = terminal.draw(|f| render_frame(f, &state));
+                                    break;
+                                }
                                 TuiMsg::SlotDone { slot_idx: s, success: ok }
                                     if state.pane_to_slot.iter().all(|&x| x != s) =>
                                 {
@@ -398,16 +410,7 @@ fn render_loop(
             }
 
             TuiMsg::Shutdown => {
-                // Rule 3: close all successful panes before exiting.
-                state.pane_to_slot.retain(|&s| state.slots[s].done != Some(true));
-                // Any job that never started by shutdown was cancelled (build
-                // failed or was interrupted) — show it as "Skipped", not
-                // "Pending".
-                for slot in &mut state.slots {
-                    if slot.done.is_none() {
-                        slot.skipped = true;
-                    }
-                }
+                apply_shutdown(&mut state);
                 let _ = terminal.draw(|f| render_frame(f, &state));
                 break;
             }
@@ -444,6 +447,24 @@ fn note_started(state: &mut RenderState, slot_idx: usize) {
         state.pane_to_slot.push(slot_idx);
     } else {
         state.background_queue.push_back(slot_idx);
+    }
+}
+
+/// Apply the shutdown close rules to the render state.
+///
+/// * Rule 3: close every pane showing a successful job, so only failed panes
+///   (red ✗) remain on screen after the build ends.
+/// * Any job that never started was cancelled by an earlier failure (or an
+///   interrupted build) and is marked "Skipped" rather than "Pending".
+///
+/// Called from every shutdown path — including when `Shutdown` interrupts a
+/// pane's hold window — so a held-green pane is never left open.
+fn apply_shutdown(state: &mut RenderState) {
+    state.pane_to_slot.retain(|&s| state.slots[s].done != Some(true));
+    for slot in &mut state.slots {
+        if slot.done.is_none() {
+            slot.skipped = true;
+        }
     }
 }
 
@@ -1171,6 +1192,38 @@ mod tests {
         assert!(st.background_queue.is_empty());
         let groups = classify_overflow_slots(&st);
         assert_eq!(groups.done_ok, vec!["m1"]);
+    }
+
+    // ── apply_shutdown ────────────────────────────────────────────────────
+
+    #[test]
+    fn shutdown_closes_successful_pane_keeps_failed() {
+        // Last frame of a failed build: a green pane and a red pane are both
+        // open.  Shutdown must drop the green one and keep only the red.
+        let mut st = empty_state(3, 2);
+        note_started(&mut st, 0);
+        note_started(&mut st, 1);
+        st.slots[0].done = Some(true);  // succeeded
+        st.slots[1].done = Some(false); // failed
+        // slot 2 never started.
+
+        apply_shutdown(&mut st);
+
+        assert_eq!(st.pane_to_slot, vec![1]); // only the failed pane remains
+        assert!(st.slots[2].skipped);         // never-started job marked skipped
+    }
+
+    #[test]
+    fn shutdown_marks_unstarted_jobs_skipped() {
+        let mut st = empty_state(2, 1);
+        note_started(&mut st, 0);
+        st.slots[0].done = Some(false);
+
+        apply_shutdown(&mut st);
+
+        let groups = classify_overflow_slots(&st);
+        assert_eq!(groups.skipped, vec!["m1"]);
+        assert!(groups.pending.is_empty());
     }
 
     // ── skipped classification ────────────────────────────────────────────
