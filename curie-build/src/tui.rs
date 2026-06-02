@@ -92,8 +92,8 @@ enum TuiMsg {
     /// boxes — they appear in the "Pending" overflow line instead.
     SlotStarted { slot_idx: usize },
     /// Job cancelled by an earlier build failure — it will never run.  Shown in
-    /// the "Skipped" overflow group instead of "Pending".
-    SlotSkipped { slot_idx: usize },
+    /// the "Skipped (<reason>)" overflow group instead of "Pending".
+    SlotSkipped { slot_idx: usize, reason: String },
     Line { slot_idx: usize, line: String },
     /// Job finished.  `success` controls whether the pane is eligible for
     /// reuse: on success the pane is immediately handed to the next waiting
@@ -124,9 +124,12 @@ impl crate::parallel::LineSink for TuiSlot {
     }
 
     /// Signal that this job was cancelled by an earlier failure and will never
-    /// run, so it is shown as "Skipped" rather than "Pending".
-    fn skip(&self) {
-        let _ = self.sender.send(TuiMsg::SlotSkipped { slot_idx: self.slot_idx });
+    /// run, so it is shown as "Skipped (<reason>)" rather than "Pending".
+    fn skip(&self, reason: &str) {
+        let _ = self.sender.send(TuiMsg::SlotSkipped {
+            slot_idx: self.slot_idx,
+            reason: reason.to_string(),
+        });
     }
 
     fn push_line(&self, line: String) {
@@ -240,6 +243,9 @@ struct RenderState {
     /// background; eligible for promotion when a pane frees up).
     background_queue: VecDeque<usize>,
     visible: usize,
+    /// Short reason the build was aborted, shown after the "Skipped" label.
+    /// Set from the first [`TuiMsg::SlotSkipped`].
+    skip_reason: Option<String>,
 }
 
 fn render_loop(
@@ -274,6 +280,7 @@ fn render_loop(
         pane_to_slot: Vec::new(),
         background_queue: VecDeque::new(),
         visible,
+        skip_reason: None,
     };
 
     // Initial draw.
@@ -294,8 +301,8 @@ fn render_loop(
                 let _ = terminal.draw(|f| render_frame(f, &state));
             }
 
-            TuiMsg::SlotSkipped { slot_idx } => {
-                state.slots[slot_idx].skipped = true;
+            TuiMsg::SlotSkipped { slot_idx, reason } => {
+                note_skipped(&mut state, slot_idx, reason);
                 let _ = terminal.draw(|f| render_frame(f, &state));
             }
 
@@ -458,6 +465,16 @@ fn note_started(state: &mut RenderState, slot_idx: usize) {
     }
 }
 
+/// Record that `slot_idx` was cancelled by an earlier failure, capturing the
+/// short `reason` the build was aborted the first time one is seen (all skipped
+/// jobs share the same reason).
+fn note_skipped(state: &mut RenderState, slot_idx: usize, reason: String) {
+    state.slots[slot_idx].skipped = true;
+    if state.skip_reason.is_none() {
+        state.skip_reason = Some(reason);
+    }
+}
+
 /// Apply the shutdown close rules to the render state.
 ///
 /// * Rule 3: close every pane showing a successful job, so only failed panes
@@ -575,8 +592,8 @@ fn drain_hold(
                 note_started(state, slot_idx);
                 let _ = terminal.draw(|f| render_frame(f, state));
             }
-            Ok(TuiMsg::SlotSkipped { slot_idx }) => {
-                state.slots[slot_idx].skipped = true;
+            Ok(TuiMsg::SlotSkipped { slot_idx, reason }) => {
+                note_skipped(state, slot_idx, reason);
                 let _ = terminal.draw(|f| render_frame(f, state));
             }
             Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
@@ -606,8 +623,8 @@ fn drain_available(
             Ok(TuiMsg::SlotStarted { slot_idx }) => {
                 note_started(state, slot_idx);
             }
-            Ok(TuiMsg::SlotSkipped { slot_idx }) => {
-                state.slots[slot_idx].skipped = true;
+            Ok(TuiMsg::SlotSkipped { slot_idx, reason }) => {
+                note_skipped(state, slot_idx, reason);
             }
             Ok(other) => {
                 if pending.is_none() {
@@ -653,7 +670,13 @@ fn render_frame(f: &mut Frame, state: &RenderState) {
 
     // Draw one line per non-empty group.
     let base = state.pane_to_slot.len();
-    render_overflow_lines(f, &chunks[base..], area.width as usize, &groups);
+    render_overflow_lines(
+        f,
+        &chunks[base..],
+        area.width as usize,
+        &groups,
+        state.skip_reason.as_deref(),
+    );
 }
 
 // ── Pane widgets ──────────────────────────────────────────────────────────
@@ -782,11 +805,15 @@ fn count_nonempty_groups(g: &OverflowGroups<'_>) -> usize {
 // ── Overflow rendering ─────────────────────────────────────────────────────
 
 /// Render one row per non-empty group into `areas` (one Rect per row).
+///
+/// `skip_reason`, when present, is shown after the "Skipped" label as
+/// `Skipped (<reason>): …` so the user sees why those jobs never ran.
 fn render_overflow_lines(
     f: &mut Frame,
     areas: &[Rect],
     width: usize,
     groups: &OverflowGroups<'_>,
+    skip_reason: Option<&str>,
 ) {
     let dim    = Style::new().add_modifier(Modifier::DIM);
     let cyan   = Style::new().fg(Color::Cyan);
@@ -795,18 +822,23 @@ fn render_overflow_lines(
     let red    = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
 
     struct GroupSpec<'a> {
-        label:       &'static str,
+        label:       String,
         names:       &'a [&'a str],
         label_style: Style,
         name_style:  Style,
     }
 
+    let skipped_label = match skip_reason {
+        Some(reason) => format!("Skipped ({}): ", reason),
+        None         => "Skipped: ".to_string(),
+    };
+
     let specs = [
-        GroupSpec { label: "Running: ", names: &groups.running,  label_style: cyan,   name_style: dim   },
-        GroupSpec { label: "Pending: ", names: &groups.pending,  label_style: dim,    name_style: dim   },
-        GroupSpec { label: "Skipped: ", names: &groups.skipped,  label_style: yellow, name_style: dim   },
-        GroupSpec { label: "Done: ",    names: &groups.done_ok,  label_style: green,  name_style: green },
-        GroupSpec { label: "Failed: ",  names: &groups.done_err, label_style: red,    name_style: red   },
+        GroupSpec { label: "Running: ".into(), names: &groups.running,  label_style: cyan,   name_style: dim   },
+        GroupSpec { label: "Pending: ".into(), names: &groups.pending,  label_style: dim,    name_style: dim   },
+        GroupSpec { label: skipped_label,      names: &groups.skipped,  label_style: yellow, name_style: dim   },
+        GroupSpec { label: "Done: ".into(),    names: &groups.done_ok,  label_style: green,  name_style: green },
+        GroupSpec { label: "Failed: ".into(),  names: &groups.done_err, label_style: red,    name_style: red   },
     ];
 
     let mut area_idx = 0;
@@ -827,9 +859,9 @@ fn render_overflow_lines(
         let body       = build_overflow_names(spec.names, budget);
 
         let line = Line::from(vec![
-            Span::styled(prefix,        dim),
-            Span::styled(spec.label,    spec.label_style),
-            Span::styled(body,          spec.name_style),
+            Span::styled(prefix,             dim),
+            Span::styled(spec.label.clone(), spec.label_style),
+            Span::styled(body,               spec.name_style),
         ]);
         f.render_widget(Paragraph::new(line), area);
     }
@@ -1085,6 +1117,7 @@ mod tests {
             pane_to_slot: Vec::new(),
             background_queue: VecDeque::new(),
             visible,
+            skip_reason: None,
         }
     }
 
@@ -1290,6 +1323,22 @@ mod tests {
         assert_eq!(groups.skipped, vec!["m1"]);
         assert_eq!(groups.pending, vec!["m2"]);
         assert!(groups.running.is_empty());
+    }
+
+    #[test]
+    fn note_skipped_marks_slots_and_keeps_first_reason() {
+        let mut st = empty_state(3, 1);
+        note_started(&mut st, 0);
+        note_skipped(&mut st, 1, "lombok-greeter failed".to_string());
+        // A later skip keeps the original reason (all share the same cause).
+        note_skipped(&mut st, 2, "something-else failed".to_string());
+
+        assert!(st.slots[1].skipped);
+        assert!(st.slots[2].skipped);
+        assert_eq!(st.skip_reason.as_deref(), Some("lombok-greeter failed"));
+
+        let groups = classify_overflow_slots(&st);
+        assert_eq!(groups.skipped, vec!["m1", "m2"]);
     }
 
     #[test]

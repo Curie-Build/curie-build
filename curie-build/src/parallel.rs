@@ -56,8 +56,9 @@ use crate::workspace::{Member, Workspace};
 pub(crate) trait LineSink: Send + Sync {
     /// Called once before the build closure runs.  Default: no-op.
     fn start(&self) {}
-    /// Called for a job cancelled by an earlier failure.  Default: no-op.
-    fn skip(&self) {}
+    /// Called for a job cancelled by an earlier failure.  `reason` is a short
+    /// description of what aborted the build (e.g. "foo failed").  Default: no-op.
+    fn skip(&self, _reason: &str) {}
     fn push_line(&self, line: String);
     fn flush(&self);
     fn complete(&self, success: bool);
@@ -395,15 +396,17 @@ fn on_completion(
 }
 
 /// Signal every subset job that has not been dispatched yet (cancelled by a
-/// build failure) so the renderer can show them as "Skipped".
+/// build failure) so the renderer can show them as "Skipped", along with the
+/// short `reason` the build was aborted.
 fn mark_undispatched_skipped(
     subset: &[usize],
     dispatched: &HashSet<usize>,
     sinks: &[Arc<dyn LineSink + Send + Sync>],
+    reason: &str,
 ) {
     for (pos, &idx) in subset.iter().enumerate() {
         if !dispatched.contains(&idx) {
-            sinks[pos].skip();
+            sinks[pos].skip(reason);
         }
     }
 }
@@ -620,9 +623,11 @@ where
                 Err(e) => {
                     // The first failure aborts further dispatch.  Tell the
                     // renderer about every job that has not started yet so they
-                    // show as "Skipped" rather than forever "Pending".
+                    // show as "Skipped" rather than forever "Pending", noting the
+                    // failing member as the reason.
                     if !failed {
-                        mark_undispatched_skipped(subset, &dispatched, sinks_ref);
+                        let reason = format!("{} failed", display_names[pos]);
+                        mark_undispatched_skipped(subset, &dispatched, sinks_ref, &reason);
                     }
                     failed = true;
                     errors.push(format!("{}: {:#}", ws.members[idx].declared, e));
