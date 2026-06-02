@@ -34,6 +34,10 @@ use crate::workspace::{Member, Workspace};
 /// [`crate::tui::TuiSlot`] (TUI split-screen path).
 ///
 /// Both paths implement the same contract:
+/// * `start` — called once by the worker thread just before the build closure
+///   runs.  Signals that the job has actually begun executing.  A no-op for the
+///   mux path; the TUI path uses it to assign a pane only to a job that is
+///   really running (so pending/never-dispatched jobs don't show empty panes).
 /// * `push_line` — called by worker threads for each line of process output.
 ///   Must write the line to the member's log file immediately and queue it
 ///   for display.
@@ -47,6 +51,8 @@ use crate::workspace::{Member, Workspace};
 ///   width so child output fits without wrapping.  Returns `0` for the TUI
 ///   path (full terminal width is available).
 pub(crate) trait LineSink: Send + Sync {
+    /// Called once before the build closure runs.  Default: no-op.
+    fn start(&self) {}
     fn push_line(&self, line: String);
     fn flush(&self);
     fn complete(&self, success: bool);
@@ -558,6 +564,9 @@ where
 
                 s.spawn(move || {
                     set_thread_sink(Arc::clone(&sink));
+                    // Announce the job has begun so the TUI assigns a pane only
+                    // to a job that is actually running (not one still pending).
+                    sink.start();
                     let result = run_ref(m, &extra_cp);
                     clear_thread_sink();
                     sink.complete(result.is_ok());

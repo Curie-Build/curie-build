@@ -14,7 +14,13 @@
 //!   · Background: member-c, member-d  and 2 more
 //! ```
 //!
-//! When more members exist than can fit on screen, the extra members are
+//! Panes are assigned lazily: a member gets a pane only once its build job has
+//! actually started running (signalled via [`crate::parallel::LineSink::start`]).
+//! Members whose jobs are still pending — or were never dispatched because an
+//! earlier failure cancelled the rest of the build — never occupy a pane; they
+//! appear compactly in the "Pending" overflow line instead of as empty boxes.
+//!
+//! When more members are running than can fit on screen, the extra members are
 //! listed on a single overflow line at the bottom.  When a visible pane
 //! finishes successfully, it is immediately reused for the next waiting
 //! background job.
@@ -80,6 +86,11 @@ pub(crate) fn tui_layout(n: usize, term_h: usize) -> (usize, usize) {
 // ── Internal message type ─────────────────────────────────────────────────
 
 enum TuiMsg {
+    /// Worker thread began running this job.  The render thread assigns it a
+    /// free pane (or queues it as a running background job).  Only started jobs
+    /// ever occupy a pane, so pending/never-dispatched jobs don't show as empty
+    /// boxes — they appear in the "Pending" overflow line instead.
+    SlotStarted { slot_idx: usize },
     Line { slot_idx: usize, line: String },
     /// Job finished.  `success` controls whether the pane is eligible for
     /// reuse: on success the pane is immediately handed to the next waiting
@@ -102,6 +113,13 @@ pub(crate) struct TuiSlot {
 }
 
 impl crate::parallel::LineSink for TuiSlot {
+    /// Signal the render thread that this job has begun executing so it can be
+    /// assigned a visible pane.  Jobs that never start (e.g. cancelled after an
+    /// earlier failure) never send this and so never show an empty pane.
+    fn start(&self) {
+        let _ = self.sender.send(TuiMsg::SlotStarted { slot_idx: self.slot_idx });
+    }
+
     fn push_line(&self, line: String) {
         // Write to disk immediately — same contract as MuxSlot.
         if let Ok(mut f) = self.log.lock() {
@@ -159,7 +177,6 @@ impl TuiRenderer {
         visible_count: usize,
         pane_height: usize,
     ) -> (Self, Vec<Arc<TuiSlot>>) {
-        let n = names.len();
         // Capacity 1000: large enough to absorb bursts while bounding memory.
         let (sender, receiver) = mpsc::sync_channel::<TuiMsg>(1000);
 
@@ -176,7 +193,7 @@ impl TuiRenderer {
             .collect();
 
         let thread = std::thread::spawn(move || {
-            render_loop(receiver, names, n, visible_count, pane_height);
+            render_loop(receiver, names, visible_count, pane_height);
         });
 
         let renderer = TuiRenderer { sender, thread: Some(thread) };
@@ -209,9 +226,9 @@ struct RenderState {
     slots: Vec<SlotData>,
     /// `pane_to_slot[pane_idx]` = slot_idx currently shown in that pane.
     pane_to_slot: Vec<usize>,
-    /// Slots not yet assigned to any visible pane.
+    /// Started slots not currently shown in a visible pane (running in the
+    /// background; eligible for promotion when a pane frees up).
     background_queue: VecDeque<usize>,
-    n: usize,
     visible: usize,
     pane_h: usize,
 }
@@ -219,7 +236,6 @@ struct RenderState {
 fn render_loop(
     rx: mpsc::Receiver<TuiMsg>,
     names: Vec<String>,
-    n: usize,
     visible: usize,
     pane_h: usize,
 ) {
@@ -238,14 +254,17 @@ fn render_loop(
     // the initial pane layout.
     let _ = terminal.clear();
 
+    // Panes start empty and are filled lazily as jobs report they have begun
+    // running (TuiMsg::SlotStarted).  This keeps a pane from ever showing a job
+    // that is still pending — or one that was never dispatched because an
+    // earlier failure cancelled the rest of the build.
     let mut state = RenderState {
         slots: names
             .into_iter()
             .map(|name| SlotData { name, done: None, ring: VecDeque::new() })
             .collect(),
-        pane_to_slot: (0..visible).collect(),
-        background_queue: (visible..n).collect(),
-        n,
+        pane_to_slot: Vec::new(),
+        background_queue: VecDeque::new(),
         visible,
         pane_h,
     };
@@ -263,6 +282,11 @@ fn render_loop(
             None    => break,
         };
         match msg {
+            TuiMsg::SlotStarted { slot_idx } => {
+                note_started(&mut state, slot_idx);
+                let _ = terminal.draw(|f| render_frame(f, &state));
+            }
+
             TuiMsg::Line { slot_idx, line } => {
                 state.slots[slot_idx].ring.push_back(line);
                 // Redraw only when this slot is in a visible pane.
@@ -372,6 +396,21 @@ fn render_loop(
     let _ = io::stdout().flush();
 }
 
+// ── Pane assignment ────────────────────────────────────────────────────────
+
+/// Record that `slot_idx` has begun running.
+///
+/// Fills a free pane if fewer than `visible` panes are open; otherwise enqueues
+/// the slot as a running background job (shown in the "Running" overflow group
+/// and eligible for promotion when a visible pane finishes successfully).
+fn note_started(state: &mut RenderState, slot_idx: usize) {
+    if state.pane_to_slot.len() < state.visible {
+        state.pane_to_slot.push(slot_idx);
+    } else {
+        state.background_queue.push_back(slot_idx);
+    }
+}
+
 // ── Hold-drain helper ─────────────────────────────────────────────────────
 
 /// Drain incoming messages for `hold_secs`, processing `Line` messages into
@@ -396,6 +435,12 @@ fn drain_hold(
                     let _ = terminal.draw(|f| render_frame(f, state));
                 }
             }
+            // A new job starting during the hold fills a free pane or joins the
+            // running overflow group; it never disturbs the finishing pane.
+            Ok(TuiMsg::SlotStarted { slot_idx }) => {
+                note_started(state, slot_idx);
+                let _ = terminal.draw(|f| render_frame(f, state));
+            }
             Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
                 return None;
             }
@@ -419,6 +464,9 @@ fn drain_available(
         match rx.try_recv() {
             Ok(TuiMsg::Line { slot_idx, line }) => {
                 state.slots[slot_idx].ring.push_back(line);
+            }
+            Ok(TuiMsg::SlotStarted { slot_idx }) => {
+                note_started(state, slot_idx);
             }
             Ok(other) => {
                 if pending.is_none() {
@@ -871,6 +919,77 @@ mod tests {
     #[test]
     fn layout_zero_members() {
         assert_eq!(tui_layout(0, 40), (0, MIN_PANE_HEIGHT));
+    }
+
+    // ── note_started / lazy pane assignment ───────────────────────────────
+
+    fn empty_state(n: usize, visible: usize) -> RenderState {
+        RenderState {
+            slots: (0..n)
+                .map(|i| SlotData {
+                    name: format!("m{i}"),
+                    done: None,
+                    ring: VecDeque::new(),
+                })
+                .collect(),
+            pane_to_slot: Vec::new(),
+            background_queue: VecDeque::new(),
+            visible,
+            pane_h: MIN_PANE_HEIGHT,
+        }
+    }
+
+    #[test]
+    fn started_jobs_fill_panes_then_queue() {
+        let mut st = empty_state(4, 2);
+        note_started(&mut st, 0);
+        note_started(&mut st, 1);
+        assert_eq!(st.pane_to_slot, vec![0, 1]);
+        assert!(st.background_queue.is_empty());
+
+        // Panes full → the third starter goes to the background queue.
+        note_started(&mut st, 2);
+        assert_eq!(st.pane_to_slot, vec![0, 1]);
+        assert_eq!(st.background_queue, VecDeque::from(vec![2]));
+    }
+
+    #[test]
+    fn unstarted_slots_are_pending_not_empty_panes() {
+        // Only slot 0 has started; 1 and 2 are still pending and must NOT
+        // occupy (empty) panes — they belong in the "Pending" overflow group.
+        let mut st = empty_state(3, 2);
+        note_started(&mut st, 0);
+
+        assert_eq!(st.pane_to_slot, vec![0]);
+        let groups = classify_overflow_slots(&st);
+        assert_eq!(groups.pending, vec!["m1", "m2"]);
+        assert!(groups.running.is_empty());
+    }
+
+    #[test]
+    fn queued_started_slot_is_running_overflow() {
+        // visible=1: slot 0 takes the pane, slot 1 (started) is a running
+        // background job, slot 2 (not started) stays pending.
+        let mut st = empty_state(3, 1);
+        note_started(&mut st, 0);
+        note_started(&mut st, 1);
+
+        let groups = classify_overflow_slots(&st);
+        assert_eq!(groups.running, vec!["m1"]);
+        assert_eq!(groups.pending, vec!["m2"]);
+    }
+
+    #[test]
+    fn pane_reopens_after_close_for_later_starter() {
+        // A pane closed (rule 2) leaves room; a job that starts later must be
+        // able to claim the freed pane rather than being queued.
+        let mut st = empty_state(4, 2);
+        note_started(&mut st, 0);
+        note_started(&mut st, 1);
+        st.pane_to_slot.remove(0); // simulate slot 0's pane closing
+        note_started(&mut st, 2);
+        assert_eq!(st.pane_to_slot, vec![1, 2]);
+        assert!(st.background_queue.is_empty());
     }
 
     // ── build_overflow_names ──────────────────────────────────────────────
