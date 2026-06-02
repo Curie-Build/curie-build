@@ -254,10 +254,13 @@ fn render_loop(
     let _ = terminal.draw(|f| render_frame(f, &state));
 
     // ── Message loop ──────────────────────────────────────────────────────
+    // `pending` holds a message that was stashed during a hold window and
+    // must be re-processed with full SlotDone treatment next iteration.
+    let mut pending: Option<TuiMsg> = None;
     loop {
-        let msg = match rx.recv() {
-            Ok(m) => m,
-            Err(_) => break,
+        let msg = match pending.take().or_else(|| rx.recv().ok()) {
+            Some(m) => m,
+            None    => break,
         };
         match msg {
             TuiMsg::Line { slot_idx, line } => {
@@ -278,62 +281,52 @@ fn render_loop(
                     state.pane_to_slot.iter().position(|&s| s == slot_idx)
                 {
                     if success && !state.background_queue.is_empty() {
-                        // Hold green for 1 s, keep draining Line messages.
+                        // Rule 1: hold green 1 s, then replace with next job.
                         if let Some(stashed) =
                             drain_hold(&rx, &mut terminal, &mut state, 1)
                         {
                             match stashed {
-                                TuiMsg::SlotDone { slot_idx: s, success: ok } => {
-                                    state.slots[s].done = Some(ok);
-                                    if state.pane_to_slot.iter().all(|&x| x != s) {
-                                        state.background_queue.retain(|&x| x != s);
-                                    }
-                                    let _ = terminal.draw(|f| render_frame(f, &state));
-                                }
                                 TuiMsg::Shutdown => break,
-                                TuiMsg::Line { .. } => unreachable!(),
+                                other            => pending = Some(other),
                             }
                         }
-                        let next = state.background_queue.pop_front().unwrap();
-                        state.pane_to_slot[pane_idx] = next;
-                        let _ = terminal.draw(|f| render_frame(f, &state));
-                    } else {
-                        // No replacement — hold for 2 s then close the pane,
-                        // but only on success; failed panes stay until shutdown.
-                        if success {
-                            if let Some(stashed) =
-                                drain_hold(&rx, &mut terminal, &mut state, 2)
-                            {
-                                match stashed {
-                                    TuiMsg::SlotDone { slot_idx: s, success: ok } => {
-                                        state.slots[s].done = Some(ok);
-                                        if state.pane_to_slot.iter().all(|&x| x != s) {
-                                            state.background_queue.retain(|&x| x != s);
-                                        }
-                                        let _ = terminal.draw(|f| render_frame(f, &state));
-                                    }
-            TuiMsg::Shutdown => {
-                // Close all panes showing successful jobs before exiting.
-                state.pane_to_slot.retain(|&s| state.slots[s].done != Some(true));
-                let _ = terminal.draw(|f| render_frame(f, &state));
-                break;
-            }
-                                    TuiMsg::Line { .. } => unreachable!(),
-                                }
-                            }
+                        // background_queue may have shrunk if a background job
+                        // finished and was removed during the hold.
+                        if let Some(next) = state.background_queue.pop_front() {
+                            state.pane_to_slot[pane_idx] = next;
+                        } else {
+                            // Queue drained during hold — close pane instead.
                             state.pane_to_slot.remove(pane_idx);
-                            let _ = terminal.draw(|f| render_frame(f, &state));
                         }
-                        // else: failure — keep pane showing red ✗ until shutdown.
+                        let _ = terminal.draw(|f| render_frame(f, &state));
+                    } else if success {
+                        // Rule 2: no replacement — hold 2 s then close.
+                        if let Some(stashed) =
+                            drain_hold(&rx, &mut terminal, &mut state, 2)
+                        {
+                            match stashed {
+                                TuiMsg::Shutdown => break,
+                                other            => pending = Some(other),
+                            }
+                        }
+                        state.pane_to_slot.remove(pane_idx);
+                        let _ = terminal.draw(|f| render_frame(f, &state));
                     }
+                    // Failure: keep pane showing red ✗ until shutdown.
                 } else {
                     // Slot finished in the background — remove from queue so
                     // it no longer appears in the overflow line.
                     state.background_queue.retain(|&s| s != slot_idx);
+                    let _ = terminal.draw(|f| render_frame(f, &state));
                 }
             }
 
-            TuiMsg::Shutdown => break,
+            TuiMsg::Shutdown => {
+                // Rule 3: close all successful panes before exiting.
+                state.pane_to_slot.retain(|&s| state.slots[s].done != Some(true));
+                let _ = terminal.draw(|f| render_frame(f, &state));
+                break;
+            }
         }
     }
 
