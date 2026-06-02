@@ -339,9 +339,9 @@ fn render_loop(
     let _ = write!(io::stdout(), "\x1b[r\x1b[?7h\x1b]8;;\x07");
     let _ = execute!(io::stdout(), cursor::Show);
     // Park cursor below the drawn content so normal output continues there.
-    let open_panes   = state.pane_to_slot.len();
-    let overflow_rows = if state.slots.len() > open_panes { 1 } else { 0 };
-    let total_rows = (open_panes * pane_h + overflow_rows) as u16;
+    let open_panes    = state.pane_to_slot.len();
+    let overflow_rows = count_nonempty_groups(&classify_overflow_slots(&state));
+    let total_rows    = (open_panes * pane_h + overflow_rows) as u16;
     let _ = terminal.set_cursor_position((0, total_rows));
     let _ = io::stdout().flush();
 }
@@ -383,15 +383,15 @@ fn drain_hold(
 fn render_frame(f: &mut Frame, state: &RenderState) {
     let area = f.area();
 
-    // Build vertical layout: one block per visible pane + optional overflow.
-    // Show overflow row whenever there are more slots than open panes.
-    let has_overflow = state.slots.len() > state.pane_to_slot.len();
+    let groups        = classify_overflow_slots(state);
+    let overflow_rows = count_nonempty_groups(&groups) as u16;
+
     let mut constraints: Vec<Constraint> = state
         .pane_to_slot
         .iter()
         .map(|_| Constraint::Length(state.pane_h as u16))
         .collect();
-    if has_overflow {
+    for _ in 0..overflow_rows {
         constraints.push(Constraint::Length(1));
     }
 
@@ -407,11 +407,9 @@ fn render_frame(f: &mut Frame, state: &RenderState) {
         render_pane(f, pane_area, &slot.name, slot.done, &slot.ring);
     }
 
-    // Draw overflow line.
-    if has_overflow {
-        let overflow_area = chunks[state.pane_to_slot.len()];
-        render_overflow(f, overflow_area, state);
-    }
+    // Draw one line per non-empty group.
+    let base = state.pane_to_slot.len();
+    render_overflow_lines(f, &chunks[base..], area.width as usize, &groups);
 }
 
 // ── Pane widgets ──────────────────────────────────────────────────────────
@@ -490,108 +488,101 @@ fn render_content(f: &mut Frame, area: Rect, ring: &VecDeque<String>) {
     f.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
-/// Render the overflow summary line below all panes.
-///
-/// Shows up to four labelled groups of non-visible slots:
-///
-/// ```text
-///   · Pending: a, b  · Running: c, d  · Done: e  · Failed: f
-/// ```
-///
-/// Each group is omitted when empty.  Names are truncated with "and N more"
-/// when they would overflow the terminal width.
-fn render_overflow(f: &mut Frame, area: Rect, state: &RenderState) {
+// ── Overflow classification ────────────────────────────────────────────────
+
+struct OverflowGroups<'a> {
+    running:  Vec<&'a str>,
+    pending:  Vec<&'a str>,
+    done_ok:  Vec<&'a str>,
+    done_err: Vec<&'a str>,
+}
+
+fn classify_overflow_slots(state: &RenderState) -> OverflowGroups<'_> {
     let visible_set: std::collections::HashSet<usize> =
         state.pane_to_slot.iter().copied().collect();
-
-    // Classify every non-visible slot into one of four buckets.
-    let mut pending:  Vec<&str> = Vec::new(); // not started (in background_queue, done=None)
-    let mut running:  Vec<&str> = Vec::new(); // running in background (background_queue, done=None)
-    let mut done_ok:  Vec<&str> = Vec::new(); // finished success (not in any pane)
-    let mut done_err: Vec<&str> = Vec::new(); // finished failure (not in any pane)
-
-    // background_queue holds slots not yet assigned to a pane and still running.
     let in_queue: std::collections::HashSet<usize> =
         state.background_queue.iter().copied().collect();
 
+    let mut g = OverflowGroups {
+        running:  Vec::new(),
+        pending:  Vec::new(),
+        done_ok:  Vec::new(),
+        done_err: Vec::new(),
+    };
+
     for (idx, slot) in state.slots.iter().enumerate() {
         if visible_set.contains(&idx) {
-            continue; // shown in a pane
+            continue;
         }
         match slot.done {
-            None if in_queue.contains(&idx) => {
-                // Distinguish: the first slot in the queue is actively running;
-                // the rest haven't started yet (they're waiting for a pane).
-                // Actually all background_queue slots are running — jobs are
-                // spawned before the TUI is set up.  Show them all as Running.
-                running.push(&slot.name);
-            }
-            None => {
-                // Slot finished before being assigned a pane — shouldn't
-                // normally happen, but handle gracefully.
-                pending.push(&slot.name);
-            }
-            Some(true)  => done_ok.push(&slot.name),
-            Some(false) => done_err.push(&slot.name),
+            None if in_queue.contains(&idx) => g.running.push(&slot.name),
+            None                            => g.pending.push(&slot.name),
+            Some(true)                      => g.done_ok.push(&slot.name),
+            Some(false)                     => g.done_err.push(&slot.name),
         }
     }
+    g
+}
 
-    // Build styled spans for each non-empty group.
-    let dim    = Style::new().add_modifier(Modifier::DIM);
-    let cyan   = Style::new().fg(Color::Cyan);
-    let green  = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
-    let red    = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
+fn count_nonempty_groups(g: &OverflowGroups<'_>) -> usize {
+    [&g.running, &g.pending, &g.done_ok, &g.done_err]
+        .iter()
+        .filter(|v| !v.is_empty())
+        .count()
+}
 
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut cols_used: usize = 0;
-    let budget = area.width as usize;
+// ── Overflow rendering ─────────────────────────────────────────────────────
 
-    /// Append one labelled group to `spans`, respecting the column budget.
-    /// Returns false when there is no room left.
-    fn push_group<'a>(
-        spans: &mut Vec<Span<'static>>,
-        cols_used: &mut usize,
-        budget: usize,
-        label: &'static str,
-        names: &[&str],
+/// Render one row per non-empty group into `areas` (one Rect per row).
+fn render_overflow_lines(
+    f: &mut Frame,
+    areas: &[Rect],
+    width: usize,
+    groups: &OverflowGroups<'_>,
+) {
+    let dim   = Style::new().add_modifier(Modifier::DIM);
+    let cyan  = Style::new().fg(Color::Cyan);
+    let green = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
+    let red   = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
+
+    struct GroupSpec<'a> {
+        label:       &'static str,
+        names:       &'a [&'a str],
         label_style: Style,
-        name_style: Style,
-        dim: Style,
-    ) -> bool {
-        if names.is_empty() {
-            return true;
-        }
-        // separator between groups
-        let sep = if *cols_used == 0 { "  \u{00b7} " } else { "  \u{00b7} " };
-        let sep_len = 4usize; // "  · "
-        let label_len = label.len();
-        let min_needed = sep_len + label_len + 1; // at least one char of names
-
-        if *cols_used + min_needed > budget {
-            return false;
-        }
-
-        spans.push(Span::styled(sep, dim));
-        spans.push(Span::styled(label, label_style));
-        *cols_used += sep_len + label_len;
-
-        let remaining = budget.saturating_sub(*cols_used);
-        let body = build_overflow_names(names, remaining);
-        *cols_used += body.len();
-        spans.push(Span::styled(body, name_style));
-        true
+        name_style:  Style,
     }
 
-    push_group(&mut spans, &mut cols_used, budget, "Running: ",  &running,  cyan,  dim,   dim);
-    push_group(&mut spans, &mut cols_used, budget, "Pending: ",  &pending,  dim,   dim,   dim);
-    push_group(&mut spans, &mut cols_used, budget, "Done: ",     &done_ok,  green, green, dim);
-    push_group(&mut spans, &mut cols_used, budget, "Failed: ",   &done_err, red,   red,   dim);
+    let specs = [
+        GroupSpec { label: "Running: ", names: &groups.running,  label_style: cyan,  name_style: dim   },
+        GroupSpec { label: "Pending: ", names: &groups.pending,  label_style: dim,   name_style: dim   },
+        GroupSpec { label: "Done: ",    names: &groups.done_ok,  label_style: green, name_style: green },
+        GroupSpec { label: "Failed: ",  names: &groups.done_err, label_style: red,   name_style: red   },
+    ];
 
-    if spans.is_empty() {
-        return;
+    let mut area_idx = 0;
+    for spec in &specs {
+        if spec.names.is_empty() {
+            continue;
+        }
+        if area_idx >= areas.len() {
+            break;
+        }
+        let area = areas[area_idx];
+        area_idx += 1;
+
+        let prefix     = "  \u{00b7} "; // "  · "
+        let prefix_len = 4;
+        let label_len  = spec.label.len();
+        let budget     = width.saturating_sub(prefix_len + label_len);
+        let body       = build_overflow_names(spec.names, budget);
+
+        let line = Line::from(vec![
+            Span::styled(prefix,        dim),
+            Span::styled(spec.label,    spec.label_style),
+            Span::styled(body,          spec.name_style),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
     }
-
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 // ── Overflow name list builder ─────────────────────────────────────────────
