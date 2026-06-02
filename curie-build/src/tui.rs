@@ -298,24 +298,28 @@ fn render_loop(
                         state.pane_to_slot[pane_idx] = next;
                         let _ = terminal.draw(|f| render_frame(f, &state));
                     } else {
-                        // No replacement — hold for 2 s then close the pane.
-                        if let Some(stashed) =
-                            drain_hold(&rx, &mut terminal, &mut state, 2)
-                        {
-                            match stashed {
-                                TuiMsg::SlotDone { slot_idx: s, success: ok } => {
-                                    state.slots[s].done = Some(ok);
-                                    if state.pane_to_slot.iter().all(|&x| x != s) {
-                                        state.background_queue.retain(|&x| x != s);
+                        // No replacement — hold for 2 s then close the pane,
+                        // but only on success; failed panes stay until shutdown.
+                        if success {
+                            if let Some(stashed) =
+                                drain_hold(&rx, &mut terminal, &mut state, 2)
+                            {
+                                match stashed {
+                                    TuiMsg::SlotDone { slot_idx: s, success: ok } => {
+                                        state.slots[s].done = Some(ok);
+                                        if state.pane_to_slot.iter().all(|&x| x != s) {
+                                            state.background_queue.retain(|&x| x != s);
+                                        }
+                                        let _ = terminal.draw(|f| render_frame(f, &state));
                                     }
-                                    let _ = terminal.draw(|f| render_frame(f, &state));
+                                    TuiMsg::Shutdown => break,
+                                    TuiMsg::Line { .. } => unreachable!(),
                                 }
-                                TuiMsg::Shutdown => break,
-                                TuiMsg::Line { .. } => unreachable!(),
                             }
+                            state.pane_to_slot.remove(pane_idx);
+                            let _ = terminal.draw(|f| render_frame(f, &state));
                         }
-                        state.pane_to_slot.remove(pane_idx);
-                        let _ = terminal.draw(|f| render_frame(f, &state));
+                        // else: failure — keep pane showing red ✗ until shutdown.
                     }
                 } else {
                     // Slot finished in the background — remove from queue so
