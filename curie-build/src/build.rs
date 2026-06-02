@@ -256,13 +256,17 @@ fn read_main_class_from_jar(jar_path: &Path) -> Option<String> {
 pub fn clean(project_root: &Path) -> Result<()> {
     let target_dir = project_root.join("target");
 
-    if target_dir.exists() {
-        std::fs::remove_dir_all(&target_dir).with_context(|| {
-            format!("failed to remove {}", target_dir.display())
-        })?;
-        crate::parallel::emit(&crate::style::stale("Target dir", "removed"));
-    } else {
-        crate::parallel::emit(&crate::style::neutral("Target dir", "nothing to clean"));
+    match std::fs::remove_dir_all(&target_dir) {
+        Ok(()) => {
+            crate::parallel::emit(&crate::style::stale("Target dir", "removed"));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            crate::parallel::emit(&crate::style::neutral("Target dir", "nothing to clean"));
+        }
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("failed to remove {}", target_dir.display()));
+        }
     }
 
     Ok(())
