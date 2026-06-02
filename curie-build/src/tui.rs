@@ -27,7 +27,8 @@
 use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+use std::time::{Duration, Instant};
 
 use ansi_to_tui::IntoText;
 use crossterm::{cursor, execute};
@@ -253,7 +254,11 @@ fn render_loop(
     let _ = terminal.draw(|f| render_frame(f, &state));
 
     // ── Message loop ──────────────────────────────────────────────────────
-    for msg in rx {
+    loop {
+        let msg = match rx.recv() {
+            Ok(m) => m,
+            Err(_) => break,
+        };
         match msg {
             TuiMsg::Line { slot_idx, line } => {
                 state.slots[slot_idx].ring.push_back(line);
@@ -273,13 +278,45 @@ fn render_loop(
                     state.pane_to_slot.iter().position(|&s| s == slot_idx)
                 {
                     if success && !state.background_queue.is_empty() {
-                        // Hold the green pane for 1 second, then hand it over.
-                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        // Hold green for 1 s, keep draining Line messages.
+                        if let Some(stashed) =
+                            drain_hold(&rx, &mut terminal, &mut state, 1)
+                        {
+                            match stashed {
+                                TuiMsg::SlotDone { slot_idx: s, success: ok } => {
+                                    state.slots[s].done = Some(ok);
+                                    if state.pane_to_slot.iter().all(|&x| x != s) {
+                                        state.background_queue.retain(|&x| x != s);
+                                    }
+                                    let _ = terminal.draw(|f| render_frame(f, &state));
+                                }
+                                TuiMsg::Shutdown => break,
+                                TuiMsg::Line { .. } => unreachable!(),
+                            }
+                        }
                         let next = state.background_queue.pop_front().unwrap();
                         state.pane_to_slot[pane_idx] = next;
                         let _ = terminal.draw(|f| render_frame(f, &state));
+                    } else {
+                        // No replacement — hold for 2 s then close the pane.
+                        if let Some(stashed) =
+                            drain_hold(&rx, &mut terminal, &mut state, 2)
+                        {
+                            match stashed {
+                                TuiMsg::SlotDone { slot_idx: s, success: ok } => {
+                                    state.slots[s].done = Some(ok);
+                                    if state.pane_to_slot.iter().all(|&x| x != s) {
+                                        state.background_queue.retain(|&x| x != s);
+                                    }
+                                    let _ = terminal.draw(|f| render_frame(f, &state));
+                                }
+                                TuiMsg::Shutdown => break,
+                                TuiMsg::Line { .. } => unreachable!(),
+                            }
+                        }
+                        state.pane_to_slot.remove(pane_idx);
+                        let _ = terminal.draw(|f| render_frame(f, &state));
                     }
-                    // else: keep pane, border shows outcome.
                 } else {
                     // Slot finished in the background — remove from queue so
                     // it no longer appears in the overflow line.
@@ -298,10 +335,43 @@ fn render_loop(
     let _ = write!(io::stdout(), "\x1b[r\x1b[?7h\x1b]8;;\x07");
     let _ = execute!(io::stdout(), cursor::Show);
     // Park cursor below the drawn content so normal output continues there.
-    let overflow_rows = if n > visible { 1 } else { 0 };
-    let total_rows = (visible * pane_h + overflow_rows) as u16;
+    let open_panes   = state.pane_to_slot.len();
+    let overflow_rows = if state.slots.len() > open_panes { 1 } else { 0 };
+    let total_rows = (open_panes * pane_h + overflow_rows) as u16;
     let _ = terminal.set_cursor_position((0, total_rows));
     let _ = io::stdout().flush();
+}
+
+// ── Hold-drain helper ─────────────────────────────────────────────────────
+
+/// Drain incoming messages for `hold_secs`, processing `Line` messages into
+/// slot rings and redrawing visible panes.  Returns the first non-`Line`
+/// message encountered (if any), which the caller must handle.
+fn drain_hold(
+    rx: &mpsc::Receiver<TuiMsg>,
+    terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut RenderState,
+    hold_secs: u64,
+) -> Option<TuiMsg> {
+    let deadline = Instant::now() + Duration::from_secs(hold_secs);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(TuiMsg::Line { slot_idx, line }) => {
+                state.slots[slot_idx].ring.push_back(line);
+                if state.pane_to_slot.iter().any(|&x| x == slot_idx) {
+                    let _ = terminal.draw(|f| render_frame(f, state));
+                }
+            }
+            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
+                return None;
+            }
+            Ok(other) => return Some(other),
+        }
+    }
 }
 
 // ── Frame renderer (pure, no I/O) ─────────────────────────────────────────
@@ -310,9 +380,8 @@ fn render_frame(f: &mut Frame, state: &RenderState) {
     let area = f.area();
 
     // Build vertical layout: one block per visible pane + optional overflow.
-    // Show overflow row whenever there are more slots than visible panes —
-    // background_queue may be empty while Done/Failed slots still need listing.
-    let has_overflow = state.n > state.visible;
+    // Show overflow row whenever there are more slots than open panes.
+    let has_overflow = state.slots.len() > state.pane_to_slot.len();
     let mut constraints: Vec<Constraint> = state
         .pane_to_slot
         .iter()
