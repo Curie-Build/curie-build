@@ -166,8 +166,8 @@ impl TuiRenderer {
     ///
     /// * `names`         — display name for each member (in slot order).
     /// * `log_files`     — per-member log files (same order).
-    /// * `visible_count` — number of panes to show on screen initially.
-    /// * `pane_height`   — rows per pane (title + content).
+    /// * `visible_count` — maximum number of panes shown on screen at once;
+    ///   open panes share the full terminal height between them.
     ///
     /// Returns `(renderer, slots)`.  The caller assigns each `Arc<TuiSlot>`
     /// to the matching worker thread via [`crate::parallel::set_thread_sink`].
@@ -175,7 +175,6 @@ impl TuiRenderer {
         names: Vec<String>,
         log_files: Vec<std::fs::File>,
         visible_count: usize,
-        pane_height: usize,
     ) -> (Self, Vec<Arc<TuiSlot>>) {
         // Capacity 1000: large enough to absorb bursts while bounding memory.
         let (sender, receiver) = mpsc::sync_channel::<TuiMsg>(1000);
@@ -193,7 +192,7 @@ impl TuiRenderer {
             .collect();
 
         let thread = std::thread::spawn(move || {
-            render_loop(receiver, names, visible_count, pane_height);
+            render_loop(receiver, names, visible_count);
         });
 
         let renderer = TuiRenderer { sender, thread: Some(thread) };
@@ -230,14 +229,12 @@ struct RenderState {
     /// background; eligible for promotion when a pane frees up).
     background_queue: VecDeque<usize>,
     visible: usize,
-    pane_h: usize,
 }
 
 fn render_loop(
     rx: mpsc::Receiver<TuiMsg>,
     names: Vec<String>,
     visible: usize,
-    pane_h: usize,
 ) {
     let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
@@ -266,7 +263,6 @@ fn render_loop(
         pane_to_slot: Vec::new(),
         background_queue: VecDeque::new(),
         visible,
-        pane_h,
     };
 
     // Initial draw.
@@ -389,9 +385,13 @@ fn render_loop(
     let _ = write!(io::stdout(), "\x1b[r\x1b[?7h\x1b]8;;\x07");
     let _ = execute!(io::stdout(), cursor::Show);
     // Park cursor below the drawn content so normal output continues there.
+    // Open panes fill all height above the overflow lines, so the drawn content
+    // reaches the bottom of the screen; with no open panes only the overflow
+    // lines were drawn.
     let open_panes    = state.pane_to_slot.len();
-    let overflow_rows = count_nonempty_groups(&classify_overflow_slots(&state));
-    let total_rows    = (open_panes * pane_h + overflow_rows) as u16;
+    let overflow_rows = count_nonempty_groups(&classify_overflow_slots(&state)) as u16;
+    let term_h        = terminal.size().map(|s| s.height).unwrap_or(0);
+    let total_rows    = if open_panes > 0 { term_h } else { overflow_rows };
     let _ = terminal.set_cursor_position((0, total_rows));
     let _ = io::stdout().flush();
 }
@@ -409,6 +409,21 @@ fn note_started(state: &mut RenderState, slot_idx: usize) {
     } else {
         state.background_queue.push_back(slot_idx);
     }
+}
+
+/// Split `total` rows evenly among `count` open panes, giving any remainder to
+/// the topmost panes.  The open panes always consume the whole available height,
+/// so a pane closing lets the survivors grow into the vacated space.
+fn distribute_pane_heights(total: u16, count: usize) -> Vec<u16> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let count = count as u16;
+    let base  = total / count;
+    let extra = total % count;
+    (0..count)
+        .map(|i| base + if i < extra { 1 } else { 0 })
+        .collect()
 }
 
 // ── Hold-drain helper ─────────────────────────────────────────────────────
@@ -487,11 +502,13 @@ fn render_frame(f: &mut Frame, state: &RenderState) {
     let groups        = classify_overflow_slots(state);
     let overflow_rows = count_nonempty_groups(&groups) as u16;
 
-    let mut constraints: Vec<Constraint> = state
-        .pane_to_slot
-        .iter()
-        .map(|_| Constraint::Length(state.pane_h as u16))
-        .collect();
+    // Open panes share all the height not taken by the overflow lines, so when
+    // a pane closes the survivors grow to reclaim the freed rows.
+    let avail   = area.height.saturating_sub(overflow_rows);
+    let heights = distribute_pane_heights(avail, state.pane_to_slot.len());
+
+    let mut constraints: Vec<Constraint> =
+        heights.iter().map(|&h| Constraint::Length(h)).collect();
     for _ in 0..overflow_rows {
         constraints.push(Constraint::Length(1));
     }
@@ -935,7 +952,6 @@ mod tests {
             pane_to_slot: Vec::new(),
             background_queue: VecDeque::new(),
             visible,
-            pane_h: MIN_PANE_HEIGHT,
         }
     }
 
@@ -990,6 +1006,35 @@ mod tests {
         note_started(&mut st, 2);
         assert_eq!(st.pane_to_slot, vec![1, 2]);
         assert!(st.background_queue.is_empty());
+    }
+
+    // ── distribute_pane_heights ───────────────────────────────────────────
+
+    #[test]
+    fn heights_divide_evenly() {
+        assert_eq!(distribute_pane_heights(40, 4), vec![10, 10, 10, 10]);
+    }
+
+    #[test]
+    fn heights_remainder_goes_to_top_panes() {
+        // 41 / 4 = 10 r1 → first pane gets the extra row.
+        assert_eq!(distribute_pane_heights(41, 4), vec![11, 10, 10, 10]);
+        // 38 / 4 = 9 r2 → first two panes get an extra row.
+        assert_eq!(distribute_pane_heights(38, 4), vec![10, 10, 9, 9]);
+    }
+
+    #[test]
+    fn heights_survivors_grow_when_a_pane_closes() {
+        // Three panes share 39 rows (13 each); after one closes the remaining
+        // two reclaim the full height (≈19/20) instead of leaving a gap.
+        assert_eq!(distribute_pane_heights(39, 3), vec![13, 13, 13]);
+        assert_eq!(distribute_pane_heights(39, 2), vec![20, 19]);
+        assert_eq!(distribute_pane_heights(39, 1), vec![39]);
+    }
+
+    #[test]
+    fn heights_no_panes_is_empty() {
+        assert_eq!(distribute_pane_heights(40, 0), Vec::<u16>::new());
     }
 
     // ── build_overflow_names ──────────────────────────────────────────────

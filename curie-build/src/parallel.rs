@@ -471,10 +471,10 @@ where
     }
 
     let (sinks, job_mode) = if use_tui {
-        let (vis, pane_h) = crate::tui::tui_layout(n, term_h);
+        let (vis, _) = crate::tui::tui_layout(n, term_h);
         let names: Vec<String> = display_names.clone();
         let (renderer, tui_slots) =
-            crate::tui::TuiRenderer::new(names, log_files, vis, pane_h);
+            crate::tui::TuiRenderer::new(names, log_files, vis);
         let sinks: Vec<Arc<dyn LineSink + Send + Sync>> = tui_slots
             .into_iter()
             .map(|s| s as Arc<dyn LineSink + Send + Sync>)
