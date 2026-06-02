@@ -91,6 +91,9 @@ enum TuiMsg {
     /// ever occupy a pane, so pending/never-dispatched jobs don't show as empty
     /// boxes — they appear in the "Pending" overflow line instead.
     SlotStarted { slot_idx: usize },
+    /// Job cancelled by an earlier build failure — it will never run.  Shown in
+    /// the "Skipped" overflow group instead of "Pending".
+    SlotSkipped { slot_idx: usize },
     Line { slot_idx: usize, line: String },
     /// Job finished.  `success` controls whether the pane is eligible for
     /// reuse: on success the pane is immediately handed to the next waiting
@@ -118,6 +121,12 @@ impl crate::parallel::LineSink for TuiSlot {
     /// earlier failure) never send this and so never show an empty pane.
     fn start(&self) {
         let _ = self.sender.send(TuiMsg::SlotStarted { slot_idx: self.slot_idx });
+    }
+
+    /// Signal that this job was cancelled by an earlier failure and will never
+    /// run, so it is shown as "Skipped" rather than "Pending".
+    fn skip(&self) {
+        let _ = self.sender.send(TuiMsg::SlotSkipped { slot_idx: self.slot_idx });
     }
 
     fn push_line(&self, line: String) {
@@ -216,6 +225,8 @@ struct SlotData {
     name: String,
     /// `None` = still running, `Some(true)` = success, `Some(false)` = failed.
     done: Option<bool>,
+    /// Cancelled by an earlier failure — never ran.  Shown as "Skipped".
+    skipped: bool,
     /// Ring buffer of received lines, newest last.
     ring: VecDeque<String>,
 }
@@ -258,7 +269,7 @@ fn render_loop(
     let mut state = RenderState {
         slots: names
             .into_iter()
-            .map(|name| SlotData { name, done: None, ring: VecDeque::new() })
+            .map(|name| SlotData { name, done: None, skipped: false, ring: VecDeque::new() })
             .collect(),
         pane_to_slot: Vec::new(),
         background_queue: VecDeque::new(),
@@ -280,6 +291,11 @@ fn render_loop(
         match msg {
             TuiMsg::SlotStarted { slot_idx } => {
                 note_started(&mut state, slot_idx);
+                let _ = terminal.draw(|f| render_frame(f, &state));
+            }
+
+            TuiMsg::SlotSkipped { slot_idx } => {
+                state.slots[slot_idx].skipped = true;
                 let _ = terminal.draw(|f| render_frame(f, &state));
             }
 
@@ -384,6 +400,14 @@ fn render_loop(
             TuiMsg::Shutdown => {
                 // Rule 3: close all successful panes before exiting.
                 state.pane_to_slot.retain(|&s| state.slots[s].done != Some(true));
+                // Any job that never started by shutdown was cancelled (build
+                // failed or was interrupted) — show it as "Skipped", not
+                // "Pending".
+                for slot in &mut state.slots {
+                    if slot.done.is_none() {
+                        slot.skipped = true;
+                    }
+                }
                 let _ = terminal.draw(|f| render_frame(f, &state));
                 break;
             }
@@ -497,6 +521,10 @@ fn drain_hold(
                 note_started(state, slot_idx);
                 let _ = terminal.draw(|f| render_frame(f, state));
             }
+            Ok(TuiMsg::SlotSkipped { slot_idx }) => {
+                state.slots[slot_idx].skipped = true;
+                let _ = terminal.draw(|f| render_frame(f, state));
+            }
             Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
                 return None;
             }
@@ -523,6 +551,9 @@ fn drain_available(
             }
             Ok(TuiMsg::SlotStarted { slot_idx }) => {
                 note_started(state, slot_idx);
+            }
+            Ok(TuiMsg::SlotSkipped { slot_idx }) => {
+                state.slots[slot_idx].skipped = true;
             }
             Ok(other) => {
                 if pending.is_none() {
@@ -652,6 +683,7 @@ fn render_content(f: &mut Frame, area: Rect, ring: &VecDeque<String>) {
 struct OverflowGroups<'a> {
     running:  Vec<&'a str>,
     pending:  Vec<&'a str>,
+    skipped:  Vec<&'a str>,
     done_ok:  Vec<&'a str>,
     done_err: Vec<&'a str>,
 }
@@ -665,6 +697,7 @@ fn classify_overflow_slots(state: &RenderState) -> OverflowGroups<'_> {
     let mut g = OverflowGroups {
         running:  Vec::new(),
         pending:  Vec::new(),
+        skipped:  Vec::new(),
         done_ok:  Vec::new(),
         done_err: Vec::new(),
     };
@@ -674,6 +707,8 @@ fn classify_overflow_slots(state: &RenderState) -> OverflowGroups<'_> {
             continue;
         }
         match slot.done {
+            // Cancelled by an earlier failure — never ran.
+            None if slot.skipped            => g.skipped.push(&slot.name),
             None if in_queue.contains(&idx) => g.running.push(&slot.name),
             None                            => g.pending.push(&slot.name),
             Some(true)                      => g.done_ok.push(&slot.name),
@@ -684,7 +719,7 @@ fn classify_overflow_slots(state: &RenderState) -> OverflowGroups<'_> {
 }
 
 fn count_nonempty_groups(g: &OverflowGroups<'_>) -> usize {
-    [&g.running, &g.pending, &g.done_ok, &g.done_err]
+    [&g.running, &g.pending, &g.skipped, &g.done_ok, &g.done_err]
         .iter()
         .filter(|v| !v.is_empty())
         .count()
@@ -699,10 +734,11 @@ fn render_overflow_lines(
     width: usize,
     groups: &OverflowGroups<'_>,
 ) {
-    let dim   = Style::new().add_modifier(Modifier::DIM);
-    let cyan  = Style::new().fg(Color::Cyan);
-    let green = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
-    let red   = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
+    let dim    = Style::new().add_modifier(Modifier::DIM);
+    let cyan   = Style::new().fg(Color::Cyan);
+    let yellow = Style::new().fg(Color::Yellow);
+    let green  = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
+    let red    = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
 
     struct GroupSpec<'a> {
         label:       &'static str,
@@ -712,10 +748,11 @@ fn render_overflow_lines(
     }
 
     let specs = [
-        GroupSpec { label: "Running: ", names: &groups.running,  label_style: cyan,  name_style: dim   },
-        GroupSpec { label: "Pending: ", names: &groups.pending,  label_style: dim,   name_style: dim   },
-        GroupSpec { label: "Done: ",    names: &groups.done_ok,  label_style: green, name_style: green },
-        GroupSpec { label: "Failed: ",  names: &groups.done_err, label_style: red,   name_style: red   },
+        GroupSpec { label: "Running: ", names: &groups.running,  label_style: cyan,   name_style: dim   },
+        GroupSpec { label: "Pending: ", names: &groups.pending,  label_style: dim,    name_style: dim   },
+        GroupSpec { label: "Skipped: ", names: &groups.skipped,  label_style: yellow, name_style: dim   },
+        GroupSpec { label: "Done: ",    names: &groups.done_ok,  label_style: green,  name_style: green },
+        GroupSpec { label: "Failed: ",  names: &groups.done_err, label_style: red,    name_style: red   },
     ];
 
     let mut area_idx = 0;
@@ -987,6 +1024,7 @@ mod tests {
                 .map(|i| SlotData {
                     name: format!("m{i}"),
                     done: None,
+                    skipped: false,
                     ring: VecDeque::new(),
                 })
                 .collect(),
@@ -1133,6 +1171,37 @@ mod tests {
         assert!(st.background_queue.is_empty());
         let groups = classify_overflow_slots(&st);
         assert_eq!(groups.done_ok, vec!["m1"]);
+    }
+
+    // ── skipped classification ────────────────────────────────────────────
+
+    #[test]
+    fn skipped_slots_are_separated_from_pending() {
+        // slot 0 runs in a pane; slot 1 was cancelled (skipped); slot 2 is
+        // still genuinely pending.
+        let mut st = empty_state(3, 1);
+        note_started(&mut st, 0);
+        st.slots[1].skipped = true;
+
+        let groups = classify_overflow_slots(&st);
+        assert_eq!(groups.skipped, vec!["m1"]);
+        assert_eq!(groups.pending, vec!["m2"]);
+        assert!(groups.running.is_empty());
+    }
+
+    #[test]
+    fn skipped_takes_precedence_over_queued_running() {
+        // A skipped slot is never reported as running even if it lingered in
+        // the background queue.
+        let mut st = empty_state(2, 1);
+        note_started(&mut st, 0);
+        st.background_queue.push_back(1);
+        st.slots[1].skipped = true;
+
+        let groups = classify_overflow_slots(&st);
+        assert_eq!(groups.skipped, vec!["m1"]);
+        assert!(groups.running.is_empty());
+        assert!(groups.pending.is_empty());
     }
 
     // ── distribute_pane_heights ───────────────────────────────────────────

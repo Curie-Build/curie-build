@@ -38,6 +38,9 @@ use crate::workspace::{Member, Workspace};
 ///   runs.  Signals that the job has actually begun executing.  A no-op for the
 ///   mux path; the TUI path uses it to assign a pane only to a job that is
 ///   really running (so pending/never-dispatched jobs don't show empty panes).
+/// * `skip` — called for a job that will never run because an earlier failure
+///   aborted the build.  A no-op for the mux path; the TUI path shows it in the
+///   "Skipped" overflow group instead of leaving it as "Pending".
 /// * `push_line` — called by worker threads for each line of process output.
 ///   Must write the line to the member's log file immediately and queue it
 ///   for display.
@@ -53,6 +56,8 @@ use crate::workspace::{Member, Workspace};
 pub(crate) trait LineSink: Send + Sync {
     /// Called once before the build closure runs.  Default: no-op.
     fn start(&self) {}
+    /// Called for a job cancelled by an earlier failure.  Default: no-op.
+    fn skip(&self) {}
     fn push_line(&self, line: String);
     fn flush(&self);
     fn complete(&self, success: bool);
@@ -389,6 +394,20 @@ fn on_completion(
     newly_ready
 }
 
+/// Signal every subset job that has not been dispatched yet (cancelled by a
+/// build failure) so the renderer can show them as "Skipped".
+fn mark_undispatched_skipped(
+    subset: &[usize],
+    dispatched: &HashSet<usize>,
+    sinks: &[Arc<dyn LineSink + Send + Sync>],
+) {
+    for (pos, &idx) in subset.iter().enumerate() {
+        if !dispatched.contains(&idx) {
+            sinks[pos].skip();
+        }
+    }
+}
+
 // ── run_jobs ───────────────────────────────────────────────────────────────
 
 /// Run `run` for every member in `subset` in parallel (up to `jobs` workers),
@@ -599,6 +618,12 @@ where
                     ready.extend(newly_ready);
                 }
                 Err(e) => {
+                    // The first failure aborts further dispatch.  Tell the
+                    // renderer about every job that has not started yet so they
+                    // show as "Skipped" rather than forever "Pending".
+                    if !failed {
+                        mark_undispatched_skipped(subset, &dispatched, sinks_ref);
+                    }
                     failed = true;
                     errors.push(format!("{}: {:#}", ws.members[idx].declared, e));
                 }
