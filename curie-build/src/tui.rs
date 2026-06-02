@@ -312,7 +312,12 @@ fn render_loop(
                                         }
                                         let _ = terminal.draw(|f| render_frame(f, &state));
                                     }
-                                    TuiMsg::Shutdown => break,
+            TuiMsg::Shutdown => {
+                // Close all panes showing successful jobs before exiting.
+                state.pane_to_slot.retain(|&s| state.slots[s].done != Some(true));
+                let _ = terminal.draw(|f| render_frame(f, &state));
+                break;
+            }
                                     TuiMsg::Line { .. } => unreachable!(),
                                 }
                             }
