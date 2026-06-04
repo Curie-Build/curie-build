@@ -435,6 +435,7 @@ fn render_loop(
     // Print the last TAIL_LINES of each failed member below the restored content
     // so the errors are visible before the caller's summary lines appear.
     print_failed_tails(&state, TAIL_LINES, &mut io::stdout());
+    print_build_summary(&state, &mut io::stdout());
     let _ = io::stdout().flush();
 }
 
@@ -497,6 +498,68 @@ fn print_failed_tails(state: &RenderState, max_lines: usize, out: &mut dyn io::W
         }
         let _ = writeln!(out);
     }
+}
+
+/// Print one ANSI-coloured overflow line for a single group.
+///
+/// Mirrors the format of [`render_overflow_lines`]: `"  · {label}{names}\n"`.
+/// No output is produced when `names` is empty.
+fn print_summary_group(
+    out:        &mut dyn io::Write,
+    label:      &str,
+    names:      &[&str],
+    label_ansi: &str,
+    name_ansi:  &str,
+    term_w:     usize,
+) {
+    if names.is_empty() {
+        return;
+    }
+    let prefix     = "  \u{00b7} ";
+    let prefix_len = 4;
+    let budget     = term_w.saturating_sub(prefix_len + label.len());
+    let body       = build_overflow_names(names, budget);
+    let _ = writeln!(out, "{prefix}{label_ansi}{label}{name_ansi}{body}\x1b[0m");
+}
+
+/// Print the Skipped / Done / Failed summary lines after the build.
+///
+/// Replicates the three post-build-relevant overflow groups from the live TUI
+/// (same prefix, same colours, same member-name lists via
+/// [`build_overflow_names`]), in the same order they appear on screen:
+/// Skipped → Done → Failed.  Running and Pending are transient and omitted.
+///
+/// Unlike [`classify_overflow_slots`] (which only classifies slots **not** in
+/// a visible pane), this function inspects every slot directly so that failed
+/// members whose pane was kept open are still included in the `Failed:` line.
+///
+/// Called after [`print_failed_tails`] so it appears below the error tails.
+fn print_build_summary(state: &RenderState, out: &mut dyn io::Write) {
+    let term_w = crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80);
+
+    let skipped:  Vec<&str> = state.slots.iter()
+        .filter(|s| s.skipped)
+        .map(|s| s.name.as_str())
+        .collect();
+    let done_ok:  Vec<&str> = state.slots.iter()
+        .filter(|s| s.done == Some(true))
+        .map(|s| s.name.as_str())
+        .collect();
+    let done_err: Vec<&str> = state.slots.iter()
+        .filter(|s| s.done == Some(false))
+        .map(|s| s.name.as_str())
+        .collect();
+
+    let skip_label = match state.skip_reason.as_deref() {
+        Some(r) => format!("Skipped ({}): ", r),
+        None    => "Skipped: ".to_string(),
+    };
+
+    print_summary_group(out, &skip_label, &skipped,  "\x1b[33m",   "\x1b[2m",  term_w);
+    print_summary_group(out, "Done: ",    &done_ok,  "\x1b[1;32m", "\x1b[32m", term_w);
+    print_summary_group(out, "Failed: ",  &done_err, "\x1b[1;31m", "\x1b[31m", term_w);
 }
 
 /// Apply the shutdown close rules to the render state.
@@ -1374,6 +1437,102 @@ mod tests {
         let pos_alpha = out.find("alpha error").unwrap();
         let pos_beta  = out.find("beta error").unwrap();
         assert!(pos_alpha < pos_beta, "slot 0 must appear before slot 2");
+    }
+
+    // ── print_build_summary ───────────────────────────────────────────────
+
+    #[test]
+    fn summary_empty_when_all_pending() {
+        // No slot has finished or been skipped — nothing should be printed.
+        let st = empty_state(3, 3);
+        let mut buf = Vec::<u8>::new();
+        print_build_summary(&st, &mut buf);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn summary_prints_done_group() {
+        let mut st = empty_state(2, 2);
+        st.slots[0].done = Some(true);
+        st.slots[1].done = Some(true);
+
+        let mut buf = Vec::<u8>::new();
+        print_build_summary(&st, &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+
+        assert!(out.contains("Done:"), "Done label missing");
+        assert!(out.contains("m0"), "first member missing");
+        assert!(out.contains("m1"), "second member missing");
+    }
+
+    #[test]
+    fn summary_prints_failed_group() {
+        let mut st = empty_state(2, 2);
+        st.slots[0].done = Some(false);
+        st.slots[1].done = Some(false);
+
+        let mut buf = Vec::<u8>::new();
+        print_build_summary(&st, &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+
+        assert!(out.contains("Failed:"), "Failed label missing");
+        assert!(out.contains("m0"));
+        assert!(out.contains("m1"));
+    }
+
+    #[test]
+    fn summary_prints_skipped_group_with_reason() {
+        let mut st = empty_state(3, 1);
+        note_started(&mut st, 0);
+        st.slots[0].done = Some(false);
+        note_skipped(&mut st, 1, "core failed".to_string());
+        note_skipped(&mut st, 2, "core failed".to_string());
+
+        let mut buf = Vec::<u8>::new();
+        print_build_summary(&st, &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+
+        assert!(out.contains("Skipped (core failed):"), "skipped label with reason missing");
+        assert!(out.contains("m1"));
+        assert!(out.contains("m2"));
+    }
+
+    #[test]
+    fn summary_omits_empty_groups() {
+        // Only done slots — no Skipped or Failed lines should appear.
+        let mut st = empty_state(2, 2);
+        st.slots[0].done = Some(true);
+        st.slots[1].done = Some(true);
+
+        let mut buf = Vec::<u8>::new();
+        print_build_summary(&st, &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+
+        assert!(!out.contains("Failed:"),  "empty Failed group must not appear");
+        assert!(!out.contains("Skipped:"), "empty Skipped group must not appear");
+    }
+
+    #[test]
+    fn summary_all_three_groups_in_order() {
+        // Skipped must precede Done; Done must precede Failed — same order as
+        // the live TUI overflow lines.
+        let mut st = empty_state(3, 1);
+        note_started(&mut st, 0);
+        st.slots[0].done = Some(false);
+        note_skipped(&mut st, 1, "core failed".to_string());
+        // Slot 2 succeeded; it never gets a pane but mark it done.
+        st.slots[2].done = Some(true);
+
+        let mut buf = Vec::<u8>::new();
+        print_build_summary(&st, &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+
+        let pos_skipped = out.find("Skipped").unwrap();
+        let pos_done    = out.find("Done:").unwrap();
+        let pos_failed  = out.find("Failed:").unwrap();
+
+        assert!(pos_skipped < pos_done,   "Skipped must appear before Done");
+        assert!(pos_done    < pos_failed, "Done must appear before Failed");
     }
 
     // ── skipped classification ────────────────────────────────────────────
