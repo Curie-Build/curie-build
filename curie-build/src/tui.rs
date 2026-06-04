@@ -288,11 +288,19 @@ fn render_loop(
     let _ = terminal.draw(|f| render_frame(f, &state));
 
     // ── Message loop ──────────────────────────────────────────────────────
-    // `pending` holds a message that was stashed during a hold window and
-    // must be re-processed with full SlotDone treatment next iteration.
-    let mut pending: Option<TuiMsg> = None;
+    // `pending` holds messages that were stashed during a hold window or
+    // drained by drain_available and must be re-processed next iteration.
+    //
+    // A VecDeque (not Option) is used so that drain_available can queue a
+    // non-Line message without dropping one that drain_hold already stashed.
+    // That scenario is common in fast incremental builds: multiple SlotDone
+    // messages arrive in rapid succession, the first is stashed by drain_hold
+    // and a second is received by drain_available — without the queue the
+    // second would be silently discarded, causing apply_shutdown to mark the
+    // corresponding slot as Skipped.
+    let mut pending: std::collections::VecDeque<TuiMsg> = std::collections::VecDeque::new();
     loop {
-        let msg = match pending.take().or_else(|| rx.recv().ok()) {
+        let msg = match pending.pop_front().or_else(|| rx.recv().ok()) {
             Some(m) => m,
             None    => break,
         };
@@ -353,7 +361,7 @@ fn render_loop(
                                 }
                                 // Visible pane slot finished — needs its own
                                 // hold/close cycle; re-process via pending.
-                                other => pending = Some(other),
+                                other => pending.push_back(other),
                             }
                         }
                         // Pop next still-running slot; skip any that finished
@@ -397,7 +405,7 @@ fn render_loop(
                                     }
                                     let _ = terminal.draw(|f| render_frame(f, &state));
                                 }
-                                other => pending = Some(other),
+                                other => pending.push_back(other),
                             }
                         }
                         state.pane_to_slot.remove(pane_idx);
@@ -669,13 +677,18 @@ fn drain_hold(
 /// Drain all immediately-available messages from `rx` without blocking.
 ///
 /// `Line` messages are stored in their slot rings.  The first non-`Line`
-/// message is stashed into `pending` (if `pending` is currently `None`) and
-/// draining stops — subsequent non-`Line` messages remain in the channel for
-/// the next iteration of the main loop.
+/// message is pushed onto `pending` and draining stops — subsequent
+/// non-`Line` messages remain in the channel for the next iteration of the
+/// main loop.
+///
+/// Using `&mut VecDeque<TuiMsg>` rather than `&mut Option<TuiMsg>` is
+/// intentional: if `pending` already holds a message from a prior
+/// `drain_hold` call, we must not drop the newly-received non-`Line`
+/// message.  Pushing to the back preserves FIFO delivery order.
 fn drain_available(
     rx: &mpsc::Receiver<TuiMsg>,
     state: &mut RenderState,
-    pending: &mut Option<TuiMsg>,
+    pending: &mut std::collections::VecDeque<TuiMsg>,
 ) {
     loop {
         match rx.try_recv() {
@@ -689,9 +702,7 @@ fn drain_available(
                 note_skipped(state, slot_idx, reason);
             }
             Ok(other) => {
-                if pending.is_none() {
-                    *pending = Some(other);
-                }
+                pending.push_back(other);
                 break;
             }
             Err(_) => break,
@@ -1533,6 +1544,34 @@ mod tests {
 
         assert!(pos_skipped < pos_done,   "Skipped must appear before Done");
         assert!(pos_done    < pos_failed, "Done must appear before Failed");
+    }
+
+    // ── drain_available regression ─────────────────────────────────────────
+
+    #[test]
+    fn drain_available_does_not_drop_slot_done_when_pending_already_set() {
+        // Regression: with a fast incremental build, drain_hold stashes SD_1
+        // into pending, then drain_available receives SD_2 from the channel.
+        // With the old Option<TuiMsg> impl, SD_2 was silently dropped because
+        // pending.is_some(); apply_shutdown then marked slot 2 as Skipped.
+        use std::collections::VecDeque;
+        use std::sync::mpsc;
+
+        let (tx, rx) = mpsc::sync_channel::<TuiMsg>(10);
+
+        // Slot 0 done — put in the channel for drain_available to receive.
+        tx.send(TuiMsg::SlotDone { slot_idx: 0, success: true }).unwrap();
+        drop(tx); // close so try_recv returns Err after the one message
+
+        let mut state = empty_state(2, 2);
+        // Simulate drain_hold having already stashed SD_1 for slot 1.
+        let mut pending: VecDeque<TuiMsg> =
+            VecDeque::from([TuiMsg::SlotDone { slot_idx: 1, success: true }]);
+
+        drain_available(&rx, &mut state, &mut pending);
+
+        // Both SD_1 (pre-existing) and SD_0 (just received) must be in pending.
+        assert_eq!(pending.len(), 2, "drain_available must not drop SD_0");
     }
 
     // ── skipped classification ────────────────────────────────────────────
