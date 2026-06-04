@@ -34,22 +34,20 @@ pub struct Pom {
     pub bom_imports: Vec<BomRef>,
 }
 
+/// A POM reference — used for both `<parent>` and BOM imports
+/// (`<scope>import</scope>` + `<type>pom</type>` in `<dependencyManagement>`).
 #[derive(Debug, Clone)]
-pub struct ParentRef {
+pub struct PomRef {
     pub group_id: String,
     pub artifact_id: String,
     pub version: String,
 }
 
-/// A BOM referenced via `<scope>import</scope>` + `<type>pom</type>` inside a
-/// `<dependencyManagement>` block.  The resolver must fetch this POM and merge
-/// its managed versions into the resolution context.
-#[derive(Debug, Clone)]
-pub struct BomRef {
-    pub group_id: String,
-    pub artifact_id: String,
-    pub version: String,
-}
+/// Alias kept for readability at parent-chain call-sites.
+pub type ParentRef = PomRef;
+
+/// Alias kept for readability at BOM-import call-sites.
+pub type BomRef = PomRef;
 
 #[derive(Debug, Clone)]
 pub struct PomDep {
@@ -125,6 +123,14 @@ impl Pom {
         }
 
         result
+    }
+
+    /// Like [`resolve_value`] but returns `None` when the result still contains
+    /// an unresolved `${...}` placeholder.  Use this instead of the
+    /// `resolve_value(v); if contains("${") { ... }` pattern.
+    pub fn try_resolve_value(&self, value: &str) -> Option<String> {
+        let resolved = self.resolve_value(value);
+        if resolved.contains("${") { None } else { Some(resolved) }
     }
 }
 

@@ -44,6 +44,7 @@
 use crate::gav::Gav;
 use crate::pom::{self, BomRef, Pom};
 use crate::repo::{default_repositories, Repository};
+use reqwest::blocking::Client;
 use anyhow::{bail, Context, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -99,6 +100,9 @@ pub struct DepEntry<'a> {
 }
 
 /// Internal BFS work item carrying per-artifact repository context.
+///
+/// `depth` and `via` are used by [`resolve_tree`]; [`resolve`] leaves them
+/// at their defaults (0 / None).
 struct BfsWork {
     gav: Gav,
     /// Repos to use when fetching THIS artifact's POM and JAR.
@@ -106,6 +110,10 @@ struct BfsWork {
     /// Repos passed to each of this artifact's transitive dependencies
     /// (used as their `fetch_repos` and `child_repos`).
     child_repos: Vec<Repository>,
+    /// BFS depth: 0 = declared by user, 1 = direct transitive, etc.
+    depth: usize,
+    /// The artifact that introduced this one.  `None` for depth-0 deps.
+    via: Option<Gav>,
 }
 
 // ---------------------------------------------------------------------------
@@ -140,16 +148,6 @@ pub struct DepTree {
     pub resolved: Vec<ResolvedDep>,
     /// Nearest-wins losers keyed by `"group:artifact"`.
     pub skipped: HashMap<String, Vec<SkippedDep>>,
-}
-
-/// Internal BFS work item for [`resolve_tree`] — same as [`BfsWork`] but
-/// also tracks depth and the introducing parent.
-struct TreeBfsWork {
-    gav: Gav,
-    fetch_repos: Vec<Repository>,
-    child_repos: Vec<Repository>,
-    depth: usize,
-    via: Option<Gav>,
 }
 
 /// Walk the parent POM chain (up to 10 levels) and merge properties +
@@ -262,8 +260,7 @@ fn fetch_and_parse_pom(
     // with resolve_boms and overflow on BOM cycles).
     if !pom.bom_imports.is_empty() {
         for bom_ref in &pom.bom_imports {
-            let version = pom.resolve_value(&bom_ref.version);
-            if version.contains("${") { continue; }
+            let Some(version) = pom.try_resolve_value(&bom_ref.version) else { continue; };
             let bom_gav = Gav {
                 group: bom_ref.group_id.clone(),
                 artifact: bom_ref.artifact_id.clone(),
@@ -285,6 +282,70 @@ fn fetch_and_parse_pom(
     }
 
     Ok(pom)
+}
+
+/// Build a reusable blocking HTTP client with curie's standard settings.
+fn build_http_client() -> Result<Client> {
+    Client::builder()
+        .user_agent("curie-build/0.1")
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")
+}
+
+/// Return the effective list of default repositories: caller-supplied when
+/// non-empty, otherwise Maven Central.
+fn effective_repos(default_repos: &[Repository]) -> Vec<Repository> {
+    if default_repos.is_empty() {
+        default_repositories()
+    } else {
+        default_repos.to_vec()
+    }
+}
+
+/// Fetch one BFS level's POMs in parallel (up to `PARALLEL_POM_FETCHES`
+/// threads).  Returns results indexed by the same order as `level`.
+fn parallel_pom_fetch(
+    level: &[BfsWork],
+    client: &Client,
+    offline: bool,
+) -> Vec<Option<Result<Pom>>> {
+    const PARALLEL_POM_FETCHES: usize = 8;
+    let level_n = level.len();
+    let thread_count = PARALLEL_POM_FETCHES.min(level_n);
+
+    let next_idx = std::sync::atomic::AtomicUsize::new(0);
+    let mut pom_results: Vec<Option<Result<Pom>>> = (0..level_n).map(|_| None).collect();
+    let mut per_thread: Vec<Vec<(usize, Result<Pom>)>> = Vec::new();
+
+    std::thread::scope(|s| {
+        let handles: Vec<_> = (0..thread_count)
+            .map(|_| {
+                s.spawn(|| -> Vec<(usize, Result<Pom>)> {
+                    let mut local = Vec::new();
+                    loop {
+                        let i = next_idx.fetch_add(1, Ordering::Relaxed);
+                        if i >= level_n { break; }
+                        let work = &level[i];
+                        local.push((i, fetch_and_parse_pom(
+                            &work.gav, &work.fetch_repos, client, offline,
+                        )));
+                    }
+                    local
+                })
+            })
+            .collect();
+        for h in handles {
+            per_thread.push(h.join().unwrap_or_default());
+        }
+    });
+
+    for thread_results in per_thread {
+        for (i, result) in thread_results {
+            pom_results[i] = Some(result);
+        }
+    }
+    pom_results
 }
 
 pub fn resolve_boms(
@@ -356,18 +417,14 @@ pub fn resolve_boms(
 /// Resolve the version of a nested BOM reference, using the importing POM's
 /// properties and managed versions for `${...}` substitution.
 fn resolve_bom_ref_version(bom_ref: &BomRef, importing_pom: &Pom) -> Option<String> {
-    let resolved = importing_pom.resolve_value(&bom_ref.version);
-    if resolved.contains("${") {
+    importing_pom.try_resolve_value(&bom_ref.version).or_else(|| {
         // Try managed_versions as a last resort.
         let key = format!("{}:{}", bom_ref.group_id, bom_ref.artifact_id);
         importing_pom
             .managed_versions
             .get(&key)
-            .map(|v| importing_pom.resolve_value(v))
-            .filter(|v| !v.contains("${"))
-    } else {
-        Some(resolved)
-    }
+            .and_then(|v| importing_pom.try_resolve_value(v))
+    })
 }
 
 /// Resolve the full transitive dependency tree and return rich metadata
@@ -379,11 +436,7 @@ pub fn resolve_tree(
     deps: &[DepEntry],
     opts: &ResolveOptions,
 ) -> Result<DepTree> {
-    let central = if opts.default_repos.is_empty() {
-        default_repositories()
-    } else {
-        opts.default_repos.clone()
-    };
+    let central = effective_repos(&opts.default_repos);
 
     let named_map: std::collections::HashMap<&str, &Repository> = opts
         .named_repos
@@ -391,11 +444,7 @@ pub fn resolve_tree(
         .map(|r| (r.id.as_str(), r))
         .collect();
 
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("curie-build/0.1")
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("failed to build HTTP client")?;
+    let client = build_http_client()?;
 
     let global_managed = resolve_boms(&opts.bom_imports, &central, &client, opts.offline)?;
 
@@ -404,7 +453,7 @@ pub fn resolve_tree(
     let mut skipped: HashMap<String, Vec<SkippedDep>> = HashMap::new();
 
     // Seed depth-0 from declared deps.
-    let mut current_level: Vec<TreeBfsWork> = Vec::new();
+    let mut current_level: Vec<BfsWork> = Vec::new();
     for dep in deps {
         let resolved_version: String = if dep.version.is_empty() {
             global_managed
@@ -436,63 +485,14 @@ pub fn resolve_tree(
         let gav = Gav::from_key_version(dep.key, &resolved_version)?;
         let ga = format!("{}:{}", gav.group, gav.artifact);
         if visited.insert(ga) {
-            current_level.push(TreeBfsWork {
-                gav,
-                fetch_repos,
-                child_repos,
-                depth: 0,
-                via: None,
-            });
+            current_level.push(BfsWork { gav, fetch_repos, child_repos, depth: 0, via: None });
         }
     }
 
-    // Level-synchronised parallel BFS — same structure as resolve().
-    const PARALLEL_POM_FETCHES: usize = 8;
-
     while !current_level.is_empty() {
-        let level_n = current_level.len();
-        let thread_count = PARALLEL_POM_FETCHES.min(level_n);
+        let pom_results = parallel_pom_fetch(&current_level, &client, opts.offline);
 
-        let next_idx = std::sync::atomic::AtomicUsize::new(0);
-        let mut pom_results: Vec<Option<Result<Pom>>> =
-            (0..level_n).map(|_| None).collect();
-        let mut per_thread: Vec<Vec<(usize, Result<Pom>)>> = Vec::new();
-
-        let next_ref = &next_idx;
-        let level_ref = &current_level;
-        let client_ref = &client;
-        let offline = opts.offline;
-
-        std::thread::scope(|s| -> Result<()> {
-            let handles: Vec<_> = (0..thread_count)
-                .map(|_| {
-                    s.spawn(move || -> Vec<(usize, Result<Pom>)> {
-                        let mut local = Vec::new();
-                        loop {
-                            let i = next_ref.fetch_add(1, Ordering::Relaxed);
-                            if i >= level_n { break; }
-                            let work = &level_ref[i];
-                            local.push((i, fetch_and_parse_pom(
-                                &work.gav, &work.fetch_repos, client_ref, offline,
-                            )));
-                        }
-                        local
-                    })
-                })
-                .collect();
-            for h in handles {
-                per_thread.push(h.join().unwrap_or_default());
-            }
-            Ok(())
-        })?;
-
-        for thread_results in per_thread {
-            for (i, result) in thread_results {
-                pom_results[i] = Some(result);
-            }
-        }
-
-        let mut next_level: Vec<TreeBfsWork> = Vec::new();
+        let mut next_level: Vec<BfsWork> = Vec::new();
         for (i, work) in current_level.iter().enumerate() {
             resolved.push(ResolvedDep {
                 gav: work.gav.clone(),
@@ -508,12 +508,8 @@ pub fn resolve_tree(
                     let child_depth = work.depth + 1;
 
                     if visited.contains(&ga_key) {
-                        // Record the losing candidate for conflict traces.
                         if let Some(raw_version) = resolve_transitive_version(
-                            &ga_key,
-                            dep.version.as_deref(),
-                            pom,
-                            &global_managed,
+                            &ga_key, dep.version.as_deref(), pom, &global_managed,
                         ) {
                             skipped.entry(ga_key).or_default().push(SkippedDep {
                                 version: raw_version,
@@ -525,10 +521,7 @@ pub fn resolve_tree(
                     }
 
                     let raw_version = match resolve_transitive_version(
-                        &ga_key,
-                        dep.version.as_deref(),
-                        pom,
-                        &global_managed,
+                        &ga_key, dep.version.as_deref(), pom, &global_managed,
                     ) {
                         Some(v) => v,
                         None => continue,
@@ -536,7 +529,7 @@ pub fn resolve_tree(
 
                     let child_gav = Gav { group, artifact, version: raw_version };
                     visited.insert(ga_key);
-                    next_level.push(TreeBfsWork {
+                    next_level.push(BfsWork {
                         fetch_repos: work.child_repos.clone(),
                         child_repos: work.child_repos.clone(),
                         depth: child_depth,
@@ -564,18 +557,8 @@ pub fn resolve_declared_gavs(
     deps: &[DepEntry],
     opts: &ResolveOptions,
 ) -> Result<Vec<Gav>> {
-    let central = if opts.default_repos.is_empty() {
-        default_repositories()
-    } else {
-        opts.default_repos.clone()
-    };
-
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("curie-build/0.1")
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("failed to build HTTP client")?;
-
+    let central = effective_repos(&opts.default_repos);
+    let client = build_http_client()?;
     let global_managed = resolve_boms(&opts.bom_imports, &central, &client, opts.offline)?;
 
     let mut out = Vec::with_capacity(deps.len());
@@ -606,13 +589,7 @@ pub fn resolve(
     deps: &[DepEntry],
     opts: &ResolveOptions,
 ) -> Result<Vec<PathBuf>> {
-    // Use caller-supplied default repos (e.g. a mirrored Central) when
-    // provided; fall back to Maven Central otherwise.
-    let central = if opts.default_repos.is_empty() {
-        default_repositories()
-    } else {
-        opts.default_repos.clone()
-    };
+    let central = effective_repos(&opts.default_repos);
 
     // Build a lookup map from repo id → Repository for named repos.
     let named_map: std::collections::HashMap<&str, &Repository> = opts
@@ -621,11 +598,7 @@ pub fn resolve(
         .map(|r| (r.id.as_str(), r))
         .collect();
 
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("curie-build/0.1")
-        .timeout(Duration::from_secs(30))
-        .build()
-        .context("failed to build HTTP client")?;
+    let client = build_http_client()?;
 
     // BOMs are resolved using the same default repos as regular deps
     // so that a Central mirror is respected here too.
@@ -643,7 +616,6 @@ pub fn resolve(
     //   - First declared wins (same depth): the serial result-collection pass
     //     processes items in their original declaration order.
     // -----------------------------------------------------------------------
-    const PARALLEL_POM_FETCHES: usize = 8;
 
     let mut visited: HashSet<String> = HashSet::new();
     // Ordered list of (GAV, fetch_repos) in BFS discovery order — used in Phase 2.
@@ -693,7 +665,7 @@ pub fn resolve(
         let gav = Gav::from_key_version(dep.key, &resolved_version)?;
         let ga = format!("{}:{}", gav.group, gav.artifact);
         if visited.insert(ga) {
-            current_level.push(BfsWork { gav, fetch_repos, child_repos });
+            current_level.push(BfsWork { gav, fetch_repos, child_repos, depth: 0, via: None });
         }
     }
 
@@ -713,49 +685,9 @@ pub fn resolve(
     };
 
     while !current_level.is_empty() {
-        let level_n = current_level.len();
-        let thread_count = PARALLEL_POM_FETCHES.min(level_n);
-
         // Parallel fetch: each thread pulls the next item from `current_level`
         // via an atomic index and stores (index, pom_result).
-        let next_idx = std::sync::atomic::AtomicUsize::new(0);
-        let mut pom_results: Vec<Option<Result<Pom>>> =
-            (0..level_n).map(|_| None).collect();
-        let mut per_thread: Vec<Vec<(usize, Result<Pom>)>> = Vec::new();
-
-        let next_ref = &next_idx;
-        let level_ref = &current_level;
-        let client_ref = &client;
-        let offline = opts.offline;
-
-        std::thread::scope(|s| -> Result<()> {
-            let handles: Vec<_> = (0..thread_count)
-                .map(|_| {
-                    s.spawn(move || -> Vec<(usize, Result<Pom>)> {
-                        let mut local = Vec::new();
-                        loop {
-                            let i = next_ref.fetch_add(1, Ordering::Relaxed);
-                            if i >= level_n { break; }
-                            let work = &level_ref[i];
-                            local.push((i, fetch_and_parse_pom(
-                                &work.gav, &work.fetch_repos, client_ref, offline,
-                            )));
-                        }
-                        local
-                    })
-                })
-                .collect();
-            for h in handles {
-                per_thread.push(h.join().unwrap_or_default());
-            }
-            Ok(())
-        })?;
-
-        for thread_results in per_thread {
-            for (i, result) in thread_results {
-                pom_results[i] = Some(result);
-            }
-        }
+        let pom_results = parallel_pom_fetch(&current_level, &client, opts.offline);
 
         // Serial pass: collect results in level order, deduplicate via `visited`,
         // and build the next level.  Processing in declaration order preserves
@@ -793,6 +725,8 @@ pub fn resolve(
                         gav: child_gav,
                         fetch_repos: work.child_repos.clone(),
                         child_repos: work.child_repos.clone(),
+                        depth: 0,
+                        via: None,
                     });
                 }
             }
@@ -985,8 +919,7 @@ fn resolve_transitive_version(
     // 1. Top-level BOM override (Maven's <dependencyManagement> at the project
     //    POM wins over transitive explicit versions).
     if let Some(bom_v) = global_managed.get(ga_key) {
-        let resolved = pom.resolve_value(bom_v);
-        if !resolved.contains("${") {
+        if let Some(resolved) = pom.try_resolve_value(bom_v) {
             return Some(resolved);
         }
         // BOM value still references a ${...}; fall through to other sources.
@@ -994,22 +927,15 @@ fn resolve_transitive_version(
 
     // 2. Dep's explicit version, resolved against properties.
     if let Some(v) = dep_explicit {
-        let resolved = pom.resolve_value(v);
-        if !resolved.contains("${") {
+        if let Some(resolved) = pom.try_resolve_value(v) {
             return Some(resolved);
         }
         // Unresolved property: try dep's own managed_versions, then global.
-        if let Some(mv) = pom
+        return pom
             .managed_versions
             .get(ga_key)
             .or_else(|| global_managed.get(ga_key))
-        {
-            let r = pom.resolve_value(mv);
-            if !r.contains("${") {
-                return Some(r);
-            }
-        }
-        return None;
+            .and_then(|mv| pom.try_resolve_value(mv));
     }
 
     // 3. No explicit version — fall back to dep's own managed_versions, then
@@ -1018,12 +944,7 @@ fn resolve_transitive_version(
         .managed_versions
         .get(ga_key)
         .or_else(|| global_managed.get(ga_key))?;
-    let resolved = pom.resolve_value(mv);
-    if resolved.contains("${") {
-        None
-    } else {
-        Some(resolved)
-    }
+    pom.try_resolve_value(mv)
 }
 
 // ---------------------------------------------------------------------------
