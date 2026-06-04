@@ -299,11 +299,15 @@ fn render_loop(
     // second would be silently discarded, causing apply_shutdown to mark the
     // corresponding slot as Skipped.
     let mut pending: std::collections::VecDeque<TuiMsg> = std::collections::VecDeque::new();
+    let mut dbg = DbgLog::open();
     loop {
         let msg = match pending.pop_front().or_else(|| rx.recv().ok()) {
             Some(m) => m,
             None    => break,
         };
+        if dbg.is_on() {
+            dbg.log(&format!("RECV pending_remaining={} msg={}", pending.len(), describe_msg(&msg)));
+        }
         match msg {
             TuiMsg::SlotStarted { slot_idx } => {
                 note_started(&mut state, slot_idx);
@@ -337,10 +341,15 @@ fn render_loop(
                         if let Some(stashed) =
                             drain_hold(&rx, &mut terminal, &mut state, 1)
                         {
+                            if dbg.is_on() {
+                                dbg.log(&format!("DRAIN_HOLD(1s) pending={} stashed={}", pending.len(), describe_msg(&stashed)));
+                            }
                             match stashed {
                                 // Shutdown during the hold still runs the close
                                 // rules so a held-green pane isn't left open.
                                 TuiMsg::Shutdown => {
+                                    log_apply_shutdown(&mut dbg, &state, &pending);
+                                    resolve_outstanding_done_messages(&rx, &mut state, &pending);
                                     apply_shutdown(&mut state);
                                     let _ = terminal.draw(|f| render_frame(f, &state));
                                     break;
@@ -381,16 +390,24 @@ fn render_loop(
                         // Drain any lines already queued for the promoted slot
                         // so the first draw shows content rather than a blank.
                         drain_available(&rx, &mut state, &mut pending);
+                        if dbg.is_on() {
+                            dbg.log(&format!("DRAIN_AVAIL pending_now={}", pending.len()));
+                        }
                         let _ = terminal.draw(|f| render_frame(f, &state));
                     } else if success {
                         // Rule 2: no replacement — hold 2 s then close.
                         if let Some(stashed) =
                             drain_hold(&rx, &mut terminal, &mut state, 2)
                         {
+                            if dbg.is_on() {
+                                dbg.log(&format!("DRAIN_HOLD(2s) pending={} stashed={}", pending.len(), describe_msg(&stashed)));
+                            }
                             match stashed {
                                 // Shutdown during the hold still runs the close
                                 // rules so this held-green pane isn't left open.
                                 TuiMsg::Shutdown => {
+                                    log_apply_shutdown(&mut dbg, &state, &pending);
+                                    resolve_outstanding_done_messages(&rx, &mut state, &pending);
                                     apply_shutdown(&mut state);
                                     let _ = terminal.draw(|f| render_frame(f, &state));
                                     break;
@@ -426,6 +443,8 @@ fn render_loop(
             }
 
             TuiMsg::Shutdown => {
+                log_apply_shutdown(&mut dbg, &state, &pending);
+                resolve_outstanding_done_messages(&rx, &mut state, &pending);
                 apply_shutdown(&mut state);
                 let _ = terminal.draw(|f| render_frame(f, &state));
                 break;
@@ -474,6 +493,109 @@ fn note_skipped(state: &mut RenderState, slot_idx: usize, reason: String) {
 
 /// Number of trailing output lines printed per failed job after the build.
 const TAIL_LINES: usize = 15;
+
+// ── Shutdown helpers ──────────────────────────────────────────────────────
+
+/// Apply every `SlotDone` message waiting in `pending` or the channel before
+/// `apply_shutdown` is called.
+///
+/// When `Shutdown` interrupts a hold window, `pending` may already contain
+/// `SlotDone` messages queued by an earlier `drain_available` call in the
+/// same outer `SlotDone` processing block.  Additionally, the channel may
+/// hold `SlotDone` messages that were sent by workers before the renderer
+/// was dropped but haven't been received yet.  Without this flush,
+/// `apply_shutdown` would see those slots as `done == None` and incorrectly
+/// mark them as skipped.
+fn resolve_outstanding_done_messages(
+    rx:      &mpsc::Receiver<TuiMsg>,
+    state:   &mut RenderState,
+    pending: &std::collections::VecDeque<TuiMsg>,
+) {
+    // Apply SlotDone messages already held in `pending`.
+    for msg in pending {
+        if let TuiMsg::SlotDone { slot_idx, success } = msg {
+            if state.slots[*slot_idx].done.is_none() {
+                state.slots[*slot_idx].done = Some(*success);
+            }
+        }
+    }
+    // Drain any remaining messages from the channel.
+    loop {
+        match rx.try_recv() {
+            Ok(TuiMsg::SlotDone { slot_idx, success }) => {
+                if state.slots[slot_idx].done.is_none() {
+                    state.slots[slot_idx].done = Some(success);
+                }
+            }
+            Ok(_) => {} // other messages (Line, SlotStarted, …) irrelevant at shutdown
+            Err(_) => break,
+        }
+    }
+}
+
+// ── Debug logger ──────────────────────────────────────────────────────────
+
+/// Optional TUI message-flow logger, active only when `CURIE_TUI_DEBUG=1`.
+///
+/// Writes timestamped lines to `/tmp/curie-tui-debug.log`.  Useful for
+/// reproducing "spurious Skipped" races: each received message, the
+/// pending-queue depth at key decision points, and every `apply_shutdown`
+/// invocation with the slots that still have `done == None` are recorded.
+struct DbgLog(Option<std::io::BufWriter<std::fs::File>>);
+
+impl DbgLog {
+    fn open() -> Self {
+        if std::env::var_os("CURIE_TUI_DEBUG").is_some() {
+            let f = std::fs::OpenOptions::new()
+                .create(true).append(true)
+                .open("/tmp/curie-tui-debug.log").ok();
+            DbgLog(f.map(std::io::BufWriter::new))
+        } else {
+            DbgLog(None)
+        }
+    }
+
+    fn log(&mut self, msg: &str) {
+        if let Some(ref mut w) = self.0 {
+            let t = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let _ = writeln!(w, "[{:.3}] {}", t.as_secs_f64(), msg);
+            let _ = w.flush();
+        }
+    }
+
+    fn is_on(&self) -> bool { self.0.is_some() }
+}
+
+fn describe_msg(msg: &TuiMsg) -> String {
+    match msg {
+        TuiMsg::SlotStarted { slot_idx }       => format!("SlotStarted(slot={slot_idx})"),
+        TuiMsg::SlotSkipped { slot_idx, reason }
+                                                => format!("SlotSkipped(slot={slot_idx} reason={reason:?})"),
+        TuiMsg::Line        { slot_idx, .. }   => format!("Line(slot={slot_idx})"),
+        TuiMsg::SlotDone    { slot_idx, success }
+                                                => format!("SlotDone(slot={slot_idx} ok={success})"),
+        TuiMsg::Shutdown                        => "Shutdown".to_string(),
+    }
+}
+
+fn log_apply_shutdown(dbg: &mut DbgLog, state: &RenderState, pending: &std::collections::VecDeque<TuiMsg>) {
+    if !dbg.is_on() { return; }
+    let none_slots: Vec<usize> = state.slots.iter().enumerate()
+        .filter(|(_, s)| s.done.is_none() && !s.skipped)
+        .map(|(i, _)| i)
+        .collect();
+    let pending_done: Vec<String> = pending.iter()
+        .filter_map(|m| if let TuiMsg::SlotDone { slot_idx, success } = m {
+            Some(format!("SD({slot_idx} ok={success})"))
+        } else { None })
+        .collect();
+    dbg.log(&format!(
+        "APPLY_SHUTDOWN none_slots={none_slots:?} pending_done=[{}]",
+        pending_done.join(", ")
+    ));
+}
 
 /// Print the last `max_lines` lines of every failed slot to `out`.
 ///
@@ -1572,6 +1694,94 @@ mod tests {
 
         // Both SD_1 (pre-existing) and SD_0 (just received) must be in pending.
         assert_eq!(pending.len(), 2, "drain_available must not drop SD_0");
+    }
+
+    // ── resolve_outstanding_done_messages ─────────────────────────────────
+
+    /// Helper: build a VecDeque<TuiMsg> from a list of (slot, success) pairs.
+    fn slot_done_queue(pairs: &[(usize, bool)]) -> VecDeque<TuiMsg> {
+        pairs.iter().map(|&(s, ok)| TuiMsg::SlotDone { slot_idx: s, success: ok }).collect()
+    }
+
+    #[test]
+    fn resolve_flushes_slot_done_from_pending() {
+        // Both SD_0 (success) and SD_1 (failure) are already in `pending`.
+        // After resolve, both slots should have done set — not None.
+        let (tx, rx) = mpsc::sync_channel::<TuiMsg>(4);
+        drop(tx);
+
+        let mut state = empty_state(2, 2);
+        let pending = slot_done_queue(&[(0, true), (1, false)]);
+
+        resolve_outstanding_done_messages(&rx, &mut state, &pending);
+
+        assert_eq!(state.slots[0].done, Some(true));
+        assert_eq!(state.slots[1].done, Some(false));
+    }
+
+    #[test]
+    fn resolve_drains_slot_done_from_channel() {
+        // Both SD_0 and SD_1 arrive via the channel (pending is empty).
+        let (tx, rx) = mpsc::sync_channel::<TuiMsg>(4);
+        tx.send(TuiMsg::SlotDone { slot_idx: 0, success: true  }).unwrap();
+        tx.send(TuiMsg::SlotDone { slot_idx: 1, success: false }).unwrap();
+        drop(tx);
+
+        let mut state = empty_state(2, 2);
+        let pending = VecDeque::new();
+
+        resolve_outstanding_done_messages(&rx, &mut state, &pending);
+
+        assert_eq!(state.slots[0].done, Some(true));
+        assert_eq!(state.slots[1].done, Some(false));
+    }
+
+    #[test]
+    fn resolve_combines_pending_and_channel() {
+        // SD_0 is in pending, SD_1 is still in the channel.
+        let (tx, rx) = mpsc::sync_channel::<TuiMsg>(4);
+        tx.send(TuiMsg::SlotDone { slot_idx: 1, success: false }).unwrap();
+        drop(tx);
+
+        let mut state = empty_state(2, 2);
+        let pending = slot_done_queue(&[(0, true)]);
+
+        resolve_outstanding_done_messages(&rx, &mut state, &pending);
+
+        assert_eq!(state.slots[0].done, Some(true));
+        assert_eq!(state.slots[1].done, Some(false));
+    }
+
+    #[test]
+    fn resolve_does_not_overwrite_already_done_slot() {
+        // Slot 0 already has done=Some(true).  A later SD_0(false) in pending
+        // must not overwrite the first result.
+        let (tx, rx) = mpsc::sync_channel::<TuiMsg>(4);
+        drop(tx);
+
+        let mut state = empty_state(1, 1);
+        state.slots[0].done = Some(true);
+        let pending = slot_done_queue(&[(0, false)]);
+
+        resolve_outstanding_done_messages(&rx, &mut state, &pending);
+
+        assert_eq!(state.slots[0].done, Some(true), "first result must not be overwritten");
+    }
+
+    #[test]
+    fn resolve_ignores_non_slot_done_messages_in_channel() {
+        // A Line message in the channel must be silently dropped — it is
+        // irrelevant at shutdown and must not cause a panic or affect done state.
+        let (tx, rx) = mpsc::sync_channel::<TuiMsg>(4);
+        tx.send(TuiMsg::Line { slot_idx: 0, line: "hello".to_string() }).unwrap();
+        drop(tx);
+
+        let mut state = empty_state(1, 1);
+        let pending = VecDeque::new();
+
+        resolve_outstanding_done_messages(&rx, &mut state, &pending);
+
+        assert_eq!(state.slots[0].done, None, "non-SlotDone must be ignored");
     }
 
     // ── skipped classification ────────────────────────────────────────────
