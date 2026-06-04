@@ -260,12 +260,13 @@ fn render_loop(
         Err(_) => return,
     };
 
+    // Enter the alternate screen so the terminal's primary-screen content is
+    // preserved and automatically restored when we leave.
+    let _ = execute!(io::stdout(), terminal::EnterAlternateScreen);
     // Hide cursor and disable line-wrap for the lifetime of the TUI.
     // \x1b[?7l (DECAWM off) has no crossterm equivalent.
     let _ = execute!(io::stdout(), cursor::Hide);
     let _ = write!(io::stdout(), "\x1b[?7l");
-    // Clear the screen so previous terminal content doesn't show through
-    // the initial pane layout.
     let _ = terminal.clear();
 
     // Panes start empty and are filled lazily as jobs report they have begun
@@ -425,19 +426,15 @@ fn render_loop(
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────────
-    // Restore scroll region and re-enable line-wrap first so that the
-    // subsequent Clear(All) operates on the full screen, not just the
-    // TUI-restricted scroll region.  Close any open OSC 8 hyperlink too.
+    // Restore scroll region / line-wrap / hyperlink state while still on the
+    // alternate screen so those escape sequences don't affect the primary screen.
     let _ = write!(io::stdout(), "\x1b[r\x1b[?7h\x1b]8;;\x07");
-    // Erase all TUI pane content and leave the cursor at (0, 0) with the
-    // cursor visible, so the caller's following output (e.g. the build
-    // error summary) starts on a clean screen.
-    let _ = execute!(
-        io::stdout(),
-        terminal::Clear(terminal::ClearType::All),
-        cursor::MoveTo(0, 0),
-        cursor::Show,
-    );
+    // Leave the alternate screen — restores whatever the terminal was showing
+    // before the TUI started.  Show the cursor on the primary screen.
+    let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen, cursor::Show);
+    // Print the last TAIL_LINES of each failed member below the restored content
+    // so the errors are visible before the caller's summary lines appear.
+    print_failed_tails(&state, TAIL_LINES, &mut io::stdout());
     let _ = io::stdout().flush();
 }
 
@@ -463,6 +460,42 @@ fn note_skipped(state: &mut RenderState, slot_idx: usize, reason: String) {
     state.slots[slot_idx].skipped = true;
     if state.skip_reason.is_none() {
         state.skip_reason = Some(reason);
+    }
+}
+
+/// Number of trailing output lines printed per failed job after the build.
+const TAIL_LINES: usize = 15;
+
+/// Print the last `max_lines` lines of every failed slot to `out`.
+///
+/// Called after the alternate screen is left so output appears on the primary
+/// screen below the restored content, before the caller's summary lines.
+///
+/// Lines are sanitised via [`truncate_to_cols`] to strip OSC / non-SGR escape
+/// sequences while keeping ANSI colour codes, preventing a stray hyperlink
+/// escape from poisoning the terminal.  Column truncation is disabled (the
+/// terminal wraps naturally).
+///
+/// Each failed slot is preceded by a bold-red header and followed by a blank
+/// line separator.
+fn print_failed_tails(state: &RenderState, max_lines: usize, out: &mut dyn io::Write) {
+    let failed: Vec<&SlotData> = state
+        .slots
+        .iter()
+        .filter(|s| s.done == Some(false))
+        .collect();
+    if failed.is_empty() {
+        return;
+    }
+    // Strip unsafe escapes but do not truncate columns — the terminal wraps.
+    const NO_COL_LIMIT: usize = usize::MAX >> 1;
+    for slot in &failed {
+        let _ = writeln!(out, "\x1b[1;31m── {} ──\x1b[0m", slot.name);
+        let skip = slot.ring.len().saturating_sub(max_lines);
+        for line in slot.ring.iter().skip(skip) {
+            let _ = writeln!(out, "  {}", truncate_to_cols(line, NO_COL_LIMIT));
+        }
+        let _ = writeln!(out);
     }
 }
 
@@ -1256,6 +1289,91 @@ mod tests {
         let groups = classify_overflow_slots(&st);
         assert_eq!(groups.skipped, vec!["m1"]);
         assert!(groups.pending.is_empty());
+    }
+
+    // ── print_failed_tails ────────────────────────────────────────────────
+
+    #[test]
+    fn tail_is_empty_when_no_failures() {
+        let st = empty_state(3, 3);
+        let mut buf = Vec::<u8>::new();
+        print_failed_tails(&st, 15, &mut buf);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn tail_skips_successful_and_pending_slots() {
+        let mut st = empty_state(3, 3);
+        st.slots[0].done = Some(true);   // succeeded — not printed
+        st.slots[1].done = None;          // still running — not printed
+        st.slots[2].done = Some(false);  // failed — printed
+        st.slots[2].ring.push_back("err line".to_string());
+
+        let mut buf = Vec::<u8>::new();
+        print_failed_tails(&st, 15, &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+
+        assert!(out.contains("m2"), "header for the failed slot");
+        assert!(out.contains("err line"));
+        assert!(!out.contains("m0"), "successful slot must not appear");
+        assert!(!out.contains("m1"), "pending slot must not appear");
+    }
+
+    #[test]
+    fn tail_prints_last_n_lines_and_trims_older_ones() {
+        let mut st = empty_state(1, 1);
+        st.slots[0].done = Some(false);
+        for i in 0..20u32 {
+            st.slots[0].ring.push_back(format!("line {i}"));
+        }
+
+        let mut buf = Vec::<u8>::new();
+        print_failed_tails(&st, 15, &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+
+        // Last 15 lines (5..=19) must appear.
+        for i in 5..20u32 {
+            assert!(out.contains(&format!("line {i}")), "missing line {i}");
+        }
+        // The first 5 lines (0..4) must be absent.
+        for i in 0..5u32 {
+            assert!(!out.contains(&format!("line {i}\n")), "old line {i} must be trimmed");
+        }
+    }
+
+    #[test]
+    fn tail_prints_all_lines_when_fewer_than_max() {
+        let mut st = empty_state(1, 1);
+        st.slots[0].done = Some(false);
+        for i in 0..5u32 {
+            st.slots[0].ring.push_back(format!("e{i}"));
+        }
+
+        let mut buf = Vec::<u8>::new();
+        print_failed_tails(&st, 15, &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+
+        for i in 0..5u32 {
+            assert!(out.contains(&format!("e{i}")));
+        }
+    }
+
+    #[test]
+    fn tail_prints_multiple_failed_slots_in_order() {
+        let mut st = empty_state(3, 3);
+        st.slots[0].done = Some(false);
+        st.slots[0].ring.push_back("alpha error".to_string());
+        st.slots[1].done = Some(true);   // skipped
+        st.slots[2].done = Some(false);
+        st.slots[2].ring.push_back("beta error".to_string());
+
+        let mut buf = Vec::<u8>::new();
+        print_failed_tails(&st, 15, &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+
+        let pos_alpha = out.find("alpha error").unwrap();
+        let pos_beta  = out.find("beta error").unwrap();
+        assert!(pos_alpha < pos_beta, "slot 0 must appear before slot 2");
     }
 
     // ── skipped classification ────────────────────────────────────────────

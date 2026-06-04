@@ -646,8 +646,8 @@ where
         }
         JobMode::Tui { _renderer } => {
             // Dropping _renderer sends TuiMsg::Shutdown to the render thread
-            // and joins it — this restores the cursor and parks it below the
-            // panes before we print errors or return to the caller.
+            // and joins it — this leaves the alternate screen, prints the last
+            // TAIL_LINES of each failed member, then returns control here.
         }
     }
 
