@@ -28,6 +28,15 @@ use std::process::Command;
 use std::time::SystemTime;
 use walkdir::{DirEntry, WalkDir};
 
+/// Write (create or overwrite) a zero-byte stamp file at `path`.
+///
+/// The file's filesystem mtime is the "as-of" timestamp for incremental skip
+/// checks.  We only care about mtime; the content is always empty.
+pub(crate) fn touch_stamp(path: &Path) -> Result<()> {
+    std::fs::write(path, b"")
+        .with_context(|| format!("failed to write stamp file {}", path.display()))
+}
+
 /// Walk `dir` recursively and yield every regular file as a [`DirEntry`].
 ///
 /// Errors from [`WalkDir`] (e.g. permission denied on a sub-entry) are

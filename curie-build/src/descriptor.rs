@@ -2095,3 +2095,54 @@ version = "0.1"
         assert!(err.contains("library") && err.contains("native-image"), "got: {err}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Test helpers (available to sibling modules via `crate::descriptor::tests`)
+// ---------------------------------------------------------------------------
+
+/// Shared test helper: build a minimal library [`Descriptor`] with the given
+/// coordinates and publish config.  Used by `pom_writer` and `publish` tests.
+///
+/// `group_id` is `Option<&str>` so callers that want to test the "missing
+/// groupId" error path can pass `None`.
+#[cfg(test)]
+pub(crate) fn fake_library_desc(
+    group_id: Option<&str>,
+    name: &str,
+    version: &str,
+    publish: PublishConfig,
+) -> Descriptor {
+    use std::collections::BTreeMap;
+    Descriptor {
+        kind: DescriptorKind::Library(Library {
+            name: name.to_string(),
+            version: version.to_string(),
+            group_id: group_id.map(String::from),
+        }),
+        java: Java::default(),
+        test: Test::default(),
+        kotlin: Kotlin::default(),
+        groovy: Groovy::default(),
+        spock: Spock::default(),
+        native_image: NativeImage::default(),
+        docker: Docker::default(),
+        build_info: BuildInfo::default(),
+        dependencies: BTreeMap::new(),
+        test_dependencies: BTreeMap::new(),
+        repositories: vec![],
+        bom_imports: BTreeMap::new(),
+        test_bom_imports: BTreeMap::new(),
+        inherited_bom_imports: BTreeMap::new(),
+        inherited_test_bom_imports: BTreeMap::new(),
+        workspace_dependencies: BTreeMap::new(),
+        annotation_processors: BTreeMap::new(),
+        test_annotation_processors: BTreeMap::new(),
+        inherited_annotation_processors: BTreeMap::new(),
+        inherited_test_annotation_processors: BTreeMap::new(),
+        annotation_processor_options: BTreeMap::new(),
+        test_annotation_processor_options: BTreeMap::new(),
+        inherited_annotation_processor_options: BTreeMap::new(),
+        inherited_test_annotation_processor_options: BTreeMap::new(),
+        publish,
+    }
+}

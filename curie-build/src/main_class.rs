@@ -22,6 +22,40 @@ use std::process::Command;
 // FQCN derivation
 // ---------------------------------------------------------------------------
 
+/// Core FQCN derivation shared by both Java and Kotlin sources.
+///
+/// Strips `src_root` from `source`, converts the remaining path components to a
+/// dot-separated string, prepends any flat-package prefix from `src_root`, and
+/// appends `stem_suffix` to the final path component (empty for Java, `"Kt"`
+/// for Kotlin top-level functions).
+fn fqcn_from_source(src_roots: &[PathBuf], source: &Path, stem_suffix: &str) -> Option<String> {
+    for src_root in src_roots {
+        if let Ok(rel) = source.strip_prefix(src_root) {
+            let without_ext = rel.with_extension("");
+            let mut parts: Vec<String> = without_ext
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            if parts.is_empty() {
+                continue;
+            }
+            if !stem_suffix.is_empty() {
+                let last = parts.len() - 1;
+                parts[last].push_str(stem_suffix);
+            }
+            let rel_fqcn = parts.join(".");
+            let pkg_prefix = pkg_prefix_for_src_root(src_root);
+            let fqcn = if pkg_prefix.is_empty() {
+                rel_fqcn
+            } else {
+                format!("{}.{}", pkg_prefix, rel_fqcn)
+            };
+            return Some(fqcn);
+        }
+    }
+    None
+}
+
 /// Derive the fully-qualified class name from a `.java` source path, trying
 /// each `src_root` in order and using the first successful strip.
 ///
@@ -36,27 +70,7 @@ use std::process::Command;
 /// For unnamed/compact source files (no top-level type declaration) the class
 /// name equals the file stem.
 fn fqcn_from_java_source(src_roots: &[PathBuf], source: &Path) -> Option<String> {
-    for src_root in src_roots {
-        if let Ok(rel) = source.strip_prefix(src_root) {
-            let without_ext = rel.with_extension("");
-            let rel_fqcn = without_ext
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(".");
-            if rel_fqcn.is_empty() {
-                continue;
-            }
-            let pkg_prefix = pkg_prefix_for_src_root(src_root);
-            let fqcn = if pkg_prefix.is_empty() {
-                rel_fqcn
-            } else {
-                format!("{}.{}", pkg_prefix, rel_fqcn)
-            };
-            return Some(fqcn);
-        }
-    }
-    None
+    fqcn_from_source(src_roots, source, "")
 }
 
 /// Derive the fully-qualified class name for a `.kt` source file.
@@ -67,32 +81,7 @@ fn fqcn_from_java_source(src_roots: &[PathBuf], source: &Path) -> Option<String>
 /// Example: `src/main/kotlin/com/example/Hello.kt`
 ///   → stem `Hello` + `Kt` suffix → FQCN `com.example.HelloKt`
 fn fqcn_from_kotlin_source(src_roots: &[PathBuf], source: &Path) -> Option<String> {
-    // Try each src_root (including kotlin-specific ones like src/main/kotlin).
-    for src_root in src_roots {
-        if let Ok(rel) = source.strip_prefix(src_root) {
-            let without_ext = rel.with_extension("");
-            let mut parts: Vec<String> = without_ext
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                .collect();
-            if parts.is_empty() {
-                continue;
-            }
-            // Append "Kt" suffix to the file-stem (last component).
-            let last = parts.len() - 1;
-            parts[last].push_str("Kt");
-
-            let rel_fqcn = parts.join(".");
-            let pkg_prefix = pkg_prefix_for_src_root(src_root);
-            let fqcn = if pkg_prefix.is_empty() {
-                rel_fqcn
-            } else {
-                format!("{}.{}", pkg_prefix, rel_fqcn)
-            };
-            return Some(fqcn);
-        }
-    }
-    None
+    fqcn_from_source(src_roots, source, "Kt")
 }
 
 // ---------------------------------------------------------------------------

@@ -183,9 +183,7 @@ fn stamp_path(target_dir: &Path) -> PathBuf {
 }
 
 fn touch_stamp(target_dir: &Path) -> Result<()> {
-    let path = stamp_path(target_dir);
-    std::fs::write(&path, b"")
-        .with_context(|| format!("failed to write {}", path.display()))
+    crate::incremental::touch_stamp(&stamp_path(target_dir))
 }
 
 /// Collect all inputs that can invalidate the native binary.

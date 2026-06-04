@@ -173,19 +173,45 @@ pub fn run_fmt_with_jars(
 // Private formatter invocations
 // ---------------------------------------------------------------------------
 
-fn fmt_java(java_files: &[PathBuf], pjf_jars: &[PathBuf], check_only: bool) -> Result<()> {
-    let cp = classpath(pjf_jars);
+/// Everything that distinguishes one formatter (PJF vs ktfmt) from another.
+struct FormatterSpec {
+    /// Fully-qualified main class to invoke via `java -cp`.
+    main_class: &'static str,
+    /// Extra JVM arguments placed before `-cp` (e.g. `--add-exports` flags).
+    jvm_flags: Vec<String>,
+    /// Arguments passed to the formatter when reformatting in-place.
+    reformat_args: &'static [&'static str],
+    /// Arguments passed to the formatter when doing a dry-run check.
+    check_args: &'static [&'static str],
+    /// Human-readable name used in error messages.
+    name: &'static str,
+    /// Language name used in the "not correctly formatted" error message.
+    language: &'static str,
+}
+
+/// Invoke a formatter on a set of source files.
+fn run_formatter(
+    files: &[PathBuf],
+    jars: &[PathBuf],
+    check_only: bool,
+    spec: &FormatterSpec,
+) -> Result<()> {
+    let cp = classpath(jars);
     let mut cmd = Command::new("java");
-    for flag in jvm_add_exports() {
+    for flag in &spec.jvm_flags {
         cmd.arg(flag);
     }
-    cmd.arg("-cp").arg(&cp).arg(PJF_MAIN).arg("--aosp");
+    cmd.arg("-cp").arg(&cp).arg(spec.main_class);
     if check_only {
-        cmd.args(["--dry-run", "--set-exit-if-changed"]);
+        for arg in spec.check_args {
+            cmd.arg(arg);
+        }
     } else {
-        cmd.arg("--replace");
+        for arg in spec.reformat_args {
+            cmd.arg(arg);
+        }
     }
-    for f in java_files {
+    for f in files {
         cmd.arg(f);
     }
     let status = cmd
@@ -194,46 +220,38 @@ fn fmt_java(java_files: &[PathBuf], pjf_jars: &[PathBuf], check_only: bool) -> R
     if !status.success() {
         if check_only {
             bail!(
-                "fmt: one or more Java files are not correctly formatted. \
-                 Run `curie fmt` (without --check) to fix them."
+                "fmt: one or more {} files are not correctly formatted. \
+                 Run `curie fmt` (without --check) to fix them.",
+                spec.language
             );
         } else {
-            bail!("palantir-java-format exited with status {}", status);
+            bail!("{} exited with status {}", spec.name, status);
         }
     }
     Ok(())
 }
 
+fn fmt_java(java_files: &[PathBuf], pjf_jars: &[PathBuf], check_only: bool) -> Result<()> {
+    run_formatter(java_files, pjf_jars, check_only, &FormatterSpec {
+        main_class: PJF_MAIN,
+        jvm_flags: jvm_add_exports(),
+        reformat_args: &["--aosp", "--replace"],
+        check_args: &["--aosp", "--dry-run", "--set-exit-if-changed"],
+        name: "palantir-java-format",
+        language: "Java",
+    })
+}
+
 fn fmt_kotlin(kotlin_files: &[PathBuf], ktfmt_jars: &[PathBuf], check_only: bool) -> Result<()> {
-    let cp = classpath(ktfmt_jars);
-    let mut cmd = Command::new("java");
-    // ktfmt bundles the Kotlin compiler PSI which accesses sun.misc.Unsafe;
-    // suppress the warning with the same flag used when invoking kotlinc.
-    cmd.arg("--enable-native-access=ALL-UNNAMED");
-    cmd.arg("-cp").arg(&cp).arg(KTFMT_MAIN);
-    // Kotlinlang style: 4-space indentation, matching Java's --aosp.
-    cmd.arg("--kotlinlang-style");
-    if check_only {
-        cmd.args(["--dry-run", "--set-exit-if-changed"]);
-    }
-    // No --replace flag: ktfmt rewrites in-place by default.
-    for f in kotlin_files {
-        cmd.arg(f);
-    }
-    let status = cmd
-        .status()
-        .context("failed to launch `java` — is a JDK installed and on PATH?")?;
-    if !status.success() {
-        if check_only {
-            bail!(
-                "fmt: one or more Kotlin files are not correctly formatted. \
-                 Run `curie fmt` (without --check) to fix them."
-            );
-        } else {
-            bail!("ktfmt exited with status {}", status);
-        }
-    }
-    Ok(())
+    // ktfmt rewrites in-place by default — no --replace flag needed.
+    run_formatter(kotlin_files, ktfmt_jars, check_only, &FormatterSpec {
+        main_class: KTFMT_MAIN,
+        jvm_flags: vec!["--enable-native-access=ALL-UNNAMED".to_string()],
+        reformat_args: &["--kotlinlang-style"],
+        check_args: &["--kotlinlang-style", "--dry-run", "--set-exit-if-changed"],
+        name: "ktfmt",
+        language: "Kotlin",
+    })
 }
 
 fn classpath(jars: &[PathBuf]) -> String {

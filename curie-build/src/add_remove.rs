@@ -124,17 +124,10 @@ pub fn run_add(project_root: &Path, coord_arg: Option<&str>, opts: AddOptions) -
     };
 
     // -- rewrite Curie.toml --------------------------------------------------
-    let toml_path = project_root.join("Curie.toml");
-    let content = std::fs::read_to_string(&toml_path)
-        .with_context(|| format!("failed to read {}", toml_path.display()))?;
-    let mut doc: DocumentMut = content
-        .parse()
-        .with_context(|| format!("failed to parse {} as TOML", toml_path.display()))?;
-
-    insert_entry(&mut doc, section, &coord, &version);
-
-    std::fs::write(&toml_path, doc.to_string())
-        .with_context(|| format!("failed to write {}", toml_path.display()))?;
+    rewrite_toml(project_root, |doc| {
+        insert_entry(doc, section, &coord, &version);
+        Ok(())
+    })?;
 
     // -- report --------------------------------------------------------------
     if version.is_empty() {
@@ -156,42 +149,55 @@ pub fn run_remove(project_root: &Path, coord_arg: &str, opts: RemoveOptions) -> 
     let section = section_name_remove(&opts);
 
     // -- rewrite Curie.toml --------------------------------------------------
-    let toml_path = project_root.join("Curie.toml");
-    let content = std::fs::read_to_string(&toml_path)
-        .with_context(|| format!("failed to read {}", toml_path.display()))?;
-    let mut doc: DocumentMut = content
-        .parse()
-        .with_context(|| format!("failed to parse {} as TOML", toml_path.display()))?;
+    rewrite_toml(project_root, |doc| {
+        // Verify entry exists before mutating.
+        let entry_present = doc
+            .get(section)
+            .and_then(|v| v.as_table())
+            .map(|t| t.contains_key(&coord))
+            .unwrap_or(false);
 
-    // Verify entry exists before mutating.
-    let entry_present = doc
-        .get(section)
-        .and_then(|v| v.as_table())
-        .map(|t| t.contains_key(&coord))
-        .unwrap_or(false);
+        if !entry_present {
+            anyhow::bail!("\"{}\" not found in [{}]", coord, section);
+        }
 
-    if !entry_present {
-        bail!("\"{}\" not found in [{}]", coord, section);
-    }
-
-    doc.get_mut(section)
-        .and_then(|v| v.as_table_mut())
-        .expect("table existence checked above")
-        .remove(&coord);
-
-    std::fs::write(&toml_path, doc.to_string())
-        .with_context(|| format!("failed to write {}", toml_path.display()))?;
+        doc.get_mut(section)
+            .and_then(|v| v.as_table_mut())
+            .expect("table existence checked above")
+            .remove(&coord);
+        Ok(())
+    })?;
 
     println!("  Removed \"{}\" from [{}]", coord, section);
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
+// TOML rewrite helper
+// ---------------------------------------------------------------------------
+
+/// Read `Curie.toml`, parse it, call `f` to mutate the document, then write
+/// it back.  All three I/O operations carry the file path in their error
+/// context.  `f` may return an error to abort the write.
+fn rewrite_toml(project_root: &Path, f: impl FnOnce(&mut DocumentMut) -> Result<()>) -> Result<()> {
+    let toml_path = project_root.join("Curie.toml");
+    let content = std::fs::read_to_string(&toml_path)
+        .with_context(|| format!("failed to read {}", toml_path.display()))?;
+    let mut doc: DocumentMut = content
+        .parse()
+        .with_context(|| format!("failed to parse {} as TOML", toml_path.display()))?;
+    f(&mut doc)?;
+    std::fs::write(&toml_path, doc.to_string())
+        .with_context(|| format!("failed to write {}", toml_path.display()))
+}
+
+// ---------------------------------------------------------------------------
 // Section routing
 // ---------------------------------------------------------------------------
 
-fn section_name(opts: &AddOptions) -> &'static str {
-    match (opts.bom, opts.annotation_processor, opts.test) {
+/// Map the three section-routing flags to the Curie.toml table name.
+fn section_for(bom: bool, annotation_processor: bool, test: bool) -> &'static str {
+    match (bom, annotation_processor, test) {
         (true,  _,     false) => "bom-imports",
         (true,  _,     true)  => "test-bom-imports",
         (false, true,  false) => "annotation-processors",
@@ -201,15 +207,12 @@ fn section_name(opts: &AddOptions) -> &'static str {
     }
 }
 
+fn section_name(opts: &AddOptions) -> &'static str {
+    section_for(opts.bom, opts.annotation_processor, opts.test)
+}
+
 fn section_name_remove(opts: &RemoveOptions) -> &'static str {
-    match (opts.bom, opts.annotation_processor, opts.test) {
-        (true,  _,     false) => "bom-imports",
-        (true,  _,     true)  => "test-bom-imports",
-        (false, true,  false) => "annotation-processors",
-        (false, true,  true)  => "test-annotation-processors",
-        (false, false, false) => "dependencies",
-        (false, false, true)  => "test-dependencies",
-    }
+    section_for(opts.bom, opts.annotation_processor, opts.test)
 }
 
 // ---------------------------------------------------------------------------

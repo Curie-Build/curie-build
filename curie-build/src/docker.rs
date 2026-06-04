@@ -112,9 +112,7 @@ fn stamp_path(target_dir: &Path) -> PathBuf {
 
 /// Touch (create/update) the stamp file to record that a build just succeeded.
 fn touch_stamp(target_dir: &Path) -> Result<()> {
-    let path = stamp_path(target_dir);
-    // Write empty content — we only care about the mtime.
-    std::fs::write(&path, b"").with_context(|| format!("failed to write {}", path.display()))
+    crate::incremental::touch_stamp(&stamp_path(target_dir))
 }
 
 /// Inputs that invalidate the generated-Dockerfile build's stamp:

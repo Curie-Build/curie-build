@@ -183,43 +183,10 @@ fn spdx_lookup(spdx: &str) -> (&str, Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::descriptor::{Developer, Scm};
+    use crate::descriptor::{fake_library_desc, Developer, Scm};
 
     fn fake_desc(group_id: &str, name: &str, version: &str, pub_cfg: PublishConfig) -> Descriptor {
-        use crate::descriptor::*;
-        use std::collections::BTreeMap;
-        Descriptor {
-            kind: DescriptorKind::Library(Library {
-                name: name.to_string(),
-                version: version.to_string(),
-                group_id: Some(group_id.to_string()),
-            }),
-            java: Java::default(),
-            test: Test::default(),
-            kotlin: Kotlin::default(),
-            groovy: Groovy::default(),
-            spock: Spock::default(),
-            native_image: NativeImage::default(),
-            docker: Docker::default(),
-            build_info: BuildInfo::default(),
-            dependencies: BTreeMap::new(),
-            test_dependencies: BTreeMap::new(),
-            repositories: vec![],
-            bom_imports: BTreeMap::new(),
-            test_bom_imports: BTreeMap::new(),
-            inherited_bom_imports: BTreeMap::new(),
-            inherited_test_bom_imports: BTreeMap::new(),
-            workspace_dependencies: BTreeMap::new(),
-            annotation_processors: BTreeMap::new(),
-            test_annotation_processors: BTreeMap::new(),
-            inherited_annotation_processors: BTreeMap::new(),
-            inherited_test_annotation_processors: BTreeMap::new(),
-            annotation_processor_options: BTreeMap::new(),
-            test_annotation_processor_options: BTreeMap::new(),
-            inherited_annotation_processor_options: BTreeMap::new(),
-            inherited_test_annotation_processor_options: BTreeMap::new(),
-            publish: pub_cfg,
-        }
+        fake_library_desc(Some(group_id), name, version, pub_cfg)
     }
 
     #[test]
@@ -304,40 +271,7 @@ mod tests {
 
     #[test]
     fn pom_errors_when_group_id_missing() {
-        use crate::descriptor::*;
-        use std::collections::BTreeMap;
-        let desc = Descriptor {
-            kind: DescriptorKind::Library(Library {
-                name: "x".into(),
-                version: "1.0".into(),
-                group_id: None,
-            }),
-            java: Java::default(),
-            test: Test::default(),
-            kotlin: Kotlin::default(),
-            groovy: Groovy::default(),
-            spock: Spock::default(),
-            native_image: NativeImage::default(),
-            docker: Docker::default(),
-            build_info: BuildInfo::default(),
-            dependencies: BTreeMap::new(),
-            test_dependencies: BTreeMap::new(),
-            repositories: vec![],
-            bom_imports: BTreeMap::new(),
-            test_bom_imports: BTreeMap::new(),
-            inherited_bom_imports: BTreeMap::new(),
-            inherited_test_bom_imports: BTreeMap::new(),
-            workspace_dependencies: BTreeMap::new(),
-            annotation_processors: BTreeMap::new(),
-            test_annotation_processors: BTreeMap::new(),
-            inherited_annotation_processors: BTreeMap::new(),
-            inherited_test_annotation_processors: BTreeMap::new(),
-            annotation_processor_options: BTreeMap::new(),
-            test_annotation_processor_options: BTreeMap::new(),
-            inherited_annotation_processor_options: BTreeMap::new(),
-            inherited_test_annotation_processor_options: BTreeMap::new(),
-            publish: PublishConfig::default(),
-        };
+        let desc = fake_library_desc(None, "x", "1.0", PublishConfig::default());
         let err = build_pom(&desc, &[]).unwrap_err().to_string();
         assert!(err.contains("groupId"), "got: {err}");
     }

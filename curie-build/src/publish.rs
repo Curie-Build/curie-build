@@ -479,6 +479,13 @@ fn upload_one(
     Ok(())
 }
 
+fn digest_hex<D: sha2::digest::Digest + sha2::digest::FixedOutput>(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path)?;
+    let mut h = D::new();
+    sha2::digest::Update::update(&mut h, &bytes);
+    Ok(hex_encode(h.finalize().as_slice()))
+}
+
 fn digest_hex_sha1(path: &Path) -> Result<String> {
     use sha1::Digest as _;
     let bytes = std::fs::read(path)?;
@@ -487,18 +494,10 @@ fn digest_hex_sha1(path: &Path) -> Result<String> {
     Ok(hex_encode(&h.finalize()))
 }
 fn digest_hex_sha256(path: &Path) -> Result<String> {
-    use sha2::Digest as _;
-    let bytes = std::fs::read(path)?;
-    let mut h = sha2::Sha256::new();
-    h.update(&bytes);
-    Ok(hex_encode(&h.finalize()))
+    digest_hex::<sha2::Sha256>(path)
 }
 fn digest_hex_sha512(path: &Path) -> Result<String> {
-    use sha2::Digest as _;
-    let bytes = std::fs::read(path)?;
-    let mut h = sha2::Sha512::new();
-    h.update(&bytes);
-    Ok(hex_encode(&h.finalize()))
+    digest_hex::<sha2::Sha512>(path)
 }
 fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
@@ -539,40 +538,7 @@ mod tests {
     use super::*;
 
     fn fake_desc(group_id: Option<&str>, pub_cfg: crate::descriptor::PublishConfig) -> Descriptor {
-        use crate::descriptor::*;
-        use std::collections::BTreeMap;
-        Descriptor {
-            kind: DescriptorKind::Library(Library {
-                name: "my-lib".into(),
-                version: "1.0.0".into(),
-                group_id: group_id.map(String::from),
-            }),
-            java: Java::default(),
-            test: Test::default(),
-            kotlin: Kotlin::default(),
-            groovy: Groovy::default(),
-            spock: Spock::default(),
-            native_image: NativeImage::default(),
-            docker: Docker::default(),
-            build_info: BuildInfo::default(),
-            dependencies: BTreeMap::new(),
-            test_dependencies: BTreeMap::new(),
-            repositories: vec![],
-            bom_imports: BTreeMap::new(),
-            test_bom_imports: BTreeMap::new(),
-            inherited_bom_imports: BTreeMap::new(),
-            inherited_test_bom_imports: BTreeMap::new(),
-            workspace_dependencies: BTreeMap::new(),
-            annotation_processors: BTreeMap::new(),
-            test_annotation_processors: BTreeMap::new(),
-            inherited_annotation_processors: BTreeMap::new(),
-            inherited_test_annotation_processors: BTreeMap::new(),
-            annotation_processor_options: BTreeMap::new(),
-            test_annotation_processor_options: BTreeMap::new(),
-            inherited_annotation_processor_options: BTreeMap::new(),
-            inherited_test_annotation_processor_options: BTreeMap::new(),
-            publish: pub_cfg,
-        }
+        crate::descriptor::fake_library_desc(group_id, "my-lib", "1.0.0", pub_cfg)
     }
 
     fn full_publish_cfg() -> crate::descriptor::PublishConfig {
