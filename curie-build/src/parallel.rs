@@ -22,9 +22,9 @@
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::workspace::{Member, Workspace};
 
@@ -411,6 +411,66 @@ fn mark_undispatched_skipped(
     }
 }
 
+// ── Build metadata sidecar ────────────────────────────────────────────────
+
+/// Persisted after each job: written to `target/<action>.meta` as JSON.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct BuildMeta {
+    pub exit_code:   i32,
+    pub duration_ms: u64,
+    /// Unix epoch milliseconds at job dispatch — canonical sort key.
+    pub started_ms:  u64,
+    /// RFC 3339 UTC representation of `started_ms` for human display.
+    pub started_at:  String,
+}
+
+/// Write a JSON `.meta` sidecar; best-effort (caller ignores errors).
+fn write_meta(path: &Path, exit_code: i32, duration_ms: u64, start: SystemTime) -> Result<()> {
+    let started_ms = start
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let started_at = format_rfc3339_utc(started_ms);
+    let meta = BuildMeta { exit_code, duration_ms, started_ms, started_at };
+    std::fs::write(path, serde_json::to_string_pretty(&meta)?)?;
+    Ok(())
+}
+
+/// Parse an existing `.meta` sidecar; returns `None` when absent or malformed.
+pub(crate) fn parse_meta(path: &Path) -> Option<BuildMeta> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// Format epoch milliseconds as `YYYY-MM-DDTHH:MM:SSZ` (UTC, no extra deps).
+fn format_rfc3339_utc(epoch_ms: u64) -> String {
+    let secs = epoch_ms / 1000;
+    let time_s = secs % 86400;
+    let days  = secs / 86400;
+    let (y, mo, d) = days_to_ymd(days);
+    let h = time_s / 3600;
+    let m = (time_s % 3600) / 60;
+    let s = time_s % 60;
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+/// Convert days-since-Unix-epoch to `(year, month, day)`.
+///
+/// Algorithm: <https://howardhinnant.github.io/date_algorithms.html#civil_from_days>
+fn days_to_ymd(days: u64) -> (u32, u32, u32) {
+    let z   = days as i64 + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y   = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp  = (5 * doy + 2) / 153;
+    let d   = doy - (153 * mp + 2) / 5 + 1;
+    let mo  = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y   = if mo <= 2 { y + 1 } else { y };
+    (y as u32, mo as u32, d as u32)
+}
+
 // ── run_jobs ───────────────────────────────────────────────────────────────
 
 /// Run `run` for every member in `subset` in parallel (up to `jobs` workers),
@@ -559,6 +619,8 @@ where
     let mut in_flight: usize = 0;
     let mut failed = false;
     let mut errors: Vec<String> = Vec::new();
+    // pos → (wall-clock dispatch time, monotonic dispatch time)
+    let mut job_starts: HashMap<usize, (SystemTime, Instant)> = HashMap::new();
 
     let mut ready: VecDeque<usize> = pending
         .iter()
@@ -578,6 +640,7 @@ where
                 let pos = ready.pop_front().unwrap();
                 let idx = subset[pos];
                 dispatched.insert(idx);
+                job_starts.insert(pos, (SystemTime::now(), Instant::now()));
 
                 let m = &ws.members[idx];
                 let extra_cp = collect_extra_cp(&m.workspace_deps, &artifacts);
@@ -605,6 +668,16 @@ where
             let (pos, result) = rx.recv().expect("channel closed while threads still running");
             in_flight -= 1;
             let idx = subset[pos];
+            let job_ok = result.is_ok();
+
+            // Write .meta sidecar (best-effort; errors are intentionally ignored).
+            if let Some((sys_start, mono_start)) = job_starts.remove(&pos) {
+                let duration_ms = mono_start.elapsed().as_millis() as u64;
+                let meta_path = ws.members[idx].path
+                    .join("target")
+                    .join(format!("{action_name}.meta"));
+                write_meta(&meta_path, if job_ok { 0 } else { 1 }, duration_ms, sys_start).ok();
+            }
 
             match result {
                 Ok(dep_jars) => {
@@ -985,5 +1058,63 @@ mod tests {
 
         assert_eq!(screen, "svc │ hello world\n");  // prefixed on screen
         assert_eq!(log, "hello world\n");            // plain in log
+    }
+
+    // ── BuildMeta tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn write_meta_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("build.meta");
+        let start = SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_749_134_041_000);
+        write_meta(&path, 0, 1300, start).unwrap();
+
+        let meta = parse_meta(&path).expect("parse_meta should succeed");
+        assert_eq!(meta.exit_code, 0);
+        assert_eq!(meta.duration_ms, 1300);
+        assert_eq!(meta.started_ms, 1_749_134_041_000);
+        assert!(meta.started_at.contains('T'), "started_at should be ISO 8601");
+    }
+
+    #[test]
+    fn write_meta_failure_exit_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("build.meta");
+        let start = SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_000_000_000_000);
+        write_meta(&path, 1, 800, start).unwrap();
+
+        let meta = parse_meta(&path).unwrap();
+        assert_eq!(meta.exit_code, 1);
+        assert_eq!(meta.duration_ms, 800);
+    }
+
+    #[test]
+    fn parse_meta_missing_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(parse_meta(&dir.path().join("no_such.meta")).is_none());
+    }
+
+    #[test]
+    fn parse_meta_malformed_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.meta");
+        std::fs::write(&path, "not json at all").unwrap();
+        assert!(parse_meta(&path).is_none());
+    }
+
+    #[test]
+    fn format_rfc3339_utc_known_date() {
+        // 2026-06-05T00:00:00Z = 20609 days * 86400 s = 1_780_617_600 s
+        let epoch_ms = 1_780_617_600_000u64;
+        let s = format_rfc3339_utc(epoch_ms);
+        assert_eq!(s, "2026-06-05T00:00:00Z");
+    }
+
+    #[test]
+    fn format_rfc3339_utc_with_time() {
+        // 2026-06-05T12:34:01Z = epoch_ms above + (12*3600 + 34*60 + 1) * 1000
+        let epoch_ms = 1_780_617_600_000u64 + (12 * 3600 + 34 * 60 + 1) * 1000;
+        let s = format_rfc3339_utc(epoch_ms);
+        assert_eq!(s, "2026-06-05T12:34:01Z");
     }
 }

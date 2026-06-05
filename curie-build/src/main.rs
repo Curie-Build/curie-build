@@ -1,5 +1,6 @@
 mod add_remove;
 mod audit;
+mod inspect_ui;
 mod search_index;
 mod search_ui;
 mod build;
@@ -231,6 +232,9 @@ enum Cmd {
         #[arg(long)]
         bom: bool,
     },
+    /// Inspect the merged logs of the last build in an interactive TUI
+    Inspect {},
+
     /// Scaffold a new Curie project in a new subdirectory
     New {
         /// Project kind: app, lib, or workspace
@@ -505,6 +509,8 @@ fn main() {
                 Err(e) => Err(e),
             }
         }
+        Cmd::Inspect {} => run_inspect(&ctx),
+
         // Handled above in the early-exit block; unreachable at runtime.
         Cmd::New { .. } | Cmd::Init { .. } => unreachable!(),
         Cmd::Add { coord, test, annotation_processor, bom, offline, refresh_index } => match &ctx {
@@ -606,6 +612,49 @@ fn native_single_module(project: &std::path::Path, offline: bool) -> anyhow::Res
     native::build_native(project, &desc, &output.jar, &output.dep_jars)?;
 
     Ok(())
+}
+
+/// Dispatch `curie inspect` for all four workspace contexts.
+fn run_inspect(ctx: &workspace::WorkspaceContext) -> anyhow::Result<()> {
+    use inspect_ui::{LogTarget, run_inspect_ui};
+    match ctx {
+        workspace::WorkspaceContext::WorkspaceRoot(root) => {
+            let ws      = workspace::load(root)?;
+            let targets = member_targets(&ws.members);
+            run_inspect_ui(root, &targets, "build", None)
+        }
+        workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+            let ws      = workspace::load(workspace_root)?;
+            let targets = member_targets(&ws.members);
+            run_inspect_ui(workspace_root, &targets, "build", Some(*member_index))
+        }
+        workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
+            let ws      = workspace::load(workspace_root)?;
+            let targets: Vec<LogTarget> = member_indices.iter()
+                .map(|&i| LogTarget {
+                    declared: ws.members[i].declared.clone(),
+                    path:     ws.members[i].path.clone(),
+                })
+                .collect();
+            run_inspect_ui(workspace_root, &targets, "build", None)
+        }
+        workspace::WorkspaceContext::Standalone(path) => {
+            let name = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("project")
+                .to_string();
+            let targets = vec![LogTarget { declared: name, path: path.clone() }];
+            run_inspect_ui(path, &targets, "build", None)
+        }
+    }
+}
+
+/// Build a `LogTarget` slice from workspace members for `curie inspect`.
+fn member_targets(members: &[workspace::Member]) -> Vec<inspect_ui::LogTarget> {
+    members.iter().map(|m| inspect_ui::LogTarget {
+        declared: m.declared.clone(),
+        path:     m.path.clone(),
+    }).collect()
 }
 
 /// Resolve `--jobs` option: explicit value wins; default to available parallelism.
