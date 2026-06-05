@@ -32,6 +32,7 @@ portable-pty = "0.9"
 crossterm = "0.29"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 ansi-to-tui = "8"
+time = { version = "0.3", features = ["local-offset"] }
 terminal_size = "0.4"
 quick-xml = { version = "0.40", features = ["serialize"] }
 tantivy = { version = "0.22", features = ["mmap"] }

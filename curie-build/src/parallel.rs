@@ -422,16 +422,30 @@ pub(crate) struct BuildMeta {
     pub started_ms:  u64,
     /// RFC 3339 UTC representation of `started_ms` for human display.
     pub started_at:  String,
+    /// UUID v4 shared by all jobs in one `run_jobs` invocation.
+    pub build_id:    String,
 }
 
 /// Write a JSON `.meta` sidecar; best-effort (caller ignores errors).
-fn write_meta(path: &Path, exit_code: i32, duration_ms: u64, start: SystemTime) -> Result<()> {
+fn write_meta(
+    path: &Path,
+    exit_code: i32,
+    duration_ms: u64,
+    start: SystemTime,
+    build_id: &str,
+) -> Result<()> {
     let started_ms = start
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
     let started_at = format_rfc3339_utc(started_ms);
-    let meta = BuildMeta { exit_code, duration_ms, started_ms, started_at };
+    let meta = BuildMeta {
+        exit_code,
+        duration_ms,
+        started_ms,
+        started_at,
+        build_id: build_id.to_string(),
+    };
     std::fs::write(path, serde_json::to_string_pretty(&meta)?)?;
     Ok(())
 }
@@ -612,6 +626,8 @@ where
         println!();
     }
 
+    let build_id = uuid::Uuid::new_v4().to_string();
+
     // Scheduler state (all accessed only on the coordinator thread).
     let mut pending = initial_pending(ws, subset, respect_dag);
     let mut dispatched: HashSet<usize> = HashSet::new(); // global member indices
@@ -676,7 +692,7 @@ where
                 let meta_path = ws.members[idx].path
                     .join("target")
                     .join(format!("{action_name}.meta"));
-                write_meta(&meta_path, if job_ok { 0 } else { 1 }, duration_ms, sys_start).ok();
+                write_meta(&meta_path, if job_ok { 0 } else { 1 }, duration_ms, sys_start, &build_id).ok();
             }
 
             match result {
@@ -1067,13 +1083,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("build.meta");
         let start = SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_749_134_041_000);
-        write_meta(&path, 0, 1300, start).unwrap();
+        write_meta(&path, 0, 1300, start, "test-build-id").unwrap();
 
         let meta = parse_meta(&path).expect("parse_meta should succeed");
         assert_eq!(meta.exit_code, 0);
         assert_eq!(meta.duration_ms, 1300);
         assert_eq!(meta.started_ms, 1_749_134_041_000);
         assert!(meta.started_at.contains('T'), "started_at should be ISO 8601");
+        assert_eq!(meta.build_id, "test-build-id");
     }
 
     #[test]
@@ -1081,7 +1098,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("build.meta");
         let start = SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_000_000_000_000);
-        write_meta(&path, 1, 800, start).unwrap();
+        write_meta(&path, 1, 800, start, "another-build-id").unwrap();
 
         let meta = parse_meta(&path).unwrap();
         assert_eq!(meta.exit_code, 1);

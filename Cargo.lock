@@ -485,6 +485,7 @@ dependencies = [
  "tantivy",
  "tempfile",
  "terminal_size",
+ "time",
  "toml",
  "toml_edit",
  "uuid",

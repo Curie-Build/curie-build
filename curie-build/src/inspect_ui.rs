@@ -41,8 +41,8 @@ pub(crate) struct LogTarget {
 enum LogState {
     Ok     { duration_ms: u64 },
     Failed { duration_ms: u64 },
-    /// `.log` exists but no `.meta` sidecar (pre-v2 build).
-    Legacy,
+    /// `.log` exists but no `.meta` sidecar — metadata unavailable.
+    NoMetadata,
     /// No `.log` or `.meta`.
     NoLog,
 }
@@ -52,9 +52,12 @@ struct Job {
     state:        LogState,
     /// `None` when no `.meta` is present.
     started_ms:   Option<u64>,
-    /// `"HH:MM:SS"` UTC, or `""` when unknown.
+    /// `"HH:MM:SS"` in local timezone, or `""` when unknown.
     started_disp: String,
     lines:        Vec<String>,
+    /// UUID v4 shared by all jobs in one build run; `None` when no `.meta`.
+    #[allow(dead_code)]
+    build_id:     Option<String>,
 }
 
 /// The active filter applied to the merged log.
@@ -85,6 +88,15 @@ enum Row {
 #[derive(PartialEq)]
 enum ActivePane { Members, Log }
 
+#[derive(PartialEq, Clone)]
+enum InputMode {
+    Normal,
+    /// User is typing a grep pattern for log content.
+    Grep,
+    /// User is typing a job name filter.
+    JobSearch,
+}
+
 struct InspectState {
     /// Stored for `reload`.
     targets:      Vec<LogTarget>,
@@ -101,6 +113,14 @@ struct InspectState {
     log_title:    String,
     /// Terminal height minus the header row; kept in sync from the event loop.
     pane_h:       u16,
+    /// Visible log height (inner block rows); updated each frame for scroll clamping.
+    log_vis_h:    usize,
+    utc_offset:   time::UtcOffset,
+    input_mode:   InputMode,
+    /// Current log-content grep pattern.
+    grep:         String,
+    /// Current job-name search pattern.
+    job_search:   String,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────
@@ -111,10 +131,14 @@ pub(crate) fn run_inspect_ui(
     action:    &str,
     preselect: Option<usize>,
 ) -> Result<()> {
-    let jobs   = load_jobs(targets, action);
+    // Query local offset before spawning threads or entering raw mode.
+    let utc_offset = time::UtcOffset::current_local_offset()
+        .unwrap_or(time::UtcOffset::UTC);
+
+    let jobs   = load_jobs(targets, action, utc_offset);
     let nodes  = build_tree_nodes(&jobs);
     let filter = Filter::All;
-    let rows   = build_rows(&jobs, &filter);
+    let rows   = build_rows(&jobs, &filter, "", "");
 
     let mut state = InspectState {
         targets:      targets.to_vec(),
@@ -130,9 +154,13 @@ pub(crate) fn run_inspect_ui(
         filter,
         log_title:    "all jobs".to_string(),
         pane_h:       24,
+        log_vis_h:    20,
+        utc_offset,
+        input_mode:   InputMode::Normal,
+        grep:         String::new(),
+        job_search:   String::new(),
     };
 
-    // Position tree cursor without changing the filter — filter stays All.
     if let Some(idx) = preselect {
         if idx < state.jobs.len() {
             if let Some(ni) = find_node_for_declared(&state.nodes, &state.jobs[idx].declared) {
@@ -158,27 +186,27 @@ pub(crate) fn run_inspect_ui(
 
 // ── Loading ───────────────────────────────────────────────────────────────
 
-fn load_jobs(targets: &[LogTarget], action: &str) -> Vec<Job> {
+fn load_jobs(targets: &[LogTarget], action: &str, utc_offset: time::UtcOffset) -> Vec<Job> {
     targets.iter().map(|t| {
         let log_path  = t.path.join("target").join(format!("{action}.log"));
         let meta_path = t.path.join("target").join(format!("{action}.meta"));
-
-        let meta = parse_meta(&meta_path);
+        let meta      = parse_meta(&meta_path);
 
         let state = match (meta.as_ref(), log_path.exists()) {
             (Some(m), _) if m.exit_code == 0 => LogState::Ok     { duration_ms: m.duration_ms },
             (Some(m), _)                     => LogState::Failed  { duration_ms: m.duration_ms },
-            (None, true)                     => LogState::Legacy,
-            (None, false)                    => LogState::NoLog,
+            (None,    true)                  => LogState::NoMetadata,
+            (None,    false)                 => LogState::NoLog,
         };
 
         let (started_ms, started_disp) = meta.as_ref()
-            .map(|m| (Some(m.started_ms), format_hms_utc(m.started_ms)))
+            .map(|m| (Some(m.started_ms), format_hms_local(m.started_ms, utc_offset)))
             .unwrap_or((None, String::new()));
 
-        let lines = if log_path.exists() { load_log(&log_path) } else { Vec::new() };
+        let build_id = meta.as_ref().map(|m| m.build_id.clone());
+        let lines    = if log_path.exists() { load_log(&log_path) } else { Vec::new() };
 
-        Job { declared: t.declared.clone(), state, started_ms, started_disp, lines }
+        Job { declared: t.declared.clone(), state, started_ms, started_disp, lines, build_id }
     }).collect()
 }
 
@@ -212,7 +240,7 @@ fn build_tree_nodes(jobs: &[Job]) -> Vec<TreeNode> {
         let dirs = &parts[..parts.len().saturating_sub(1)];
         let name = parts.last().copied().unwrap_or(&job.declared);
 
-        // Common prefix length with the previously emitted directory stack.
+        // Common prefix depth with the previously emitted directory stack.
         // Use a for-loop: take_while passes &Item, causing &&str vs &str issues.
         let common = {
             let mut n = 0;
@@ -222,7 +250,6 @@ fn build_tree_nodes(jobs: &[Job]) -> Vec<TreeNode> {
             n
         };
 
-        // Container nodes for each new directory segment.
         for depth in common..dirs.len() {
             let path_here = dirs[..=depth].join("/");
             let indent    = "  ".repeat(depth + 1);
@@ -235,7 +262,6 @@ fn build_tree_nodes(jobs: &[Job]) -> Vec<TreeNode> {
             });
         }
 
-        // Leaf node.
         let depth  = dirs.len();
         let indent = "  ".repeat(depth + 1);
         nodes.push(TreeNode {
@@ -268,14 +294,24 @@ fn job_matches(filter: &Filter, declared: &str) -> bool {
     }
 }
 
+fn job_search_matches(declared: &str, job_search: &str) -> bool {
+    if job_search.is_empty() { return true; }
+    declared.to_lowercase().contains(&job_search.to_lowercase())
+}
+
 // ── Row building ──────────────────────────────────────────────────────────
 
-fn build_rows(jobs: &[Job], filter: &Filter) -> Vec<Row> {
+/// Build the flat list of rows for the log pane.
+///
+/// - `filter`:     workspace/project filter from the members pane.
+/// - `grep`:       non-empty → only body rows whose text contains the pattern.
+/// - `job_search`: non-empty → only jobs whose `declared` path contains the pattern.
+fn build_rows(jobs: &[Job], filter: &Filter, grep: &str, job_search: &str) -> Vec<Row> {
     let mut indices: Vec<usize> = (0..jobs.len())
         .filter(|&i| job_matches(filter, &jobs[i].declared))
+        .filter(|&i| job_search_matches(&jobs[i].declared, job_search))
         .collect();
 
-    // Earlier start time first; unknown start (no meta) sorts last.
     indices.sort_by(|&a, &b| {
         let sa = jobs[a].started_ms.unwrap_or(u64::MAX);
         let sb = jobs[b].started_ms.unwrap_or(u64::MAX);
@@ -283,10 +319,25 @@ fn build_rows(jobs: &[Job], filter: &Filter) -> Vec<Row> {
     });
 
     let mut rows = Vec::new();
-    for ji in indices {
-        rows.push(Row::Header { job: ji });
-        for li in 0..jobs[ji].lines.len() {
-            rows.push(Row::Body { job: ji, line: li });
+    if grep.is_empty() {
+        for ji in indices {
+            rows.push(Row::Header { job: ji });
+            for li in 0..jobs[ji].lines.len() {
+                rows.push(Row::Body { job: ji, line: li });
+            }
+        }
+    } else {
+        let grep_lower = grep.to_lowercase();
+        for ji in indices {
+            let matching: Vec<usize> = (0..jobs[ji].lines.len())
+                .filter(|&li| jobs[ji].lines[li].to_lowercase().contains(&grep_lower))
+                .collect();
+            if !matching.is_empty() {
+                rows.push(Row::Header { job: ji });
+                for li in matching {
+                    rows.push(Row::Body { job: ji, line: li });
+                }
+            }
         }
     }
     rows
@@ -298,18 +349,25 @@ fn apply_selection(state: &mut InspectState) {
     let node        = &state.nodes[state.selected_idx];
     state.filter    = node.filter.clone();
     state.log_title = node.title.clone();
-    state.rows      = build_rows(&state.jobs, &state.filter);
-    state.scroll    = 0;
+    rebuild_rows(state);
     sync_tree_scroll(state);
 }
 
+/// Rebuild rows from current filter/grep/job_search, then clamp scroll.
+fn rebuild_rows(state: &mut InspectState) {
+    state.rows   = build_rows(&state.jobs, &state.filter, &state.grep, &state.job_search);
+    let max      = state.rows.len().saturating_sub(state.log_vis_h.max(1));
+    state.scroll = state.scroll.min(max);
+}
+
 fn reload(state: &mut InspectState) {
-    let targets = state.targets.clone();
-    let action  = state.action.clone();
-    state.jobs  = load_jobs(&targets, &action);
-    state.nodes = build_tree_nodes(&state.jobs);
+    let targets    = state.targets.clone();
+    let action     = state.action.clone();
+    let utc_offset = state.utc_offset;
+    state.jobs     = load_jobs(&targets, &action, utc_offset);
+    state.nodes    = build_tree_nodes(&state.jobs);
     state.selected_idx = state.selected_idx.min(state.nodes.len().saturating_sub(1));
-    state.rows  = build_rows(&state.jobs, &state.filter);
+    rebuild_rows(state);
 }
 
 fn sync_tree_scroll(state: &mut InspectState) {
@@ -344,28 +402,28 @@ fn prev_node(nodes: &[TreeNode], from: usize) -> usize {
 
 fn gutter_color(state: &LogState) -> Color {
     match state {
-        LogState::Ok     { .. } => Color::Green,
-        LogState::Failed { .. } => Color::Red,
-        LogState::Legacy        => Color::Yellow,
-        LogState::NoLog         => Color::DarkGray,
+        LogState::Ok         { .. } => Color::Green,
+        LogState::Failed     { .. } => Color::Red,
+        LogState::NoMetadata        => Color::Yellow,
+        LogState::NoLog             => Color::DarkGray,
     }
 }
 
 fn badge_str(state: &LogState) -> String {
     match state {
-        LogState::Ok     { duration_ms } => format!("✓ {}", fmt_duration(*duration_ms)),
-        LogState::Failed { duration_ms } => format!("✗ {}", fmt_duration(*duration_ms)),
-        LogState::Legacy                 => "(legacy)".to_string(),
-        LogState::NoLog                  => "(no log)".to_string(),
+        LogState::Ok         { duration_ms } => format!("✓ {}", fmt_duration(*duration_ms)),
+        LogState::Failed     { duration_ms } => format!("✗ {}", fmt_duration(*duration_ms)),
+        LogState::NoMetadata                 => "missing metadata".to_string(),
+        LogState::NoLog                      => "(no log)".to_string(),
     }
 }
 
 fn badge_style(state: &LogState) -> Style {
     match state {
-        LogState::Ok     { .. } => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-        LogState::Failed { .. } => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        LogState::Legacy        => Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM),
-        LogState::NoLog         => Style::default().add_modifier(Modifier::DIM),
+        LogState::Ok         { .. } => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        LogState::Failed     { .. } => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        LogState::NoMetadata        => Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM),
+        LogState::NoLog             => Style::default().add_modifier(Modifier::DIM),
     }
 }
 
@@ -374,38 +432,44 @@ fn fmt_duration(ms: u64) -> String {
     format!("{}.{}s", tenths / 10, tenths % 10)
 }
 
-/// Format epoch-milliseconds as `HH:MM:SS` (UTC).
-fn format_hms_utc(epoch_ms: u64) -> String {
-    let secs   = epoch_ms / 1000;
-    let time_s = secs % 86400;
+/// Format epoch-milliseconds as `HH:MM:SS` in the given UTC offset.
+fn format_hms_local(epoch_ms: u64, offset: time::UtcOffset) -> String {
+    let secs   = (epoch_ms / 1000) as i64 + offset.whole_seconds() as i64;
+    let time_s = secs.rem_euclid(86400) as u64;
     let h = time_s / 3600;
     let m = (time_s % 3600) / 60;
     let s = time_s % 60;
     format!("{h:02}:{m:02}:{s:02}")
 }
 
+/// Format epoch-milliseconds as `HH:MM:SS` in UTC (used by tests).
+#[cfg(test)]
+fn format_hms_utc(epoch_ms: u64) -> String {
+    format_hms_local(epoch_ms, time::UtcOffset::UTC)
+}
+
 // ── Rendering ─────────────────────────────────────────────────────────────
 
 fn render_frame(f: &mut Frame, state: &InspectState) {
-    let total = f.area();
+    let total    = f.area();
+    let in_input = state.input_mode != InputMode::Normal;
+
+    let constraints: Vec<Constraint> = if in_input {
+        vec![Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)]
+    } else {
+        vec![Constraint::Length(1), Constraint::Min(0)]
+    };
 
     let vchunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .constraints(constraints)
         .split(total);
 
-    // Header hint line
-    let hint = if state.show_members && state.active_pane == ActivePane::Members {
-        "curie inspect  \u{2191}\u{2193}/jk select  PgUp/Dn scroll  Tab log  r reload  q quit"
-    } else {
-        "curie inspect  PgUp/Dn scroll  g/G top/bot  m members  r reload  q quit"
-    };
     f.render_widget(
-        Paragraph::new(hint).style(Style::default().add_modifier(Modifier::DIM)),
+        Paragraph::new(hint_text(state)).style(Style::default().add_modifier(Modifier::DIM)),
         vchunks[0],
     );
 
-    // Body
     if state.show_members {
         let hchunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -416,10 +480,24 @@ fn render_frame(f: &mut Frame, state: &InspectState) {
     } else {
         render_log_block(f, state, vchunks[1]);
     }
+
+    if in_input {
+        render_status_bar(f, state, vchunks[2]);
+    }
+}
+
+fn hint_text(state: &InspectState) -> &'static str {
+    if state.show_members && state.active_pane == ActivePane::Members {
+        "curie inspect  \u{2191}\u{2193}/jk select  PgUp/Dn scroll  Tab log  r reload  q quit"
+    } else if state.input_mode != InputMode::Normal {
+        "curie inspect  type to filter  Esc clear  PgUp/Dn scroll"
+    } else {
+        "curie inspect  jk/PgUp/Dn scroll  g/G top/bot  / grep  f job  m members  r reload  q quit"
+    }
 }
 
 fn render_members_block(f: &mut Frame, state: &InspectState, area: Rect) {
-    let is_active = state.active_pane == ActivePane::Members;
+    let is_active    = state.active_pane == ActivePane::Members;
     let border_style = if is_active { Style::default().fg(Color::Cyan) } else { Style::default() };
 
     let block = Block::default()
@@ -475,8 +553,9 @@ fn member_line(node: &TreeNode, is_selected: bool, inner_w: usize) -> Line<'stat
     }
 }
 
+/// Virtualized log renderer: only converts the visible row slice to `Line`s (O(vis_h)).
 fn render_log_block(f: &mut Frame, state: &InspectState, area: Rect) {
-    let is_active = !state.show_members || state.active_pane == ActivePane::Log;
+    let is_active    = !state.show_members || state.active_pane == ActivePane::Log;
     let border_style = if is_active { Style::default().fg(Color::Cyan) } else { Style::default() };
 
     let title = format!("Log: {}", state.log_title);
@@ -485,31 +564,37 @@ fn render_log_block(f: &mut Frame, state: &InspectState, area: Rect) {
         .borders(Borders::ALL)
         .border_style(border_style);
 
-    let scroll = state.scroll.min(u16::MAX as usize) as u16;
-    let text   = build_log_text(state);
-    let para   = Paragraph::new(text).block(block).scroll((scroll, 0));
+    let inner = block.inner(area);
+    let vis_h = inner.height as usize;
+    let start = state.scroll.min(state.rows.len());
+    let end   = (start + vis_h).min(state.rows.len());
 
-    f.render_widget(para, area);
+    let lines: Vec<Line<'static>> = state.rows[start..end]
+        .iter()
+        .map(|row| render_row(row, &state.jobs, &state.grep))
+        .collect();
+
+    f.render_widget(block, area);
+    f.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
-fn build_log_text(state: &InspectState) -> Text<'static> {
-    let lines: Vec<Line<'static>> = state.rows.iter().map(|row| match row {
+fn render_row(row: &Row, jobs: &[Job], grep: &str) -> Line<'static> {
+    match row {
         Row::Header { job } => {
-            let j     = &state.jobs[*job];
+            let j     = &jobs[*job];
             let color = gutter_color(&j.state);
             header_line(j, color)
         }
         Row::Body { job, line } => {
-            let j     = &state.jobs[*job];
+            let j     = &jobs[*job];
             let color = gutter_color(&j.state);
-            body_line(&j.lines[*line], color)
+            body_line(&j.lines[*line], color, grep)
         }
-    }).collect();
-    Text::from(lines)
+    }
 }
 
 fn header_line(job: &Job, color: Color) -> Line<'static> {
-    let gutter  = Span::styled("▎ ", Style::default().fg(color));
+    let gutter  = Span::styled("▌ ", Style::default().fg(color).add_modifier(Modifier::BOLD));
     let content = if job.started_disp.is_empty() {
         format!("{}  {}", job.declared, badge_str(&job.state))
     } else {
@@ -517,13 +602,69 @@ fn header_line(job: &Job, color: Color) -> Line<'static> {
     };
     let text = Span::styled(content, Style::default().fg(color).add_modifier(Modifier::BOLD));
     Line::from(vec![gutter, text])
+        .style(Style::default().bg(Color::Indexed(236)))
 }
 
-fn body_line(text: &str, color: Color) -> Line<'static> {
-    let gutter = Span::styled("▎", Style::default().fg(color));
-    let mut spans = vec![gutter];
-    spans.extend(parse_ansi_line(text));
+fn body_line(text: &str, color: Color, grep: &str) -> Line<'static> {
+    let gutter     = Span::styled("▌ ", Style::default().fg(color).add_modifier(Modifier::BOLD));
+    let body_spans = parse_ansi_line(text);
+    let mut spans  = vec![gutter];
+    if grep.is_empty() {
+        spans.extend(body_spans);
+    } else {
+        spans.extend(highlight_spans(body_spans, grep));
+    }
     Line::from(spans)
+}
+
+/// Split `spans` at occurrences of `pattern` and apply a yellow highlight to each match.
+fn highlight_spans(spans: Vec<Span<'static>>, pattern: &str) -> Vec<Span<'static>> {
+    let pattern_lower = pattern.to_lowercase();
+    let highlight     = Style::default().bg(Color::Yellow).fg(Color::Black);
+    let mut result    = Vec::new();
+
+    for span in spans {
+        let content       = span.content.to_string();
+        let content_lower = content.to_lowercase();
+        if content_lower.contains(&pattern_lower) {
+            split_span_at_pattern(&content, &content_lower, &pattern_lower,
+                                  span.style, highlight, &mut result);
+        } else {
+            result.push(span);
+        }
+    }
+    result
+}
+
+fn split_span_at_pattern(
+    content:       &str,
+    content_lower: &str,
+    pattern_lower: &str,
+    base_style:    Style,
+    highlight:     Style,
+    out:           &mut Vec<Span<'static>>,
+) {
+    let pat_len = pattern_lower.len();
+    let mut pos = 0;
+    loop {
+        match content_lower[pos..].find(pattern_lower) {
+            None => {
+                if pos < content.len() {
+                    out.push(Span::styled(content[pos..].to_string(), base_style));
+                }
+                break;
+            }
+            Some(rel) => {
+                let start = pos + rel;
+                let end   = start + pat_len;
+                if start > pos {
+                    out.push(Span::styled(content[pos..start].to_string(), base_style));
+                }
+                out.push(Span::styled(content[start..end].to_string(), highlight));
+                pos = end;
+            }
+        }
+    }
 }
 
 fn parse_ansi_line(s: &str) -> Vec<Span<'static>> {
@@ -531,6 +672,18 @@ fn parse_ansi_line(s: &str) -> Vec<Span<'static>> {
         Ok(mut text) => text.lines.pop().map(|l| l.spans).unwrap_or_default(),
         Err(_)       => vec![Span::raw(s.to_string())],
     }
+}
+
+fn render_status_bar(f: &mut Frame, state: &InspectState, area: Rect) {
+    let content = match &state.input_mode {
+        InputMode::Grep      => format!("/ {}█", state.grep),
+        InputMode::JobSearch => format!("f {}█", state.job_search),
+        InputMode::Normal    => return,
+    };
+    f.render_widget(
+        Paragraph::new(content).style(Style::default().fg(Color::White).bg(Color::DarkGray)),
+        area,
+    );
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────
@@ -542,9 +695,9 @@ fn event_loop(
     loop {
         terminal.draw(|f| render_frame(f, state))?;
 
-        // Keep pane_h in sync; used by scroll arithmetic and sync_tree_scroll.
-        let size = terminal.size()?;
-        state.pane_h = size.height.saturating_sub(1);
+        let size      = terminal.size()?;
+        state.pane_h  = size.height.saturating_sub(1);
+        state.log_vis_h = (state.pane_h as usize).saturating_sub(2);
 
         match crossterm::event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -552,23 +705,26 @@ fn event_loop(
                     return Ok(());
                 }
             }
-            Event::Resize(_, _) => {} // next draw picks up new dimensions
+            Event::Resize(_, _) => {}
             _ => {}
         }
     }
 }
 
 fn handle_key(state: &mut InspectState, key: KeyEvent) -> bool {
+    if state.input_mode != InputMode::Normal {
+        return handle_key_input_mode(state, key);
+    }
+
     let members_active = state.show_members && state.active_pane == ActivePane::Members;
-    let log_ph         = (state.pane_h as usize).saturating_sub(2); // inner height
+    let log_ph         = state.log_vis_h.max(1);
 
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => return false,
 
-        // Members pane toggle / pane switch
         KeyCode::Tab | KeyCode::Char('m') => toggle_members(state),
 
-        // Tree navigation (members pane must be active)
+        // Tree navigation — members pane must be active.
         KeyCode::Up | KeyCode::Char('k') if members_active => {
             state.selected_idx = prev_node(&state.nodes, state.selected_idx);
             apply_selection(state);
@@ -578,13 +734,21 @@ fn handle_key(state: &mut InspectState, key: KeyEvent) -> bool {
             apply_selection(state);
         }
 
-        // Log scrolling (always available)
+        // Log scrolling — one line at a time.
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.scroll = state.scroll.saturating_sub(1);
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            let max = state.rows.len().saturating_sub(1);
+            state.scroll = (state.scroll + 1).min(max);
+        }
+
         KeyCode::PageUp => {
-            state.scroll = state.scroll.saturating_sub(log_ph.max(1));
+            state.scroll = state.scroll.saturating_sub(log_ph);
         }
         KeyCode::PageDown => {
             let max = state.rows.len().saturating_sub(1);
-            state.scroll = (state.scroll + log_ph.max(1)).min(max);
+            state.scroll = (state.scroll + log_ph).min(max);
         }
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             state.scroll = state.scroll.saturating_sub((log_ph / 2).max(1));
@@ -596,9 +760,60 @@ fn handle_key(state: &mut InspectState, key: KeyEvent) -> bool {
         KeyCode::Char('g') => { state.scroll = 0; }
         KeyCode::Char('G') => { state.scroll = state.rows.len().saturating_sub(1); }
 
-        // Reload from disk
         KeyCode::Char('r') => reload(state),
 
+        KeyCode::Char('/') => {
+            state.input_mode = InputMode::Grep;
+            state.grep.clear();
+            rebuild_rows(state);
+        }
+        KeyCode::Char('f') => {
+            state.input_mode = InputMode::JobSearch;
+            state.job_search.clear();
+            rebuild_rows(state);
+        }
+
+        _ => {}
+    }
+    true
+}
+
+fn handle_key_input_mode(state: &mut InspectState, key: KeyEvent) -> bool {
+    let log_ph = state.log_vis_h.max(1);
+
+    match key.code {
+        KeyCode::Esc => {
+            match state.input_mode {
+                InputMode::Grep      => state.grep.clear(),
+                InputMode::JobSearch => state.job_search.clear(),
+                _                    => {}
+            }
+            state.input_mode = InputMode::Normal;
+            rebuild_rows(state);
+        }
+        KeyCode::Backspace => {
+            match state.input_mode {
+                InputMode::Grep      => { state.grep.pop(); }
+                InputMode::JobSearch => { state.job_search.pop(); }
+                _                    => {}
+            }
+            rebuild_rows(state);
+        }
+        KeyCode::Char(c) => {
+            match state.input_mode {
+                InputMode::Grep      => state.grep.push(c),
+                InputMode::JobSearch => state.job_search.push(c),
+                _                    => {}
+            }
+            rebuild_rows(state);
+        }
+        KeyCode::PageUp => {
+            state.scroll = state.scroll.saturating_sub(log_ph);
+        }
+        KeyCode::PageDown => {
+            let max = state.rows.len().saturating_sub(1);
+            state.scroll = (state.scroll + log_ph).min(max);
+        }
         _ => {}
     }
     true
@@ -635,7 +850,8 @@ mod tests {
             state,
             started_ms,
             started_disp,
-            lines: vec!["line one".to_string(), "line two".to_string()],
+            lines:    vec!["line one".to_string(), "line two".to_string()],
+            build_id: None,
         }
     }
 
@@ -659,7 +875,6 @@ mod tests {
             make_job("services/web", None, Some(0)),
         ];
         let nodes = build_tree_nodes(&jobs);
-        // root + container(services/) + leaf(api) + leaf(web)
         assert_eq!(nodes.len(), 4);
         assert!(nodes[1].label.contains("services/"));
         assert!(matches!(&nodes[1].filter, Filter::Prefix(p) if p == "services"));
@@ -671,7 +886,7 @@ mod tests {
     fn tree_single_member() {
         let jobs  = vec![make_job("mylib", None, Some(0))];
         let nodes = build_tree_nodes(&jobs);
-        assert_eq!(nodes.len(), 2); // root + leaf
+        assert_eq!(nodes.len(), 2);
         assert!(matches!(&nodes[1].filter, Filter::Prefix(p) if p == "mylib"));
     }
 
@@ -679,7 +894,6 @@ mod tests {
     fn tree_deep_nesting() {
         let jobs  = vec![make_job("a/b/c/leaf", None, Some(0))];
         let nodes = build_tree_nodes(&jobs);
-        // root + a/ + b/ + c/ + leaf = 5
         assert_eq!(nodes.len(), 5);
         assert!(matches!(&nodes[4].filter, Filter::Prefix(p) if p == "a/b/c/leaf"));
     }
@@ -690,8 +904,8 @@ mod tests {
             make_job("svc/api", None, Some(0)),
             make_job("svc/web", None, Some(0)),
         ];
-        let nodes  = build_tree_nodes(&jobs);
-        let svc    = nodes.iter().find(|n| n.label.contains("svc/")).unwrap();
+        let nodes = build_tree_nodes(&jobs);
+        let svc   = nodes.iter().find(|n| n.label.contains("svc/")).unwrap();
         assert!(matches!(&svc.filter, Filter::Prefix(p) if p == "svc"));
     }
 
@@ -727,6 +941,21 @@ mod tests {
         assert!( job_matches(&f, "svc"));
     }
 
+    // ── job_search_matches ───────────────────────────────────────────────
+
+    #[test]
+    fn job_search_empty_matches_all() {
+        assert!(job_search_matches("services/api", ""));
+        assert!(job_search_matches("anything", ""));
+    }
+
+    #[test]
+    fn job_search_case_insensitive() {
+        assert!( job_search_matches("Services/Api", "api"));
+        assert!( job_search_matches("services/api", "API"));
+        assert!(!job_search_matches("services/web", "api"));
+    }
+
     // ── build_rows ───────────────────────────────────────────────────────
 
     #[test]
@@ -735,10 +964,8 @@ mod tests {
             make_job("b", Some(2000), Some(0)),
             make_job("a", Some(1000), Some(0)),
         ];
-        let rows = build_rows(&jobs, &Filter::All);
-        // Job 1 (a, earlier start) should come first.
+        let rows = build_rows(&jobs, &Filter::All, "", "");
         assert!(matches!(rows[0], Row::Header { job: 1 }));
-        // Job 0 (b) follows after a's 2 body lines.
         assert!(matches!(rows[3], Row::Header { job: 0 }));
     }
 
@@ -750,11 +977,11 @@ mod tests {
             make_job("app",     Some(3000), Some(0)),
         ];
         let f    = Filter::Prefix("svc".to_string());
-        let rows = build_rows(&jobs, &f);
+        let rows = build_rows(&jobs, &f, "", "");
         let headers: Vec<usize> = rows.iter().filter_map(|r| {
             if let Row::Header { job } = r { Some(*job) } else { None }
         }).collect();
-        assert_eq!(headers, vec![0, 1]); // api then web; app excluded
+        assert_eq!(headers, vec![0, 1]);
     }
 
     #[test]
@@ -763,7 +990,7 @@ mod tests {
             make_job("notime", None,       Some(0)),
             make_job("known",  Some(1000), Some(0)),
         ];
-        let rows    = build_rows(&jobs, &Filter::All);
+        let rows    = build_rows(&jobs, &Filter::All, "", "");
         let headers: Vec<usize> = rows.iter().filter_map(|r| {
             if let Row::Header { job } = r { Some(*job) } else { None }
         }).collect();
@@ -778,9 +1005,52 @@ mod tests {
             make_job("b", Some(2000), Some(0)),
             make_job("c", Some(3000), Some(0)),
         ];
-        let rows    = build_rows(&jobs, &Filter::All);
+        let rows    = build_rows(&jobs, &Filter::All, "", "");
         let headers = rows.iter().filter(|r| matches!(r, Row::Header { .. })).count();
         assert_eq!(headers, 3);
+    }
+
+    #[test]
+    fn rows_grep_filters_body_lines() {
+        let mut jobs = vec![make_job("a", Some(1000), Some(0))];
+        jobs[0].lines = vec![
+            "hello world".to_string(),
+            "something else".to_string(),
+            "hello again".to_string(),
+        ];
+        let rows = build_rows(&jobs, &Filter::All, "hello", "");
+        assert_eq!(rows.len(), 3); // header + 2 matching body rows
+        assert!(matches!(rows[0], Row::Header { job: 0 }));
+        assert!(matches!(rows[1], Row::Body { job: 0, line: 0 }));
+        assert!(matches!(rows[2], Row::Body { job: 0, line: 2 }));
+    }
+
+    #[test]
+    fn rows_grep_excludes_job_with_no_match() {
+        let mut jobs = vec![
+            make_job("a", Some(1000), Some(0)),
+            make_job("b", Some(2000), Some(0)),
+        ];
+        jobs[1].lines = vec!["different content".to_string(), "no match here".to_string()];
+        let rows    = build_rows(&jobs, &Filter::All, "line", "");
+        let headers: Vec<usize> = rows.iter().filter_map(|r| {
+            if let Row::Header { job } = r { Some(*job) } else { None }
+        }).collect();
+        assert_eq!(headers, vec![0]); // only job a whose lines contain "line"
+    }
+
+    #[test]
+    fn rows_job_search_filter() {
+        let jobs = vec![
+            make_job("services/api", Some(1000), Some(0)),
+            make_job("services/web", Some(2000), Some(0)),
+            make_job("app",          Some(3000), Some(0)),
+        ];
+        let rows    = build_rows(&jobs, &Filter::All, "", "api");
+        let headers: Vec<usize> = rows.iter().filter_map(|r| {
+            if let Row::Header { job } = r { Some(*job) } else { None }
+        }).collect();
+        assert_eq!(headers, vec![0]); // only services/api
     }
 
     // ── navigation ───────────────────────────────────────────────────────
@@ -788,15 +1058,15 @@ mod tests {
     #[test]
     fn next_node_wraps() {
         let jobs  = vec![make_job("a", None, Some(0)), make_job("b", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs); // [root, a, b]
-        assert_eq!(next_node(&nodes, 2), 0); // wraps from last to root
+        let nodes = build_tree_nodes(&jobs);
+        assert_eq!(next_node(&nodes, 2), 0);
     }
 
     #[test]
     fn prev_node_wraps() {
         let jobs  = vec![make_job("a", None, Some(0)), make_job("b", None, Some(0))];
         let nodes = build_tree_nodes(&jobs);
-        assert_eq!(prev_node(&nodes, 0), 2); // wraps from root to last
+        assert_eq!(prev_node(&nodes, 0), 2);
     }
 
     // ── display helpers ──────────────────────────────────────────────────
@@ -822,5 +1092,62 @@ mod tests {
     fn format_hms_utc_known_time() {
         // 12*3600 + 34*60 + 1 = 45241 seconds past midnight
         assert_eq!(format_hms_utc(45241 * 1000), "12:34:01");
+    }
+
+    #[test]
+    fn format_hms_local_positive_offset() {
+        let offset = time::UtcOffset::from_whole_seconds(7200).unwrap(); // UTC+2
+        assert_eq!(format_hms_local(0, offset), "02:00:00");
+    }
+
+    #[test]
+    fn format_hms_local_negative_offset() {
+        let offset = time::UtcOffset::from_whole_seconds(-18000).unwrap(); // UTC-5
+        // 12:00:00 UTC → 07:00:00 local
+        assert_eq!(format_hms_local(43200 * 1000, offset), "07:00:00");
+    }
+
+    // ── badge_str ────────────────────────────────────────────────────────
+
+    #[test]
+    fn badge_str_no_metadata() {
+        assert_eq!(badge_str(&LogState::NoMetadata), "missing metadata");
+    }
+
+    // ── highlight_spans ──────────────────────────────────────────────────
+
+    #[test]
+    fn highlight_spans_no_match() {
+        let spans  = vec![Span::raw("hello world")];
+        let result = highlight_spans(spans, "xyz");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content, "hello world");
+    }
+
+    #[test]
+    fn highlight_spans_single_match() {
+        let spans  = vec![Span::raw("hello world")];
+        let result = highlight_spans(spans, "world");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].content, "hello ");
+        assert_eq!(result[1].content, "world");
+        assert_eq!(result[1].style, Style::default().bg(Color::Yellow).fg(Color::Black));
+    }
+
+    #[test]
+    fn highlight_spans_case_insensitive() {
+        let spans  = vec![Span::raw("Hello World")];
+        let result = highlight_spans(spans, "world");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[1].content, "World"); // original case preserved
+    }
+
+    #[test]
+    fn highlight_spans_multiple_matches() {
+        let spans  = vec![Span::raw("abcabc")];
+        let result = highlight_spans(spans, "abc");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].content, "abc");
+        assert_eq!(result[1].content, "abc");
     }
 }
