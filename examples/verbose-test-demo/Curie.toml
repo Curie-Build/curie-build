@@ -1,0 +1,16 @@
+# verbose-test-demo
+#
+# Produces ~20 000 lines of test output (20 tests × 1 000 lines each).
+# Useful for exercising curie inspect's virtualized log renderer under
+# realistic load:
+#
+#   curie build            # generates a large target/build.log
+#   curie inspect          # scroll through 20k lines with j/k/PgDn
+#   curie inspect          # press / to grep, f to filter by job name
+
+[library]
+name    = "verbose-test-demo"
+version = "0.1.0"
+
+[test-dependencies]
+"org.junit.jupiter:junit-jupiter" = "6.0.3"

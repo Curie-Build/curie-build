@@ -29,6 +29,7 @@ members = [
     "hello-mixed",
     "graalvm-hello",
     "nested-workspace-demo",
+    "verbose-test-demo",
 ]
 
 [java]
