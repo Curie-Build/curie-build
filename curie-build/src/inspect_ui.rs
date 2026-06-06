@@ -4,6 +4,7 @@
 //! and sorted by job start time.  An optional members pane (toggled with Tab/m)
 //! lets the user filter the merged log to a single workspace subtree or project.
 
+use std::collections::HashSet;
 use std::io::Stdout;
 use std::path::PathBuf;
 
@@ -58,7 +59,24 @@ struct Job {
     /// UUID v4 shared by all jobs in one build run; `None` when no `.meta`.
     #[allow(dead_code)]
     build_id:     Option<String>,
+    /// Per-test results from `target/build.tests.json`; empty when absent.
+    tests:        Vec<TestEntry>,
 }
+
+#[derive(Clone)]
+struct TestEntry {
+    name:        String,
+    #[allow(dead_code)]
+    class_name:  String,
+    duration_ms: u64,
+    status:      TestStatus,
+    failure:     Option<String>,
+    /// Absolute path to the per-test output `.txt` file, or `None`.
+    output_file: Option<PathBuf>,
+}
+
+#[derive(Clone, PartialEq)]
+enum TestStatus { Passed, Failed, Skipped }
 
 /// The active filter applied to the merged log.
 #[derive(Clone)]
@@ -77,12 +95,18 @@ struct TreeNode {
     /// `None` for the root "all jobs" row and for container rows.
     state:      Option<LogState>,
     selectable: bool,
+    /// `Some((job_idx, test_idx))` for test leaf nodes.
+    test_ref:   Option<(usize, usize)>,
 }
 
 enum Row {
     Header { job: usize },
     /// `line` is an index into `jobs[job].lines`.
     Body   { job: usize, line: usize },
+    /// Failure message shown at the top of a test's log view.
+    TestFailure { text: String },
+    /// `line` is an index into `InspectState::test_lines`.
+    TestBody    { line: usize },
 }
 
 #[derive(PartialEq)]
@@ -121,6 +145,10 @@ struct InspectState {
     grep:         String,
     /// Current job-name search pattern.
     job_search:   String,
+    /// Job indices that have been expanded to show individual test rows.
+    expanded_jobs: HashSet<usize>,
+    /// Lines from the currently selected test's output file (empty when not in test view).
+    test_lines:   Vec<String>,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────
@@ -136,7 +164,8 @@ pub(crate) fn run_inspect_ui(
         .unwrap_or(time::UtcOffset::UTC);
 
     let jobs   = load_jobs(targets, action, utc_offset);
-    let nodes  = build_tree_nodes(&jobs);
+    let expanded_jobs: HashSet<usize> = HashSet::new();
+    let nodes  = build_tree_nodes(&jobs, &expanded_jobs);
     let filter = Filter::All;
     let rows   = build_rows(&jobs, &filter, "", "");
 
@@ -159,6 +188,8 @@ pub(crate) fn run_inspect_ui(
         input_mode:   InputMode::Normal,
         grep:         String::new(),
         job_search:   String::new(),
+        expanded_jobs,
+        test_lines:   Vec::new(),
     };
 
     if let Some(idx) = preselect {
@@ -205,9 +236,41 @@ fn load_jobs(targets: &[LogTarget], action: &str, utc_offset: time::UtcOffset) -
 
         let build_id = meta.as_ref().map(|m| m.build_id.clone());
         let lines    = if log_path.exists() { load_log(&log_path) } else { Vec::new() };
+        let tests    = parse_test_sidecar(&t.path);
 
-        Job { declared: t.declared.clone(), state, started_ms, started_disp, lines, build_id }
+        Job { declared: t.declared.clone(), state, started_ms, started_disp, lines, build_id, tests }
     }).collect()
+}
+
+fn parse_test_sidecar(member_root: &std::path::Path) -> Vec<TestEntry> {
+    let path = member_root.join("target").join("build.tests.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c)  => c,
+        Err(_) => return Vec::new(),
+    };
+    let raw: Vec<serde_json::Value> = match serde_json::from_str(&content) {
+        Ok(v)  => v,
+        Err(_) => return Vec::new(),
+    };
+    raw.into_iter()
+        .filter_map(|v| parse_test_entry(v, member_root))
+        .collect()
+}
+
+fn parse_test_entry(v: serde_json::Value, member_root: &std::path::Path) -> Option<TestEntry> {
+    let name        = v["name"].as_str()?.to_string();
+    let class_name  = v["class_name"].as_str().unwrap_or("").to_string();
+    let duration_ms = v["duration_ms"].as_u64().unwrap_or(0);
+    let status = match v["status"].as_str().unwrap_or("") {
+        "failed"  => TestStatus::Failed,
+        "skipped" => TestStatus::Skipped,
+        _         => TestStatus::Passed,
+    };
+    let failure = v["failure"].as_str().map(str::to_string);
+    // output_file in JSON is relative to target/, e.g. "test-output/com/..."
+    let output_file = v["output_file"].as_str()
+        .map(|p| member_root.join("target").join(p));
+    Some(TestEntry { name, class_name, duration_ms, status, failure, output_file })
 }
 
 fn load_log(path: &std::path::Path) -> Vec<String> {
@@ -224,18 +287,19 @@ fn load_log(path: &std::path::Path) -> Vec<String> {
 
 // ── Tree construction ─────────────────────────────────────────────────────
 
-fn build_tree_nodes(jobs: &[Job]) -> Vec<TreeNode> {
+fn build_tree_nodes(jobs: &[Job], expanded_jobs: &HashSet<usize>) -> Vec<TreeNode> {
     let mut nodes = vec![TreeNode {
         label:      "all jobs".to_string(),
         title:      "all jobs".to_string(),
         filter:     Filter::All,
         state:      None,
         selectable: true,
+        test_ref:   None,
     }];
 
     let mut current_dirs: Vec<String> = Vec::new();
 
-    for job in jobs {
+    for (job_idx, job) in jobs.iter().enumerate() {
         let parts: Vec<&str> = job.declared.split('/').collect();
         let dirs = &parts[..parts.len().saturating_sub(1)];
         let name = parts.last().copied().unwrap_or(&job.declared);
@@ -259,18 +323,40 @@ fn build_tree_nodes(jobs: &[Job]) -> Vec<TreeNode> {
                 filter:     Filter::Prefix(path_here),
                 state:      None,
                 selectable: true,
+                test_ref:   None,
             });
         }
 
         let depth  = dirs.len();
         let indent = "  ".repeat(depth + 1);
+        let has_tests = !job.tests.is_empty();
+        let expand_marker = if has_tests {
+            if expanded_jobs.contains(&job_idx) { " ▾" } else { " ▸" }
+        } else { "" };
         nodes.push(TreeNode {
-            label:      format!("{indent}{name}"),
+            label:      format!("{indent}{name}{expand_marker}"),
             title:      job.declared.clone(),
             filter:     Filter::Prefix(job.declared.clone()),
             state:      Some(job.state.clone()),
             selectable: true,
+            test_ref:   None,
         });
+
+        // When expanded, add one leaf node per test.
+        if has_tests && expanded_jobs.contains(&job_idx) {
+            let test_indent = "  ".repeat(depth + 2);
+            for (test_idx, test) in job.tests.iter().enumerate() {
+                let badge = test_badge(&test.status, test.duration_ms);
+                nodes.push(TreeNode {
+                    label:      format!("{test_indent}{} {badge}", test.name),
+                    title:      format!("{} › {}", job.declared, test.name),
+                    filter:     Filter::Prefix(job.declared.clone()),
+                    state:      None,
+                    selectable: true,
+                    test_ref:   Some((job_idx, test_idx)),
+                });
+            }
+        }
 
         current_dirs = dirs.iter().map(|s| s.to_string()).collect();
     }
@@ -346,15 +432,55 @@ fn build_rows(jobs: &[Job], filter: &Filter, grep: &str, job_search: &str) -> Ve
 // ── Selection and reload ──────────────────────────────────────────────────
 
 fn apply_selection(state: &mut InspectState) {
-    let node        = &state.nodes[state.selected_idx];
-    state.filter    = node.filter.clone();
-    state.log_title = node.title.clone();
-    rebuild_rows(state);
+    let node     = &state.nodes[state.selected_idx];
+    let test_ref = node.test_ref;
+    let title    = node.title.clone();
+    let filter   = node.filter.clone();
+
+    state.log_title = title;
+    state.filter    = filter;
+
+    if let Some((job_idx, test_idx)) = test_ref {
+        load_test_view(state, job_idx, test_idx);
+    } else {
+        state.test_lines.clear();
+        rebuild_rows(state);
+    }
+
     sync_tree_scroll(state);
 }
 
+fn load_test_view(state: &mut InspectState, job_idx: usize, test_idx: usize) {
+    let test = &state.jobs[job_idx].tests[test_idx];
+    let failure = test.failure.clone();
+    state.test_lines = test.output_file.as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+
+    let mut rows: Vec<Row> = Vec::new();
+    if let Some(msg) = failure {
+        rows.push(Row::TestFailure { text: msg });
+    }
+    for li in 0..state.test_lines.len() {
+        rows.push(Row::TestBody { line: li });
+    }
+    if rows.is_empty() {
+        rows.push(Row::TestFailure { text: "(no output captured)".to_string() });
+    }
+    state.rows   = rows;
+    let max      = state.rows.len().saturating_sub(state.log_vis_h.max(1));
+    state.scroll = state.scroll.min(max);
+}
+
 /// Rebuild rows from current filter/grep/job_search, then clamp scroll.
+/// When the selected node is a test leaf, re-applies the test view.
 fn rebuild_rows(state: &mut InspectState) {
+    if let Some((job_idx, test_idx)) = state.nodes.get(state.selected_idx).and_then(|n| n.test_ref) {
+        load_test_view(state, job_idx, test_idx);
+        return;
+    }
+    state.test_lines.clear();
     state.rows   = build_rows(&state.jobs, &state.filter, &state.grep, &state.job_search);
     let max      = state.rows.len().saturating_sub(state.log_vis_h.max(1));
     state.scroll = state.scroll.min(max);
@@ -365,7 +491,7 @@ fn reload(state: &mut InspectState) {
     let action     = state.action.clone();
     let utc_offset = state.utc_offset;
     state.jobs     = load_jobs(&targets, &action, utc_offset);
-    state.nodes    = build_tree_nodes(&state.jobs);
+    state.nodes    = build_tree_nodes(&state.jobs, &state.expanded_jobs);
     state.selected_idx = state.selected_idx.min(state.nodes.len().saturating_sub(1));
     rebuild_rows(state);
 }
@@ -424,6 +550,23 @@ fn badge_style(state: &LogState) -> Style {
         LogState::Failed     { .. } => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         LogState::NoMetadata        => Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM),
         LogState::NoLog             => Style::default().add_modifier(Modifier::DIM),
+    }
+}
+
+fn test_badge(status: &TestStatus, duration_ms: u64) -> String {
+    match status {
+        TestStatus::Passed  => format!("✓ {}ms", duration_ms),
+        TestStatus::Failed  => format!("✗ {}ms", duration_ms),
+        TestStatus::Skipped => "⊘ skipped".to_string(),
+    }
+}
+
+#[allow(dead_code)]
+fn test_badge_style(status: &TestStatus) -> Style {
+    match status {
+        TestStatus::Passed  => Style::default().fg(Color::Green),
+        TestStatus::Failed  => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        TestStatus::Skipped => Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM),
     }
 }
 
@@ -541,12 +684,18 @@ fn member_line(node: &TreeNode, is_selected: bool, inner_w: usize) -> Line<'stat
             line
         }
         None => {
-            let style = if is_selected {
-                Style::default().add_modifier(Modifier::REVERSED)
+            // Test leaf nodes get status colour; directory containers are dimmed.
+            let base_style = if let Some((_, _)) = node.test_ref {
+                Style::default().fg(Color::DarkGray)
             } else if matches!(node.filter, Filter::Prefix(_)) {
                 Style::default().add_modifier(Modifier::DIM)
             } else {
                 Style::default()
+            };
+            let style = if is_selected {
+                base_style.add_modifier(Modifier::REVERSED)
+            } else {
+                base_style
             };
             Line::styled(node.label.clone(), style)
         }
@@ -571,14 +720,14 @@ fn render_log_block(f: &mut Frame, state: &InspectState, area: Rect) {
 
     let lines: Vec<Line<'static>> = state.rows[start..end]
         .iter()
-        .map(|row| render_row(row, &state.jobs, &state.grep))
+        .map(|row| render_row(row, &state.jobs, &state.test_lines, &state.grep))
         .collect();
 
     f.render_widget(block, area);
     f.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
-fn render_row(row: &Row, jobs: &[Job], grep: &str) -> Line<'static> {
+fn render_row(row: &Row, jobs: &[Job], test_lines: &[String], grep: &str) -> Line<'static> {
     match row {
         Row::Header { job } => {
             let j     = &jobs[*job];
@@ -589,6 +738,15 @@ fn render_row(row: &Row, jobs: &[Job], grep: &str) -> Line<'static> {
             let j     = &jobs[*job];
             let color = gutter_color(&j.state);
             body_line(&j.lines[*line], color, grep)
+        }
+        Row::TestFailure { text } => {
+            let gutter = Span::styled("▌ ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+            let msg    = Span::styled(text.clone(), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+            Line::from(vec![gutter, msg]).style(Style::default().bg(Color::Indexed(236)))
+        }
+        Row::TestBody { line } => {
+            let text = test_lines.get(*line).map(String::as_str).unwrap_or("");
+            body_line(text, Color::Cyan, grep)
         }
     }
 }
@@ -733,6 +891,13 @@ fn handle_key(state: &mut InspectState, key: KeyEvent) -> bool {
             state.selected_idx = next_node(&state.nodes, state.selected_idx);
             apply_selection(state);
         }
+        // Expand/collapse test nodes with Enter or → / ←
+        KeyCode::Enter | KeyCode::Right if members_active => {
+            toggle_test_expansion(state);
+        }
+        KeyCode::Left if members_active => {
+            collapse_test_node(state);
+        }
 
         // Log scrolling — one line at a time.
         KeyCode::Char('k') | KeyCode::Up => {
@@ -819,6 +984,60 @@ fn handle_key_input_mode(state: &mut InspectState, key: KeyEvent) -> bool {
     true
 }
 
+/// Toggle expansion of the job at the current selection (if it has tests).
+/// On a test leaf, collapse its parent job instead.
+fn toggle_test_expansion(state: &mut InspectState) {
+    let node = &state.nodes[state.selected_idx];
+    if let Some((job_idx, _)) = node.test_ref {
+        // On a test leaf: toggle the parent job
+        if state.expanded_jobs.contains(&job_idx) {
+            state.expanded_jobs.remove(&job_idx);
+        } else {
+            state.expanded_jobs.insert(job_idx);
+        }
+        rebuild_tree_and_reselect(state, None);
+        return;
+    }
+    // On a job node: find which job this is and toggle it
+    if let Some(job_idx) = job_idx_for_node(state) {
+        if state.expanded_jobs.contains(&job_idx) {
+            state.expanded_jobs.remove(&job_idx);
+        } else {
+            state.expanded_jobs.insert(job_idx);
+        }
+        rebuild_tree_and_reselect(state, Some(job_idx));
+    }
+}
+
+/// Collapse: if on a test leaf, jump to the parent job node and collapse it.
+fn collapse_test_node(state: &mut InspectState) {
+    if let Some((job_idx, _)) = state.nodes[state.selected_idx].test_ref {
+        state.expanded_jobs.remove(&job_idx);
+        rebuild_tree_and_reselect(state, Some(job_idx));
+    }
+}
+
+/// Find the job index that the current node maps to (for job-level nodes only).
+fn job_idx_for_node(state: &InspectState) -> Option<usize> {
+    let node = &state.nodes[state.selected_idx];
+    if node.test_ref.is_some() { return None; }
+    let Filter::Prefix(p) = &node.filter else { return None; };
+    state.jobs.iter().position(|j| &j.declared == p)
+}
+
+/// Rebuild tree nodes and re-select the job node for `job_idx` (or keep current selection).
+fn rebuild_tree_and_reselect(state: &mut InspectState, job_idx: Option<usize>) {
+    let prev_declared = job_idx.map(|i| state.jobs[i].declared.clone());
+    state.nodes = build_tree_nodes(&state.jobs, &state.expanded_jobs);
+    if let Some(declared) = prev_declared {
+        if let Some(ni) = find_node_for_declared(&state.nodes, &declared) {
+            state.selected_idx = ni;
+        }
+    }
+    state.selected_idx = state.selected_idx.min(state.nodes.len().saturating_sub(1));
+    apply_selection(state);
+}
+
 /// Cycle: hidden → Members-active → Log-active → hidden → …
 fn toggle_members(state: &mut InspectState) {
     if !state.show_members {
@@ -852,6 +1071,7 @@ mod tests {
             started_disp,
             lines:    vec!["line one".to_string(), "line two".to_string()],
             build_id: None,
+            tests:    vec![],
         }
     }
 
@@ -860,7 +1080,7 @@ mod tests {
     #[test]
     fn tree_root_then_flat_members() {
         let jobs  = vec![make_job("alpha", None, Some(0)), make_job("beta", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs);
+        let nodes = build_tree_nodes(&jobs, &HashSet::new());
         assert_eq!(nodes[0].title, "all jobs");
         assert!(matches!(nodes[0].filter, Filter::All));
         assert_eq!(nodes[1].label.trim(), "alpha");
@@ -874,7 +1094,7 @@ mod tests {
             make_job("services/api", None, Some(0)),
             make_job("services/web", None, Some(0)),
         ];
-        let nodes = build_tree_nodes(&jobs);
+        let nodes = build_tree_nodes(&jobs, &HashSet::new());
         assert_eq!(nodes.len(), 4);
         assert!(nodes[1].label.contains("services/"));
         assert!(matches!(&nodes[1].filter, Filter::Prefix(p) if p == "services"));
@@ -885,7 +1105,7 @@ mod tests {
     #[test]
     fn tree_single_member() {
         let jobs  = vec![make_job("mylib", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs);
+        let nodes = build_tree_nodes(&jobs, &HashSet::new());
         assert_eq!(nodes.len(), 2);
         assert!(matches!(&nodes[1].filter, Filter::Prefix(p) if p == "mylib"));
     }
@@ -893,7 +1113,7 @@ mod tests {
     #[test]
     fn tree_deep_nesting() {
         let jobs  = vec![make_job("a/b/c/leaf", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs);
+        let nodes = build_tree_nodes(&jobs, &HashSet::new());
         assert_eq!(nodes.len(), 5);
         assert!(matches!(&nodes[4].filter, Filter::Prefix(p) if p == "a/b/c/leaf"));
     }
@@ -904,7 +1124,7 @@ mod tests {
             make_job("svc/api", None, Some(0)),
             make_job("svc/web", None, Some(0)),
         ];
-        let nodes = build_tree_nodes(&jobs);
+        let nodes = build_tree_nodes(&jobs, &HashSet::new());
         let svc   = nodes.iter().find(|n| n.label.contains("svc/")).unwrap();
         assert!(matches!(&svc.filter, Filter::Prefix(p) if p == "svc"));
     }
@@ -1058,14 +1278,14 @@ mod tests {
     #[test]
     fn next_node_wraps() {
         let jobs  = vec![make_job("a", None, Some(0)), make_job("b", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs);
+        let nodes = build_tree_nodes(&jobs, &HashSet::new());
         assert_eq!(next_node(&nodes, 2), 0);
     }
 
     #[test]
     fn prev_node_wraps() {
         let jobs  = vec![make_job("a", None, Some(0)), make_job("b", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs);
+        let nodes = build_tree_nodes(&jobs, &HashSet::new());
         assert_eq!(prev_node(&nodes, 0), 2);
     }
 

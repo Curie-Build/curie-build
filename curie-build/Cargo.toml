@@ -38,9 +38,10 @@ quick-xml = { version = "0.40", features = ["serialize"] }
 tantivy = { version = "0.22", features = ["mmap"] }
 flate2 = { version = "1", features = ["zlib-rs"] }
 
+tempfile = "3"
+
 [build-dependencies]
 sha2 = "0.11"
 
 [dev-dependencies]
-tempfile = "3"
 filetime = "0.2"

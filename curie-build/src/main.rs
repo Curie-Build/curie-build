@@ -27,6 +27,7 @@ mod sources_jar;
 mod style;
 mod term;
 mod test;
+mod test_runner;
 mod tui;
 mod update;
 mod workspace;

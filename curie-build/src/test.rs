@@ -520,28 +520,40 @@ pub fn run_tests(
 
     crate::parallel::emit("");
 
-    let mut java = Command::new("java");
-    if desc.java.preview_enabled() {
-        java.arg("--enable-preview");
+    // --- prepare per-test result directories ---------------------------------
+    let sidecar_path = project_root.join("target").join("build.tests.json");
+    let output_dir   = project_root.join("target").join("test-output");
+
+    if output_dir.exists() {
+        std::fs::remove_dir_all(&output_dir)
+            .context("failed to clear target/test-output")?;
     }
-    java.arg("-jar")
-        .arg(&standalone_jar)
-        .arg("execute")
-        .arg("-cp")
-        .arg(classpath_string(&run_cp))
-        .arg("--scan-class-path");
+    std::fs::create_dir_all(&output_dir)
+        .context("failed to create target/test-output")?;
 
     // JUnit Platform's default class-name filter matches *Test/*Tests and
     // similar Java/Kotlin conventions but skips Groovy *Spec classes.  When
     // Spock is enabled, broaden the filter to include `.*Spec` names.
-    if let Some(f) = filter {
-        java.arg(format!("--include-classname={}", f));
+    let effective_filter = if filter.is_some() {
+        filter
     } else if !spock_jars.is_empty() {
-        // Match the Spock *Spec convention alongside JUnit's default patterns.
-        // The default JUnit pattern already covers *Tests / *Test / Test* etc.;
-        // we add .*Spec so Groovy specification classes are included.
-        java.arg("--include-classname=.*Tests?$|^Test.*|.*TestCase$|.*Spec$");
-    }
+        Some(".*Tests?$|^Test.*|.*TestCase$|.*Spec$")
+    } else {
+        None
+    };
+
+    let runner_jar = crate::test_runner::ensure_runner_jar(&standalone_jar)
+        .context("failed to prepare Curie test runner")?;
+
+    let mut java = crate::test_runner::build_runner_command(
+        &runner_jar,
+        &standalone_jar,
+        &classpath_string(&run_cp),
+        &sidecar_path,
+        &output_dir,
+        effective_filter,
+        desc.java.preview_enabled(),
+    );
 
     let status = crate::proc::spawn_cmd(&mut java)
         .context("failed to invoke java — is a JRE installed?")?;
