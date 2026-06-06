@@ -58,6 +58,7 @@ public class CurieTestRunner {
 
         LauncherFactory.create().execute(request, listener);
 
+        listener.printSummary();
         listener.writeJson(jsonOut);
         System.exit(listener.anyFailed() ? 1 : 0);
     }
@@ -156,7 +157,35 @@ class ResultListener implements TestExecutionListener {
     }
 
     boolean anyFailed() {
-        return results.stream().anyMatch(r -> "failed".equals(r.status()));
+        return results.stream().anyMatch(r -> "failed".equals(r.status()) || "errored".equals(r.status()));
+    }
+
+    void printSummary() {
+        long passed  = results.stream().filter(r -> "passed".equals(r.status())).count();
+        long failed  = results.stream().filter(r -> "failed".equals(r.status())).count();
+        long skipped = results.stream().filter(r -> "skipped".equals(r.status())).count();
+
+        // Print each failure with its message.
+        for (TestRecord r : results) {
+            if (!"failed".equals(r.status())) continue;
+            originalOut.println();
+            originalOut.println("FAILED  " + r.className() + " > " + r.name());
+            if (r.failure() != null) {
+                // Print each line of the failure message indented.
+                for (String line : r.failure().split("\n")) {
+                    originalOut.println("  " + line);
+                }
+            }
+        }
+
+        // Final count line.
+        originalOut.println();
+        StringBuilder summary = new StringBuilder();
+        summary.append(passed).append(" passed");
+        if (failed  > 0) summary.append(", ").append(failed).append(" failed");
+        if (skipped > 0) summary.append(", ").append(skipped).append(" skipped");
+        originalOut.println(summary);
+        originalOut.flush();
     }
 
     void writeJson(Path path) throws IOException {
