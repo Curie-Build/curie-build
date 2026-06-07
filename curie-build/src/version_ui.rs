@@ -138,6 +138,32 @@ impl UiState {
 // Public entry point
 // ---------------------------------------------------------------------------
 
+/// Show a "fetching versions…" placeholder in an already-open alternate screen.
+/// Called while the network fetch is in progress so the terminal doesn't flash.
+pub(crate) fn show_loading_screen(stdout: &mut impl Write, coord: &str) -> Result<()> {
+    let (width, height) = terminal::size().unwrap_or((80, 24));
+    execute!(stdout, terminal::Clear(ClearType::All))?;
+    let msg = format!("  Fetching versions for {}\u{2026}", coord);
+    execute!(stdout, cursor::MoveTo(0, height / 2))?;
+    execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
+    write!(stdout, "{}", truncate_str(&msg, width as usize))?;
+    execute!(stdout, SetForegroundColor(Color::Reset))?;
+    stdout.flush()?;
+    Ok(())
+}
+
+/// Run the version picker inside an already-open alternate screen.
+/// Returns the user's choice or `None` when Esc is pressed.
+pub(crate) fn run_version_phase(
+    coord: &str,
+    all_versions: &[String],
+    bom_version: Option<&str>,
+    stdout: &mut impl Write,
+) -> Result<Option<VersionPick>> {
+    let (entries, preselected) = build_entries(all_versions, bom_version);
+    run_ui_inner(coord, entries, preselected, stdout)
+}
+
 /// Open the interactive version picker.
 ///
 /// * `all_versions` — versions in oldest-to-newest order (from `maven-metadata.xml`).

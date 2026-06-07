@@ -28,25 +28,6 @@ const HEADER: &str =
     "  curie add (API)    \u{2191}\u{2193} navigate    Enter select    Esc cancel";
 
 // ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
-
-/// Open the interactive API-backed search UI.  Returns the selected
-/// `"group:artifact"` coordinate, or `None` when the user cancels.
-pub fn run_api_search_ui() -> Result<Option<String>> {
-    let mut stdout = std::io::stdout();
-    terminal::enable_raw_mode()?;
-    execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
-
-    let result = run_ui_inner(&mut stdout);
-
-    let _ = execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show);
-    let _ = terminal::disable_raw_mode();
-
-    result
-}
-
-// ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
@@ -119,7 +100,7 @@ impl UiState {
 
 type SearchResult = Result<Vec<ArtifactHit>, String>;
 
-fn run_ui_inner(stdout: &mut impl Write) -> Result<Option<String>> {
+pub(crate) fn run_ui_inner(stdout: &mut impl Write) -> Result<Option<String>> {
     let mut state = UiState::new();
     let debounce = Duration::from_millis(DEBOUNCE_MS);
 

@@ -38,10 +38,13 @@
 
 use crate::build::{central_repos, extra_repos};
 use crate::descriptor::{self, Descriptor};
+use crate::search_index::IndexHandle;
 use crate::update::{fetch_all_versions, fetch_latest_stable, resolve_repo_url};
-use crate::version_ui::{run_version_ui, VersionPick};
+use crate::version_ui::{run_version_phase, run_version_ui, show_loading_screen, VersionPick};
 use anyhow::{bail, Context, Result};
+use crossterm::{cursor, execute, terminal};
 use curie_deps::repo::Repository;
+use std::io::Write;
 use std::path::Path;
 use toml_edit::DocumentMut;
 
@@ -83,32 +86,35 @@ pub struct RemoveOptions {
 /// Add a dependency to `Curie.toml`.
 ///
 /// `coord_arg` is `"group:artifact"` or `"group:artifact@version"`, or `None`
-/// to open the interactive artifact search UI.
+/// to open the interactive artifact search + version picker.
 pub fn run_add(project_root: &Path, coord_arg: Option<&str>, opts: AddOptions) -> Result<()> {
-    // -- resolve coordinate (interactive or explicit) ------------------------
-    let coord_str: String = match coord_arg {
-        Some(c) => c.to_string(),
-        None => match pick_coord_interactively(&opts)? {
-            Some(coord) => coord,
-            None => return Ok(()), // user cancelled
-        },
-    };
-    let coord_arg = coord_str.as_str();
-
-    // -- parse coordinate ----------------------------------------------------
-    let (coord, explicit_version) = parse_coord_arg(coord_arg)?;
-
-    // BOMs always need an explicit version.
-    if opts.bom && explicit_version.is_none() {
-        bail!(
-            "BOM imports require an explicit version.\n\
-             Use:  curie add --bom {}@<version>",
-            coord
-        );
-    }
-
-    let section = section_name(&opts);
     let desc = descriptor::load(project_root)?;
+    let section = section_name(&opts);
+
+    let (coord, version) = if coord_arg.is_none() {
+        // ── Interactive path: unified search → version picker in one alt-screen ──
+        // Prepare data source BEFORE entering the alt screen (may download index).
+        let source = prepare_search_source(&opts)?;
+        match run_interactive_flow(&opts, &desc, source)? {
+            Some(pair) => pair,
+            None => return Ok(()), // user cancelled
+        }
+    } else {
+        // ── CLI path: coord (possibly with explicit version) given on command line ──
+        let (coord, explicit_version) = parse_coord_arg(coord_arg.unwrap())?;
+        if opts.bom && explicit_version.is_none() {
+            bail!(
+                "BOM imports require an explicit version.\n\
+                 Use:  curie add --bom {}@<version>",
+                coord
+            );
+        }
+        let version = match explicit_version {
+            Some(v) => v,
+            None => resolve_version(&coord, &desc, &opts)?,
+        };
+        (coord, version)
+    };
 
     // -- guard: already present ----------------------------------------------
     if coord_exists_in_section(&desc, section, &coord) {
@@ -118,12 +124,6 @@ pub fn run_add(project_root: &Path, coord_arg: Option<&str>, opts: AddOptions) -
             coord, section
         );
     }
-
-    // -- resolve version -----------------------------------------------------
-    let version = match explicit_version {
-        Some(v) => v,
-        None => resolve_version(&coord, &desc, &opts)?,
-    };
 
     // -- rewrite Curie.toml --------------------------------------------------
     rewrite_toml(project_root, |doc| {
@@ -141,37 +141,108 @@ pub fn run_add(project_root: &Path, coord_arg: Option<&str>, opts: AddOptions) -
     Ok(())
 }
 
-/// Choose how to pick a coordinate interactively based on flags.
-///
-/// Decision table:
-/// * `--refresh-index` → force re-download, then Tantivy search.
-/// * `--use-index`     → use existing Tantivy index (download if absent).
-/// * default           → Tantivy if index already downloaded, else Maven Central API.
-/// * `--api`           → Maven Central REST API regardless of local index.
-fn pick_coord_interactively(opts: &AddOptions) -> Result<Option<String>> {
+// ---------------------------------------------------------------------------
+// Unified interactive flow (search → version picker, single alt-screen session)
+// ---------------------------------------------------------------------------
+
+/// Discriminates which data source backs the artifact search.
+enum SearchSource {
+    Tantivy(IndexHandle),
+    Api,
+}
+
+/// Prepare the search source BEFORE entering the alternate screen.
+/// Index downloads (if needed) happen here, with normal terminal output.
+fn prepare_search_source(opts: &AddOptions) -> Result<SearchSource> {
     if opts.refresh_index {
         let db = crate::search_index::ensure_index(true, opts.offline)?;
-        return crate::search_ui::run_search_ui(&db);
+        return Ok(SearchSource::Tantivy(db));
     }
-
     if opts.use_index {
         let db = crate::search_index::ensure_index(false, opts.offline)?;
-        return crate::search_ui::run_search_ui(&db);
+        return Ok(SearchSource::Tantivy(db));
     }
-
-    let index_ready = crate::search_index::index_exists() && !opts.api;
-    if index_ready {
+    if crate::search_index::index_exists() && !opts.api {
         let db = crate::search_index::open_index()?;
-        return crate::search_ui::run_search_ui(&db);
+        return Ok(SearchSource::Tantivy(db));
     }
-
     if opts.offline {
         anyhow::bail!(
             "no local artifact index; pass --use-index to download it, or remove --offline"
         );
     }
+    Ok(SearchSource::Api)
+}
 
-    crate::api_search_ui::run_api_search_ui()
+/// Open the full interactive add flow — artifact search, then version picker —
+/// in a single alternate-screen session.  Esc on the version picker returns to
+/// the artifact search rather than cancelling the whole command.
+fn run_interactive_flow(
+    opts: &AddOptions,
+    desc: &Descriptor,
+    source: SearchSource,
+) -> Result<Option<(String, String)>> {
+    let mut stdout = std::io::stdout();
+    terminal::enable_raw_mode()?;
+    execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
+
+    let result = interactive_flow_inner(opts, desc, &source, &mut stdout);
+
+    let _ = execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show);
+    let _ = terminal::disable_raw_mode();
+
+    result
+}
+
+fn interactive_flow_inner(
+    opts: &AddOptions,
+    desc: &Descriptor,
+    source: &SearchSource,
+    stdout: &mut impl Write,
+) -> Result<Option<(String, String)>> {
+    loop {
+        // ── Phase 1: artifact selection ────────────────────────────────────
+        let coord = match source {
+            SearchSource::Tantivy(db) => crate::search_ui::run_ui_inner(db, stdout)?,
+            SearchSource::Api         => crate::api_search_ui::run_ui_inner(stdout)?,
+        };
+        let coord = match coord {
+            Some(c) => c,
+            None    => return Ok(None), // Esc at search → cancel add
+        };
+
+        // ── Loading placeholder while we fetch version data ────────────────
+        show_loading_screen(stdout, &coord)?;
+
+        let bom_version   = bom_managed_version(&coord, desc, opts);
+        let all_versions  = fetch_coord_versions(&coord, desc, opts);
+
+        // ── Phase 2: version selection ─────────────────────────────────────
+        let pick = run_version_phase(&coord, &all_versions, bom_version.as_deref(), stdout)?;
+
+        match pick {
+            Some(VersionPick::BomManaged)   => return Ok(Some((coord, String::new()))),
+            Some(VersionPick::Explicit(v))  => return Ok(Some((coord, v))),
+            // Esc on version picker → go back to artifact search
+            None => continue,
+        }
+    }
+}
+
+/// Fetch all versions from Maven Central for `coord`.  Returns an empty vec on
+/// network failure or when offline (the version picker still shows BOM entry).
+fn fetch_coord_versions(coord: &str, desc: &Descriptor, opts: &AddOptions) -> Vec<String> {
+    if opts.offline {
+        return vec![];
+    }
+    let default_repos = central_repos();
+    let named_repos   = extra_repos(desc);
+    let repo_url      = resolve_repo_url(&None, &named_repos, &default_repos);
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .user_agent("curie-add/0.1")
+        .timeout(std::time::Duration::from_secs(15))
+        .build() else { return vec![]; };
+    fetch_all_versions(&client, &repo_url, coord).unwrap_or_default()
 }
 
 /// Remove a dependency from `Curie.toml`.

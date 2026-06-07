@@ -26,25 +26,6 @@ const SEARCH_LIMIT: usize = 50;
 const HEADER: &str = "  curie add    \u{2191}\u{2193} navigate    Enter select    Esc cancel";
 
 // ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
-
-/// Open the interactive search UI.  Returns the selected `"group:artifact"`
-/// coordinate, or `None` when the user cancels.
-pub fn run_search_ui(handle: &IndexHandle) -> Result<Option<String>> {
-    let mut stdout = std::io::stdout();
-    terminal::enable_raw_mode()?;
-    execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
-
-    let result = run_ui_inner(handle, &mut stdout);
-
-    let _ = execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show);
-    let _ = terminal::disable_raw_mode();
-
-    result
-}
-
-// ---------------------------------------------------------------------------
 // Internal UI state
 // ---------------------------------------------------------------------------
 
@@ -110,7 +91,7 @@ impl UiState {
 // Main loop
 // ---------------------------------------------------------------------------
 
-fn run_ui_inner(handle: &IndexHandle, stdout: &mut impl Write) -> Result<Option<String>> {
+pub(crate) fn run_ui_inner(handle: &IndexHandle, stdout: &mut impl Write) -> Result<Option<String>> {
     let total = total_count(handle);
     let mut state = UiState::new(total);
 
