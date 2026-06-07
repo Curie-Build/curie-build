@@ -29,11 +29,11 @@ const HEADER: &str = "  curie add    \u{2191}\u{2193} navigate    Enter select  
 // Internal UI state
 // ---------------------------------------------------------------------------
 
-struct UiState {
-    query: String,
-    results: Vec<ArtifactRecord>,
-    selected_idx: usize,
-    scroll_offset: usize,
+pub(crate) struct UiState {
+    pub(crate) query: String,
+    pub(crate) results: Vec<ArtifactRecord>,
+    pub(crate) selected_idx: usize,
+    pub(crate) scroll_offset: usize,
     total: u64,
 }
 
@@ -91,9 +91,16 @@ impl UiState {
 // Main loop
 // ---------------------------------------------------------------------------
 
-pub(crate) fn run_ui_inner(handle: &IndexHandle, stdout: &mut impl Write) -> Result<Option<String>> {
+/// Run the search UI.  Pass `initial_state` to restore query/results/selection
+/// when returning from the version picker.  Always returns the final state so
+/// the caller can pass it back on the next invocation.
+pub(crate) fn run_ui_inner(
+    handle: &IndexHandle,
+    stdout: &mut impl Write,
+    initial_state: Option<UiState>,
+) -> Result<(Option<String>, UiState)> {
     let total = total_count(handle);
-    let mut state = UiState::new(total);
+    let mut state = initial_state.unwrap_or_else(|| UiState::new(total));
 
     redraw(stdout, &state)?;
 
@@ -104,12 +111,13 @@ pub(crate) fn run_ui_inner(handle: &IndexHandle, stdout: &mut impl Write) -> Res
                 match (code, modifiers) {
                     (KeyCode::Esc, _)
                     | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                        return Ok(None);
+                        return Ok((None, state));
                     }
 
                     (KeyCode::Enter, _) => {
                         if !state.results.is_empty() {
-                            return Ok(Some(state.results[state.selected_idx].coord.clone()));
+                            let coord = state.results[state.selected_idx].coord.clone();
+                            return Ok((Some(coord), state));
                         }
                     }
 

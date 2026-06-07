@@ -200,11 +200,24 @@ fn interactive_flow_inner(
     source: &SearchSource,
     stdout: &mut impl Write,
 ) -> Result<Option<(String, String)>> {
+    // Preserve search state across the version picker so the user can
+    // return to the same query + selection after pressing Esc.
+    let mut tantivy_state: Option<crate::search_ui::UiState>     = None;
+    let mut api_state:     Option<crate::api_search_ui::UiState> = None;
+
     loop {
         // ── Phase 1: artifact selection ────────────────────────────────────
         let coord = match source {
-            SearchSource::Tantivy(db) => crate::search_ui::run_ui_inner(db, stdout)?,
-            SearchSource::Api         => crate::api_search_ui::run_ui_inner(stdout)?,
+            SearchSource::Tantivy(db) => {
+                let (coord, st) = crate::search_ui::run_ui_inner(db, stdout, tantivy_state.take())?;
+                tantivy_state = Some(st);
+                coord
+            }
+            SearchSource::Api => {
+                let (coord, st) = crate::api_search_ui::run_ui_inner(stdout, api_state.take())?;
+                api_state = Some(st);
+                coord
+            }
         };
         let coord = match coord {
             Some(c) => c,

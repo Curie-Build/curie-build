@@ -38,14 +38,14 @@ enum SearchStatus {
     Error(String),
 }
 
-struct UiState {
-    query:           String,
-    results:         Vec<ArtifactHit>,
-    selected_idx:    usize,
-    scroll_offset:   usize,
-    status:          SearchStatus,
-    last_query_sent: String,
-    last_keystroke:  Instant,
+pub(crate) struct UiState {
+    pub(crate) query:        String,
+    pub(crate) results:      Vec<ArtifactHit>,
+    pub(crate) selected_idx: usize,
+    scroll_offset:           usize,
+    status:                  SearchStatus,
+    last_query_sent:         String,
+    last_keystroke:          Instant,
 }
 
 impl UiState {
@@ -59,6 +59,14 @@ impl UiState {
             last_query_sent: String::new(),
             last_keystroke:  Instant::now(),
         }
+    }
+
+    /// Reset timing so returning from the version picker doesn't trigger a
+    /// stale debounce.  Query and results are kept intact.
+    pub(crate) fn reset_timing(&mut self) {
+        // Setting last_keystroke far in the past is harmless: since
+        // last_query_sent == query, query_pending is false and no search fires.
+        self.last_keystroke = Instant::now();
     }
 
     fn move_up(&mut self) {
@@ -100,8 +108,16 @@ impl UiState {
 
 type SearchResult = Result<Vec<ArtifactHit>, String>;
 
-pub(crate) fn run_ui_inner(stdout: &mut impl Write) -> Result<Option<String>> {
-    let mut state = UiState::new();
+/// Run the API search UI.  Pass `initial_state` to restore query/results/selection
+/// when returning from the version picker.  Always returns the final state.
+pub(crate) fn run_ui_inner(
+    stdout: &mut impl Write,
+    initial_state: Option<UiState>,
+) -> Result<(Option<String>, UiState)> {
+    let mut state = match initial_state {
+        Some(mut s) => { s.reset_timing(); s }
+        None        => UiState::new(),
+    };
     let debounce = Duration::from_millis(DEBOUNCE_MS);
 
     // Dummy channel replaced on first search fire.
@@ -138,12 +154,13 @@ pub(crate) fn run_ui_inner(stdout: &mut impl Write) -> Result<Option<String>> {
                     if handle_key(&mut state, code, modifiers) {
                         // selection confirmed — return chosen coordinate
                         if !state.results.is_empty() {
-                            return Ok(Some(state.results[state.selected_idx].coord.clone()));
+                            let coord = state.results[state.selected_idx].coord.clone();
+                            return Ok((Some(coord), state));
                         }
                     } else if matches!(code, KeyCode::Esc)
                         || matches!((code, modifiers), (KeyCode::Char('c'), KeyModifiers::CONTROL))
                     {
-                        return Ok(None);
+                        return Ok((None, state));
                     }
                 }
                 Event::Resize(..) => {}
