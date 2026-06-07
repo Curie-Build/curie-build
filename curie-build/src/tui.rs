@@ -321,10 +321,11 @@ fn render_loop(
 
             TuiMsg::Line { slot_idx, line } => {
                 state.slots[slot_idx].ring.push_back(line);
-                // Redraw only when this slot is in a visible pane.
-                if state.pane_to_slot.iter().any(|&s| s == slot_idx) {
-                    let _ = terminal.draw(|f| render_frame(f, &state));
-                }
+                // Drain all buffered lines before drawing so we repaint once
+                // per batch rather than once per line (fixes 80s→2s regression
+                // for jobs that produce tens-of-thousands of output lines).
+                drain_available(&rx, &mut state, &mut pending);
+                let _ = terminal.draw(|f| render_frame(f, &state));
             }
 
             TuiMsg::SlotDone { slot_idx, success } => {
@@ -765,7 +766,9 @@ fn drain_hold(
     state: &mut RenderState,
     hold_secs: u64,
 ) -> Option<TuiMsg> {
-    let deadline = Instant::now() + Duration::from_secs(hold_secs);
+    let deadline       = Instant::now() + Duration::from_secs(hold_secs);
+    let frame_interval = Duration::from_millis(33); // cap at ~30 fps
+    let mut last_draw  = Instant::now() - frame_interval;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -774,8 +777,9 @@ fn drain_hold(
         match rx.recv_timeout(remaining) {
             Ok(TuiMsg::Line { slot_idx, line }) => {
                 state.slots[slot_idx].ring.push_back(line);
-                if state.pane_to_slot.iter().any(|&x| x == slot_idx) {
+                if last_draw.elapsed() >= frame_interval {
                     let _ = terminal.draw(|f| render_frame(f, state));
+                    last_draw = Instant::now();
                 }
             }
             // A new job starting during the hold fills a free pane or joins the
