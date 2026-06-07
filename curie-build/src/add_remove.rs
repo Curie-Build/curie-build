@@ -62,6 +62,10 @@ pub struct AddOptions {
     pub offline: bool,
     /// Force re-download of the local artifact index before opening the search UI.
     pub refresh_index: bool,
+    /// Use the local Tantivy index for search (download it if not yet present).
+    pub use_index: bool,
+    /// Force Maven Central REST API search even when a local index exists.
+    pub api: bool,
 }
 
 /// Options for `curie remove`.
@@ -83,13 +87,10 @@ pub fn run_add(project_root: &Path, coord_arg: Option<&str>, opts: AddOptions) -
     // -- resolve coordinate (interactive or explicit) ------------------------
     let coord_str: String = match coord_arg {
         Some(c) => c.to_string(),
-        None => {
-            let db = crate::search_index::ensure_index(opts.refresh_index, opts.offline)?;
-            match crate::search_ui::run_search_ui(&db)? {
-                Some(coord) => coord,
-                None => return Ok(()), // user cancelled
-            }
-        }
+        None => match pick_coord_interactively(&opts)? {
+            Some(coord) => coord,
+            None => return Ok(()), // user cancelled
+        },
     };
     let coord_arg = coord_str.as_str();
 
@@ -137,6 +138,39 @@ pub fn run_add(project_root: &Path, coord_arg: Option<&str>, opts: AddOptions) -
     }
 
     Ok(())
+}
+
+/// Choose how to pick a coordinate interactively based on flags.
+///
+/// Decision table:
+/// * `--refresh-index` → force re-download, then Tantivy search.
+/// * `--use-index`     → use existing Tantivy index (download if absent).
+/// * default           → Tantivy if index already downloaded, else Maven Central API.
+/// * `--api`           → Maven Central REST API regardless of local index.
+fn pick_coord_interactively(opts: &AddOptions) -> Result<Option<String>> {
+    if opts.refresh_index {
+        let db = crate::search_index::ensure_index(true, opts.offline)?;
+        return crate::search_ui::run_search_ui(&db);
+    }
+
+    if opts.use_index {
+        let db = crate::search_index::ensure_index(false, opts.offline)?;
+        return crate::search_ui::run_search_ui(&db);
+    }
+
+    let index_ready = crate::search_index::index_exists() && !opts.api;
+    if index_ready {
+        let db = crate::search_index::open_index()?;
+        return crate::search_ui::run_search_ui(&db);
+    }
+
+    if opts.offline {
+        anyhow::bail!(
+            "no local artifact index; pass --use-index to download it, or remove --offline"
+        );
+    }
+
+    crate::api_search_ui::run_api_search_ui()
 }
 
 /// Remove a dependency from `Curie.toml`.
@@ -443,37 +477,37 @@ mod tests {
 
     #[test]
     fn section_defaults_to_dependencies() {
-        let opts = AddOptions { test: false, annotation_processor: false, bom: false, offline: false, refresh_index: false };
+        let opts = AddOptions { test: false, annotation_processor: false, bom: false, offline: false, refresh_index: false, use_index: false, api: false };
         assert_eq!(section_name(&opts), "dependencies");
     }
 
     #[test]
     fn section_test_flag() {
-        let opts = AddOptions { test: true, annotation_processor: false, bom: false, offline: false, refresh_index: false };
+        let opts = AddOptions { test: true, annotation_processor: false, bom: false, offline: false, refresh_index: false, use_index: false, api: false };
         assert_eq!(section_name(&opts), "test-dependencies");
     }
 
     #[test]
     fn section_annotation_processor() {
-        let opts = AddOptions { test: false, annotation_processor: true, bom: false, offline: false, refresh_index: false };
+        let opts = AddOptions { test: false, annotation_processor: true, bom: false, offline: false, refresh_index: false, use_index: false, api: false };
         assert_eq!(section_name(&opts), "annotation-processors");
     }
 
     #[test]
     fn section_test_annotation_processor() {
-        let opts = AddOptions { test: true, annotation_processor: true, bom: false, offline: false, refresh_index: false };
+        let opts = AddOptions { test: true, annotation_processor: true, bom: false, offline: false, refresh_index: false, use_index: false, api: false };
         assert_eq!(section_name(&opts), "test-annotation-processors");
     }
 
     #[test]
     fn section_bom() {
-        let opts = AddOptions { test: false, annotation_processor: false, bom: true, offline: false, refresh_index: false };
+        let opts = AddOptions { test: false, annotation_processor: false, bom: true, offline: false, refresh_index: false, use_index: false, api: false };
         assert_eq!(section_name(&opts), "bom-imports");
     }
 
     #[test]
     fn section_test_bom() {
-        let opts = AddOptions { test: true, annotation_processor: false, bom: true, offline: false, refresh_index: false };
+        let opts = AddOptions { test: true, annotation_processor: false, bom: true, offline: false, refresh_index: false, use_index: false, api: false };
         assert_eq!(section_name(&opts), "test-bom-imports");
     }
 
@@ -525,7 +559,7 @@ mod tests {
         run_add(
             dir.path(),
             Some("com.google.guava:guava@33.0.0-jre"),
-            AddOptions { test: false, annotation_processor: false, bom: false, offline: false, refresh_index: false },
+            AddOptions { test: false, annotation_processor: false, bom: false, offline: false, refresh_index: false, use_index: false, api: false },
         ).unwrap();
         let out = read_toml(&dir);
         assert!(out.contains("[dependencies]"), "got: {}", out);
@@ -538,7 +572,7 @@ mod tests {
         run_add(
             dir.path(),
             Some("org.junit.jupiter:junit-jupiter@5.10.0"),
-            AddOptions { test: true, annotation_processor: false, bom: false, offline: false, refresh_index: false },
+            AddOptions { test: true, annotation_processor: false, bom: false, offline: false, refresh_index: false, use_index: false, api: false },
         ).unwrap();
         let out = read_toml(&dir);
         assert!(out.contains("[test-dependencies]"), "got: {}", out);
@@ -552,7 +586,7 @@ mod tests {
         run_add(
             dir.path(),
             Some("org.projectlombok:lombok@1.18.30"),
-            AddOptions { test: false, annotation_processor: true, bom: false, offline: false, refresh_index: false },
+            AddOptions { test: false, annotation_processor: true, bom: false, offline: false, refresh_index: false, use_index: false, api: false },
         ).unwrap();
         let out = read_toml(&dir);
         assert!(out.contains("[annotation-processors]"), "got: {}", out);
@@ -565,7 +599,7 @@ mod tests {
         run_add(
             dir.path(),
             Some("com.example:proc@2.0.0"),
-            AddOptions { test: true, annotation_processor: true, bom: false, offline: false, refresh_index: false },
+            AddOptions { test: true, annotation_processor: true, bom: false, offline: false, refresh_index: false, use_index: false, api: false },
         ).unwrap();
         let out = read_toml(&dir);
         assert!(out.contains("[test-annotation-processors]"), "got: {}", out);
@@ -578,7 +612,7 @@ mod tests {
         run_add(
             dir.path(),
             Some("org.springframework.boot:spring-boot-dependencies@3.2.0"),
-            AddOptions { test: false, annotation_processor: false, bom: true, offline: false, refresh_index: false },
+            AddOptions { test: false, annotation_processor: false, bom: true, offline: false, refresh_index: false, use_index: false, api: false },
         ).unwrap();
         let out = read_toml(&dir);
         assert!(out.contains("[bom-imports]"), "got: {}", out);
@@ -594,7 +628,7 @@ mod tests {
         run_add(
             dir.path(),
             Some("com.example:test-bom@1.0.0"),
-            AddOptions { test: true, annotation_processor: false, bom: true, offline: false, refresh_index: false },
+            AddOptions { test: true, annotation_processor: false, bom: true, offline: false, refresh_index: false, use_index: false, api: false },
         ).unwrap();
         let out = read_toml(&dir);
         assert!(out.contains("[test-bom-imports]"), "got: {}", out);
@@ -606,7 +640,7 @@ mod tests {
         let result = run_add(
             dir.path(),
             Some("org.springframework.boot:spring-boot-dependencies"),
-            AddOptions { test: false, annotation_processor: false, bom: true, offline: false, refresh_index: false },
+            AddOptions { test: false, annotation_processor: false, bom: true, offline: false, refresh_index: false, use_index: false, api: false },
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("require an explicit version"));
@@ -620,7 +654,7 @@ mod tests {
         let result = run_add(
             dir.path(),
             Some("com.example:foo@2.0.0"),
-            AddOptions { test: false, annotation_processor: false, bom: false, offline: false, refresh_index: false },
+            AddOptions { test: false, annotation_processor: false, bom: false, offline: false, refresh_index: false, use_index: false, api: false },
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already present"));
@@ -632,7 +666,7 @@ mod tests {
         let result = run_add(
             dir.path(),
             Some("com.example:foo"),
-            AddOptions { test: false, annotation_processor: false, bom: false, offline: true, refresh_index: false },
+            AddOptions { test: false, annotation_processor: false, bom: false, offline: true, refresh_index: false, use_index: false, api: false },
         );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();

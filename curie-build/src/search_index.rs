@@ -146,6 +146,11 @@ fn gz_present() -> bool {
 }
 
 fn index_present() -> bool {
+    index_exists()
+}
+
+/// Return `true` if a usable Tantivy artifact index exists locally.
+pub fn index_exists() -> bool {
     let d = index_dir();
     d.exists() && !is_dir_empty(&d)
 }
@@ -295,7 +300,9 @@ pub fn total_count(handle: &IndexHandle) -> u64 {
 // Index opening
 // ---------------------------------------------------------------------------
 
-fn open_index() -> Result<IndexHandle> {
+/// Open the existing Tantivy index without downloading or rebuilding.
+/// Fails if the index is not present.
+pub fn open_index() -> Result<IndexHandle> {
     let dir = index_dir();
     let index = Index::open_in_dir(&dir)
         .with_context(|| format!("failed to open index at {}", dir.display()))?;
