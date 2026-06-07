@@ -1,6 +1,7 @@
 mod add_remove;
 mod api_search;
 mod api_search_ui;
+mod version_ui;
 mod audit;
 mod inspect_ui;
 mod search_index;

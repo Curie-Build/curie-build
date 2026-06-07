@@ -38,7 +38,8 @@
 
 use crate::build::{central_repos, extra_repos};
 use crate::descriptor::{self, Descriptor};
-use crate::update::{fetch_latest_stable, resolve_repo_url};
+use crate::update::{fetch_all_versions, fetch_latest_stable, resolve_repo_url};
+use crate::version_ui::{run_version_ui, VersionPick};
 use anyhow::{bail, Context, Result};
 use curie_deps::repo::Repository;
 use std::path::Path;
@@ -303,27 +304,21 @@ fn coord_exists_in_section(desc: &Descriptor, section: &str, coord: &str) -> boo
 
 /// Determine the version string to write when none was given on the CLI.
 ///
-/// 1. Check whether the coord is managed by an already-declared BOM.
-///    If so, return `""` (BOM-managed shorthand).
-/// 2. Otherwise fetch the latest stable release from Maven metadata.
+/// * Offline: auto-accept BOM if available, otherwise fail.
+/// * Online:  open an interactive version picker (pre-selecting the BOM version,
+///   the latest stable, or the newest available — in that priority order).
 fn resolve_version(
     coord: &str,
     desc: &Descriptor,
     opts: &AddOptions,
 ) -> Result<String> {
-    // Step 1: BOM-managed check (cheap path — no network needed when BOM
-    // itself is already cached locally; we accept the network cost of BOM
-    // resolution because it matches what the build itself would do).
-    if let Some(managed) = bom_managed_version(coord, desc, opts) {
-        println!(
-            "  {} is managed by a BOM ({}); writing empty version",
-            coord, managed
-        );
-        return Ok(String::new());
-    }
+    let bom_version = bom_managed_version(coord, desc, opts);
 
-    // Step 2: network fetch of maven-metadata.xml
+    // Offline path: no TUI, no network.
     if opts.offline {
+        if bom_version.is_some() {
+            return Ok(String::new()); // BOM-managed
+        }
         bail!(
             "\"{}\" is not managed by any declared BOM and no version was \
              specified.\nRe-run without --offline or pass an explicit version:\n  \
@@ -342,10 +337,24 @@ fn resolve_version(
         .build()
         .context("failed to build HTTP client")?;
 
+    // Fetch all versions from maven-metadata.xml; open the picker if successful.
+    if let Some(versions) = fetch_all_versions(&client, &repo_url, coord) {
+        let pick = run_version_ui(coord, &versions, bom_version.as_deref())?;
+        return match pick {
+            Some(VersionPick::BomManaged)    => Ok(String::new()),
+            Some(VersionPick::Explicit(v))   => Ok(v),
+            None                             => bail!("add cancelled"),
+        };
+    }
+
+    // Fallback when version fetch fails (network error, artifact absent).
+    if bom_version.is_some() {
+        return Ok(String::new());
+    }
     match fetch_latest_stable(&client, &repo_url, coord) {
         Some(v) => Ok(v),
         None => bail!(
-            "could not find any stable release of \"{}\" in {}.\n\
+            "could not find any release of \"{}\" in {}.\n\
              Specify a version explicitly:  curie add {}@<version>",
             coord, repo_url, coord
         ),

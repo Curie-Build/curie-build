@@ -248,6 +248,19 @@ pub fn fetch_latest_stable(
     latest_stable(&versions)
 }
 
+/// Fetch all versions from `maven-metadata.xml` in oldest-to-newest order.
+/// Returns `None` on any network or parse failure.
+pub fn fetch_all_versions(
+    client: &reqwest::blocking::Client,
+    repo_base: &str,
+    coord: &str,
+) -> Option<Vec<String>> {
+    let url = metadata_url(repo_base, coord)?;
+    let body = client.get(&url).send().ok()?.text().ok()?;
+    let versions = parse_versions(&body);
+    if versions.is_empty() { None } else { Some(versions) }
+}
+
 /// Extract all `<version>…</version>` values from a `maven-metadata.xml` body.
 fn parse_versions(xml: &str) -> Vec<String> {
     let mut versions = Vec::new();
