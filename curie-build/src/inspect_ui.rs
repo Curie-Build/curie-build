@@ -56,11 +56,10 @@ struct Job {
     /// `"HH:MM:SS"` in local timezone, or `""` when unknown.
     started_disp: String,
     lines:        Vec<String>,
-    /// UUID v4 shared by all jobs in one build run; `None` when no `.meta`.
-    #[allow(dead_code)]
-    build_id:     Option<String>,
+    /// UUIDv7 shared by all jobs in one build run; `None` when no `.meta`.
+    build_id:  Option<String>,
     /// Per-test results from `target/build.tests.json`; empty when absent.
-    tests:        Vec<TestEntry>,
+    tests:     Vec<TestEntry>,
 }
 
 #[derive(Clone)]
@@ -101,6 +100,8 @@ struct TreeNode {
     test_badge: Option<(String, TestStatus)>,
     /// `Some((job_idx, class_name))` for class group nodes.
     class_ref:  Option<(usize, String)>,
+    /// Index into `jobs` for every node that belongs to a specific job (leaf or child).
+    job_idx:    Option<usize>,
 }
 
 enum Row {
@@ -154,9 +155,13 @@ struct InspectState {
     /// `(job_idx, class_name)` pairs that have been expanded to show test method rows.
     expanded_classes: HashSet<(usize, String)>,
     /// Lines from the currently selected test's output file (empty when not in test view).
-    test_lines:       Vec<String>,
+    test_lines:        Vec<String>,
     /// Pane to return to when the search bar is dismissed with Enter or Esc.
-    pre_search_pane:  ActivePane,
+    pre_search_pane:   ActivePane,
+    /// Job indices whose log lines contain the current grep pattern (empty when grep inactive).
+    grep_job_matches:  HashSet<usize>,
+    /// Job indices whose build_id is older than the latest build_id seen across all jobs.
+    stale_jobs:        HashSet<usize>,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────
@@ -172,8 +177,9 @@ pub(crate) fn run_inspect_ui(
         .unwrap_or(time::UtcOffset::UTC);
 
     let jobs   = load_jobs(targets, action, utc_offset);
-    let expanded_jobs:    HashSet<usize>              = HashSet::new();
-    let expanded_classes: HashSet<(usize, String)>    = HashSet::new();
+    let stale_jobs   = collect_stale_jobs(&jobs);
+    let expanded_jobs:    HashSet<usize>           = HashSet::new();
+    let expanded_classes: HashSet<(usize, String)> = HashSet::new();
     let nodes  = build_tree_nodes(&jobs, &expanded_jobs, &expanded_classes);
     let filter = Filter::All;
     let rows   = build_rows(&jobs, &filter, "", "");
@@ -199,8 +205,10 @@ pub(crate) fn run_inspect_ui(
         job_search:      String::new(),
         expanded_jobs,
         expanded_classes,
-        test_lines:      Vec::new(),
-        pre_search_pane: ActivePane::Members,
+        test_lines:       Vec::new(),
+        pre_search_pane:  ActivePane::Members,
+        grep_job_matches: HashSet::new(),
+        stale_jobs,
     };
 
     // Auto-focus first failure; fall back to explicit preselect index.
@@ -255,6 +263,24 @@ fn load_jobs(targets: &[LogTarget], action: &str, utc_offset: time::UtcOffset) -
 
         Job { declared: t.declared.clone(), state, started_ms, started_disp, lines, build_id, tests }
     }).collect()
+}
+
+/// Return the set of job indices whose build_id is older than the latest seen.
+/// When all jobs share the same id (or have none), the set is empty.
+fn collect_stale_jobs(jobs: &[Job]) -> HashSet<usize> {
+    let latest = jobs.iter()
+        .filter_map(|j| j.build_id.as_deref())
+        .max()
+        .map(str::to_string);
+    let Some(latest_id) = latest else { return HashSet::new(); };
+    let has_mixed = jobs.iter()
+        .filter_map(|j| j.build_id.as_deref())
+        .any(|id| id != latest_id);
+    if !has_mixed { return HashSet::new(); }
+    jobs.iter().enumerate()
+        .filter(|(_, j)| j.build_id.as_deref().is_some_and(|id| id != latest_id))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 fn parse_test_sidecar(member_root: &std::path::Path) -> Vec<TestEntry> {
@@ -350,6 +376,7 @@ fn build_tree_nodes(
             test_ref:   None,
             test_badge: None,
             class_ref:  None,
+            job_idx:    Some(job_idx),
         });
 
         // When job is expanded: add one class-group node per unique class, then
@@ -361,7 +388,6 @@ fn build_tree_nodes(
             for (class_name, tests_in_class) in group_by_class(&job.tests) {
                 let class_expanded = expanded_classes.contains(&(job_idx, class_name.clone()));
                 let class_marker   = if class_expanded { " ▾" } else { " ▸" };
-                // Short name: last component after '.' for display
                 let short_class = class_name.rsplit('.').next().unwrap_or(&class_name);
                 nodes.push(TreeNode {
                     label:      format!("{class_indent}{short_class}{class_marker}"),
@@ -372,6 +398,7 @@ fn build_tree_nodes(
                     test_ref:   None,
                     test_badge: None,
                     class_ref:  Some((job_idx, class_name.clone())),
+                    job_idx:    Some(job_idx),
                 });
 
                 if class_expanded {
@@ -387,6 +414,7 @@ fn build_tree_nodes(
                             test_ref:   Some((job_idx, test_idx)),
                             test_badge: Some((badge, test.status.clone())),
                             class_ref:  None,
+                            job_idx:    Some(job_idx),
                         });
                     }
                 }
@@ -421,6 +449,7 @@ fn tree_node_plain(label: &str, title: &str, filter: Filter) -> TreeNode {
         test_ref:   None,
         test_badge: None,
         class_ref:  None,
+        job_idx:    None,
     }
 }
 
@@ -539,9 +568,19 @@ fn load_test_view(state: &mut InspectState, job_idx: usize, test_idx: usize) {
     state.scroll = state.scroll.min(max);
 }
 
+/// Job indices whose log lines contain `grep` (case-insensitive). Empty when grep is inactive.
+fn grep_hits(jobs: &[Job], grep: &str) -> HashSet<usize> {
+    if grep.is_empty() { return HashSet::new(); }
+    let pattern = grep.to_lowercase();
+    (0..jobs.len())
+        .filter(|&i| jobs[i].lines.iter().any(|l| l.to_lowercase().contains(&pattern)))
+        .collect()
+}
+
 /// Rebuild rows from current filter/grep/job_search, then clamp scroll.
 /// When the selected node is a test leaf, re-applies the test view.
 fn rebuild_rows(state: &mut InspectState) {
+    state.grep_job_matches = grep_hits(&state.jobs, &state.grep);
     if let Some((job_idx, test_idx)) = state.nodes.get(state.selected_idx).and_then(|n| n.test_ref) {
         load_test_view(state, job_idx, test_idx);
         return;
@@ -556,7 +595,8 @@ fn reload(state: &mut InspectState) {
     let targets    = state.targets.clone();
     let action     = state.action.clone();
     let utc_offset = state.utc_offset;
-    state.jobs     = load_jobs(&targets, &action, utc_offset);
+    state.jobs       = load_jobs(&targets, &action, utc_offset);
+    state.stale_jobs = collect_stale_jobs(&state.jobs);
     state.nodes    = build_tree_nodes(&state.jobs, &state.expanded_jobs, &state.expanded_classes);
     state.selected_idx = state.selected_idx.min(state.nodes.len().saturating_sub(1));
     rebuild_rows(state);
@@ -642,7 +682,7 @@ fn badge_str(state: &LogState) -> String {
     match state {
         LogState::Ok         { duration_ms } => format!("✓ {}", fmt_duration(*duration_ms)),
         LogState::Failed     { duration_ms } => format!("✗ {}", fmt_duration(*duration_ms)),
-        LogState::NoMetadata                 => "missing metadata".to_string(),
+        LogState::NoMetadata                 => "skipped".to_string(),
         LogState::NoLog                      => "(no log)".to_string(),
     }
 }
@@ -755,9 +795,8 @@ fn hint_text(state: &InspectState) -> &'static str {
 }
 
 fn render_members_block(f: &mut Frame, state: &InspectState, area: Rect) {
-    let is_active = state.active_pane == ActivePane::Members
-        || (state.active_pane == ActivePane::Search
-            && state.pre_search_pane == ActivePane::Members);
+    // Only highlight border when Members pane itself is focused (not when Search is active).
+    let is_active    = state.active_pane == ActivePane::Members;
     let border_style = if is_active { Style::default().fg(Color::Cyan) } else { Style::default() };
 
     let block = Block::default()
@@ -769,28 +808,46 @@ fn render_members_block(f: &mut Frame, state: &InspectState, area: Rect) {
     let vis_h   = inner.height as usize;
     let inner_w = inner.width  as usize;
     let js      = &state.job_search;
+    let gm      = &state.grep_job_matches;
+    let stale   = &state.stale_jobs;
 
     let lines: Vec<Line<'static>> = state.nodes.iter()
         .enumerate()
         .skip(state.tree_scroll)
         .take(vis_h)
-        .map(|(i, node)| member_line(node, i == state.selected_idx, inner_w, js))
+        .map(|(i, node)| member_line(node, i == state.selected_idx, inner_w, js, gm, stale))
         .collect();
 
     f.render_widget(block, area);
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn member_line(node: &TreeNode, is_selected: bool, inner_w: usize, job_search: &str) -> Line<'static> {
+fn member_line(
+    node:         &TreeNode,
+    is_selected:  bool,
+    inner_w:      usize,
+    job_search:   &str,
+    grep_matches: &HashSet<usize>,
+    stale_jobs:   &HashSet<usize>,
+) -> Line<'static> {
     match &node.state {
         Some(log_state) => {
-            // Job leaf node: right-aligned status badge.
-            // Dim when job_search is active and this job doesn't match.
-            let search_dim = !job_search.is_empty()
+            let ji = node.job_idx;
+            // Dim when either search filter is active and this job doesn't match.
+            let job_search_dim = !job_search.is_empty()
                 && !node.title.to_lowercase().contains(&job_search.to_lowercase());
-            let badge   = badge_str(log_state);
-            let bstyle  = if search_dim {
-                Style::default().add_modifier(Modifier::DIM)
+            let grep_dim = !grep_matches.is_empty()
+                && ji.map_or(true, |i| !grep_matches.contains(&i));
+            let is_stale = ji.map_or(false, |i| stale_jobs.contains(&i));
+            let search_dim = job_search_dim || grep_dim;
+
+            let badge = if is_stale {
+                format!("{} (prev)", badge_str(log_state))
+            } else {
+                badge_str(log_state)
+            };
+            let bstyle = if is_stale || search_dim {
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
             } else {
                 badge_style(log_state)
             };
@@ -798,7 +855,11 @@ fn member_line(node: &TreeNode, is_selected: bool, inner_w: usize, job_search: &
             let label_w = inner_w.saturating_sub(badge_w + 1);
             let label:  String = node.label.chars().take(label_w).collect();
             let padding = " ".repeat(label_w.saturating_sub(label.chars().count()) + 1);
-            let label_style = if search_dim { Style::default().add_modifier(Modifier::DIM) } else { Style::default() };
+            let label_style = if is_stale || search_dim {
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+            } else {
+                Style::default()
+            };
 
             let mut line = Line::from(vec![
                 Span::styled(label, label_style),
@@ -849,10 +910,8 @@ fn member_line(node: &TreeNode, is_selected: bool, inner_w: usize, job_search: &
 
 /// Virtualized log renderer: only converts the visible row slice to `Line`s (O(vis_h)).
 fn render_log_block(f: &mut Frame, state: &InspectState, area: Rect) {
-    let is_active = !state.show_members
-        || state.active_pane == ActivePane::Log
-        || (state.active_pane == ActivePane::Search
-            && state.pre_search_pane == ActivePane::Log);
+    // Only highlight border when Log pane itself is focused (not when Search is active).
+    let is_active = !state.show_members || state.active_pane == ActivePane::Log;
     let border_style = if is_active { Style::default().fg(Color::Cyan) } else { Style::default() };
 
     let title = format!("Log: {}", state.log_title);
@@ -986,10 +1045,13 @@ fn render_status_bar(f: &mut Frame, state: &InspectState, area: Rect) {
         InputMode::JobSearch => format!("f {}█", state.job_search),
         InputMode::Normal    => return,
     };
-    f.render_widget(
-        Paragraph::new(content).style(Style::default().fg(Color::White).bg(Color::DarkGray)),
-        area,
-    );
+    // Cyan background when the search bar has keyboard focus; dimmer when a pane does.
+    let style = if state.active_pane == ActivePane::Search {
+        Style::default().fg(Color::Black).bg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray).bg(Color::Black)
+    };
+    f.render_widget(Paragraph::new(content).style(style), area);
 }
 
 // ── Event loop ────────────────────────────────────────────────────────────
@@ -1554,7 +1616,7 @@ mod tests {
 
     #[test]
     fn badge_str_no_metadata() {
-        assert_eq!(badge_str(&LogState::NoMetadata), "missing metadata");
+        assert_eq!(badge_str(&LogState::NoMetadata), "skipped");
     }
 
     // ── highlight_spans ──────────────────────────────────────────────────

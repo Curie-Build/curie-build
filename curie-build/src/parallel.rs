@@ -626,7 +626,7 @@ where
         println!();
     }
 
-    let build_id = uuid::Uuid::new_v4().to_string();
+    let build_id = uuid::Uuid::now_v7().to_string();
 
     // Scheduler state (all accessed only on the coordinator thread).
     let mut pending = initial_pending(ws, subset, respect_dag);
