@@ -20,6 +20,8 @@ use crate::build::{central_repos, extra_repos};
 use crate::descriptor::{self, Descriptor};
 use anyhow::{Context, Result};
 use curie_deps::repo::Repository;
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 use toml_edit::DocumentMut;
 
@@ -273,6 +275,65 @@ fn parse_versions(xml: &str) -> Vec<String> {
         }
     }
     versions
+}
+
+// ---------------------------------------------------------------------------
+// Per-version timestamps via Maven Central GAV API
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct GavResponse { response: GavBody }
+#[derive(Deserialize)]
+struct GavBody { docs: Vec<GavDoc> }
+#[derive(Deserialize)]
+struct GavDoc {
+    #[serde(rename = "v")] version: String,
+    #[serde(default)]      timestamp: i64,
+}
+
+const GAV_API_BASE: &str = "https://search.maven.org/solrsearch/select";
+
+/// Fetch per-version release timestamps from the Maven Central GAV search API.
+///
+/// Returns a map of `version → epoch-milliseconds`.  Returns an empty map on
+/// any network or parse failure so the caller can degrade gracefully.
+/// The call always targets Maven Central directly; private repo artifacts will
+/// yield an empty map.
+pub fn fetch_version_timestamps(
+    client: &reqwest::blocking::Client,
+    coord: &str,
+) -> HashMap<String, i64> {
+    fetch_timestamps_inner(client, coord).unwrap_or_default()
+}
+
+fn fetch_timestamps_inner(
+    client: &reqwest::blocking::Client,
+    coord: &str,
+) -> Option<HashMap<String, i64>> {
+    let (group, artifact) = coord.split_once(':')?;
+    // Group/artifact IDs contain only [a-zA-Z0-9._-], all URL-safe.
+    let url = format!(
+        "{}?q=g:{}+AND+a:{}&core=gav&rows=200&wt=json",
+        GAV_API_BASE, group, artifact
+    );
+    let body = client.get(&url).send().ok()?.text().ok()?;
+    let parsed: GavResponse = serde_json::from_str(&body).ok()?;
+    Some(
+        parsed.response.docs
+            .into_iter()
+            .filter(|d| d.timestamp > 0)
+            .map(|d| (d.version, d.timestamp))
+            .collect(),
+    )
+}
+
+/// Convert epoch milliseconds to a `"YYYY-MM-DD"` string (UTC).
+/// Returns an empty string when the timestamp is out of valid range.
+pub fn epoch_ms_to_date(ms: i64) -> String {
+    match time::OffsetDateTime::from_unix_timestamp(ms / 1000) {
+        Ok(dt) => format!("{:04}-{:02}-{:02}", dt.year(), dt.month() as u8, dt.day()),
+        Err(_) => String::new(),
+    }
 }
 
 /// Return the highest stable version from a list, or `None` if none qualify.
@@ -638,5 +699,48 @@ mod tests {
         assert_eq!(version_cmp("1.10.0", "1.9.0"), std::cmp::Ordering::Greater);
         assert_eq!(version_cmp("2.0.0", "1.99.99"), std::cmp::Ordering::Greater);
         assert_eq!(version_cmp("1.0.0", "1.0.0"), std::cmp::Ordering::Equal);
+    }
+
+    // -- GAV timestamp parsing / date formatting ----------------------------
+
+    fn parse_timestamps(json: &str) -> HashMap<String, i64> {
+        let parsed: GavResponse = serde_json::from_str(json).unwrap();
+        parsed.response.docs
+            .into_iter()
+            .filter(|d| d.timestamp > 0)
+            .map(|d| (d.version, d.timestamp))
+            .collect()
+    }
+
+    #[test]
+    fn parse_gav_response_empty() {
+        let json = r#"{"response":{"numFound":0,"start":0,"docs":[]}}"#;
+        let map = parse_timestamps(json);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn parse_gav_response_maps_versions() {
+        let json = r#"{
+            "response": {"numFound": 2, "start": 0, "docs": [
+                {"v": "33.0.0-jre", "timestamp": 1709000000000},
+                {"v": "32.1.3-jre", "timestamp": 1694000000000}
+            ]}
+        }"#;
+        let map = parse_timestamps(json);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map["33.0.0-jre"], 1709000000000);
+        assert_eq!(map["32.1.3-jre"], 1694000000000);
+    }
+
+    #[test]
+    fn epoch_ms_to_date_known_value() {
+        // 1700000000 seconds = 2023-11-14 22:13:20 UTC
+        assert_eq!(epoch_ms_to_date(1_700_000_000_000), "2023-11-14");
+    }
+
+    #[test]
+    fn epoch_ms_to_date_zero_epoch() {
+        assert_eq!(epoch_ms_to_date(0), "1970-01-01");
     }
 }

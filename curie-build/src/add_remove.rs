@@ -39,11 +39,15 @@
 use crate::build::{central_repos, extra_repos};
 use crate::descriptor::{self, Descriptor};
 use crate::search_index::IndexHandle;
-use crate::update::{fetch_all_versions, fetch_latest_stable, resolve_repo_url};
+use crate::update::{
+    epoch_ms_to_date, fetch_all_versions, fetch_latest_stable, fetch_version_timestamps,
+    resolve_repo_url,
+};
 use crate::version_ui::{run_version_phase, run_version_ui, show_loading_screen, VersionPick};
 use anyhow::{bail, Context, Result};
 use crossterm::{cursor, execute, terminal};
 use curie_deps::repo::Repository;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use toml_edit::DocumentMut;
@@ -229,9 +233,12 @@ fn interactive_flow_inner(
 
         let bom_version   = bom_managed_version(&coord, desc, opts);
         let all_versions  = fetch_coord_versions(&coord, desc, opts);
+        let version_dates = fetch_coord_version_dates(&coord, opts);
 
         // ── Phase 2: version selection ─────────────────────────────────────
-        let pick = run_version_phase(&coord, &all_versions, bom_version.as_deref(), stdout)?;
+        let pick = run_version_phase(
+            &coord, &all_versions, bom_version.as_deref(), &version_dates, stdout,
+        )?;
 
         match pick {
             Some(VersionPick::BomManaged)   => return Ok(Some((coord, String::new()))),
@@ -240,6 +247,25 @@ fn interactive_flow_inner(
             None => continue,
         }
     }
+}
+
+/// Fetch release dates for all versions of `coord` from the Maven Central GAV API.
+///
+/// Returns a map of `version → "YYYY-MM-DD"`.  Returns an empty map when
+/// offline or on any network/parse failure (graceful degradation).
+fn fetch_coord_version_dates(coord: &str, opts: &AddOptions) -> HashMap<String, String> {
+    if opts.offline { return HashMap::new(); }
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .user_agent("curie-add/0.1")
+        .timeout(std::time::Duration::from_secs(15))
+        .build() else { return HashMap::new(); };
+    fetch_version_timestamps(&client, coord)
+        .into_iter()
+        .filter_map(|(v, ms)| {
+            let date = epoch_ms_to_date(ms);
+            if date.is_empty() { None } else { Some((v, date)) }
+        })
+        .collect()
 }
 
 /// Fetch all versions from Maven Central for `coord`.  Returns an empty vec on
@@ -423,7 +449,8 @@ fn resolve_version(
 
     // Fetch all versions from maven-metadata.xml; open the picker if successful.
     if let Some(versions) = fetch_all_versions(&client, &repo_url, coord) {
-        let pick = run_version_ui(coord, &versions, bom_version.as_deref())?;
+        let version_dates = fetch_coord_version_dates(coord, opts);
+        let pick = run_version_ui(coord, &versions, bom_version.as_deref(), &version_dates)?;
         return match pick {
             Some(VersionPick::BomManaged)    => Ok(String::new()),
             Some(VersionPick::Explicit(v))   => Ok(v),
