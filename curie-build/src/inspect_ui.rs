@@ -113,8 +113,8 @@ enum Row {
     TestBody       { line: usize },
 }
 
-#[derive(PartialEq)]
-enum ActivePane { Members, Log }
+#[derive(PartialEq, Clone)]
+enum ActivePane { Members, Log, Search }
 
 #[derive(PartialEq, Clone)]
 enum InputMode {
@@ -154,7 +154,9 @@ struct InspectState {
     /// `(job_idx, class_name)` pairs that have been expanded to show test method rows.
     expanded_classes: HashSet<(usize, String)>,
     /// Lines from the currently selected test's output file (empty when not in test view).
-    test_lines:   Vec<String>,
+    test_lines:       Vec<String>,
+    /// Pane to return to when the search bar is dismissed with Enter or Esc.
+    pre_search_pane:  ActivePane,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────
@@ -181,29 +183,34 @@ pub(crate) fn run_inspect_ui(
         action:       action.to_string(),
         jobs,
         nodes,
-        selected_idx: 0,
-        tree_scroll:  0,
+        selected_idx:    0,
+        tree_scroll:     0,
         rows,
-        scroll:       0,
-        show_members: false,
-        active_pane:  ActivePane::Log,
+        scroll:          0,
+        show_members:    true,
+        active_pane:     ActivePane::Members,
         filter,
-        log_title:    "all jobs".to_string(),
-        pane_h:       24,
-        log_vis_h:    20,
+        log_title:       "all jobs".to_string(),
+        pane_h:          24,
+        log_vis_h:       20,
         utc_offset,
-        input_mode:   InputMode::Normal,
-        grep:         String::new(),
-        job_search:   String::new(),
+        input_mode:      InputMode::Normal,
+        grep:            String::new(),
+        job_search:      String::new(),
         expanded_jobs,
         expanded_classes,
-        test_lines:   Vec::new(),
+        test_lines:      Vec::new(),
+        pre_search_pane: ActivePane::Members,
     };
 
-    if let Some(idx) = preselect {
-        if idx < state.jobs.len() {
-            if let Some(ni) = find_node_for_declared(&state.nodes, &state.jobs[idx].declared) {
-                state.selected_idx = ni;
+    // Auto-focus first failure; fall back to explicit preselect index.
+    if !auto_select_failed(&mut state) {
+        if let Some(idx) = preselect {
+            if idx < state.jobs.len() {
+                if let Some(ni) = find_node_for_declared(&state.nodes, &state.jobs[idx].declared) {
+                    state.selected_idx = ni;
+                    apply_selection(&mut state);
+                }
             }
         }
     }
@@ -555,6 +562,43 @@ fn reload(state: &mut InspectState) {
     rebuild_rows(state);
 }
 
+/// Focus the first failing job.  If it has failing tests, expand the job+class
+/// and select the first failing test.  Returns `true` when a failure was found.
+fn auto_select_failed(state: &mut InspectState) -> bool {
+    let failed_job = state.jobs.iter().enumerate()
+        .find(|(_, j)| matches!(j.state, LogState::Failed { .. }));
+
+    let Some((job_idx, _)) = failed_job else { return false; };
+
+    // Look for the first failing test in this job.
+    let first_failing_test = state.jobs[job_idx].tests.iter().enumerate()
+        .find(|(_, t)| t.status == TestStatus::Failed)
+        .map(|(i, _)| {
+            let class_name = state.jobs[job_idx].tests[i].class_name.clone();
+            (i, class_name)
+        });
+
+    if let Some((test_idx, class_name)) = first_failing_test {
+        state.expanded_jobs.insert(job_idx);
+        state.expanded_classes.insert((job_idx, class_name.clone()));
+        state.nodes = build_tree_nodes(&state.jobs, &state.expanded_jobs, &state.expanded_classes);
+
+        if let Some(ni) = state.nodes.iter().position(|n| n.test_ref == Some((job_idx, test_idx))) {
+            state.selected_idx = ni;
+            apply_selection(state);
+            return true;
+        }
+    }
+
+    // No failing test: just select the failed job node.
+    let declared = state.jobs[job_idx].declared.clone();
+    if let Some(ni) = find_node_for_declared(&state.nodes, &declared) {
+        state.selected_idx = ni;
+        apply_selection(state);
+    }
+    true
+}
+
 fn sync_tree_scroll(state: &mut InspectState) {
     let visible = (state.pane_h as usize).saturating_sub(2);
     let sel     = state.selected_idx;
@@ -689,17 +733,31 @@ fn render_frame(f: &mut Frame, state: &InspectState) {
 }
 
 fn hint_text(state: &InspectState) -> &'static str {
-    if state.show_members && state.active_pane == ActivePane::Members {
-        "curie inspect  \u{2191}\u{2193}/jk select  PgUp/Dn scroll  Tab log  r reload  q quit"
-    } else if state.input_mode != InputMode::Normal {
-        "curie inspect  type to filter  Esc clear  PgUp/Dn scroll"
-    } else {
-        "curie inspect  jk/PgUp/Dn scroll  g/G top/bot  / grep  f job  m members  r reload  q quit"
+    match &state.active_pane {
+        ActivePane::Search => {
+            "curie inspect  type to filter  Enter apply  Tab switch pane  Esc clear"
+        }
+        ActivePane::Members => {
+            if state.input_mode != InputMode::Normal {
+                "curie inspect  \u{2191}\u{2193}/jk select  Tab switch  Esc clear search  q quit"
+            } else {
+                "curie inspect  \u{2191}\u{2193}/jk select  Enter/\u{2192} expand  \u{2190} collapse  Tab log  m hide  / grep  f job  r reload  q quit"
+            }
+        }
+        ActivePane::Log => {
+            if state.input_mode != InputMode::Normal {
+                "curie inspect  PgUp/Dn scroll  Tab switch  Esc clear search  q quit"
+            } else {
+                "curie inspect  jk/PgUp/Dn scroll  g/G top/bot  Tab members  m toggle  / grep  f job  r reload  q quit"
+            }
+        }
     }
 }
 
 fn render_members_block(f: &mut Frame, state: &InspectState, area: Rect) {
-    let is_active    = state.active_pane == ActivePane::Members;
+    let is_active = state.active_pane == ActivePane::Members
+        || (state.active_pane == ActivePane::Search
+            && state.pre_search_pane == ActivePane::Members);
     let border_style = if is_active { Style::default().fg(Color::Cyan) } else { Style::default() };
 
     let block = Block::default()
@@ -710,31 +768,41 @@ fn render_members_block(f: &mut Frame, state: &InspectState, area: Rect) {
     let inner   = block.inner(area);
     let vis_h   = inner.height as usize;
     let inner_w = inner.width  as usize;
+    let js      = &state.job_search;
 
     let lines: Vec<Line<'static>> = state.nodes.iter()
         .enumerate()
         .skip(state.tree_scroll)
         .take(vis_h)
-        .map(|(i, node)| member_line(node, i == state.selected_idx, inner_w))
+        .map(|(i, node)| member_line(node, i == state.selected_idx, inner_w, js))
         .collect();
 
     f.render_widget(block, area);
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn member_line(node: &TreeNode, is_selected: bool, inner_w: usize) -> Line<'static> {
+fn member_line(node: &TreeNode, is_selected: bool, inner_w: usize, job_search: &str) -> Line<'static> {
     match &node.state {
-        Some(state) => {
-            let badge   = badge_str(state);
-            let bstyle  = badge_style(state);
+        Some(log_state) => {
+            // Job leaf node: right-aligned status badge.
+            // Dim when job_search is active and this job doesn't match.
+            let search_dim = !job_search.is_empty()
+                && !node.title.to_lowercase().contains(&job_search.to_lowercase());
+            let badge   = badge_str(log_state);
+            let bstyle  = if search_dim {
+                Style::default().add_modifier(Modifier::DIM)
+            } else {
+                badge_style(log_state)
+            };
             let badge_w = badge.chars().count();
             let label_w = inner_w.saturating_sub(badge_w + 1);
             let label:  String = node.label.chars().take(label_w).collect();
             let padding = " ".repeat(label_w.saturating_sub(label.chars().count()) + 1);
+            let label_style = if search_dim { Style::default().add_modifier(Modifier::DIM) } else { Style::default() };
 
             let mut line = Line::from(vec![
-                Span::raw(label),
-                Span::raw(padding),
+                Span::styled(label, label_style),
+                Span::styled(padding, label_style),
                 Span::styled(badge, bstyle),
             ]);
             if is_selected {
@@ -744,7 +812,7 @@ fn member_line(node: &TreeNode, is_selected: bool, inner_w: usize) -> Line<'stat
         }
         None => {
             if let Some((badge_text, status)) = &node.test_badge {
-                // Test leaf node: right-aligned coloured badge, like job nodes.
+                // Test leaf node: right-aligned coloured badge.
                 let badge_color = match status {
                     TestStatus::Passed  => Color::Green,
                     TestStatus::Failed  => Color::Red,
@@ -781,7 +849,10 @@ fn member_line(node: &TreeNode, is_selected: bool, inner_w: usize) -> Line<'stat
 
 /// Virtualized log renderer: only converts the visible row slice to `Line`s (O(vis_h)).
 fn render_log_block(f: &mut Frame, state: &InspectState, area: Rect) {
-    let is_active    = !state.show_members || state.active_pane == ActivePane::Log;
+    let is_active = !state.show_members
+        || state.active_pane == ActivePane::Log
+        || (state.active_pane == ActivePane::Search
+            && state.pre_search_pane == ActivePane::Log);
     let border_style = if is_active { Style::default().fg(Color::Cyan) } else { Style::default() };
 
     let title = format!("Log: {}", state.log_title);
@@ -947,19 +1018,27 @@ fn event_loop(
 }
 
 fn handle_key(state: &mut InspectState, key: KeyEvent) -> bool {
-    if state.input_mode != InputMode::Normal {
-        return handle_key_input_mode(state, key);
+    if state.active_pane == ActivePane::Search {
+        return handle_key_search(state, key);
     }
 
     let members_active = state.show_members && state.active_pane == ActivePane::Members;
+    let searching      = state.input_mode != InputMode::Normal;
     let log_ph         = state.log_vis_h.max(1);
 
     match key.code {
+        // Esc with active search: clear search instead of quitting.
+        KeyCode::Esc if searching => {
+            clear_search(state);
+        }
         KeyCode::Char('q') | KeyCode::Esc => return false,
 
-        KeyCode::Tab | KeyCode::Char('m') => toggle_members(state),
+        KeyCode::Tab => cycle_panes(state),
 
-        // Tree navigation — members pane must be active.
+        // m: toggle Members pane visibility.
+        KeyCode::Char('m') => toggle_members(state),
+
+        // Members navigation.
         KeyCode::Up | KeyCode::Char('k') if members_active => {
             state.selected_idx = prev_node(&state.nodes, state.selected_idx);
             apply_selection(state);
@@ -968,7 +1047,6 @@ fn handle_key(state: &mut InspectState, key: KeyEvent) -> bool {
             state.selected_idx = next_node(&state.nodes, state.selected_idx);
             apply_selection(state);
         }
-        // Expand/collapse test nodes with Enter or → / ←
         KeyCode::Enter | KeyCode::Right if members_active => {
             toggle_test_expansion(state);
         }
@@ -976,7 +1054,7 @@ fn handle_key(state: &mut InspectState, key: KeyEvent) -> bool {
             collapse_test_node(state);
         }
 
-        // Log scrolling — one line at a time.
+        // Log scrolling.
         KeyCode::Char('k') | KeyCode::Up => {
             state.scroll = state.scroll.saturating_sub(1);
         }
@@ -984,7 +1062,6 @@ fn handle_key(state: &mut InspectState, key: KeyEvent) -> bool {
             let max = state.rows.len().saturating_sub(1);
             state.scroll = (state.scroll + 1).min(max);
         }
-
         KeyCode::PageUp => {
             state.scroll = state.scroll.saturating_sub(log_ph);
         }
@@ -1005,12 +1082,16 @@ fn handle_key(state: &mut InspectState, key: KeyEvent) -> bool {
         KeyCode::Char('r') => reload(state),
 
         KeyCode::Char('/') => {
-            state.input_mode = InputMode::Grep;
+            state.pre_search_pane = state.active_pane.clone();
+            state.input_mode      = InputMode::Grep;
+            state.active_pane     = ActivePane::Search;
             state.grep.clear();
             rebuild_rows(state);
         }
         KeyCode::Char('f') => {
-            state.input_mode = InputMode::JobSearch;
+            state.pre_search_pane = state.active_pane.clone();
+            state.input_mode      = InputMode::JobSearch;
+            state.active_pane     = ActivePane::Search;
             state.job_search.clear();
             rebuild_rows(state);
         }
@@ -1020,18 +1101,20 @@ fn handle_key(state: &mut InspectState, key: KeyEvent) -> bool {
     true
 }
 
-fn handle_key_input_mode(state: &mut InspectState, key: KeyEvent) -> bool {
+fn handle_key_search(state: &mut InspectState, key: KeyEvent) -> bool {
     let log_ph = state.log_vis_h.max(1);
 
     match key.code {
         KeyCode::Esc => {
-            match state.input_mode {
-                InputMode::Grep      => state.grep.clear(),
-                InputMode::JobSearch => state.job_search.clear(),
-                _                    => {}
-            }
-            state.input_mode = InputMode::Normal;
-            rebuild_rows(state);
+            clear_search(state);
+        }
+        KeyCode::Enter => {
+            // Confirm search and return focus to the previous pane.
+            state.active_pane = state.pre_search_pane.clone();
+        }
+        KeyCode::Tab => {
+            // Cycle: Search → Members (or Log if members hidden) → Log → Search.
+            cycle_panes(state);
         }
         KeyCode::Backspace => {
             match state.input_mode {
@@ -1142,17 +1225,53 @@ fn rebuild_tree_and_reselect_class(state: &mut InspectState, job_idx: usize, cla
     apply_selection(state);
 }
 
-/// Cycle: hidden → Members-active → Log-active → hidden → …
+/// Cycle panes in order: Members → Log → (Search if active) → Members.
+fn cycle_panes(state: &mut InspectState) {
+    let searching = state.input_mode != InputMode::Normal;
+    state.active_pane = match &state.active_pane {
+        ActivePane::Members => ActivePane::Log,
+        ActivePane::Log => {
+            if searching {
+                ActivePane::Search
+            } else if state.show_members {
+                ActivePane::Members
+            } else {
+                ActivePane::Log
+            }
+        }
+        ActivePane::Search => {
+            if state.show_members { ActivePane::Members } else { ActivePane::Log }
+        }
+    };
+    // Switching to Members implicitly shows the pane.
+    if state.active_pane == ActivePane::Members {
+        state.show_members = true;
+    }
+}
+
+/// `m` key: toggle Members pane visibility.
 fn toggle_members(state: &mut InspectState) {
-    if !state.show_members {
+    if state.show_members {
+        state.show_members = false;
+        if state.active_pane == ActivePane::Members {
+            state.active_pane = ActivePane::Log;
+        }
+    } else {
         state.show_members = true;
         state.active_pane  = ActivePane::Members;
-    } else if state.active_pane == ActivePane::Members {
-        state.active_pane = ActivePane::Log;
-    } else {
-        state.show_members = false;
-        state.active_pane  = ActivePane::Log;
     }
+}
+
+/// Clear the active search pattern and return focus to the pre-search pane.
+fn clear_search(state: &mut InspectState) {
+    match state.input_mode {
+        InputMode::Grep      => state.grep.clear(),
+        InputMode::JobSearch => state.job_search.clear(),
+        InputMode::Normal    => {}
+    }
+    state.input_mode  = InputMode::Normal;
+    state.active_pane = state.pre_search_pane.clone();
+    rebuild_rows(state);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
