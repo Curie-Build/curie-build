@@ -19,6 +19,10 @@ pub struct ArtifactHit {
     /// `"group:artifact"` coordinate.
     pub coord: String,
     pub latest_version: String,
+    /// Number of published versions — used as a popularity proxy for sorting.
+    pub version_count: u32,
+    /// Epoch-millisecond timestamp of the latest release — used to break ties.
+    pub timestamp: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -43,6 +47,10 @@ struct ApiDoc {
     artifact: String,
     #[serde(rename = "latestVersion", default)]
     latest_version: String,
+    #[serde(rename = "versionCount", default)]
+    version_count: u32,
+    #[serde(default)]
+    timestamp: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,15 +97,31 @@ fn percent_encode(s: &str) -> String {
 fn parse_response(body: &str) -> Result<Vec<ArtifactHit>> {
     let parsed: ApiResponse =
         serde_json::from_str(body).context("failed to parse Maven Central API response")?;
-    Ok(parsed
+    let mut hits: Vec<ArtifactHit> = parsed
         .response
         .docs
         .into_iter()
         .map(|d| ArtifactHit {
             coord: format!("{}:{}", d.group, d.artifact),
             latest_version: d.latest_version,
+            version_count: d.version_count,
+            timestamp: d.timestamp,
         })
-        .collect())
+        .collect();
+    sort_by_popularity(&mut hits);
+    Ok(hits)
+}
+
+/// Sort hits by `version_count` descending, then `timestamp` descending.
+///
+/// `version_count` is a reliable proxy for popularity: widely-adopted libraries
+/// accumulate many releases over time.  `timestamp` breaks ties in favour of
+/// recently active projects.
+fn sort_by_popularity(hits: &mut Vec<ArtifactHit>) {
+    hits.sort_by(|a, b| {
+        b.version_count.cmp(&a.version_count)
+            .then_with(|| b.timestamp.cmp(&a.timestamp))
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -120,13 +144,16 @@ mod tests {
         let json = r#"{
             "responseHeader":{"status":0,"QTime":10},
             "response":{"numFound":1,"start":0,"docs":[
-                {"g":"com.google.guava","a":"guava","latestVersion":"33.0.0-jre","versionCount":45}
+                {"g":"com.google.guava","a":"guava","latestVersion":"33.0.0-jre",
+                 "versionCount":45,"timestamp":1700000000000}
             ]}
         }"#;
         let hits = parse_response(json).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].coord, "com.google.guava:guava");
         assert_eq!(hits[0].latest_version, "33.0.0-jre");
+        assert_eq!(hits[0].version_count, 45);
+        assert_eq!(hits[0].timestamp, 1_700_000_000_000);
     }
 
     #[test]
@@ -141,5 +168,37 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].coord, "org.example:lib");
         assert_eq!(hits[0].latest_version, "");
+        assert_eq!(hits[0].version_count, 0);
+        assert_eq!(hits[0].timestamp, 0);
+    }
+
+    #[test]
+    fn sort_by_popularity_orders_by_version_count_desc() {
+        let json = r#"{
+            "responseHeader":{"status":0,"QTime":5},
+            "response":{"numFound":3,"start":0,"docs":[
+                {"g":"a","a":"low",  "versionCount":5,  "timestamp":2000},
+                {"g":"b","a":"high", "versionCount":100,"timestamp":1000},
+                {"g":"c","a":"mid",  "versionCount":50, "timestamp":1500}
+            ]}
+        }"#;
+        let hits = parse_response(json).unwrap();
+        assert_eq!(hits[0].coord, "b:high");
+        assert_eq!(hits[1].coord, "c:mid");
+        assert_eq!(hits[2].coord, "a:low");
+    }
+
+    #[test]
+    fn sort_by_popularity_breaks_ties_by_timestamp_desc() {
+        let json = r#"{
+            "responseHeader":{"status":0,"QTime":5},
+            "response":{"numFound":2,"start":0,"docs":[
+                {"g":"a","a":"older","versionCount":10,"timestamp":1000},
+                {"g":"b","a":"newer","versionCount":10,"timestamp":2000}
+            ]}
+        }"#;
+        let hits = parse_response(json).unwrap();
+        assert_eq!(hits[0].coord, "b:newer");
+        assert_eq!(hits[1].coord, "a:older");
     }
 }
