@@ -411,7 +411,7 @@ pub fn clean_all(workspace_root: &Path, jobs: usize) -> Result<()> {
     let ws = load(workspace_root)?;
     let subset: Vec<usize> = (0..ws.members.len()).collect();
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "clean", jobs, false, false, "Cleaned", |m, _extra_cp| {
+        return crate::parallel::run_jobs(&ws, &subset, "clean", jobs, false, true, "Cleaned", |m, _extra_cp| {
             build::clean(&m.path).map(|_| Vec::new())
         });
     }
@@ -425,7 +425,7 @@ pub fn clean_all(workspace_root: &Path, jobs: usize) -> Result<()> {
 pub fn clean_subtree(workspace_root: &Path, member_indices: &[usize], jobs: usize) -> Result<()> {
     let ws = load(workspace_root)?;
     if member_indices.len() > 1 {
-        return crate::parallel::run_jobs(&ws, member_indices, "clean", jobs, false, false, "Cleaned", |m, _: &[PathBuf]| {
+        return crate::parallel::run_jobs(&ws, member_indices, "clean", jobs, false, true, "Cleaned", |m, _: &[PathBuf]| {
             build::clean(&m.path).map(|_| Vec::<PathBuf>::new())
         });
     }
