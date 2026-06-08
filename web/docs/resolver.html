@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Resolver & checksums · Curie docs</title>
+  <title>Resolver &amp; checksums · Curie docs</title>
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -32,61 +32,42 @@
     <h4>Documentation</h4>
     <ul>
       <li><a href="/docs/">Overview</a></li>
-      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
-      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
       <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
-      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
       <li><a href="/docs/workspaces.html">Workspaces</a></li>
-      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
       <li><a href="/docs/testing.html">Testing</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
       <li><a href="/docs/docker.html">Docker</a></li>
       <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
       <li><a href="/docs/deps.html">Dependency tree</a></li>
       <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
-      <li><a href="/docs/native.html">GraalVM native</a></li>
       <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
     </ul>
   </aside>
 
   <main class="prose">
     <span class="eyebrow">Subsystem · resolver</span>
     <h1>Resolver &amp; checksums</h1>
-    <p class="lede">Curie talks to Maven Central directly. No POM you wrote, no plugin ceremony — just <code>group:artifact = "version"</code> in <code>Curie.toml</code> and a transitive closure resolved against the same <code>~/.m2/repository</code> Maven uses.</p>
-
-    <h2>Declaring dependencies</h2>
-    <div class="code">
-      <header>
-        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-        <span>Curie.toml</span>
-      </header>
-<pre><span class="kw">[dependencies]</span>
-<span class="str">"com.fasterxml.jackson.core:jackson-databind"</span> = <span class="str">"2.17.2"</span>
-<span class="str">"com.google.guava:guava"</span>                     = <span class="str">"33.2.0-jre"</span>
-
-<span class="kw">[test-dependencies]</span>
-<span class="str">"org.junit.jupiter:junit-jupiter"</span> = <span class="str">"5.11.0"</span></pre>
-    </div>
-
-    <p>Each entry is <code>"group:artifact" = "version"</code>. An empty version (<code>""</code>) means the version comes from a BOM — see below.</p>
-
-    <h2>BOM imports</h2>
-    <p>A BOM (<em>bill of materials</em>) is a POM-packaged artifact whose <code>&lt;dependencyManagement&gt;</code> section pins versions for a family of related artifacts. List them under <code>[bom-imports]</code> in priority order (later wins on collision):</p>
-
-    <div class="code">
-      <header>
-        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-        <span>Curie.toml</span>
-      </header>
-<pre><span class="kw">[bom-imports]</span>
-<span class="str">"com.fasterxml.jackson:jackson-bom"</span> = <span class="str">"2.17.2"</span>
-
-<span class="kw">[dependencies]</span>
-<span class="com"># empty version → resolved from the BOM above</span>
-<span class="str">"com.fasterxml.jackson.core:jackson-databind"</span> = <span class="str">""</span>
-<span class="str">"com.fasterxml.jackson.core:jackson-annotations"</span> = <span class="str">""</span></pre>
-    </div>
-
-    <p>If you declare a dependency with <code>""</code> and no BOM provides it, the build fails up front — there's no silent fallback to "latest".</p>
+    <p class="lede">Curie talks to Maven Central directly — it resolves transitive closures, verifies checksums, and supports mirrors, credentials, and per-artifact repository routing. For declaring dependencies and BOM imports, see <a href="/docs/dependencies.html">Adding dependencies</a>.</p>
 
     <h2>Transitive resolution</h2>
     <p>Curie does a breadth-first walk of every dependency's POM, applying Maven's conflict-resolution rules:</p>
@@ -218,13 +199,13 @@
     <p>Add <code>--tests</code> to inspect the test-dependency closure instead. See <a href="/docs/deps.html">Dependency tree</a> for the full reference.</p>
 
     <div class="pager">
-      <a href="/docs/" >
-        <span>← Back</span>
-        <strong>Overview</strong>
+      <a href="/docs/dependencies.html">
+        <span>← Previous</span>
+        <strong>Adding dependencies</strong>
       </a>
-      <a href="/docs/kotlin.html" style="text-align: right; align-items: flex-end;">
+      <a href="/docs/testing.html" style="text-align: right; align-items: flex-end;">
         <span>Next →</span>
-        <strong>Kotlin support</strong>
+        <strong>Testing</strong>
       </a>
     </div>
   </main>

@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Java · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Language support · java</span>
+    <h1>Java</h1>
+    <p class="lede">Java is Curie's default language. Any <code>*.java</code> files found in the source tree are compiled automatically — no configuration required.</p>
+
+    <h2>Source layouts</h2>
+    <p>Curie recognises two directory conventions and they can coexist in the same project:</p>
+    <ul>
+      <li><strong>Flat-package</strong> — the package name becomes the directory name, with dots kept as-is:<br>
+        <code>src/com.example/Greeter.java</code></li>
+      <li><strong>Maven</strong> — the conventional Maven source root:<br>
+        <code>src/main/java/com/example/Greeter.java</code></li>
+    </ul>
+    <p>Both layouts are discovered by scanning for <code>*.java</code> files. You can migrate from Maven layout to flat-package layout gradually — Curie will compile whichever files it finds.</p>
+
+    <h2>Java version</h2>
+    <p>The <code>[java]</code> section sets the language version passed to <code>javac --release</code>. The default is <code>21</code>:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[java]</span>
+<span class="kw">sourceCompatibility</span> = <span class="str">"21"</span>  <span class="com"># default</span>
+</pre>
+    </div>
+
+    <p>Change this to target an older JVM, or bump it to enable newer language features. The value is passed verbatim to <code>javac --release</code>, so any version your installed JDK supports is accepted.</p>
+
+    <h2>Main class auto-detection</h2>
+    <p>For <code>[application]</code> projects, Curie scans compiled <code>.class</code> files looking for a <code>public static void main(String[])</code> method. If exactly one is found it is used automatically; if zero or more than one are found, the build fails with a message listing the candidates — set <code>mainClass</code> explicitly to resolve the ambiguity:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[application]</span>
+<span class="kw">name</span>      = <span class="str">"my-app"</span>
+<span class="kw">version</span>   = <span class="str">"1.0.0"</span>
+<span class="kw">mainClass</span> = <span class="str">"com.example.Main"</span>  <span class="com"># explicit override</span>
+</pre>
+    </div>
+
+    <h2>Instance main methods (Java 21+)</h2>
+    <p>Curie also detects "simplified" entry points introduced in Java 21 preview — a class with a <code>void main()</code> instance method and no class declaration boilerplate:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>src/com.example/Hello.java</span>
+      </header>
+<pre><span class="com">// no class wrapper required</span>
+<span class="kw">void</span> main() {
+    System.out.println(<span class="str">"Hello!"</span>);
+}
+</pre>
+    </div>
+
+    <p>See <a href="https://github.com/atteo/curie-build/tree/master/examples/simplified-main" target="_blank" rel="noopener">examples/simplified-main</a> for a working example. Requires <code>sourceCompatibility = "21"</code> or higher and a JDK that supports the preview feature.</p>
+
+    <h2>Annotation processors</h2>
+    <p>Processors (Lombok, AutoValue, MapStruct, …) run during compilation when declared under <code>[annotation-processors]</code>. They are placed on the <em>annotation processor path</em>, not the regular classpath:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[annotation-processors]</span>
+<span class="pkg">"org.projectlombok:lombok"</span> = <span class="str">"1.18.32"</span>
+
+<span class="kw">[test-annotation-processors]</span>
+<span class="pkg">"com.example:test-proc"</span> = <span class="str">"1.0.0"</span>
+</pre>
+    </div>
+
+    <p>Some processors (Lombok in particular) also need to be on the compile classpath so their annotations are visible to <code>javac</code>. Set <code>on-compile-classpath = true</code> for those:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[annotation-processors]</span>
+<span class="pkg">"org.projectlombok:lombok"</span> = { version = <span class="str">"1.18.32"</span>, on-compile-classpath = <span class="kw">true</span> }
+</pre>
+    </div>
+
+    <p>See <a href="https://github.com/atteo/curie-build/tree/master/examples/lombok-greeter" target="_blank" rel="noopener">examples/lombok-greeter</a> and <a href="https://github.com/atteo/curie-build/tree/master/examples/auto-value-demo" target="_blank" rel="noopener">examples/auto-value-demo</a>.</p>
+
+    <div class="pager">
+      <a href="/docs/">
+        <span>↑ Back to</span>
+        <strong>Overview</strong>
+      </a>
+      <a href="/docs/kotlin.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Kotlin</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

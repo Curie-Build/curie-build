@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Application · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Project type · application</span>
+    <h1>Application</h1>
+    <p class="lede">An <code>[application]</code> project compiles sources, runs tests, packages a JAR with an embedded classpath manifest, and optionally builds a Docker image or a GraalVM native binary.</p>
+
+    <h2>Minimal configuration</h2>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[application]</span>
+<span class="kw">name</span>    = <span class="str">"my-app"</span>
+<span class="kw">version</span> = <span class="str">"1.0.0"</span>
+</pre>
+    </div>
+
+    <p><code>mainClass</code> is optional. Curie scans the compiled bytecode for a class with a <code>public static void main(String[])</code> method and uses it automatically. Declare it explicitly when there is more than one candidate:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[application]</span>
+<span class="kw">name</span>      = <span class="str">"my-app"</span>
+<span class="kw">version</span>   = <span class="str">"1.0.0"</span>
+<span class="kw">mainClass</span> = <span class="str">"com.example.Main"</span>  <span class="com"># explicit override</span>
+<span class="kw">groupId</span>   = <span class="str">"com.example"</span>       <span class="com"># required for curie publish</span>
+</pre>
+    </div>
+
+    <h2>Build output</h2>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build</span>
+      </header>
+<pre><span class="dim">Building my-app v1.0.0</span>
+  Resolve deps    3 JAR(s)
+  Compile         4 source file(s)
+  Tests           <span class="ok">✔ 12 tests successful</span>
+  Package         my-app-1.0.0.jar
+  <span class="ok">Done</span>            target/my-app-1.0.0.jar</pre>
+    </div>
+
+    <p>The JAR includes a <code>MANIFEST.MF</code> with <code>Main-Class</code> and a <code>Class-Path</code> entry pointing to the dep JARs in <code>target/libs/</code>. Run it with:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie run</span>
+      </header>
+<pre><span class="dim">Running  my-app v1.0.0</span>
+Hello from my-app.</pre>
+    </div>
+
+    <h2>Full configuration reference</h2>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml — all application keys</span>
+      </header>
+<pre><span class="kw">[application]</span>
+<span class="kw">name</span>      = <span class="str">"my-app"</span>
+<span class="kw">version</span>   = <span class="str">"1.0.0"</span>
+<span class="kw">mainClass</span> = <span class="str">"com.example.Main"</span>  <span class="com"># optional — auto-detected if omitted</span>
+<span class="kw">groupId</span>   = <span class="str">"com.example"</span>       <span class="com"># required for curie publish</span>
+
+<span class="com"># Java version passed to javac --release (default: 21)</span>
+<span class="kw">[java]</span>
+<span class="kw">sourceCompatibility</span> = <span class="str">"21"</span>
+
+<span class="com"># JUnit Platform Console Standalone version (workspace-inheritable)</span>
+<span class="kw">[test]</span>
+<span class="kw">junitPlatformVersion</span> = <span class="str">"6.0.3"</span>
+
+<span class="com"># kotlinc + kotlin-stdlib (only needed when .kt sources are present)</span>
+<span class="kw">[kotlin]</span>
+<span class="kw">version</span> = <span class="str">"2.1.21"</span>
+
+<span class="com"># Production dependencies</span>
+<span class="kw">[dependencies]</span>
+<span class="pkg">"com.fasterxml.jackson.core:jackson-databind"</span> = <span class="str">"2.17.2"</span>
+<span class="pkg">"com.google.guava:guava"</span>                       = <span class="str">""</span>  <span class="com"># version from BOM</span>
+
+<span class="com"># Test-only dependencies</span>
+<span class="kw">[test-dependencies]</span>
+<span class="pkg">"org.assertj:assertj-core"</span> = <span class="str">"3.26.0"</span>
+
+<span class="com"># BOMs to import for version management</span>
+<span class="kw">[bom-imports]</span>
+<span class="pkg">"com.google.guava:guava-bom"</span> = <span class="str">"33.4.8-jre"</span>
+
+<span class="kw">[test-bom-imports]</span>
+<span class="pkg">"org.junit:junit-bom"</span> = <span class="str">"5.11.0"</span>
+
+<span class="com"># Annotation processors run during compilation</span>
+<span class="kw">[annotation-processors]</span>
+<span class="pkg">"org.projectlombok:lombok"</span> = <span class="str">"1.18.32"</span>
+
+<span class="kw">[test-annotation-processors]</span>
+<span class="pkg">"com.example:test-proc"</span> = <span class="str">"1.0.0"</span>
+
+<span class="com"># Additional Maven repositories (Maven Central is always included)</span>
+<span class="kw">[[repositories]]</span>
+<span class="kw">id</span>  = <span class="str">"my-nexus"</span>
+<span class="kw">url</span> = <span class="str">"https://nexus.example.com/repository/releases/"</span>
+
+<span class="com"># Docker image — enabled by this section or by a Dockerfile at project root</span>
+<span class="kw">[docker]</span>
+<span class="kw">baseImage</span> = <span class="str">"eclipse-temurin:21-jre-alpine"</span>  <span class="com"># default</span>
+<span class="kw">imageName</span> = <span class="str">"my-app"</span>   <span class="com"># default: application.name</span>
+<span class="kw">imageTag</span>  = <span class="str">"latest"</span>  <span class="com"># default: application.version</span>
+
+<span class="com"># GraalVM native-image compilation</span>
+<span class="kw">[native-image]</span>
+<span class="kw">outputName</span> = <span class="str">"my-app"</span>  <span class="com"># default: application.name</span>
+<span class="kw">configDir</span>  = <span class="str">"src/main/resources/META-INF/native-image"</span>
+<span class="kw">extraArgs</span>  = [<span class="str">"--no-fallback"</span>]
+
+<span class="com"># Build-info — git commit id embedded in the JAR (enabled by default)</span>
+<span class="kw">[build-info]</span>
+<span class="kw">enabled</span> = <span class="kw">false</span>
+
+<span class="com"># Publishing to a Maven repository</span>
+<span class="kw">[publish]</span>
+<span class="kw">repository</span>  = <span class="str">"my-nexus"</span>
+<span class="kw">sign</span>        = <span class="kw">true</span>
+<span class="kw">description</span> = <span class="str">"My application"</span>
+<span class="kw">homepage</span>    = <span class="str">"https://github.com/example/my-app"</span>
+<span class="kw">licenses</span>    = [<span class="str">"Apache-2.0"</span>]
+<span class="kw">developers</span>  = [{ id = <span class="str">"alice"</span>, name = <span class="str">"Alice"</span>, email = <span class="str">"alice@example.com"</span> }]
+</pre>
+    </div>
+
+    <h2>Key fields</h2>
+    <table>
+      <thead><tr><th>Field</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>name</code></td><td>Yes</td><td>—</td><td>Used as the JAR base name and Docker image name</td></tr>
+        <tr><td><code>version</code></td><td>Yes</td><td>—</td><td>Embedded in JAR name and MANIFEST.MF</td></tr>
+        <tr><td><code>mainClass</code></td><td>No</td><td>Auto-detected</td><td>Must be set explicitly when multiple main classes exist</td></tr>
+        <tr><td><code>groupId</code></td><td>No</td><td>—</td><td>Required for <code>curie publish</code> and SBOM <code>metadata.component</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2>mainClass auto-detection</h2>
+    <p>When <code>mainClass</code> is omitted, Curie scans compiled <code>.class</code> files for a <code>public static void main(String[])</code> method. If exactly one is found, it is used. If zero or more than one are found, the build fails with a message listing the candidates — set <code>mainClass</code> explicitly to resolve the ambiguity.</p>
+    <p>Java 21+ "instance main methods" (a class with a <code>void main()</code> instance method, no <code>static</code>, no <code>String[]</code>) are also detected. See <a href="https://github.com/atteo/curie-build/tree/master/examples/simplified-main" target="_blank" rel="noopener">examples/simplified-main</a>.</p>
+
+    <h2>Source layouts</h2>
+    <p>Curie supports two layouts, and they can coexist in the same project:</p>
+    <ul>
+      <li><strong>Flat-package</strong> — <code>src/com.example/Main.java</code> (dot-delimited package as directory name)</li>
+      <li><strong>Maven</strong> — <code>src/main/java/com/example/Main.java</code></li>
+    </ul>
+    <p>Test files (<code>*Test.java</code>, <code>*Tests.java</code>, <code>*Spec.java</code>) co-located in the source tree are treated as tests; a separate <code>tests/</code> or <code>src/test/java/</code> directory is optional for integration tests.</p>
+
+    <h2>build-info</h2>
+    <p>When the project is inside a git repository, Curie automatically embeds <code>META-INF/build-info.properties</code> in the JAR:</p>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>META-INF/build-info.properties</span>
+      </header>
+<pre>git.commit.id=a3f1b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0</pre>
+    </div>
+    <p>If there are uncommitted changes the value is suffixed with <code>-dirty</code>. Set <code>[build-info] enabled = false</code> to opt out.</p>
+
+    <div class="pager">
+      <a href="/docs/groovy.html">
+        <span>← Previous</span>
+        <strong>Groovy &amp; Spock</strong>
+      </a>
+      <a href="/docs/lib.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Library</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

@@ -30,6 +30,7 @@ members = [
     "graalvm-hello",
     "nested-workspace-demo",
     "verbose-test-demo",
+    "my-platform-bom",
 ]
 
 [java]

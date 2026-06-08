@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Adding dependencies · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Build &amp; test · dependencies</span>
+    <h1>Adding dependencies</h1>
+    <p class="lede">Dependencies are declared in <code>Curie.toml</code>. Add them by editing the file directly, or use <code>curie add</code> to let Curie resolve the latest version and write the entry for you.</p>
+
+    <h2>Editing Curie.toml by hand</h2>
+    <p>Each entry is <code>"group:artifact" = "version"</code>. Production dependencies go under <code>[dependencies]</code>; test-only dependencies go under <code>[test-dependencies]</code>:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[dependencies]</span>
+<span class="pkg">"com.fasterxml.jackson.core:jackson-databind"</span> = <span class="str">"2.17.2"</span>
+<span class="pkg">"com.google.guava:guava"</span>                     = <span class="str">"33.4.8-jre"</span>
+
+<span class="kw">[test-dependencies]</span>
+<span class="pkg">"org.junit.jupiter:junit-jupiter"</span> = <span class="str">"6.0.3"</span>
+<span class="pkg">"org.assertj:assertj-core"</span>        = <span class="str">"3.26.0"</span></pre>
+    </div>
+
+    <p>An empty version (<code>""</code>) means the version comes from a BOM — see <a href="#bom-imports">BOM imports</a> below. If no BOM provides the version, the build fails immediately with an error.</p>
+
+    <h2>curie add</h2>
+    <p><code>curie add</code> queries Maven Central for the artifact, picks the latest version, and writes the entry into <code>Curie.toml</code>:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie add com.google.guava:guava</span>
+      </header>
+<pre><span class="dim">Resolving latest: com.google.guava:guava</span>
+  Added  <span class="ok">com.google.guava:guava = "33.4.8-jre"</span>  →  [dependencies]</pre>
+    </div>
+
+    <p>Pin to a specific version with <code>@version</code>:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie add com.google.guava:guava@33.2.1-jre</span>
+      </header>
+<pre>  Added  <span class="ok">com.google.guava:guava = "33.2.1-jre"</span>  →  [dependencies]</pre>
+    </div>
+
+    <h2>curie add flags</h2>
+    <table>
+      <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+      <tbody>
+        <tr><td><code>--test</code></td><td>Add to <code>[test-dependencies]</code> instead of <code>[dependencies]</code></td></tr>
+        <tr><td><code>--bom</code></td><td>Add to <code>[bom-imports]</code>; subsequent BOM-managed deps can omit the version</td></tr>
+        <tr><td><code>--test-bom</code></td><td>Add to <code>[test-bom-imports]</code></td></tr>
+        <tr><td><code>--annotation-processor</code></td><td>Add to <code>[annotation-processors]</code></td></tr>
+      </tbody>
+    </table>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>examples</span>
+      </header>
+<pre><span class="com"># test dependency</span>
+curie add --test org.assertj:assertj-core@3.26.0
+
+<span class="com"># add a BOM, then a BOM-managed dep (version will be "")</span>
+curie add --bom com.fasterxml.jackson:jackson-bom@2.17.2
+curie add com.fasterxml.jackson.core:jackson-databind
+
+<span class="com"># annotation processor</span>
+curie add --annotation-processor org.projectlombok:lombok@1.18.32</pre>
+    </div>
+
+    <h2>curie remove</h2>
+    <p>Remove an entry from whichever section it appears in:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie remove com.google.guava:guava</span>
+      </header>
+<pre>  Removed  com.google.guava:guava  from [dependencies]</pre>
+    </div>
+
+    <h2 id="bom-imports">BOM imports</h2>
+    <p>A BOM (<em>bill of materials</em>) is a POM-packaged artifact whose <code>&lt;dependencyManagement&gt;</code> section pins versions for a family of related artifacts. Declare BOMs under <code>[bom-imports]</code>; all entries are applied in order (later wins on collision):</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[bom-imports]</span>
+<span class="pkg">"com.fasterxml.jackson:jackson-bom"</span> = <span class="str">"2.17.2"</span>
+
+<span class="kw">[dependencies]</span>
+<span class="com"># empty version → resolved from the BOM above</span>
+<span class="pkg">"com.fasterxml.jackson.core:jackson-databind"</span>   = <span class="str">""</span>
+<span class="pkg">"com.fasterxml.jackson.core:jackson-annotations"</span> = <span class="str">""</span></pre>
+    </div>
+
+    <p>Use <code>[test-bom-imports]</code> for BOMs that only apply to test-scope dependencies:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[test-bom-imports]</span>
+<span class="pkg">"org.junit:junit-bom"</span> = <span class="str">"5.11.0"</span>
+
+<span class="kw">[test-dependencies]</span>
+<span class="pkg">"org.junit.jupiter:junit-jupiter"</span> = <span class="str">""</span></pre>
+    </div>
+
+    <p>BOM imports can also be inherited from a workspace root — see <a href="/docs/workspaces.html">Workspaces</a>.</p>
+
+    <p>For how Curie resolves transitive dependencies, applies nearest-wins conflict resolution, verifies checksums, and handles offline mode, see <a href="/docs/resolver.html">Resolver &amp; checksums</a>.</p>
+
+    <div class="pager">
+      <a href="/docs/incremental.html">
+        <span>← Previous</span>
+        <strong>Incremental builds</strong>
+      </a>
+      <a href="/docs/resolver.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Resolver &amp; checksums</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

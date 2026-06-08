@@ -550,6 +550,16 @@ section { padding: var(--gap-lg) 0; }
 }
 .docs-nav ul { list-style: none; }
 .docs-nav li { margin-bottom: 0.35rem; }
+.docs-nav .nav-group {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-lo);
+  padding: 0.9rem 0.7rem 0.2rem;
+  cursor: default;
+}
 .docs-nav a {
   display: block;
   padding: 0.4rem 0.7rem;

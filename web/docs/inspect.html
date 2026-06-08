@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Build Inspect · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · inspect</span>
+    <h1>Build Inspect</h1>
+    <p class="lede"><code>curie inspect</code> opens a terminal UI for browsing build logs interactively. Browse every project in a workspace side by side, drill into per-test output, and grep across all logs — all without leaving the terminal.</p>
+
+    <h2>Launching</h2>
+    <p>Run <code>curie inspect</code> from any project or workspace root after a build. Logs must already exist — <code>inspect</code> is a viewer, not a build trigger:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build &amp;&amp; curie inspect</span>
+      </header>
+<pre><span class="dim"># workspace build runs first, then the TUI opens</span></pre>
+    </div>
+
+    <p>When run inside a workspace member directory Curie still loads the full workspace log set but pre-selects that member. Use <code>--project</code> to target a specific member explicitly:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie --project services/api inspect</span>
+      </header>
+<pre><span class="dim"># opens with services/api pre-selected</span></pre>
+    </div>
+
+    <h2>Layout</h2>
+    <p>The UI is split into two panes. The <strong>Members</strong> pane on the left lists every project; the <strong>Log</strong> pane on the right shows the merged output:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>curie inspect</span>
+      </header>
+<pre><span class="dim">curie inspect  ↑↓/jk select  Enter/→ expand  ← collapse  Tab log  m hide  / grep  f job  r reload  q quit</span>
+┌ Members ──────────────────┐┌ Log: all jobs ──────────────────────────────────────────┐
+│ all jobs                  ││<span class="ok">▌</span> <span class="ok">hello-world  started 09:12:01  ✓ 1.2s</span>                  │
+│   hello-world  <span class="ok">✓ 1.2s</span>     ││  Resolve deps    3 JAR(s)                               │
+│   string-utils <span class="ok">✓ 0.8s</span>     ││  Compile         4 source file(s)                       │
+│ <span class="em">▶ json-greeter  ✗ 0.4s</span>    ││  Tests  <span class="ok">✔ 6 tests successful</span>                            │
+│                           ││  Package  hello-world-0.1.0.jar                         │
+│                           ││<span class="ok">▌</span> <span class="ok">string-utils  started 09:12:02  ✓ 0.8s</span>                 │
+│                           ││  Resolve deps    1 JAR(s)                               │
+│                           ││  Compile         2 source file(s)                       │
+│                           ││<span class="em">▌</span> <span class="em">json-greeter  started 09:12:03  ✗ 0.4s</span>                 │
+│                           ││  Resolve deps    1 JAR(s)                               │
+│                           ││  error: cannot find symbol                              │
+│                           ││        import com.example.Missing;                      │
+└───────────────────────────┘└─────────────────────────────────────────────────────────┘</pre>
+    </div>
+
+    <h2>Members pane</h2>
+    <p>The left pane lists every workspace member in a tree that mirrors the member path hierarchy. Each entry shows a right-aligned badge:</p>
+    <ul>
+      <li><code>✓ 1.2s</code> — build succeeded, duration in seconds</li>
+      <li><code>✗ 0.4s</code> — build failed</li>
+      <li><code>skipped</code> — no metadata; the member was skipped by a parallel build</li>
+      <li><code>(no log)</code> — <code>curie build</code> has not been run for this member yet</li>
+    </ul>
+    <p>When a workspace build has been run more than once, jobs from an older run are dimmed and marked <code>(prev)</code> so you can tell at a glance which results are current.</p>
+    <p>Selecting <strong>all jobs</strong> at the top of the tree shows the merged log for every member.</p>
+
+    <h2>Log pane</h2>
+    <p>The right pane streams all log lines from the selected member (or all members) sorted by build-start time. Each job's output is preceded by a coloured header line showing the member name, start time, and outcome badge. ANSI colour codes from compiler output and test reporters are rendered faithfully.</p>
+
+    <h2>Test tree</h2>
+    <p>When a member has test results recorded in <code>target/build.tests.json</code>, the job node shows a <code>▸</code> marker. Press <kbd>Enter</kbd> or <kbd>→</kbd> to expand:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>curie inspect — test tree expanded</span>
+      </header>
+<pre>│   string-utils <span class="ok">✓ 0.8s</span>               │
+│ <span class="em">▶ json-greeter ▾ ✗ 0.4s</span>             │
+│     <span class="dim">GreeterTest ▾</span>                   │
+│       testGreeting     <span class="ok">✓ 12ms</span>       │
+│       testMissingClass <span class="em">✗ 8ms</span>        │</pre>
+    </div>
+
+    <p>Select a test method and press <kbd>Enter</kbd> to open that test's captured output in the log pane — including the failure message at the top and any <code>System.out</code> lines below. Press <kbd>←</kbd> to collapse back to the class, then the job.</p>
+    <p>When <code>curie inspect</code> opens after a failed build it automatically jumps to the first failing test to minimise time-to-feedback.</p>
+
+    <h2>Keyboard shortcuts</h2>
+    <table>
+      <thead>
+        <tr><th>Key</th><th>Effect</th><th>Where</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><kbd>↑</kbd> <kbd>↓</kbd> / <kbd>j</kbd> <kbd>k</kbd></td><td>Move selection up / down</td><td>Members</td></tr>
+        <tr><td><kbd>Enter</kbd> / <kbd>→</kbd></td><td>Expand job → classes → test methods</td><td>Members</td></tr>
+        <tr><td><kbd>←</kbd></td><td>Collapse test method → class → job</td><td>Members</td></tr>
+        <tr><td><kbd>Tab</kbd></td><td>Cycle focus: Members → Log → Members</td><td>Both</td></tr>
+        <tr><td><kbd>m</kbd></td><td>Toggle Members pane visibility</td><td>Both</td></tr>
+        <tr><td><kbd>j</kbd> <kbd>k</kbd> / <kbd>↑</kbd> <kbd>↓</kbd></td><td>Scroll log one line</td><td>Log</td></tr>
+        <tr><td><kbd>PgUp</kbd> <kbd>PgDn</kbd></td><td>Scroll log one page</td><td>Log</td></tr>
+        <tr><td><kbd>Ctrl-u</kbd> <kbd>Ctrl-d</kbd></td><td>Scroll log half page</td><td>Log</td></tr>
+        <tr><td><kbd>g</kbd> / <kbd>G</kbd></td><td>Jump to top / bottom of log</td><td>Log</td></tr>
+        <tr><td><kbd>/</kbd></td><td>Open grep bar — filter log lines by content</td><td>Both</td></tr>
+        <tr><td><kbd>f</kbd></td><td>Open job filter bar — filter members by name</td><td>Both</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>Clear active search; quit when no search active</td><td>Both</td></tr>
+        <tr><td><kbd>r</kbd></td><td>Reload all logs from disk without restarting</td><td>Both</td></tr>
+        <tr><td><kbd>q</kbd></td><td>Quit</td><td>Both</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Grep</h2>
+    <p>Press <kbd>/</kbd> to open the grep bar at the bottom of the screen. As you type, the log pane filters to only jobs whose output contains the pattern (case-insensitive) and highlights every match in yellow. The Members pane dims jobs with no matching lines so you can spot the relevant member at a glance.</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>curie inspect — grep active</span>
+      </header>
+<pre>│ all jobs                  ││<span class="em">▌</span> <span class="em">json-greeter  started 09:12:03  ✗ 0.4s</span>             │
+│   <span class="dim">hello-world  ✓ 1.2s</span>    ││  error: cannot find <span class="em">symbol</span>                          │
+│   <span class="dim">string-utils ✓ 0.8s</span>    ││        import com.example.Missing;                     │
+│ ▶ json-greeter  ✗ 0.4s   ││                                                        │
+└───────────────────────────┘└────────────────────────────────────────────────────────┘
+/ <span class="em">symbol</span>█</pre>
+    </div>
+
+    <p>Press <kbd>Enter</kbd> to confirm and return focus to the previous pane while keeping the filter active. Press <kbd>Esc</kbd> to clear and show all lines again.</p>
+
+    <h2>Job filter</h2>
+    <p>Press <kbd>f</kbd> to open the job filter bar. Typing narrows the Members tree to entries whose path contains the search string (case-insensitive). This is useful in large workspaces with many members — type <code>svc</code> to instantly focus all <code>services/*</code> members.</p>
+
+    <h2>Reload</h2>
+    <p>Press <kbd>r</kbd> to reload all logs from disk. Run <code>curie build</code> in a separate terminal, then press <kbd>r</kbd> in inspect to see the new results without closing the TUI. The stale-job detection updates on reload — members from the previous run are dimmed until the new build has also completed them.</p>
+
+    <div class="pager">
+      <a href="/docs/scaffold.html">
+        <span>← Previous</span>
+        <strong>Scaffolding</strong>
+      </a>
+      <a href="/docs/" style="text-align: right; align-items: flex-end;">
+        <span>↑ Back to</span>
+        <strong>Overview</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

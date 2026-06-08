@@ -33,19 +33,35 @@
     <h4>Documentation</h4>
     <ul>
       <li><a href="/docs/">Overview</a></li>
-      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
-      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
       <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
-      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
       <li><a href="/docs/workspaces.html">Workspaces</a></li>
-      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
       <li><a href="/docs/testing.html">Testing</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
       <li><a href="/docs/docker.html">Docker</a></li>
       <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
       <li><a href="/docs/deps.html">Dependency tree</a></li>
       <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
-      <li><a href="/docs/native.html">GraalVM native</a></li>
       <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
     </ul>
   </aside>
 
@@ -60,72 +76,151 @@
     <h2>Topics</h2>
 
     <div class="feature-rows" style="margin-top: 1.5rem;">
-      <a class="feature-card" href="/docs/resolver.html" style="text-decoration: none; color: inherit;">
+
+      <p style="font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-lo); margin: 1.5rem 0 0.5rem;">Language support</p>
+
+      <a class="feature-card" href="/docs/java.html" style="text-decoration: none; color: inherit;">
         <span class="badge">01</span>
-        <h3>Resolver &amp; checksums</h3>
-        <p>How Curie pulls JARs from Maven Central, expands transitives, applies BOM imports, and verifies every artifact against a <code>.sha256</code> sidecar.</p>
+        <h3>Java</h3>
+        <p>Default language — no config needed. Two source layouts (flat-package and Maven), Java version via <code>[java]</code>, main-class scanning, instance main methods, annotation processors.</p>
       </a>
       <a class="feature-card" href="/docs/kotlin.html" style="text-decoration: none; color: inherit;">
         <span class="badge">02</span>
-        <h3>Kotlin support</h3>
+        <h3>Kotlin</h3>
         <p>Auto-detected <code>.kt</code> sources, two-phase Kotlin/Java compile, automatic Kotlin main-class detection, stale-class cleanup.</p>
       </a>
-      <a class="feature-card" href="/docs/incremental.html" style="text-decoration: none; color: inherit;">
+      <a class="feature-card" href="/docs/groovy.html" style="text-decoration: none; color: inherit;">
         <span class="badge">03</span>
-        <h3>Incremental builds</h3>
-        <p>The mtime check, the JDK fingerprint, the per-source class manifest the wrapper emits, and how all three combine into a precise rebuild gate.</p>
+        <h3>Groovy &amp; Spock</h3>
+        <p>Auto-detected <code>.groovy</code> sources, joint Java/Groovy compilation via <code>FileSystemCompiler</code>, Spock 2.x test specs discovered and run through JUnit Platform.</p>
+      </a>
+
+      <p style="font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-lo); margin: 1.5rem 0 0.5rem;">Project types</p>
+
+      <a class="feature-card" href="/docs/app.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">04</span>
+        <h3>Application</h3>
+        <p>Compiles sources, runs tests, packages a JAR with embedded classpath manifest. Optional Docker image and GraalVM native binary. Full <code>Curie.toml</code> reference.</p>
+      </a>
+      <a class="feature-card" href="/docs/lib.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">05</span>
+        <h3>Library</h3>
+        <p>Produces a plain JAR for use as a dependency. No main class, no Docker. Publishable to Maven repositories. Works as a workspace member with <code>[workspace-dependencies]</code>.</p>
       </a>
       <a class="feature-card" href="/docs/workspaces.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">04</span>
+        <span class="badge">06</span>
         <h3>Workspaces</h3>
         <p>Multi-module projects under one root <code>Curie.toml</code>. Topo-sorted builds, inherited BOM imports, shared Java version.</p>
       </a>
-      <a class="feature-card" href="/docs/fmt.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">05</span>
-        <h3>Formatter</h3>
-        <p><code>curie fmt</code> runs palantir-java-format (Java) and ktfmt (Kotlin) in one command. <code>--check</code> mode for CI; workspace fan-out shares one resolved classpath across all members.</p>
+      <a class="feature-card" href="/docs/bom.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">07</span>
+        <h3>BOM projects</h3>
+        <p>Author and publish a Maven Bill of Materials with <code>[bom]</code>. <code>curie build</code> produces a <code>.pom</code> with <code>&lt;packaging&gt;pom&lt;/packaging&gt;</code> and a <code>&lt;dependencyManagement&gt;</code> block.</p>
+      </a>
+
+      <p style="font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-lo); margin: 1.5rem 0 0.5rem;">Build &amp; test</p>
+
+      <a class="feature-card" href="/docs/incremental.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">08</span>
+        <h3>Incremental builds</h3>
+        <p>The mtime check, the JDK fingerprint, the per-source class manifest the wrapper emits, and how all three combine into a precise rebuild gate.</p>
+      </a>
+      <a class="feature-card" href="/docs/dependencies.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">09</span>
+        <h3>Adding dependencies</h3>
+        <p>Declare <code>[dependencies]</code> and <code>[bom-imports]</code> by hand, or use <code>curie add</code> to resolve the latest version and write the entry automatically. <code>curie remove</code> cleans up.</p>
+      </a>
+      <a class="feature-card" href="/docs/resolver.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">10</span>
+        <h3>Resolver &amp; checksums</h3>
+        <p>Breadth-first transitive resolution with nearest-wins conflict rules, parallel JAR downloads, <code>.sha256</code> sidecar verification, offline mode, mirrors, and per-artifact repository routing.</p>
       </a>
       <a class="feature-card" href="/docs/testing.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">06</span>
+        <span class="badge">11</span>
         <h3>Testing</h3>
         <p>JUnit 5 platform console runner with configurable version, co-located <code>*Test.java</code>/<code>*Spec.java</code> and top-level <code>tests/</code> integration sources, optional filter argument.</p>
       </a>
+
+      <p style="font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-lo); margin: 1.5rem 0 0.5rem;">Deploy</p>
+
       <a class="feature-card" href="/docs/docker.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">07</span>
+        <span class="badge">12</span>
         <h3>Docker</h3>
         <p>Generated layer-friendly Dockerfile + <code>.dockerignore</code>, eclipse-temurin JRE base by default, configurable <code>baseImage</code>, dep JARs in their own cached layer.</p>
       </a>
-      <a class="feature-card" href="/docs/groovy.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">08</span>
-        <h3>Groovy &amp; Spock</h3>
-        <p>Auto-detected <code>.groovy</code> sources, joint Java/Groovy compilation via <code>FileSystemCompiler</code>, Spock 2.x test specs discovered and run through JUnit Platform. Configure with <code>[groovy]</code> and <code>[spock]</code> in <code>Curie.toml</code>.</p>
-      </a>
       <a class="feature-card" href="/docs/publish.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">09</span>
+        <span class="badge">13</span>
         <h3>Publishing</h3>
-        <p><code>curie publish</code> generates a POM, sources jar, javadoc jar, and GPG signatures, then uploads everything via HTTP PUT to any Maven 2-layout repository. Credentials stored in <code>~/.curie/config.toml</code>.</p>
-      </a>
-      <a class="feature-card" href="/docs/deps.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">10</span>
-        <h3>Dependency tree</h3>
-        <p><code>curie deps</code> prints the full transitive tree. <code>--why org.foo:bar</code> explains which path introduced an artifact and why nearest-wins chose its version over any conflicts. <code>--tests</code> shows the test closure.</p>
-      </a>
-      <a class="feature-card" href="/docs/audit.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">11</span>
-        <h3>Audit (SBOM)</h3>
-        <p><code>curie audit</code> emits a CycloneDX 1.6 SBOM for the resolved dependency closure and cross-references every artifact against the OSV vulnerability database, printing findings grouped by artifact with ANSI-coloured severity.</p>
+        <p><code>curie publish</code> generates a POM, sources jar, javadoc jar, and GPG signatures, then uploads everything via HTTP PUT to any Maven 2-layout repository.</p>
       </a>
       <a class="feature-card" href="/docs/native.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">12</span>
+        <span class="badge">14</span>
         <h3>GraalVM native-image</h3>
-        <p><code>curie native</code> compiles the project to a standalone native binary using GraalVM's <code>native-image</code> tool. Configure reachability metadata, output name, and extra flags via <code>[native-image]</code> in <code>Curie.toml</code>.</p>
+        <p><code>curie native</code> compiles the project to a standalone native binary using GraalVM's <code>native-image</code> tool. Configure reachability metadata, output name, and extra flags via <code>[native-image]</code>.</p>
+      </a>
+
+      <p style="font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-lo); margin: 1.5rem 0 0.5rem;">Tools</p>
+
+      <a class="feature-card" href="/docs/fmt.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">15</span>
+        <h3>Formatter</h3>
+        <p><code>curie fmt</code> runs palantir-java-format (Java) and ktfmt (Kotlin) in one command. <code>--check</code> mode for CI; workspace fan-out shares one resolved classpath across all members.</p>
+      </a>
+      <a class="feature-card" href="/docs/deps.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">16</span>
+        <h3>Dependency tree</h3>
+        <p><code>curie deps</code> prints the full transitive tree. <code>--why org.foo:bar</code> explains which path introduced an artifact and why nearest-wins chose its version.</p>
+      </a>
+      <a class="feature-card" href="/docs/audit.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">17</span>
+        <h3>Audit (SBOM)</h3>
+        <p><code>curie audit</code> emits a CycloneDX 1.6 SBOM and cross-references every artifact against the OSV vulnerability database, printing findings grouped by artifact with ANSI-coloured severity.</p>
       </a>
       <a class="feature-card" href="/docs/scaffold.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">13</span>
+        <span class="badge">18</span>
         <h3>Scaffolding</h3>
-        <p><code>curie new app &lt;name&gt;</code> and <code>curie new lib &lt;name&gt;</code> generate a ready-to-build project skeleton — <code>Curie.toml</code>, source file, and directory layout — in one command. <code>curie init</code> does the same in the current directory.</p>
+        <p><code>curie new app|lib|bom &lt;name&gt;</code> generates a ready-to-build project skeleton in one command. <code>curie init</code> does the same in the current directory.</p>
+      </a>
+      <a class="feature-card" href="/docs/inspect.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">19</span>
+        <h3>Build Inspect</h3>
+        <p>Terminal UI for browsing build logs across an entire workspace. Drill into per-test output, grep log content with live highlights, filter by member name, and reload without restarting.</p>
       </a>
     </div>
+
+    <h2>Examples</h2>
+    <p>All examples live in the <a href="https://github.com/atteo/curie-build/tree/master/examples" target="_blank" rel="noopener"><code>examples/</code></a> directory and build end-to-end with <code>curie build</code>.</p>
+
+    <table>
+      <thead><tr><th>Example</th><th>What it shows</th></tr></thead>
+      <tbody>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/hello-world" target="_blank" rel="noopener"><code>hello-world</code></a></td><td>Flat-package source layout — <code>src/com.example/HelloWorld.java</code></td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/maven-hello-world" target="_blank" rel="noopener"><code>maven-hello-world</code></a></td><td>Maven source layout — <code>src/main/java/com/example/</code></td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/simplified-main" target="_blank" rel="noopener"><code>simplified-main</code></a></td><td>Instance main methods (Java 21+ preview) — bare <code>void main()</code> with no class or package</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/json-greeter" target="_blank" rel="noopener"><code>json-greeter</code></a></td><td>Flat-package layout with a Jackson dependency</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/maven-json-greeter" target="_blank" rel="noopener"><code>maven-json-greeter</code></a></td><td>Maven layout with Jackson + Docker image</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/string-utils" target="_blank" rel="noopener"><code>string-utils</code></a></td><td>Library — flat-package, co-located unit tests and separate <code>tests/</code> integration tests</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/maven-string-utils" target="_blank" rel="noopener"><code>maven-string-utils</code></a></td><td>Library — Maven layout (<code>src/main/java/</code> + <code>src/test/java/</code>)</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/string-utils-cli" target="_blank" rel="noopener"><code>string-utils-cli</code></a></td><td>Application with <code>[workspace-dependencies]</code> on a sibling library</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/jackson-bom-greeter" target="_blank" rel="noopener"><code>jackson-bom-greeter</code></a></td><td>BOM imports inherited from the workspace root</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/maven-jackson-bom-greeter" target="_blank" rel="noopener"><code>maven-jackson-bom-greeter</code></a></td><td>Same as above, Maven source layout</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/hello-kotlin" target="_blank" rel="noopener"><code>hello-kotlin</code></a></td><td>Kotlin sources — Maven layout, auto-detected main class</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/hello-mixed" target="_blank" rel="noopener"><code>hello-mixed</code></a></td><td>Mixed Java + Kotlin in a single flat-package directory</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/groovy-greeter" target="_blank" rel="noopener"><code>groovy-greeter</code></a></td><td>Groovy language support — joint Java/Groovy compilation</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/spock-demo" target="_blank" rel="noopener"><code>spock-demo</code></a></td><td>Spock 2.x test specs run through JUnit Platform</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/lombok-greeter" target="_blank" rel="noopener"><code>lombok-greeter</code></a></td><td>Annotation processors — Lombok with <code>on-compile-classpath = true</code></td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/auto-value-demo" target="_blank" rel="noopener"><code>auto-value-demo</code></a></td><td>Annotation processors — Google AutoValue generates immutable value classes</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/graalvm-hello" target="_blank" rel="noopener"><code>graalvm-hello</code></a></td><td>GraalVM native-image compilation — <code>[native-image]</code> configuration</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/spring-boot-demo" target="_blank" rel="noopener"><code>spring-boot-demo</code></a></td><td>Production-quality Spring Boot 3 app — REST API, JPA, Spring Security</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/google-mirror-demo" target="_blank" rel="noopener"><code>google-mirror-demo</code></a></td><td>Repository mirror — route Maven Central downloads through a mirror</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/shibboleth-demo" target="_blank" rel="noopener"><code>shibboleth-demo</code></a></td><td>Per-dependency repository selection — artifact served from a custom registry</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/add-remove-demo" target="_blank" rel="noopener"><code>add-remove-demo</code></a></td><td><code>curie add</code> and <code>curie remove</code> — managing dependencies from the CLI</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/publish-demo" target="_blank" rel="noopener"><code>publish-demo</code></a></td><td><code>curie publish</code> — JAR + sources + javadoc + POM + GPG signatures via HTTP PUT</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/my-platform-bom" target="_blank" rel="noopener"><code>my-platform-bom</code></a></td><td>BOM project — <code>[bom]</code> section produces a <code>.pom</code> with <code>&lt;dependencyManagement&gt;</code></td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/nested-workspace-demo" target="_blank" rel="noopener"><code>nested-workspace-demo</code></a></td><td>Nested workspaces — three levels of workspace nesting</td></tr>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/verbose-test-demo" target="_blank" rel="noopener"><code>verbose-test-demo</code></a></td><td>High-volume test output (~20k lines) — exercises <code>curie inspect</code>'s virtualized log renderer</td></tr>
+      </tbody>
+    </table>
 
     <h2>Reference</h2>
     <p>The <a href="/docs/resolver.html">Resolver</a> page lists every TOML key in the dependency section. <a href="/docs/workspaces.html">Workspaces</a> covers the inheritance rules. If something isn't documented, treat it as not yet stable — Curie is a research project and the surface area is intentionally small until each piece has had time to settle.</p>

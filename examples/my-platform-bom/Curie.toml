@@ -1,0 +1,42 @@
+# my-platform-bom
+#
+# Demonstrates the [bom] project type — a POM-only artifact that declares
+# managed dependency versions for a family of libraries.
+#
+# Build output:  target/my-platform-bom-1.0.0.pom
+# No source files, no compilation, no tests, no JAR, no Docker.
+#
+# The generated POM is a standard Maven BOM ready to be deployed to a
+# Maven repository.  Other projects can import it via:
+#
+#   [bom-imports]
+#   "com.example:my-platform-bom" = "1.0.0"
+#
+#   [dependencies]
+#   "com.google.guava:guava"         = ""   # version from the BOM
+#   "org.slf4j:slf4j-api"            = ""   # version from the BOM
+#
+# To build:
+#   curie build
+#   cat target/my-platform-bom-1.0.0.pom
+#
+# To publish (requires [publish] config + a Maven repository):
+#   curie publish --dry-run
+
+[bom]
+name    = "my-platform-bom"
+version = "1.0.0"
+groupId = "com.example"
+
+# Direct managed versions — consumers inherit these by importing the BOM.
+[dependencies]
+"com.google.guava:guava"         = "33.4.8-jre"
+"org.slf4j:slf4j-api"            = "2.0.17"
+"ch.qos.logback:logback-classic" = "1.5.18"
+
+# A nested BOM import — emitted in the generated POM as
+# <type>pom</type> / <scope>import</scope> inside <dependencyManagement>.
+# Consumers who import my-platform-bom will also benefit from Jackson's
+# full managed version set.
+[bom-imports]
+"com.fasterxml.jackson:jackson-bom" = "2.17.2"

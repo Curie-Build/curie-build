@@ -153,6 +153,39 @@
   </div>
 </section>
 
+<!-- =================== Pillars =================== -->
+<section>
+  <div class="container">
+    <header style="margin-bottom: 2rem;">
+      <span class="eyebrow">Design pillars</span>
+      <h2 style="margin-top: 1rem;">Built on four principles.</h2>
+    </header>
+
+    <div class="feature-rows">
+      <div class="feature-card">
+        <span class="badge">01 — conventions</span>
+        <h3>New conventions for 202X.</h3>
+        <p>Maven's "convention over configuration" was the right idea — but the conventions were set in 2004. Curie starts from the baseline that Cargo and Go modules established: a lockfile is standard, reproducible outputs are the default, and a workspace is a first-class concept. Same philosophy, updated conventions.</p>
+      </div>
+      <div class="feature-card">
+        <span class="badge">02 — correctness</span>
+        <h3>Reproducible. Incremental. Parallel.</h3>
+        <p>Every artifact from Maven Central is SHA-256 verified and cached in a tamper-evident local store. Outputs are deterministic — re-run a build with the same inputs, get a byte-identical JAR. Incremental compilation skips <code>javac</code> when nothing has changed. Workspace members build in parallel across all available cores.</p>
+      </div>
+      <div class="feature-card">
+        <span class="badge">03 — accessible</span>
+        <h3>Human and AI friendly.</h3>
+        <p>A single <code>Curie.toml</code> file captures everything a build needs — no lifecycle phases, no task graph, no DSL. It is easy to read, easy to write, and easy to generate. An AI coding assistant can scaffold, update, and debug a Curie project without needing to understand a plugin ecosystem or a Groovy DSL.</p>
+      </div>
+      <div class="feature-card">
+        <span class="badge">04 — minimal</span>
+        <h3>Less plugins.</h3>
+        <p>Maven and Gradle solve every problem with a plugin. Curie builds the 80% case — compile, test, package, format, publish, audit, containerise — directly into the binary. Fewer moving parts means fewer version conflicts, fewer classpath surprises, and a complexity ceiling that stays low as your project grows.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- =================== Why Curie =================== -->
 <section>
   <div class="container">
@@ -173,33 +206,27 @@
       <tbody>
         <tr>
           <td>Configuration</td>
-          <td class="curie">Curie.toml (~20 lines)</td>
-          <td>pom.xml (100+ XML)</td>
-          <td>build.gradle DSL</td>
+          <td class="curie">Curie.toml (~20 lines) — declarative</td>
+          <td>pom.xml (100+ XML) — declarative</td>
+          <td>build.gradle — a step back to procedural DSL (<a href="https://declarative.gradle.org/" target="_blank" rel="noopener">declarative syntax planned</a>)</td>
         </tr>
         <tr>
           <td>Startup</td>
           <td class="curie">Native binary — instant</td>
           <td>JVM cold start (~1–2 s)</td>
-          <td>JVM + daemon</td>
+          <td>Quick, but only if resource heavy daemon already started</td>
         </tr>
         <tr>
           <td>Incremental builds</td>
           <td class="curie">Built-in</td>
           <td>Plugin-dependent</td>
-          <td>Built-in (complex)</td>
+          <td>Built-in but complex: task inputs/outputs must be annotated, build cache needs explicit configuration, classpath normalization is a separate concern, and file-system watching adds another layer to understand</td>
         </tr>
         <tr>
           <td>Reproducible output</td>
           <td class="curie">Yes, default</td>
           <td>Extra plugin</td>
           <td>Extra plugin</td>
-        </tr>
-        <tr>
-          <td>Checksum verification</td>
-          <td class="curie">SHA-256, default</td>
-          <td>Extra config</td>
-          <td>Extra config</td>
         </tr>
         <tr>
           <td>Docker support</td>
@@ -218,6 +245,12 @@
           <td class="curie">curie audit (built-in)</td>
           <td>External plugin</td>
           <td>External plugin</td>
+        </tr>
+        <tr>
+          <td>Checksum verification</td>
+          <td class="curie">SHA-256, default</td>
+          <td>Extra config</td>
+          <td>Extra config</td>
         </tr>
       </tbody>
     </table>
@@ -369,39 +402,6 @@
   Tests           <span class="ok">✔ 27 tests successful</span>
   Done            <span class="em">target/app-0.1.0.jar</span>
 </pre>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- =================== Pillars =================== -->
-<section>
-  <div class="container">
-    <header style="margin-bottom: 2rem;">
-      <span class="eyebrow">Design pillars</span>
-      <h2 style="margin-top: 1rem;">Built on four principles.</h2>
-    </header>
-
-    <div class="feature-rows">
-      <div class="feature-card">
-        <span class="badge">01 — fast</span>
-        <h3>Compiled, parallel, incremental.</h3>
-        <p>Curie is a native binary that starts in milliseconds. Dependency downloads run on eight parallel threads. Recompilation is gated by per-source class manifests and an mtime check that's tied to your JDK version — change the JDK, get a clean rebuild for free.</p>
-      </div>
-      <div class="feature-card">
-        <span class="badge">02 — verifiable</span>
-        <h3>SHA-256 by default. Reproducible by default.</h3>
-        <p>Every artifact pulled from Maven Central is checksum-verified on download. The sidecar hash is cached locally and re-checked on every build — your <code>~/.m2</code> is now a tamper-evident store. Outputs are deterministic: re-run a build with the same inputs, get a byte-identical JAR.</p>
-      </div>
-      <div class="feature-card">
-        <span class="badge">03 — minimal</span>
-        <h3>One file, no plugins, no DSL.</h3>
-        <p>Curie.toml is a flat, declarative TOML document. There are no lifecycle phases to memorise, no task graph, no extension points to learn. If a feature isn't in the core binary, it's not in Curie. The complexity ceiling is low on purpose.</p>
-      </div>
-      <div class="feature-card">
-        <span class="badge">04 — polyglot</span>
-        <h3>Java, Kotlin, and Groovy — in the same project.</h3>
-        <p>Drop a <code>.kt</code> or <code>.groovy</code> file next to your <code>.java</code> files — Curie detects it, resolves the right compiler from Maven Central, and compiles everything together. Spock specs (<code>*Spec.groovy</code>) are auto-discovered and run via JUnit Platform. Auto-detects your <code>main</code> entry point in any language.</p>
       </div>
     </div>
   </div>

@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BOM projects · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · bom</span>
+    <h1>BOM projects</h1>
+    <p class="lede">A <strong>Bill of Materials</strong> (BOM) is a POM-only artifact that centralises managed dependency versions for a family of libraries. <code>curie build</code> produces a ready-to-deploy <code>.pom</code> file — no compilation, no JAR, no tests.</p>
+
+    <h2>What is a BOM?</h2>
+    <p>In Maven's dependency model a BOM is a POM with <code>&lt;packaging&gt;pom&lt;/packaging&gt;</code> and a <code>&lt;dependencyManagement&gt;</code> block. Consumers import it via their own <code>[bom-imports]</code> table and then omit versions when declaring the managed artifacts — Maven resolves the version from the BOM at build time.</p>
+    <p>Curie has always been able to <em>consume</em> BOMs. The <code>[bom]</code> project type lets you <em>author</em> one and publish it to a Maven repository so your whole organisation can benefit from a single source of truth for library versions.</p>
+
+    <h2>Configuration</h2>
+    <p>Declare the project with a <code>[bom]</code> section instead of <code>[application]</code> or <code>[library]</code>. List the artifacts and their versions in <code>[dependencies]</code>. Nested BOMs go in <code>[bom-imports]</code>:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[bom]</span>
+<span class="kw">name</span>    = <span class="str">"my-platform-bom"</span>
+<span class="kw">version</span> = <span class="str">"1.0.0"</span>
+<span class="kw">groupId</span> = <span class="str">"com.example"</span>
+
+<span class="com"># Artifacts whose versions this BOM manages.</span>
+<span class="com"># Every version must be explicit — empty strings are not allowed.</span>
+<span class="kw">[dependencies]</span>
+<span class="pkg">"com.google.guava:guava"</span>         = <span class="str">"33.4.8-jre"</span>
+<span class="pkg">"org.slf4j:slf4j-api"</span>            = <span class="str">"2.0.17"</span>
+<span class="pkg">"ch.qos.logback:logback-classic"</span> = <span class="str">"1.5.18"</span>
+
+<span class="com"># Nest another BOM — re-exported inside &lt;dependencyManagement&gt;.</span>
+<span class="kw">[bom-imports]</span>
+<span class="pkg">"com.fasterxml.jackson:jackson-bom"</span> = <span class="str">"2.17.2"</span>
+</pre>
+    </div>
+
+    <h2>Building</h2>
+    <p><code>curie build</code> short-circuits immediately — no resolver pass, no compiler invocation, no test run. It writes a single POM to <code>target/</code>:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build</span>
+      </header>
+<pre>  <span class="ok">Done</span>  my-platform-bom 1.0.0</pre>
+    </div>
+
+    <p>The output POM:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>target/my-platform-bom-1.0.0.pom</span>
+      </header>
+<pre><span class="dim">&lt;?xml version="1.0" encoding="UTF-8"?&gt;</span>
+&lt;<span class="kw">project</span> xmlns=<span class="str">"http://maven.apache.org/POM/4.0.0"</span>
+         xmlns:xsi=<span class="str">"http://www.w3.org/2001/XMLSchema-instance"</span>
+         xsi:schemaLocation=<span class="str">"http://maven.apache.org/POM/4.0.0
+           http://maven.apache.org/xsd/maven-4.0.0.xsd"</span>&gt;
+  &lt;<span class="kw">modelVersion</span>&gt;4.0.0&lt;/<span class="kw">modelVersion</span>&gt;
+  &lt;<span class="kw">groupId</span>&gt;com.example&lt;/<span class="kw">groupId</span>&gt;
+  &lt;<span class="kw">artifactId</span>&gt;my-platform-bom&lt;/<span class="kw">artifactId</span>&gt;
+  &lt;<span class="kw">version</span>&gt;1.0.0&lt;/<span class="kw">version</span>&gt;
+  &lt;<span class="kw">packaging</span>&gt;pom&lt;/<span class="kw">packaging</span>&gt;
+  &lt;<span class="kw">dependencyManagement</span>&gt;
+    &lt;<span class="kw">dependencies</span>&gt;
+      <span class="com">&lt;!-- nested BOM import --&gt;</span>
+      &lt;<span class="kw">dependency</span>&gt;
+        &lt;<span class="kw">groupId</span>&gt;com.fasterxml.jackson&lt;/<span class="kw">groupId</span>&gt;
+        &lt;<span class="kw">artifactId</span>&gt;jackson-bom&lt;/<span class="kw">artifactId</span>&gt;
+        &lt;<span class="kw">version</span>&gt;2.17.2&lt;/<span class="kw">version</span>&gt;
+        &lt;<span class="kw">type</span>&gt;pom&lt;/<span class="kw">type</span>&gt;
+        &lt;<span class="kw">scope</span>&gt;import&lt;/<span class="kw">scope</span>&gt;
+      &lt;/<span class="kw">dependency</span>&gt;
+      <span class="com">&lt;!-- managed versions --&gt;</span>
+      &lt;<span class="kw">dependency</span>&gt;
+        &lt;<span class="kw">groupId</span>&gt;ch.qos.logback&lt;/<span class="kw">groupId</span>&gt;
+        &lt;<span class="kw">artifactId</span>&gt;logback-classic&lt;/<span class="kw">artifactId</span>&gt;
+        &lt;<span class="kw">version</span>&gt;1.5.18&lt;/<span class="kw">version</span>&gt;
+      &lt;/<span class="kw">dependency</span>&gt;
+      <span class="dim">…</span>
+    &lt;/<span class="kw">dependencies</span>&gt;
+  &lt;/<span class="kw">dependencyManagement</span>&gt;
+&lt;/<span class="kw">project</span>&gt;</pre>
+    </div>
+
+    <h2>Directory layout</h2>
+    <p>A BOM project has no source files — just a config file:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>my-platform-bom/</span>
+      </header>
+<pre>my-platform-bom/
+├── Curie.toml          <span class="com"># [bom] config — the only required file</span>
+└── target/             <span class="com"># created by curie build</span>
+    └── my-platform-bom-1.0.0.pom</pre>
+    </div>
+
+    <h2>Publishing</h2>
+    <p>Publishing a BOM works exactly like publishing a library — add <code>[publish]</code> config and run <code>curie publish</code>. The difference is that only the POM is uploaded; there is no JAR, sources jar, or javadoc jar:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie publish</span>
+      </header>
+<pre><span class="dim">Building my-platform-bom v1.0.0</span>
+  POM             my-platform-bom-1.0.0.pom
+  Signed          1 artifact(s)
+  Publishing to   https://nexus.internal/repository/releases/com/example/my-platform-bom/1.0.0
+    → my-platform-bom-1.0.0.pom  (.sha1 .sha256 .sha512 .asc)
+  Uploaded        5 file(s)</pre>
+    </div>
+
+    <p>See the <a href="/docs/publish.html">Publishing</a> page for credentials configuration, GPG signing, and dry-run mode.</p>
+
+    <h2>Restrictions</h2>
+    <p>A <code>[bom]</code> project is POM-only — sections that imply compilation or runtime are not allowed:</p>
+    <ul>
+      <li><code>[test]</code>, <code>[test-dependencies]</code>, <code>[test-bom-imports]</code> — BOM projects have no tests</li>
+      <li><code>[annotation-processors]</code>, <code>[test-annotation-processors]</code> — no compilation step</li>
+      <li><code>[docker]</code>, <code>[native-image]</code> — no runnable artifact</li>
+      <li>Every entry in <code>[dependencies]</code> must have an explicit, non-empty version — BOM-delegated <code>""</code> versions are not permitted</li>
+    </ul>
+    <p>Curie validates these constraints when loading <code>Curie.toml</code> and reports a clear error if any are violated.</p>
+
+    <h2>Consuming a BOM</h2>
+    <p>Once published, other Curie projects import the BOM via <code>[bom-imports]</code> and omit versions for the managed artifacts:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>consumer/Curie.toml</span>
+      </header>
+<pre><span class="kw">[library]</span>
+<span class="kw">name</span>    = <span class="str">"my-service"</span>
+<span class="kw">version</span> = <span class="str">"0.1.0"</span>
+<span class="kw">groupId</span> = <span class="str">"com.example"</span>
+
+<span class="kw">[bom-imports]</span>
+<span class="pkg">"com.example:my-platform-bom"</span> = <span class="str">"1.0.0"</span>
+
+<span class="kw">[dependencies]</span>
+<span class="pkg">"com.google.guava:guava"</span>         = <span class="str">""</span>  <span class="com"># version from the BOM</span>
+<span class="pkg">"org.slf4j:slf4j-api"</span>            = <span class="str">""</span>  <span class="com"># version from the BOM</span>
+<span class="pkg">"ch.qos.logback:logback-classic"</span> = <span class="str">""</span>  <span class="com"># version from the BOM</span>
+</pre>
+    </div>
+
+    <h2>Scaffolding</h2>
+    <p>Use <code>curie new bom</code> to generate a minimal project skeleton — just a <code>Curie.toml</code> with a <code>[bom]</code> section and a commented-out example dependency:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie new bom my-platform-bom</span>
+      </header>
+<pre><span class="ok">Created</span> my-platform-bom/Curie.toml
+
+<span class="dim">Run `curie build` inside my-platform-bom/ to generate the POM.</span></pre>
+    </div>
+
+    <h2>Workspace member</h2>
+    <p>A BOM project can live alongside application and library members in a workspace. The workspace-level <code>[bom-imports]</code> is <em>not</em> re-exported into the generated BOM POM — only the entries declared directly in the member's own <code>Curie.toml</code> are written to <code>&lt;dependencyManagement&gt;</code>. See <a href="/docs/workspaces.html">Workspaces</a> for the full inheritance rules.</p>
+
+    <div class="pager">
+      <a href="/docs/workspaces.html">
+        <span>← Previous</span>
+        <strong>Workspaces</strong>
+      </a>
+      <a href="/docs/incremental.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Incremental builds</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

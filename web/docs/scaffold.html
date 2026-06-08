@@ -32,19 +32,35 @@
     <h4>Documentation</h4>
     <ul>
       <li><a href="/docs/">Overview</a></li>
-      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
-      <li><a href="/docs/kotlin.html">Kotlin support</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
       <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
-      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
       <li><a href="/docs/workspaces.html">Workspaces</a></li>
-      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
       <li><a href="/docs/testing.html">Testing</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
       <li><a href="/docs/docker.html">Docker</a></li>
       <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
       <li><a href="/docs/deps.html">Dependency tree</a></li>
       <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
-      <li><a href="/docs/native.html">GraalVM native</a></li>
       <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
     </ul>
   </aside>
 
@@ -113,6 +129,11 @@
           <td><code>[workspace]</code> root with an empty members list</td>
           <td>Multi-module monorepo root</td>
         </tr>
+        <tr>
+          <td><code>bom</code></td>
+          <td><code>[bom]</code> with a commented example dependency</td>
+          <td>Maven Bill of Materials — publishes a POM only, no JAR</td>
+        </tr>
       </tbody>
     </table>
 
@@ -128,13 +149,13 @@
     <p>The generated source file uses the flat-package layout by default (<code>src/com.example/Hello.java</code>). This keeps the source tree shallow and is the layout Curie recommends for new projects. If you prefer Maven-style (<code>src/main/java/com/example/Hello.java</code>), move the file — both layouts are supported and can coexist.</p>
 
     <div class="pager">
-      <a href="/docs/native.html">
+      <a href="/docs/audit.html">
         <span>← Previous</span>
-        <strong>GraalVM native</strong>
+        <strong>Audit (SBOM)</strong>
       </a>
-      <a href="/docs/" style="text-align: right; align-items: flex-end;">
-        <span>↑ Back to</span>
-        <strong>Overview</strong>
+      <a href="/docs/inspect.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Build Inspect</strong>
       </a>
     </div>
   </main>
