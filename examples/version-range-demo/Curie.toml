@@ -1,0 +1,30 @@
+# version-range-demo
+#
+# Demonstrates Curie's version-range detection and how to fix it.
+#
+# com.github.stefanbirkner:system-rules:1.18.0 declares its JUnit dependency
+# as the Maven version range [4.9,) rather than a specific version.  Curie
+# treats this as a hard error: ranges are non-deterministic and break
+# reproducible builds.
+#
+# Without the explicit pin below, `curie build` would fail with:
+#
+#   non-deterministic version ranges in dependency graph
+#
+#     junit:junit-dep
+#       "[4.9,)"  declared in com.github.stefanbirkner:system-rules:1.18.0
+#
+#   Pin these artifacts in Curie.toml to fix:
+#     [dependencies]
+#     "junit:junit-dep" = "<version>"
+#
+# Adding the explicit pin restores deterministic resolution.
+
+[application]
+name = "version-range-demo"
+version = "0.1.0"
+mainClass = "com.example.VersionRangeDemo"
+
+[dependencies]
+"com.github.stefanbirkner:system-rules" = "1.18.0"
+"junit:junit-dep"                        = "4.10"   # pins the transitive range dep
