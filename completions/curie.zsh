@@ -38,6 +38,7 @@ _curie() {
                 'add:Add a dependency to Curie.toml'
                 'remove:Remove a dependency from Curie.toml'
                 'inspect:Inspect last build logs in an interactive TUI'
+                'setup:Download and install shell completions'
                 'new:Scaffold a new Curie project in a subdirectory'
                 'init:Initialise a Curie project in the current directory'
             )
@@ -122,6 +123,10 @@ _curie() {
                         '--bom[Remove from [bom-imports]]'
                     ;;
                 inspect)
+                    ;;
+                setup)
+                    _arguments \
+                        '--shell[Override shell detection]:shell:(fish bash zsh)'
                     ;;
                 new|init)
                     local -a project_kinds

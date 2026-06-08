@@ -66,9 +66,30 @@
       </div>
 
       <h2>Shell completions</h2>
-      <p>Completion scripts for fish, bash, and zsh are bundled in the <code>completions/</code> directory of the repository. Pick the one for your shell:</p>
+      <p>Run <code>curie setup</code> to automatically detect your shell and install the matching completion script in one command:</p>
+      <div class="term">
+        <header>
+          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+          <span>shell</span>
+        </header>
+<pre><span class="prompt">$</span> curie setup
+  Shell           fish
+  Downloading     https://raw.githubusercontent.com/atteo/curie-build/&lt;commit&gt;/completions/curie.fish
+  Installed       /home/you/.config/fish/completions/curie.fish
+  Open a new terminal, or run: source /home/you/.config/fish/completions/curie.fish</pre>
+      </div>
+      <p>The script is downloaded from GitHub at the exact commit that matches your installed binary, so it always reflects the correct set of subcommands and flags. Pass <code>--shell</code> to override detection:</p>
+      <div class="term">
+        <header>
+          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+          <span>shell</span>
+        </header>
+<pre><span class="prompt">$</span> curie setup --shell zsh</pre>
+      </div>
 
-      <h3>fish</h3>
+      <p>Alternatively, install manually from the <code>completions/</code> directory of the repository:</p>
+
+      <h3>fish (manual)</h3>
       <div class="term">
         <header>
           <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
@@ -76,9 +97,8 @@
         </header>
 <pre><span class="prompt">$</span> cp completions/curie.fish ~/.config/fish/completions/</pre>
       </div>
-      <p>Open a new terminal (or run <code>source ~/.config/fish/completions/curie.fish</code>) and press Tab after <code>curie</code> to see subcommands.</p>
 
-      <h3>bash</h3>
+      <h3>bash (manual)</h3>
       <div class="term">
         <header>
           <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
@@ -86,9 +106,8 @@
         </header>
 <pre><span class="prompt">$</span> cp completions/curie.bash ~/.local/share/bash-completion/completions/curie</pre>
       </div>
-      <p>Open a new terminal, or run <code>source completions/curie.bash</code> to activate immediately in the current shell.</p>
 
-      <h3>zsh</h3>
+      <h3>zsh (manual)</h3>
       <div class="term">
         <header>
           <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
@@ -97,7 +116,7 @@
 <pre><span class="prompt">$</span> mkdir -p ~/.zsh/completions
 <span class="prompt">$</span> cp completions/curie.zsh ~/.zsh/completions/_curie</pre>
       </div>
-      <p>Add the following to your <code>~/.zshrc</code> if it isn't there already, then open a new terminal:</p>
+      <p>Add to <code>~/.zshrc</code> if not already present, then open a new terminal:</p>
       <div class="code">
         <header>
           <span class="dot live"></span><span class="dot"></span><span class="dot"></span>

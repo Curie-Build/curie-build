@@ -11,7 +11,7 @@ function __curie_needs_subcommand
     for i in (commandline -opc)
         if contains -- $i \
                 build test run clean native list fmt deps \
-                publish update audit add remove inspect new init
+                publish update audit add remove inspect setup new init
             return 1
         end
     end
@@ -37,6 +37,7 @@ complete -c curie -f -n __curie_needs_subcommand -a audit   -d "Emit SBOM and sc
 complete -c curie -f -n __curie_needs_subcommand -a add     -d "Add a dependency to Curie.toml"
 complete -c curie -f -n __curie_needs_subcommand -a remove  -d "Remove a dependency from Curie.toml"
 complete -c curie -f -n __curie_needs_subcommand -a inspect -d "Inspect last build logs in an interactive TUI"
+complete -c curie -f -n __curie_needs_subcommand -a setup   -d "Download and install shell completions"
 complete -c curie -f -n __curie_needs_subcommand -a new     -d "Scaffold a new Curie project in a subdirectory"
 complete -c curie -f -n __curie_needs_subcommand -a init    -d "Initialise a Curie project in the current directory"
 
@@ -102,6 +103,9 @@ complete -c curie -f -n "__fish_seen_subcommand_from add" -l offline            
 complete -c curie -f -n "__fish_seen_subcommand_from remove" -l test                 -d "Remove from [test-dependencies]"
 complete -c curie -f -n "__fish_seen_subcommand_from remove" -l annotation-processor -d "Remove from [annotation-processors]"
 complete -c curie -f -n "__fish_seen_subcommand_from remove" -l bom                  -d "Remove from [bom-imports]"
+
+# ── setup ─────────────────────────────────────────────────────────────────────
+complete -c curie -f -n "__fish_seen_subcommand_from setup" -l shell -d "Override shell detection: fish, bash, or zsh" -r
 
 # ── new ───────────────────────────────────────────────────────────────────────
 complete -c curie -f -n "__fish_seen_subcommand_from new" -a app       -d "Executable application"

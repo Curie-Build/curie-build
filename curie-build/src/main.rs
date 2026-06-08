@@ -3,6 +3,7 @@ mod api_search;
 mod api_search_ui;
 mod version_ui;
 mod audit;
+mod setup;
 mod inspect_ui;
 mod build;
 mod class_manifest;
@@ -238,6 +239,17 @@ enum Cmd {
     /// Inspect the merged logs of the last build in an interactive TUI
     Inspect {},
 
+    /// Download and install shell completions for the detected shell
+    ///
+    /// Detects your shell from $SHELL, then downloads the completion script
+    /// that matches this exact binary version from GitHub and installs it to
+    /// the conventional per-user completions directory.
+    Setup {
+        /// Override shell detection: fish, bash, or zsh
+        #[arg(long, value_name = "SHELL")]
+        shell: Option<String>,
+    },
+
     /// Scaffold a new Curie project in a new subdirectory
     New {
         /// Project kind: app, lib, or workspace
@@ -264,14 +276,17 @@ enum Cmd {
 fn main() {
     let cli = Cli::parse();
 
-    // `curie new` and `curie init` don't operate on an existing project —
-    // they create one.  Skip workspace discovery entirely for them.
+    // `curie new`, `curie init`, and `curie setup` don't operate on an
+    // existing project.  Skip workspace discovery entirely for them.
     let early_result = match &cli.command {
         Cmd::New { kind, name, package } => {
             Some(new::run_new(*kind, name.clone(), package.clone()))
         }
         Cmd::Init { kind, package } => {
             Some(new::run_init(*kind, package.clone()))
+        }
+        Cmd::Setup { shell } => {
+            Some(setup::run_setup(shell.clone()))
         }
         _ => None,
     };
@@ -548,6 +563,8 @@ fn main() {
                 )
             }
         },
+        // Handled before workspace discovery in the early_result block above.
+        Cmd::Setup { .. } => unreachable!(),
     };
 
     if let Err(e) = result {

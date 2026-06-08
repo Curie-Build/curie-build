@@ -12,7 +12,7 @@ _curie() {
     local cur prev words cword
     _init_completion || return
 
-    local subcommands="build test run clean native list fmt deps publish update audit add remove inspect new init"
+    local subcommands="build test run clean native list fmt deps publish update audit add remove inspect setup new init"
 
     # Find the subcommand already typed (first non-flag word after 'curie')
     local subcommand=""
@@ -103,6 +103,12 @@ _curie() {
             ;;
         inspect)
             COMPREPLY=()
+            ;;
+        setup)
+            case "$prev" in
+                --shell) COMPREPLY=( $(compgen -W "fish bash zsh" -- "$cur") ); return ;;
+            esac
+            COMPREPLY=( $(compgen -W "--shell" -- "$cur") )
             ;;
         new|init)
             case "$prev" in

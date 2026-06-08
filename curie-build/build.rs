@@ -18,6 +18,8 @@ fn main() {
     println!("cargo:rerun-if-changed=javac-wrapper/Wrapper.java");
     println!("cargo:rerun-if-changed=build.rs");
 
+    emit_git_commit_hash();
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
     let class_dir = out_dir.join("wrapper-classes");
     let manifest_path = out_dir.join("wrapper-manifest.txt");
@@ -105,4 +107,32 @@ fn main() {
         ),
     )
     .expect("failed to write wrapper_sha8.rs");
+}
+
+/// Bake the Git commit hash into the binary as the `GIT_COMMIT_HASH` env var.
+///
+/// Set to `"unknown"` when the source tree is not inside a Git repository or
+/// when `git` is not available (e.g. builds from a crates.io tarball).
+fn emit_git_commit_hash() {
+    // Re-run when HEAD or the branch ref changes (new commit or checkout).
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let git_head = manifest_dir.join("../.git/HEAD");
+    if git_head.exists() {
+        println!("cargo:rerun-if-changed={}", git_head.display());
+        // Also watch the branch ref so a new commit on the current branch triggers a rebuild.
+        let git_refs = manifest_dir.join("../.git/refs");
+        if git_refs.exists() {
+            println!("cargo:rerun-if-changed={}", git_refs.display());
+        }
+    }
+
+    let hash = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    println!("cargo:rustc-env=GIT_COMMIT_HASH={hash}");
 }
