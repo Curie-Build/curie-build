@@ -150,6 +150,50 @@ pub struct DepTree {
     pub skipped: HashMap<String, Vec<SkippedDep>>,
 }
 
+struct RangeViolation {
+    dep_key: String,
+    range: String,
+    declared_in: Gav,
+}
+
+fn is_version_range(version: &str) -> bool {
+    version.starts_with('[') || version.starts_with('(')
+}
+
+fn curie_toml_gav() -> Gav {
+    Gav { group: String::new(), artifact: "Curie.toml".to_string(), version: String::new() }
+}
+
+fn format_range_error(violations: &[RangeViolation]) -> String {
+    use std::collections::BTreeMap;
+
+    let mut grouped: BTreeMap<&str, Vec<(&str, &Gav)>> = BTreeMap::new();
+    for v in violations {
+        grouped.entry(&v.dep_key).or_default().push((&v.range, &v.declared_in));
+    }
+
+    let mut msg = String::from("non-deterministic version ranges in dependency graph");
+
+    for (dep_key, entries) in &grouped {
+        msg.push_str(&format!("\n\n  {dep_key}"));
+        for (range, declared_in) in entries {
+            let location = if declared_in.artifact == "Curie.toml" {
+                "Curie.toml".to_string()
+            } else {
+                declared_in.notation()
+            };
+            msg.push_str(&format!("\n    \"{range}\"  declared in {location}"));
+        }
+    }
+
+    msg.push_str("\n\nPin these artifacts in Curie.toml to fix:\n  [dependencies]");
+    for dep_key in grouped.keys() {
+        msg.push_str(&format!("\n  \"{dep_key}\" = \"<version>\""));
+    }
+
+    msg
+}
+
 /// Walk the parent POM chain (up to 10 levels) and merge properties +
 /// managed_versions into `pom`. Parent values only fill gaps — own values win.
 fn merge_parent_chain(
@@ -451,6 +495,7 @@ pub fn resolve_tree(
     let mut visited: HashSet<String> = HashSet::new();
     let mut resolved: Vec<ResolvedDep> = Vec::new();
     let mut skipped: HashMap<String, Vec<SkippedDep>> = HashMap::new();
+    let mut range_violations: Vec<RangeViolation> = Vec::new();
 
     // Seed depth-0 from declared deps.
     let mut current_level: Vec<BfsWork> = Vec::new();
@@ -466,6 +511,15 @@ pub fn resolve_tree(
         } else {
             dep.version.to_string()
         };
+
+        if is_version_range(&resolved_version) {
+            range_violations.push(RangeViolation {
+                dep_key: dep.key.to_string(),
+                range: resolved_version,
+                declared_in: curie_toml_gav(),
+            });
+            continue;
+        }
 
         let (fetch_repos, child_repos) = if let Some(repo_id) = dep.repo_id {
             let named: Repository = (*named_map
@@ -527,6 +581,15 @@ pub fn resolve_tree(
                         None => continue,
                     };
 
+                    if is_version_range(&raw_version) {
+                        range_violations.push(RangeViolation {
+                            dep_key: ga_key,
+                            range: raw_version,
+                            declared_in: work.gav.clone(),
+                        });
+                        continue;
+                    }
+
                     let child_gav = Gav { group, artifact, version: raw_version };
                     visited.insert(ga_key);
                     next_level.push(BfsWork {
@@ -541,6 +604,10 @@ pub fn resolve_tree(
         }
 
         current_level = next_level;
+    }
+
+    if !range_violations.is_empty() {
+        bail!("{}", format_range_error(&range_violations));
     }
 
     Ok(DepTree { resolved, skipped })
@@ -620,6 +687,7 @@ pub fn resolve(
     let mut visited: HashSet<String> = HashSet::new();
     // Ordered list of (GAV, fetch_repos) in BFS discovery order — used in Phase 2.
     let mut ordered_gavs: Vec<(Gav, Vec<Repository>)> = Vec::new();
+    let mut range_violations: Vec<RangeViolation> = Vec::new();
 
     // Seed the first level from declared dependencies.  At depth 0 the user's
     // explicit version always wins — BOMs only fill in when the version is empty.
@@ -639,6 +707,15 @@ pub fn resolve(
         } else {
             dep.version.to_string()
         };
+
+        if is_version_range(&resolved_version) {
+            range_violations.push(RangeViolation {
+                dep_key: dep.key.to_string(),
+                range: resolved_version,
+                declared_in: curie_toml_gav(),
+            });
+            continue;
+        }
 
         // Compute per-artifact repo context based on the optional repo_id.
         //
@@ -718,6 +795,15 @@ pub fn resolve(
                         None => continue, // unresolvable — drop this dep
                     };
 
+                    if is_version_range(&raw_version) {
+                        range_violations.push(RangeViolation {
+                            dep_key: ga_key,
+                            range: raw_version,
+                            declared_in: work.gav.clone(),
+                        });
+                        continue;
+                    }
+
                     let child_gav = Gav { group, artifact, version: raw_version };
                     visited.insert(ga_key);
                     // Transitives inherit the parent's child_repos.
@@ -741,6 +827,10 @@ pub fn resolve(
 
     if let Some(sp) = phase1_spinner {
         sp.finish_and_clear();
+    }
+
+    if !range_violations.is_empty() {
+        bail!("{}", format_range_error(&range_violations));
     }
 
     // -----------------------------------------------------------------------
@@ -2227,5 +2317,99 @@ mod tests {
         assert_eq!(skips[0].depth, 2);
         let skip_via = skips[0].via.as_ref().unwrap();
         assert_eq!(skip_via.artifact, "c");
+    }
+
+    // -----------------------------------------------------------------------
+    // Version range detection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn version_range_in_transitive_pom_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        // parent:1.0 declares a transitive dep on child with a range version.
+        write_fake_artifact(dir.path(), "foo", "parent", "1.0",
+            &[("foo", "child", "[1.0,2.0)")]);
+
+        let err = run_resolve(dir.path(), &[("foo:parent", "1.0")], vec![])
+            .unwrap_err();
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("[1.0,2.0)"),
+            "expected range in error, got {:?}", msg,
+        );
+        assert!(
+            msg.contains("foo:parent:1.0"),
+            "expected declaring POM in error, got {:?}", msg,
+        );
+        assert!(
+            msg.contains("foo:child"),
+            "expected the ranged artifact in error, got {:?}", msg,
+        );
+    }
+
+    #[test]
+    fn version_range_in_direct_dep_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        // No files needed — error must fire before any artifact is fetched.
+        let err = run_resolve(dir.path(), &[("foo:bar", "[1.0,)")], vec![])
+            .unwrap_err();
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("[1.0,)"),
+            "expected range in error, got {:?}", msg,
+        );
+        assert!(
+            msg.contains("Curie.toml"),
+            "expected 'Curie.toml' as the declared-in location, got {:?}", msg,
+        );
+    }
+
+    #[test]
+    fn multiple_ranges_grouped_in_one_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // lib:1.0 declares two transitive deps, both using ranges.
+        write_fake_artifact(dir.path(), "grp", "lib", "1.0",
+            &[("foo", "alpha", "[1.0,2.0)"), ("foo", "beta", "(,1.5]")]);
+
+        let err = run_resolve(dir.path(), &[("grp:lib", "1.0")], vec![])
+            .unwrap_err();
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("[1.0,2.0)"), "expected [1.0,2.0) in error: {:?}", msg);
+        assert!(msg.contains("(,1.5]"),    "expected (,1.5] in error: {:?}", msg);
+        assert!(msg.contains("foo:alpha"), "expected foo:alpha in error: {:?}", msg);
+        assert!(msg.contains("foo:beta"),  "expected foo:beta in error: {:?}", msg);
+        // Both should appear in the pin block.
+        assert!(
+            msg.contains("Pin these artifacts"),
+            "expected pin hint in error: {:?}", msg,
+        );
+    }
+
+    #[test]
+    fn exact_versions_are_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
+        write_fake_artifact(dir.path(), "foo", "bar", "2.17.2", &[]);
+        write_fake_artifact(dir.path(), "grp", "lib", "1.0",
+            &[("foo", "bar", "2.17.2")]);
+
+        // Direct dep with exact version.
+        run_resolve(dir.path(), &[("foo:bar", "1.0")], vec![]).unwrap();
+        // Transitive dep with exact version.
+        run_resolve(dir.path(), &[("grp:lib", "1.0")], vec![]).unwrap();
+    }
+
+    #[test]
+    fn single_pin_range_notation_is_rejected() {
+        // [1.0] is still range syntax even though it pins a single version.
+        // Users should write "1.0" instead.
+        let dir = tempfile::tempdir().unwrap();
+        let err = run_resolve(dir.path(), &[("foo:bar", "[1.0]")], vec![])
+            .unwrap_err();
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("[1.0]"),
+            "expected [1.0] range notation in error, got {:?}", msg,
+        );
     }
 }
