@@ -291,7 +291,7 @@ pub fn clean(project_root: &Path) -> Result<()> {
 
     match std::fs::remove_dir_all(&target_dir) {
         Ok(()) => {
-            crate::parallel::emit(&crate::style::stale("Target dir", "removed"));
+            crate::parallel::emit(&crate::style::clean_step("Target dir", "removed"));
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             crate::parallel::emit(&crate::style::neutral("Target dir", "nothing to clean"));

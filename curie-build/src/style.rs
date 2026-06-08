@@ -31,6 +31,7 @@ const ICON_RUN:      &str = "▸";   // curie run — launch / play
 const ICON_AUDIT:    &str = "⊙";   // curie audit — security scan / SBOM
 const ICON_FORMAT:   &str = "≡";   // curie fmt — code formatting
 const ICON_PUBLISH:  &str = "↑";   // curie publish — upload
+const ICON_CLEAN:    &str = "⌫";   // curie clean — erase / delete
 
 // ── Formatting helpers (internal) ───────────────────────────────────────────
 
@@ -112,6 +113,11 @@ pub fn info(label: &str, value: &str) -> String {
 /// Truly neutral / nothing to do.  Dim `·`.
 pub fn neutral(label: &str, value: &str) -> String {
     line(GRAY, ICON_NEUTRAL, label, value)
+}
+
+/// `curie clean` step.  Blue `⌫`.
+pub fn clean_step(label: &str, value: &str) -> String {
+    line(BLUE, ICON_CLEAN, label, value)
 }
 
 /// `curie run` launch announcement.  Bold-green `▸`.
