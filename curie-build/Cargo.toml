@@ -22,6 +22,7 @@ clap = { version = "4", features = ["derive"] }
 dirs = "6"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 curie-deps = { version = "0.5.0", path = "../curie-deps" }
+curie-meta = { version = "0.1.0", path = "../curie-meta" }
 indicatif = "0.18"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 sha1 = "0.11"

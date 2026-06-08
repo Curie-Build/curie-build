@@ -2,5 +2,6 @@
 members = [
     "curie-build",
     "curie-deps",
+    "curie-meta",
 ]
 resolver = "2"

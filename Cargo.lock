@@ -374,6 +374,7 @@ dependencies = [
  "clap",
  "crossterm",
  "curie-deps",
+ "curie-meta",
  "dirs",
  "filetime",
  "indicatif",
@@ -409,6 +410,17 @@ dependencies = [
  "sha1",
  "sha2",
  "tempfile",
+]
+
+[[package]]
+name = "curie-meta"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "curie-deps",
+ "serde",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

@@ -384,10 +384,10 @@ fn main() {
             workspace::WorkspaceContext::WorkspaceRoot(root)
             | workspace::WorkspaceContext::WorkspaceMember { workspace_root: root, .. }
             | workspace::WorkspaceContext::WorkspaceSubtree { workspace_root: root, .. } => {
-                workspace::list(root, &cli.project, all)
+                workspace::list(root, &cli.project, all, crate::term::use_color())
             }
             workspace::WorkspaceContext::Standalone(project) => {
-                workspace::list(project, project, all)
+                workspace::list(project, project, all, crate::term::use_color())
             }
         },
         Cmd::Fmt { check, offline } => match &ctx {
