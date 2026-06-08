@@ -1,31 +1,32 @@
 [package]
 name = "curie-build"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
 license = "Apache-2.0"
 homepage = "https://curie-build.org"
 description = "The Curie build tool"
 build = "build.rs"
+readme = "../README.md"
 
 [[bin]]
 name = "curie"
 path = "src/main.rs"
 
 [dependencies]
-toml = "1.1"
-toml_edit = "0.22"
+toml = "1.1.2"
+toml_edit = "0.25.12"
 serde = { version = "1", features = ["derive"] }
 walkdir = "2"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 zip = { version = "8", default-features = false, features = ["deflate"] }
-curie-deps = { version = "0.1.0", path = "../curie-deps" }
+curie-deps = { version = "0.5.0", path = "../curie-deps" }
 indicatif = "0.18"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 sha1 = "0.11"
 sha2 = "0.11"
-which = "6"
+which = "8.0.3"
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "v7"] }
 portable-pty = "0.9"
