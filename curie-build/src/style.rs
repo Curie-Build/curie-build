@@ -20,13 +20,17 @@ const RESET:       &str = "\x1b[0m";
 // ── Icons ───────────────────────────────────────────────────────────────────
 // All single display-column characters so the label column stays aligned.
 
-const ICON_ACTIVE:   &str = "⚙";   // compile, package, build
+const ICON_ACTIVE:   &str = "⚙";   // compile, package
 const ICON_RESOLVE:  &str = "↓";   // dependency resolution
 const ICON_DONE:     &str = "✓";   // final success
 const ICON_SKIP:     &str = "✓";   // up to date (same mark, dimmer)
 const ICON_STALE:    &str = "✗";   // stale / removed
 const ICON_INFO:     &str = "→";   // neutral informational
 const ICON_NEUTRAL:  &str = "·";   // truly neutral (no test sources, etc.)
+const ICON_RUN:      &str = "▸";   // curie run — launch / play
+const ICON_AUDIT:    &str = "⊙";   // curie audit — security scan / SBOM
+const ICON_FORMAT:   &str = "≡";   // curie fmt — code formatting
+const ICON_PUBLISH:  &str = "↑";   // curie publish — upload
 
 // ── Formatting helpers (internal) ───────────────────────────────────────────
 
@@ -35,6 +39,16 @@ const ICON_NEUTRAL:  &str = "·";   // truly neutral (no test sources, etc.)
 fn line(color: &str, icon: &str, label: &str, value: &str) -> String {
     if crate::term::use_color() {
         format!("  {color}{icon} {label:<14}{RESET}{value}")
+    } else {
+        format!("  {label:<16}{value}")
+    }
+}
+
+/// Like [`line`] but the entire row (label + value) is dimmed grey.
+/// Used for skip/up-to-date lines so the detail text is also muted.
+fn line_all_dimmed(icon: &str, label: &str, value: &str) -> String {
+    if crate::term::use_color() {
+        format!("  {GRAY}{icon} {label:<14}{value}{RESET}")
     } else {
         format!("  {label:<16}{value}")
     }
@@ -79,13 +93,10 @@ pub fn done(value: &str) -> String {
     }
 }
 
-/// Step was skipped because already up to date.  Dim `✓`.
+/// Step was skipped because already up to date.  Entire row is dim grey
+/// (icon, label, and the "up to date" detail) to signal low importance.
 pub fn up_to_date(label: &str) -> String {
-    if crate::term::use_color() {
-        format!("  {GRAY}{ICON_SKIP} {label:<14}{RESET}up to date")
-    } else {
-        format!("  {label:<16}up to date")
-    }
+    line_all_dimmed(ICON_SKIP, label, "up to date")
 }
 
 /// Something was removed or is stale.  Yellow `✗`.
@@ -101,6 +112,32 @@ pub fn info(label: &str, value: &str) -> String {
 /// Truly neutral / nothing to do.  Dim `·`.
 pub fn neutral(label: &str, value: &str) -> String {
     line(GRAY, ICON_NEUTRAL, label, value)
+}
+
+/// `curie run` launch announcement.  Bold-green `▸`.
+/// Formats `"name v version"` as the value (version omitted when empty).
+pub fn run_step(name: &str, version: &str) -> String {
+    let value = if version.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} v{version}")
+    };
+    line(BOLD_GREEN, ICON_RUN, "Running", &value)
+}
+
+/// `curie audit` step: SBOM write, scan result, etc.  Cyan `⊙`.
+pub fn audit_step(label: &str, value: &str) -> String {
+    line(CYAN, ICON_AUDIT, label, value)
+}
+
+/// `curie fmt` step: file count, check result, etc.  Cyan `≡`.
+pub fn fmt_step(label: &str, value: &str) -> String {
+    line(CYAN, ICON_FORMAT, label, value)
+}
+
+/// `curie publish` step: POM, sources jar, upload count, etc.  Cyan `↑`.
+pub fn publish_step(label: &str, value: &str) -> String {
+    line(CYAN, ICON_PUBLISH, label, value)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -154,8 +191,6 @@ mod tests {
 
     #[test]
     fn plain_headline_format() {
-        // When use_color is false the helper falls through to the plain path.
-        // We test the plain_headline directly.
         let s = plain_headline("Building", "my-app", "0.1.0");
         assert_eq!(s, "Building my-app v0.1.0");
     }
@@ -179,7 +214,6 @@ mod tests {
 
     #[test]
     fn plain_done_format() {
-        // Visually: "  Done            target/foo.jar"
         let s = plain_done("target/foo.jar");
         assert_eq!(s, "  Done            target/foo.jar");
     }
@@ -201,11 +235,17 @@ mod tests {
     }
 
     #[test]
-    fn colored_up_to_date_contains_dim_and_check() {
+    fn colored_up_to_date_all_grey_including_details() {
         let s = colored_up_to_date("Compile");
         assert!(s.contains(GRAY));
         assert!(s.contains(ICON_SKIP));
-        assert!(s.contains("up to date"));
+        // RESET must appear after "up to date" so the detail text is also dimmed.
+        let reset_pos  = s.rfind(RESET).unwrap();
+        let detail_pos = s.find("up to date").unwrap();
+        assert!(
+            detail_pos < reset_pos,
+            "\"up to date\" must appear before RESET so it is rendered grey"
+        );
     }
 
     // ── stale ─────────────────────────────────────────────────────────────
@@ -223,6 +263,62 @@ mod tests {
         assert!(s.contains(ICON_STALE));
     }
 
+    // ── run_step ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn plain_run_step_with_version() {
+        let s = plain_run_step("my-app", "1.2.3");
+        assert_eq!(s, "  Running         my-app v1.2.3");
+    }
+
+    #[test]
+    fn plain_run_step_no_version() {
+        let s = plain_run_step("my-image", "");
+        assert_eq!(s, "  Running         my-image");
+    }
+
+    #[test]
+    fn colored_run_step_uses_green_and_run_icon() {
+        let s = colored_run_step("my-app", "0.1.0");
+        assert!(s.contains(BOLD_GREEN));
+        assert!(s.contains(ICON_RUN));
+        assert!(s.contains("my-app v0.1.0"));
+    }
+
+    // ── audit_step ────────────────────────────────────────────────────────
+
+    #[test]
+    fn plain_audit_step_format() {
+        let s = plain_line("SBOM", "target/sbom.cdx.json");
+        assert_eq!(s, "  SBOM            target/sbom.cdx.json");
+    }
+
+    #[test]
+    fn colored_audit_step_uses_audit_icon() {
+        let s = colored_line(CYAN, ICON_AUDIT, "SBOM", "target/sbom.cdx.json");
+        assert!(s.contains(ICON_AUDIT));
+        assert!(s.contains(CYAN));
+        assert!(s.contains("target/sbom.cdx.json"));
+    }
+
+    // ── fmt_step ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn colored_fmt_step_uses_format_icon() {
+        let s = colored_line(CYAN, ICON_FORMAT, "Format", "5 Java file(s)");
+        assert!(s.contains(ICON_FORMAT));
+        assert!(s.contains("5 Java file(s)"));
+    }
+
+    // ── publish_step ─────────────────────────────────────────────────────
+
+    #[test]
+    fn colored_publish_step_uses_publish_icon() {
+        let s = colored_line(CYAN, ICON_PUBLISH, "Uploaded", "3 file(s)");
+        assert!(s.contains(ICON_PUBLISH));
+        assert!(s.contains("3 file(s)"));
+    }
+
     // ── Helpers used only in tests ────────────────────────────────────────
 
     fn strip_ansi(s: &str) -> String {
@@ -230,7 +326,6 @@ mod tests {
         let mut chars = s.chars().peekable();
         while let Some(c) = chars.next() {
             if c == '\x1b' {
-                // Skip until end of CSI sequence (letter) or OSC.
                 while let Some(&next) = chars.peek() {
                     chars.next();
                     if next.is_ascii_alphabetic() { break; }
@@ -242,9 +337,6 @@ mod tests {
         out
     }
 
-    // Plain/colored variants that don't call use_color() — for isolated tests.
-
-    /// Returns the char-index (not byte-index) of `needle` in `haystack`.
     fn char_index_of(haystack: &str, needle: &str) -> Option<usize> {
         haystack.find(needle).map(|byte_idx| {
             haystack[..byte_idx].chars().count()
@@ -280,6 +372,19 @@ mod tests {
     }
 
     fn colored_up_to_date(label: &str) -> String {
-        format!("  {GRAY}{ICON_SKIP} {label:<14}{RESET}up to date")
+        format!("  {GRAY}{ICON_SKIP} {label:<14}up to date{RESET}")
+    }
+
+    fn plain_run_step(name: &str, version: &str) -> String {
+        if version.is_empty() {
+            format!("  {:<16}{name}", "Running")
+        } else {
+            format!("  {:<16}{name} v{version}", "Running")
+        }
+    }
+
+    fn colored_run_step(name: &str, version: &str) -> String {
+        let value = if version.is_empty() { name.to_string() } else { format!("{name} v{version}") };
+        format!("  {BOLD_GREEN}{ICON_RUN} {:<14}{RESET}{value}", "Running")
     }
 }

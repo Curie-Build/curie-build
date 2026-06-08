@@ -90,7 +90,7 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
         // BOM projects publish the POM only — no JAR, no sources, no javadoc.
         // build_with_desc already wrote the BOM POM; its path is in build_out.jar.
         let pom_path = &build_out.jar;
-        println!("  POM             {}", pom_path.file_name().unwrap().to_string_lossy());
+        println!("{}", crate::style::publish_step("POM", &pom_path.file_name().unwrap().to_string_lossy()));
         artifacts.push(UploadArtifact::pom(pom_path));
     } else {
         // --- sources jar -----------------------------------------------------
@@ -99,14 +99,14 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
         let resources_dir = build_out.resources_dir.as_deref();
         sources_jar::write_sources_jar(&sources_jar_path, &src_roots, resources_dir)
             .context("failed to build sources jar")?;
-        println!("  Sources jar     {}", sources_jar_path.file_name().unwrap().to_string_lossy());
+        println!("{}", crate::style::publish_step("Sources jar", &sources_jar_path.file_name().unwrap().to_string_lossy()));
 
         // --- javadoc jar (optional) ------------------------------------------
         let javadoc_jar_path: Option<PathBuf> = if javadoc {
             let p = target_dir.join(format!("{}-javadoc.jar", base_name));
             build_javadoc_jar(project_root, &src_roots, &p)
                 .context("failed to build javadoc jar")?;
-            println!("  Javadoc jar     {}", p.file_name().unwrap().to_string_lossy());
+            println!("{}", crate::style::publish_step("Javadoc jar", &p.file_name().unwrap().to_string_lossy()));
             Some(p)
         } else {
             None
@@ -117,7 +117,7 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
         let pom_path = target_dir.join(format!("{}.pom", base_name));
         pom_writer::write_pom(&desc, &declared_gavs, &pom_path)
             .context("failed to write POM")?;
-        println!("  POM             {}", pom_path.file_name().unwrap().to_string_lossy());
+        println!("{}", crate::style::publish_step("POM", &pom_path.file_name().unwrap().to_string_lossy()));
 
         artifacts.push(UploadArtifact::new(&build_out.jar, "")); // main jar
         artifacts.push(UploadArtifact::new(&sources_jar_path, "-sources"));
@@ -133,7 +133,7 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
             let asc = gpg_sign(&a.path)?;
             a.signature = Some(asc);
         }
-        println!("  Signed          {} artifact(s)", artifacts.len());
+        println!("{}", crate::style::publish_step("Signed", &format!("{} artifact(s)", artifacts.len())));
     }
 
     // --- build and print upload plan ----------------------------------------
@@ -145,7 +145,7 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
         artifact_id,
         version,
     );
-    println!("  Publishing to   {}", base_dir);
+    println!("{}", crate::style::publish_step("Publishing to", &base_dir));
 
     let upload_jobs = build_upload_plan(&artifacts, &base_dir);
     for j in &upload_jobs {
@@ -153,7 +153,7 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
     }
 
     if opts.dry_run {
-        println!("  Dry-run         {} file(s) would be uploaded", upload_jobs.len());
+        println!("{}", crate::style::info("Dry-run", &format!("{} file(s) would be uploaded", upload_jobs.len())));
         return Ok(());
     }
 
@@ -169,7 +169,7 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
         upload_one(&client, &credentials, job)
             .with_context(|| format!("upload failed: {}", job.url))?;
     }
-    println!("  Uploaded        {} file(s)", upload_jobs.len());
+    println!("{}", crate::style::publish_step("Uploaded", &format!("{} file(s)", upload_jobs.len())));
     Ok(())
 }
 

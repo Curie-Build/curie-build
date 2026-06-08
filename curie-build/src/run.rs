@@ -26,10 +26,7 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
         .as_deref()
         .expect("do_build guarantees a resolved main_class for application projects");
 
-    println!(
-        "Running {} v{}",
-        app.name, app.version
-    );
+    println!("{}", crate::style::run_step(&app.name, &app.version));
     println!();
 
     let use_docker = !opts.no_docker && descriptor::docker_enabled(project_root, &desc);

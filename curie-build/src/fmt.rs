@@ -149,6 +149,14 @@ pub fn run_fmt_with_jars(
         return Ok(());
     }
 
+    let file_summary = match (java_files.len(), kotlin_files.len()) {
+        (j, 0) => format!("{j} Java file(s)"),
+        (0, k) => format!("{k} Kotlin file(s)"),
+        (j, k) => format!("{j} Java, {k} Kotlin file(s)"),
+    };
+    let action = if check_only { "Check" } else { "Format" };
+    crate::parallel::emit(&crate::style::fmt_step(action, &file_summary));
+
     // Run both formatters independently so that both errors surface in one
     // --check pass rather than short-circuiting on the first failure.
     let java_err = if !java_files.is_empty() {

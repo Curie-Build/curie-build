@@ -52,7 +52,7 @@ pub fn docker_run(
 ) -> Result<()> {
     let image_ref = docker_build(project_root, desc, jar, dep_jars)?;
 
-    crate::parallel::emit(&crate::style::headline("Running", &image_ref, ""));
+    crate::parallel::emit(&crate::style::run_step(&image_ref, ""));
 
     let mut cmd = Command::new("docker");
     cmd.arg("run").arg("--rm").arg(&image_ref);

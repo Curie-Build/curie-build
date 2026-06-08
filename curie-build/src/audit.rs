@@ -103,6 +103,10 @@ pub fn run_audit_with_desc(
     desc: &Descriptor,
     opts: &AuditOptions,
 ) -> Result<AuditReport> {
+    crate::parallel::emit(&crate::style::headline(
+        "Auditing", desc.buildable_name(), desc.buildable_version(),
+    ));
+
     // 1. Resolve dependency closure.
     let components = resolve_components(project_root, desc, opts)?;
 
@@ -118,7 +122,10 @@ pub fn run_audit_with_desc(
     let json = serde_json::to_string_pretty(&bom).context("failed to serialise SBOM")?;
     std::fs::write(&sbom_path, json)
         .with_context(|| format!("failed to write SBOM to {}", sbom_path.display()))?;
-    println!("  SBOM written    {}", sbom_path.display());
+    crate::parallel::emit(&crate::style::audit_step(
+        "SBOM",
+        &sbom_path.strip_prefix(project_root).unwrap_or(&sbom_path).display().to_string(),
+    ));
 
     // 3. Optionally scan against OSV.
     if opts.offline || components.is_empty() {
@@ -127,7 +134,7 @@ pub fn run_audit_with_desc(
 
     let raw_findings = osv_querybatch(&components)?;
     if raw_findings.is_empty() {
-        println!("  No vulnerabilities found.");
+        crate::parallel::emit(&crate::style::audit_step("Audit", "no vulnerabilities found"));
         return Ok(AuditReport { sbom_path, findings: vec![], max_score: None });
     }
 

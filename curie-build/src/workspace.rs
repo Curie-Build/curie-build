@@ -348,11 +348,10 @@ pub fn run_one(
         .as_deref()
         .expect("application member should have resolved main_class after build");
 
-    println!(
-        "Running {} v{}",
+    println!("{}", crate::style::run_step(
         target.descriptor.buildable_name(),
         target.descriptor.buildable_version(),
-    );
+    ));
     println!();
 
     // Assemble the runtime classpath.  Use JARs (not classes_dir) for
