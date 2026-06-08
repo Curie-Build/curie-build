@@ -65,8 +65,10 @@
 <span class="prompt">$</span> cargo install --path curie-build</pre>
       </div>
 
-      <h2>Shell completions (fish)</h2>
-      <p>A fish completion script is bundled in the <code>completions/</code> directory of the repository. Copy it to your completions directory to get Tab-completion for all subcommands and flags:</p>
+      <h2>Shell completions</h2>
+      <p>Completion scripts for fish, bash, and zsh are bundled in the <code>completions/</code> directory of the repository. Pick the one for your shell:</p>
+
+      <h3>fish</h3>
       <div class="term">
         <header>
           <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
@@ -74,7 +76,36 @@
         </header>
 <pre><span class="prompt">$</span> cp completions/curie.fish ~/.config/fish/completions/</pre>
       </div>
-      <p>After copying, open a new terminal (or run <code>source ~/.config/fish/completions/curie.fish</code>) and press Tab after <code>curie</code> to see subcommands, or after <code>curie build</code> to see its flags.</p>
+      <p>Open a new terminal (or run <code>source ~/.config/fish/completions/curie.fish</code>) and press Tab after <code>curie</code> to see subcommands.</p>
+
+      <h3>bash</h3>
+      <div class="term">
+        <header>
+          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+          <span>bash</span>
+        </header>
+<pre><span class="prompt">$</span> cp completions/curie.bash ~/.local/share/bash-completion/completions/curie</pre>
+      </div>
+      <p>Open a new terminal, or run <code>source completions/curie.bash</code> to activate immediately in the current shell.</p>
+
+      <h3>zsh</h3>
+      <div class="term">
+        <header>
+          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+          <span>zsh</span>
+        </header>
+<pre><span class="prompt">$</span> mkdir -p ~/.zsh/completions
+<span class="prompt">$</span> cp completions/curie.zsh ~/.zsh/completions/_curie</pre>
+      </div>
+      <p>Add the following to your <code>~/.zshrc</code> if it isn't there already, then open a new terminal:</p>
+      <div class="code">
+        <header>
+          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+          <span>~/.zshrc</span>
+        </header>
+<pre>fpath=(~/.zsh/completions $fpath)
+autoload -Uz compinit &amp;&amp; compinit</pre>
+      </div>
 
       <h2>3. Create a project</h2>
 
