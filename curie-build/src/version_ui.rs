@@ -2,10 +2,10 @@
 //!
 //! Layout (0-indexed rows):
 //! ```text
-//!  0       │  select version for <coord>    ↑↓ navigate    Enter select    Esc cancel
-//!  1..H-3  │  [version list]
+//!  0       │  select version for <coord>  Tab switch  Enter add  Esc cancel
+//!  1..H-3  │  [version list]  │  [scope list]
 //!  H-2     │
-//!  H-1     │  <N versions — oldest shown last>
+//!  H-1     │  <N versions — oldest shown last>   [Tab: scope ▶]
 //! ```
 
 use std::collections::HashMap;
@@ -25,6 +25,9 @@ use crate::update::{is_stable, latest_stable};
 
 const MARKER: &str = "  \u{25CF} ";
 const MARKER_W: usize = 4;
+// Width of the scope panel including the divider (│ + space + content + space).
+// "test annotation processor" = 25 chars; marker(4) + label(25) + padding(2) = 31.
+const SCOPE_PANEL_W: usize = 32;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -36,6 +39,46 @@ pub enum VersionPick {
     BomManaged,
     /// Write this explicit version string.
     Explicit(String),
+}
+
+/// The scope selected by the user in the scope panel.
+#[derive(Clone)]
+pub struct ScopePick {
+    pub bom: bool,
+    pub annotation_processor: bool,
+    pub test: bool,
+}
+
+/// Combined result returned when the user confirms in the version+scope picker.
+pub struct VersionAndScope {
+    pub version: VersionPick,
+    pub scope: ScopePick,
+}
+
+// ---------------------------------------------------------------------------
+// Scope options
+// ---------------------------------------------------------------------------
+
+struct ScopeOption {
+    label: &'static str,
+    pick: ScopePick,
+}
+
+const SCOPE_OPTIONS: &[ScopeOption] = &[
+    ScopeOption { label: "compile",                   pick: ScopePick { bom: false, annotation_processor: false, test: false } },
+    ScopeOption { label: "test",                      pick: ScopePick { bom: false, annotation_processor: false, test: true  } },
+    ScopeOption { label: "annotation processor",      pick: ScopePick { bom: false, annotation_processor: true,  test: false } },
+    ScopeOption { label: "test annotation processor", pick: ScopePick { bom: false, annotation_processor: true,  test: true  } },
+    ScopeOption { label: "bom",                       pick: ScopePick { bom: true,  annotation_processor: false, test: false } },
+    ScopeOption { label: "test bom",                  pick: ScopePick { bom: true,  annotation_processor: false, test: true  } },
+];
+
+/// Return the index into `SCOPE_OPTIONS` matching `(bom, annotation_processor, test)`, or 0.
+pub fn scope_idx_for(bom: bool, annotation_processor: bool, test: bool) -> usize {
+    SCOPE_OPTIONS
+        .iter()
+        .position(|o| o.pick.bom == bom && o.pick.annotation_processor == annotation_processor && o.pick.test == test)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -112,25 +155,43 @@ fn build_entries(
 // UI state
 // ---------------------------------------------------------------------------
 
+#[derive(PartialEq)]
+enum Panel { Version, Scope }
+
 struct UiState {
     entries:      Vec<Entry>,
     selected_idx: usize,
     scroll_off:   usize,
     total:        usize,
+    scope_idx:    usize,
+    active_panel: Panel,
 }
 
 impl UiState {
-    fn new(entries: Vec<Entry>, preselected: usize) -> Self {
+    fn new(entries: Vec<Entry>, preselected: usize, scope_idx: usize) -> Self {
         let total = entries.len();
-        UiState { entries, selected_idx: preselected, scroll_off: 0, total }
+        UiState { entries, selected_idx: preselected, scroll_off: 0, total, scope_idx, active_panel: Panel::Version }
     }
 
     fn move_up(&mut self) {
-        if self.selected_idx > 0 { self.selected_idx -= 1; }
+        match self.active_panel {
+            Panel::Version => { if self.selected_idx > 0 { self.selected_idx -= 1; } }
+            Panel::Scope   => { if self.scope_idx > 0 { self.scope_idx -= 1; } }
+        }
     }
 
     fn move_down(&mut self) {
-        if self.selected_idx + 1 < self.total { self.selected_idx += 1; }
+        match self.active_panel {
+            Panel::Version => { if self.selected_idx + 1 < self.total { self.selected_idx += 1; } }
+            Panel::Scope   => { if self.scope_idx + 1 < SCOPE_OPTIONS.len() { self.scope_idx += 1; } }
+        }
+    }
+
+    fn toggle_panel(&mut self) {
+        self.active_panel = match self.active_panel {
+            Panel::Version => Panel::Scope,
+            Panel::Scope   => Panel::Version,
+        };
     }
 
     fn adjust_scroll(&mut self, visible: usize) {
@@ -145,7 +206,7 @@ impl UiState {
 }
 
 // ---------------------------------------------------------------------------
-// Public entry point
+// Public entry points
 // ---------------------------------------------------------------------------
 
 /// Show a "fetching versions…" placeholder in an already-open alternate screen.
@@ -162,39 +223,35 @@ pub(crate) fn show_loading_screen(stdout: &mut impl Write, coord: &str) -> Resul
     Ok(())
 }
 
-/// Run the version picker inside an already-open alternate screen.
-/// Returns the user's choice or `None` when Esc is pressed.
+/// Run the version+scope picker inside an already-open alternate screen.
+/// Returns the user's combined choice or `None` when Esc is pressed.
 pub(crate) fn run_version_phase(
-    coord:         &str,
-    all_versions:  &[String],
-    bom_version:   Option<&str>,
-    version_dates: &HashMap<String, String>,
-    stdout:        &mut impl Write,
-) -> Result<Option<VersionPick>> {
+    coord:             &str,
+    all_versions:      &[String],
+    bom_version:       Option<&str>,
+    version_dates:     &HashMap<String, String>,
+    initial_scope_idx: usize,
+    stdout:            &mut impl Write,
+) -> Result<Option<VersionAndScope>> {
     let (entries, preselected) = build_entries(all_versions, bom_version, version_dates);
-    run_ui_inner(coord, entries, preselected, stdout)
+    run_ui_inner(coord, entries, preselected, initial_scope_idx, stdout)
 }
 
-/// Open the interactive version picker.
-///
-/// * `all_versions`  — versions in oldest-to-newest order (from `maven-metadata.xml`).
-/// * `bom_version`   — the version string managed by the project's BOM, if any.
-/// * `version_dates` — map of version → `"YYYY-MM-DD"` release date (may be empty).
-///
-/// Returns the user's choice, or `None` if cancelled.
+/// Open the interactive version+scope picker (opens its own alternate screen).
 pub fn run_version_ui(
-    coord:         &str,
-    all_versions:  &[String],
-    bom_version:   Option<&str>,
-    version_dates: &HashMap<String, String>,
-) -> Result<Option<VersionPick>> {
+    coord:             &str,
+    all_versions:      &[String],
+    bom_version:       Option<&str>,
+    version_dates:     &HashMap<String, String>,
+    initial_scope_idx: usize,
+) -> Result<Option<VersionAndScope>> {
     let (entries, preselected) = build_entries(all_versions, bom_version, version_dates);
 
     let mut stdout = std::io::stdout();
     terminal::enable_raw_mode()?;
     execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
 
-    let result = run_ui_inner(coord, entries, preselected, &mut stdout);
+    let result = run_ui_inner(coord, entries, preselected, initial_scope_idx, &mut stdout);
 
     let _ = execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show);
     let _ = terminal::disable_raw_mode();
@@ -203,14 +260,14 @@ pub fn run_version_ui(
 }
 
 fn run_ui_inner(
-    coord: &str,
-    entries: Vec<Entry>,
-    preselected: usize,
-    stdout: &mut impl Write,
-) -> Result<Option<VersionPick>> {
-    let mut state = UiState::new(entries, preselected);
+    coord:             &str,
+    entries:           Vec<Entry>,
+    preselected:       usize,
+    initial_scope_idx: usize,
+    stdout:            &mut impl Write,
+) -> Result<Option<VersionAndScope>> {
+    let mut state = UiState::new(entries, preselected, initial_scope_idx);
 
-    // Make sure the preselected row is in view on first draw.
     let (_, h) = terminal::size().unwrap_or((80, 24));
     state.adjust_scroll((h as usize).saturating_sub(4));
     redraw(stdout, coord, &state)?;
@@ -223,12 +280,15 @@ fn run_ui_inner(
                     (KeyCode::Esc, _)
                     | (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(None),
 
+                    (KeyCode::Tab, _) => state.toggle_panel(),
+
                     (KeyCode::Enter, _) => {
-                        let pick = match &state.entries[state.selected_idx].kind {
-                            EntryKind::Bom          => VersionPick::BomManaged,
-                            EntryKind::Version(v)   => VersionPick::Explicit(v.clone()),
+                        let version_pick = match &state.entries[state.selected_idx].kind {
+                            EntryKind::Bom        => VersionPick::BomManaged,
+                            EntryKind::Version(v) => VersionPick::Explicit(v.clone()),
                         };
-                        return Ok(Some(pick));
+                        let scope = SCOPE_OPTIONS[state.scope_idx].pick.clone();
+                        return Ok(Some(VersionAndScope { version: version_pick, scope }));
                     }
 
                     (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
@@ -262,45 +322,79 @@ fn redraw(stdout: &mut impl Write, coord: &str, state: &UiState) -> Result<()> {
     let result_rows = h.saturating_sub(4);
     let st = state.scroll_off;
 
+    // Scope panel occupies the right SCOPE_PANEL_W columns (including the │ divider).
+    let scope_w = SCOPE_PANEL_W.min(w / 3);
+    let ver_w   = w.saturating_sub(scope_w + 1); // +1 for │
+
     // Reserve a fixed 12-char date column when any entry has a date.
     let date_col_w = if state.entries.iter().any(|e| e.date.is_some()) { 12 } else { 0 };
 
     execute!(stdout, cursor::Hide)?;
 
     // Row 0: header
+    let tab_hint = if state.active_panel == Panel::Version { "Tab: scope \u{25b6}" } else { "Tab: version \u{25b6}" };
     let header = format!(
-        "  select version for {}    \u{2191}\u{2193} navigate    Enter select    Esc cancel",
-        coord
+        "  {}  \u{2191}\u{2193} navigate  Tab switch  Enter add  Esc cancel  [{}]",
+        coord, tab_hint
     );
     execute!(stdout, cursor::MoveTo(0, 0), terminal::Clear(ClearType::CurrentLine))?;
     write!(stdout, "{}", truncate_str(&header, w))?;
 
-    // Rows 1..result_rows: version list
+    // Rows 1..result_rows: version list (left) │ scope list (right)
     for screen_row in 0..result_rows {
-        let idx = st + screen_row;
+        let ver_idx   = st + screen_row;
+        let scope_row = screen_row; // scope has 6 entries, no scrolling
+
         execute!(
             stdout,
             cursor::MoveTo(0, (screen_row + 1) as u16),
             terminal::Clear(ClearType::CurrentLine)
         )?;
-        if idx < state.entries.len() {
-            let entry = &state.entries[idx];
-            let is_sel = idx == state.selected_idx;
-            let line = format_entry(entry, w, date_col_w);
+
+        // --- left: version entry ---
+        let ver_str = if ver_idx < state.entries.len() {
+            let entry = &state.entries[ver_idx];
+            let is_sel = ver_idx == state.selected_idx && state.active_panel == Panel::Version;
+            let line = format_entry(entry, ver_w, date_col_w);
             if is_sel {
                 execute!(stdout, SetAttribute(Attribute::Reverse))?;
                 write!(stdout, "{}", line)?;
                 execute!(stdout, SetAttribute(Attribute::Reset))?;
             } else {
-                // Dim non-stable versions slightly so stable ones stand out.
                 let is_unstable = matches!(&entry.kind, EntryKind::Version(v) if !is_stable(v));
-                if is_unstable {
-                    execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
-                }
+                if is_unstable { execute!(stdout, SetForegroundColor(Color::DarkGrey))?; }
                 write!(stdout, "{}", line)?;
-                if is_unstable {
-                    execute!(stdout, SetForegroundColor(Color::Reset))?;
-                }
+                if is_unstable { execute!(stdout, SetForegroundColor(Color::Reset))?; }
+            }
+            // pad to ver_w
+            let line_len = truncate_str(&format_entry(entry, 999, date_col_w), 999).chars().count().min(ver_w);
+            " ".repeat(ver_w.saturating_sub(line_len))
+        } else {
+            " ".repeat(ver_w)
+        };
+        // undo any prior color so the divider is clean
+        let _ = ver_str; // already written above
+        // move to divider column
+        execute!(stdout, cursor::MoveTo(ver_w as u16, (screen_row + 1) as u16))?;
+
+        // --- divider ---
+        execute!(stdout, SetForegroundColor(Color::DarkGrey))?;
+        write!(stdout, "\u{2502}")?; // │
+        execute!(stdout, SetForegroundColor(Color::Reset))?;
+
+        // --- right: scope entry ---
+        if scope_row < SCOPE_OPTIONS.len() {
+            let opt    = &SCOPE_OPTIONS[scope_row];
+            let is_sel = scope_row == state.scope_idx && state.active_panel == Panel::Scope;
+            let is_cur = scope_row == state.scope_idx; // always mark current even when not focused
+            let marker = if is_cur { MARKER } else { "    " };
+            let line   = truncate_str(&format!("{}{}", marker, opt.label), scope_w);
+            if is_sel {
+                execute!(stdout, SetAttribute(Attribute::Reverse))?;
+                write!(stdout, "{}", line)?;
+                execute!(stdout, SetAttribute(Attribute::Reset))?;
+            } else {
+                write!(stdout, "{}", line)?;
             }
         }
     }
@@ -454,5 +548,56 @@ mod tests {
         let line_without = format_entry(&without_date, 80, 12);
         // Both lines should be the same length (tags align).
         assert_eq!(line_with.chars().count(), line_without.chars().count());
+    }
+
+    // -----------------------------------------------------------------------
+    // Scope options
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scope_options_all_unique_labels() {
+        let labels: Vec<_> = SCOPE_OPTIONS.iter().map(|o| o.label).collect();
+        let unique: std::collections::HashSet<_> = labels.iter().collect();
+        assert_eq!(labels.len(), unique.len());
+    }
+
+    #[test]
+    fn scope_options_all_unique_picks() {
+        for (i, a) in SCOPE_OPTIONS.iter().enumerate() {
+            for (j, b) in SCOPE_OPTIONS.iter().enumerate() {
+                if i != j {
+                    assert!(
+                        a.pick.bom != b.pick.bom
+                        || a.pick.annotation_processor != b.pick.annotation_processor
+                        || a.pick.test != b.pick.test,
+                        "duplicate scope pick at indices {} and {}", i, j
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scope_idx_for_compile_is_zero() {
+        assert_eq!(scope_idx_for(false, false, false), 0);
+    }
+
+    #[test]
+    fn scope_idx_for_test_is_nonzero() {
+        let idx = scope_idx_for(false, false, true);
+        assert!(idx > 0);
+        assert_eq!(SCOPE_OPTIONS[idx].label, "test");
+    }
+
+    #[test]
+    fn scope_idx_for_bom() {
+        let idx = scope_idx_for(true, false, false);
+        assert_eq!(SCOPE_OPTIONS[idx].label, "bom");
+    }
+
+    #[test]
+    fn scope_idx_for_unknown_defaults_to_zero() {
+        // No option has bom=true AND annotation_processor=true — should fall back to 0.
+        assert_eq!(scope_idx_for(true, true, false), 0);
     }
 }

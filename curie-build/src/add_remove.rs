@@ -42,7 +42,10 @@ use crate::update::{
     epoch_ms_to_date, fetch_all_versions, fetch_latest_stable, fetch_version_timestamps,
     resolve_repo_url,
 };
-use crate::version_ui::{run_version_phase, run_version_ui, show_loading_screen, VersionPick};
+use crate::version_ui::{
+    run_version_phase, run_version_ui, scope_idx_for, show_loading_screen, VersionAndScope,
+    VersionPick,
+};
 use anyhow::{bail, Context, Result};
 use crossterm::{cursor, execute, terminal};
 use curie_deps::repo::Repository;
@@ -86,19 +89,19 @@ pub struct RemoveOptions {
 /// to open the interactive artifact search + version picker.
 pub fn run_add(project_root: &Path, coord_arg: Option<&str>, opts: AddOptions) -> Result<()> {
     let desc = descriptor::load(project_root)?;
-    let section = section_name(&opts);
 
-    let (coord, version) = if coord_arg.is_none() {
-        // ── Interactive path: unified search → version picker in one alt-screen ──
+    let (coord, version, section) = if coord_arg.is_none() {
+        // ── Interactive path: unified search → version+scope picker ──
         if opts.offline {
             bail!("`--offline` cannot be used without specifying a coordinate");
         }
         match run_interactive_flow(&opts, &desc)? {
-            Some(pair) => pair,
+            Some(triple) => triple,
             None => return Ok(()), // user cancelled
         }
     } else {
         // ── CLI path: coord (possibly with explicit version) given on command line ──
+        let section = section_name(&opts);
         let (coord, explicit_version) = parse_coord_arg(coord_arg.unwrap())?;
         if opts.bom && explicit_version.is_none() {
             bail!(
@@ -111,7 +114,7 @@ pub fn run_add(project_root: &Path, coord_arg: Option<&str>, opts: AddOptions) -
             Some(v) => v,
             None => resolve_version(&coord, &desc, &opts)?,
         };
-        (coord, version)
+        (coord, version, section)
     };
 
     // -- guard: already present ----------------------------------------------
@@ -143,10 +146,10 @@ pub fn run_add(project_root: &Path, coord_arg: Option<&str>, opts: AddOptions) -
 // Unified interactive flow (search → version picker, single alt-screen session)
 // ---------------------------------------------------------------------------
 
-/// Open the full interactive add flow — artifact search, then version picker —
+/// Open the full interactive add flow — artifact search, then version+scope picker —
 /// in a single alternate-screen session.  Esc on the version picker returns to
 /// the artifact search rather than cancelling the whole command.
-fn run_interactive_flow(opts: &AddOptions, desc: &Descriptor) -> Result<Option<(String, String)>> {
+fn run_interactive_flow(opts: &AddOptions, desc: &Descriptor) -> Result<Option<(String, String, &'static str)>> {
     let mut stdout = std::io::stdout();
     terminal::enable_raw_mode()?;
     execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
@@ -163,10 +166,11 @@ fn interactive_flow_inner(
     opts: &AddOptions,
     desc: &Descriptor,
     stdout: &mut impl Write,
-) -> Result<Option<(String, String)>> {
+) -> Result<Option<(String, String, &'static str)>> {
     // Preserve search state across the version picker so the user can
     // return to the same query + selection after pressing Esc.
     let mut api_state: Option<crate::api_search_ui::UiState> = None;
+    let initial_scope_idx = scope_idx_for(opts.bom, opts.annotation_processor, opts.test);
 
     loop {
         // ── Phase 1: artifact selection ────────────────────────────────────
@@ -180,18 +184,24 @@ fn interactive_flow_inner(
         // ── Loading placeholder while we fetch version data ────────────────
         show_loading_screen(stdout, &coord)?;
 
-        let bom_version   = bom_managed_version(&coord, desc, opts);
+        let bom_version   = bom_managed_version(&coord, desc, opts.test);
         let all_versions  = fetch_coord_versions(&coord, desc, opts);
         let version_dates = fetch_coord_version_dates(&coord, opts);
 
-        // ── Phase 2: version selection ─────────────────────────────────────
+        // ── Phase 2: version+scope selection ──────────────────────────────
         let pick = run_version_phase(
-            &coord, &all_versions, bom_version.as_deref(), &version_dates, stdout,
+            &coord, &all_versions, bom_version.as_deref(), &version_dates, initial_scope_idx, stdout,
         )?;
 
         match pick {
-            Some(VersionPick::BomManaged)   => return Ok(Some((coord, String::new()))),
-            Some(VersionPick::Explicit(v))  => return Ok(Some((coord, v))),
+            Some(VersionAndScope { version, scope }) => {
+                let section = section_for(scope.bom, scope.annotation_processor, scope.test);
+                let v = match version {
+                    VersionPick::BomManaged   => String::new(),
+                    VersionPick::Explicit(v)  => v,
+                };
+                return Ok(Some((coord, v, section)));
+            }
             // Esc on version picker → go back to artifact search
             None => continue,
         }
@@ -371,7 +381,7 @@ fn resolve_version(
     desc: &Descriptor,
     opts: &AddOptions,
 ) -> Result<String> {
-    let bom_version = bom_managed_version(coord, desc, opts);
+    let bom_version = bom_managed_version(coord, desc, opts.test);
 
     // Offline path: no TUI, no network.
     if opts.offline {
@@ -399,11 +409,12 @@ fn resolve_version(
     // Fetch all versions from maven-metadata.xml; open the picker if successful.
     if let Some(versions) = fetch_all_versions(&client, &repo_url, coord) {
         let version_dates = fetch_coord_version_dates(coord, opts);
-        let pick = run_version_ui(coord, &versions, bom_version.as_deref(), &version_dates)?;
+        let initial_scope_idx = scope_idx_for(opts.bom, opts.annotation_processor, opts.test);
+        let pick = run_version_ui(coord, &versions, bom_version.as_deref(), &version_dates, initial_scope_idx)?;
         return match pick {
-            Some(VersionPick::BomManaged)    => Ok(String::new()),
-            Some(VersionPick::Explicit(v))   => Ok(v),
-            None                             => bail!("add cancelled"),
+            Some(VersionAndScope { version: VersionPick::BomManaged, .. })  => Ok(String::new()),
+            Some(VersionAndScope { version: VersionPick::Explicit(v), .. }) => Ok(v),
+            None => bail!("add cancelled"),
         };
     }
 
@@ -432,10 +443,10 @@ fn resolve_version(
 /// This is intentionally a *best-effort* check: if BOM resolution fails
 /// (network error, malformed POM), we fall through to the Maven-metadata
 /// fetch rather than aborting the `add` command.
-fn bom_managed_version(coord: &str, desc: &Descriptor, opts: &AddOptions) -> Option<String> {
+fn bom_managed_version(coord: &str, desc: &Descriptor, test: bool) -> Option<String> {
     use curie_deps::resolver::resolve_boms;
 
-    let bom_gavs = if opts.test {
+    let bom_gavs = if test {
         desc.test_bom_gavs().ok()?
     } else {
         desc.prod_bom_gavs().ok()?
