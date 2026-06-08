@@ -485,6 +485,24 @@ fn days_to_ymd(days: u64) -> (u32, u32, u32) {
     (y as u32, mo as u32, d as u32)
 }
 
+// ── TuiMode ───────────────────────────────────────────────────────────────
+
+/// Controls how parallel job output is presented.
+#[allow(dead_code)]
+pub(crate) enum TuiMode {
+    /// Always use the prefix-mux path (one prefixed line per output line).
+    Off,
+    /// Full alternate-screen TUI with per-member panes (existing build/test/fmt behaviour).
+    /// Falls back to prefix-mux when the terminal is too small or not a TTY.
+    Full,
+    /// Inline status-only TUI: no alternate screen, no panes — just overflow
+    /// lines (Running / Pending / Done) rendered at the current cursor position.
+    /// Used by `curie clean`, where each member produces at most one output line
+    /// that does not need a dedicated pane.  Falls back to prefix-mux when stdout
+    /// is not a TTY.
+    StatusOnly,
+}
+
 // ── run_jobs ───────────────────────────────────────────────────────────────
 
 /// Run `run` for every member in `subset` in parallel (up to `jobs` workers),
@@ -503,7 +521,7 @@ pub fn run_jobs<F>(
     action_name: &str,
     jobs: usize,
     respect_dag: bool,
-    allow_tui: bool,
+    tui_mode: TuiMode,
     done_label: &str,
     run: F,
 ) -> Result<()>
@@ -540,16 +558,23 @@ where
         })
         .collect::<Result<_>>()?;
 
-    // ── Choose between TUI split-screen and prefix-mux ─────────────────────
+    // ── Choose between TUI split-screen / inline and prefix-mux ───────────
     //
-    // TUI activates when stdout is a TTY and the terminal is tall enough for
-    // at least one pane (MIN_PANE_HEIGHT = 9 rows).  Everything else (piped
-    // output, --no-color, tiny terminals) falls through to the prefix-mux.
+    // TuiMode::Full    activates the alternate-screen TUI when stdout is a TTY
+    //                  and the terminal is tall enough for at least one pane.
+    // TuiMode::StatusOnly activates the inline TUI (no panes, status lines only)
+    //                  whenever stdout is a TTY.
+    // TuiMode::Off     always uses the prefix-mux path.
+    // Anything else (piped output, --no-color, tiny terminals) → prefix-mux.
 
     let term_h = crate::term::height().unwrap_or(0) as usize;
-    let use_tui = allow_tui && crate::term::is_tty() && {
-        let (vis, _) = crate::tui::tui_layout(n, term_h);
-        vis > 0
+    let (use_tui, vis) = match &tui_mode {
+        TuiMode::Off => (false, 0),
+        TuiMode::Full => {
+            let (v, _) = crate::tui::tui_layout(n, term_h);
+            (crate::term::is_tty() && v > 0, v)
+        }
+        TuiMode::StatusOnly => (crate::term::is_tty(), 0),
     };
 
     // Internal enum — lives only for the duration of this function.
@@ -568,7 +593,6 @@ where
     }
 
     let (sinks, job_mode) = if use_tui {
-        let (vis, _) = crate::tui::tui_layout(n, term_h);
         let names: Vec<String> = display_names.clone();
         let (renderer, tui_slots) =
             crate::tui::TuiRenderer::new(names, log_files, vis, done_label.to_string());

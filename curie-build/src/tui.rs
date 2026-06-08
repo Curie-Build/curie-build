@@ -40,6 +40,8 @@ use ansi_to_tui::IntoText;
 use crossterm::{cursor, execute, terminal};
 use ratatui::{
     Terminal,
+    TerminalOptions,
+    Viewport,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -257,21 +259,39 @@ fn render_loop(
     visible: usize,
     done_label: String,
 ) {
-    let stdout = io::stdout();
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = match Terminal::new(backend) {
-        Ok(t) => t,
-        Err(_) => return,
+    // When visible == 0 (e.g. curie clean), use an inline viewport — status
+    // lines are rendered at the current cursor position without entering the
+    // alternate screen.  When visible > 0, use the full alternate screen.
+    let inline_mode = visible == 0;
+
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = {
+        let res = if inline_mode {
+            Terminal::with_options(backend, TerminalOptions {
+                viewport: Viewport::Inline(5),
+            })
+        } else {
+            Terminal::new(backend)
+        };
+        match res {
+            Ok(t) => t,
+            Err(_) => return,
+        }
     };
 
-    // Enter the alternate screen so the terminal's primary-screen content is
-    // preserved and automatically restored when we leave.
-    let _ = execute!(io::stdout(), terminal::EnterAlternateScreen);
-    // Hide cursor and disable line-wrap for the lifetime of the TUI.
-    // \x1b[?7l (DECAWM off) has no crossterm equivalent.
-    let _ = execute!(io::stdout(), cursor::Hide);
-    let _ = write!(io::stdout(), "\x1b[?7l");
-    let _ = terminal.clear();
+    if inline_mode {
+        // Hide cursor while the inline status lines refresh.
+        let _ = execute!(io::stdout(), cursor::Hide);
+    } else {
+        // Enter the alternate screen so the terminal's primary-screen content is
+        // preserved and automatically restored when we leave.
+        let _ = execute!(io::stdout(), terminal::EnterAlternateScreen);
+        // Hide cursor and disable line-wrap for the lifetime of the TUI.
+        // \x1b[?7l (DECAWM off) has no crossterm equivalent.
+        let _ = execute!(io::stdout(), cursor::Hide);
+        let _ = write!(io::stdout(), "\x1b[?7l");
+        let _ = terminal.clear();
+    }
 
     // Panes start empty and are filled lazily as jobs report they have begun
     // running (TuiMsg::SlotStarted).  This keeps a pane from ever showing a job
@@ -459,16 +479,23 @@ fn render_loop(
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────────
-    // Restore scroll region / line-wrap / hyperlink state while still on the
-    // alternate screen so those escape sequences don't affect the primary screen.
-    let _ = write!(io::stdout(), "\x1b[r\x1b[?7h\x1b]8;;\x07");
-    // Leave the alternate screen — restores whatever the terminal was showing
-    // before the TUI started.  Show the cursor on the primary screen.
-    let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen, cursor::Show);
-    // Print the last TAIL_LINES of each failed member below the restored content
-    // so the errors are visible before the caller's summary lines appear.
-    print_failed_tails(&state, TAIL_LINES, &mut io::stdout());
-    print_build_summary(&state, &mut io::stdout());
+    if inline_mode {
+        // Show the cursor and emit a newline so subsequent output starts on a
+        // fresh line below the inline status area.
+        let _ = execute!(io::stdout(), cursor::Show);
+        let _ = writeln!(io::stdout());
+    } else {
+        // Restore scroll region / line-wrap / hyperlink state while still on the
+        // alternate screen so those escape sequences don't affect the primary screen.
+        let _ = write!(io::stdout(), "\x1b[r\x1b[?7h\x1b]8;;\x07");
+        // Leave the alternate screen — restores whatever the terminal was showing
+        // before the TUI started.  Show the cursor on the primary screen.
+        let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen, cursor::Show);
+        // Print the last TAIL_LINES of each failed member below the restored content
+        // so the errors are visible before the caller's summary lines appear.
+        print_failed_tails(&state, TAIL_LINES, &mut io::stdout());
+        print_build_summary(&state, &mut io::stdout());
+    }
     let _ = io::stdout().flush();
 }
 
