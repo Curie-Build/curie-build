@@ -39,7 +39,12 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "curie", about = "The Curie build tool", version)]
+#[command(
+    name = "curie",
+    about = "The Curie build tool",
+    version,
+    long_version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_COMMIT_HASH"), ")")
+)]
 struct Cli {
     /// Path to the project root (defaults to current directory)
     #[arg(long, default_value = ".")]
