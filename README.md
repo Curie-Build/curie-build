@@ -4,8 +4,7 @@ The Java build tooling landscape has been largely static for two decades. Maven 
 
 Other language ecosystems have quietly raised the bar. Cargo, Rust's built-in build tool, ships workspaces, a lockfile, and reproducible dependency resolution as first-class features with no plugins required — a new project is correct and reproducible by default. Go takes the same philosophy further: `go.mod` and `go.sum` are part of the toolchain itself, so deterministic builds and zero-configuration module management are simply the starting point, not optional add-ons. Java developers working across languages notice the gap.
 
-This is how progress in general tends to work: an ecosystem experiments, different approaches compete, and over time the field converges on what actually works. Maven followed this approach by proposing excellent conventions. What Curie shows is that
-the conventions have moved — there is a new baseline.
+This is how progress in general tends to work: an ecosystem experiments, different approaches compete, and over time the field converges on what actually works. Maven followed this approach by proposing excellent conventions. What Curie shows is that the conventions have moved — there is a new baseline. Versions in `Curie.toml` are always exact pins, so `Curie.toml` itself is the reproducibility source of truth; no separate lockfile is needed or generated.
 
 Curie is a fast, minimal build tool for Java projects written in Rust. It handles dependency resolution from Maven Central, incremental compilation, [reproducible builds](https://reproducible-builds.org), test execution, and optional Docker image building — driven by a single `Curie.toml` configuration file.
 
