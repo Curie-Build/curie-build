@@ -55,6 +55,10 @@ pub fn build_with_desc(
         "Building", desc.buildable_name(), desc.buildable_version(),
     ));
 
+    if desc.is_bom() {
+        return build_bom(project_root, desc);
+    }
+
     // Library projects must not have a Dockerfile at the project root.
     if desc.is_library() && project_root.join("Dockerfile").exists() {
         anyhow::bail!(
@@ -105,6 +109,35 @@ pub fn extra_repos(desc: &descriptor::Descriptor) -> Vec<Repository> {
         })
         .collect();
     config::apply_mirrors(repos, &cfg.mirrors)
+}
+
+/// Build a BOM project: generate the POM file into `target/` and return.
+/// No compilation or test phases run; the output JAR path holds the POM path.
+fn build_bom(project_root: &Path, desc: &descriptor::Descriptor) -> Result<BuildOutput> {
+    let target = project_root.join("target");
+    std::fs::create_dir_all(&target)
+        .with_context(|| format!("failed to create {}", target.display()))?;
+
+    let name = desc.buildable_name();
+    let version = desc.buildable_version();
+    let pom_path = target.join(format!("{}-{}.pom", name, version));
+
+    crate::pom_writer::write_bom_pom(desc, &pom_path)?;
+
+    crate::parallel::emit(&crate::style::done(
+        &pom_path
+            .strip_prefix(project_root)
+            .unwrap_or(&pom_path)
+            .display()
+            .to_string(),
+    ));
+
+    Ok(BuildOutput {
+        jar: pom_path,
+        dep_jars: vec![],
+        main_class: None,
+        resources_dir: None,
+    })
 }
 
 /// Phase 2: compile production sources, run tests, then package JAR.

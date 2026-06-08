@@ -142,6 +142,9 @@ pub enum DescriptorKind {
     Library(Library),
     /// Workspace root: lists members but is not itself buildable.
     Workspace(Workspace),
+    /// BOM (Bill of Materials): publishes a POM-only artifact that declares
+    /// managed versions for a set of dependencies.  No JAR is produced.
+    Bom(Bom),
 }
 
 /// Flat shape for serde — every section is `Option`, and [`load`]
@@ -153,6 +156,7 @@ struct RawDescriptor {
     application: Option<Application>,
     library: Option<Library>,
     workspace: Option<Workspace>,
+    bom: Option<Bom>,
     #[serde(default)]
     java: Java,
     #[serde(default)]
@@ -239,6 +243,18 @@ pub struct Library {
 #[derive(Debug, Deserialize)]
 pub struct Workspace {
     pub members: Vec<String>,
+}
+
+/// BOM (Bill of Materials) descriptor: declares managed dependency versions
+/// that consumers can import via `[bom-imports]`.  Produces a POM-only
+/// artifact; no JAR, no compilation.
+#[derive(Debug, Deserialize)]
+pub struct Bom {
+    pub name: String,
+    pub version: String,
+    /// Maven `groupId` — required for publishing.  See [`Application::group_id`].
+    #[serde(rename = "groupId", default)]
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -657,6 +673,11 @@ impl Descriptor {
         matches!(self.kind, DescriptorKind::Workspace(_))
     }
 
+    /// BOM projects produce a POM-only artifact with no JAR.
+    pub fn is_bom(&self) -> bool {
+        matches!(self.kind, DescriptorKind::Bom(_))
+    }
+
     /// View the `[application]` section if this descriptor is one.
     pub fn application(&self) -> Option<&Application> {
         match &self.kind {
@@ -679,6 +700,7 @@ impl Descriptor {
             DescriptorKind::Application(_) => "application",
             DescriptorKind::Library(_) => "library",
             DescriptorKind::Workspace(_) => "workspace",
+            DescriptorKind::Bom(_) => "bom",
         }
     }
 
@@ -689,6 +711,7 @@ impl Descriptor {
             DescriptorKind::Application(a) => Some(&a.name),
             DescriptorKind::Library(l) => Some(&l.name),
             DescriptorKind::Workspace(_) => None,
+            DescriptorKind::Bom(b) => Some(&b.name),
         }
     }
 
@@ -700,6 +723,7 @@ impl Descriptor {
             DescriptorKind::Application(a) => a.group_id.as_deref(),
             DescriptorKind::Library(l) => l.group_id.as_deref(),
             DescriptorKind::Workspace(_) => None,
+            DescriptorKind::Bom(b) => b.group_id.as_deref(),
         }
     }
 
@@ -709,6 +733,7 @@ impl Descriptor {
             DescriptorKind::Application(a) => Some(&a.version),
             DescriptorKind::Library(l) => Some(&l.version),
             DescriptorKind::Workspace(_) => None,
+            DescriptorKind::Bom(b) => Some(&b.version),
         }
     }
 
@@ -956,18 +981,19 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     let parsed: RawDescriptor = toml::from_str(&content)
         .map_err(|e| format_parse_error(e, &content, &path))?;
 
-    // Exactly one of [application] / [library] / [workspace] — enforced
+    // Exactly one of [application] / [library] / [workspace] / [bom] — enforced
     // both as a count check (for the diagnostic message) and by reifying
     // the kind into the DescriptorKind enum.
-    let kind = match (parsed.application, parsed.library, parsed.workspace) {
-        (Some(a), None, None) => DescriptorKind::Application(a),
-        (None, Some(l), None) => DescriptorKind::Library(l),
-        (None, None, Some(w)) => DescriptorKind::Workspace(w),
-        (None, None, None) => bail!(
-            "Curie.toml must contain one of [application], [library], or [workspace]"
+    let kind = match (parsed.application, parsed.library, parsed.workspace, parsed.bom) {
+        (Some(a), None, None, None) => DescriptorKind::Application(a),
+        (None, Some(l), None, None) => DescriptorKind::Library(l),
+        (None, None, Some(w), None) => DescriptorKind::Workspace(w),
+        (None, None, None, Some(b)) => DescriptorKind::Bom(b),
+        (None, None, None, None) => bail!(
+            "Curie.toml must contain one of [application], [library], [workspace], or [bom]"
         ),
         _ => bail!(
-            "Curie.toml must contain only one of [application], [library], or [workspace]"
+            "Curie.toml must contain only one of [application], [library], [workspace], or [bom]"
         ),
     };
 
@@ -1060,9 +1086,64 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         );
     }
 
+    if descriptor.is_bom() {
+        validate_bom_restrictions(&descriptor, docker_section_present, native_image_section_present,
+            table.map(|t| t.contains_key("test")).unwrap_or(false),
+            table.map(|t| t.contains_key("test-dependencies")).unwrap_or(false),
+            table.map(|t| t.contains_key("test-bom-imports")).unwrap_or(false),
+            table.map(|t| t.contains_key("annotation-processors")).unwrap_or(false),
+            table.map(|t| t.contains_key("test-annotation-processors")).unwrap_or(false),
+        )?;
+    }
+
     validate_dep_repo_refs(&descriptor)?;
 
     Ok(descriptor)
+}
+
+/// Enforce restrictions that apply exclusively to BOM projects.
+#[allow(clippy::too_many_arguments)]
+fn validate_bom_restrictions(
+    desc: &Descriptor,
+    docker_present: bool,
+    native_image_present: bool,
+    test_present: bool,
+    test_deps_present: bool,
+    test_bom_imports_present: bool,
+    annotation_processors_present: bool,
+    test_annotation_processors_present: bool,
+) -> Result<()> {
+    if docker_present {
+        bail!("BOM projects do not support Docker: remove the [docker] section from Curie.toml");
+    }
+    if native_image_present {
+        bail!("BOM projects do not support native-image compilation: remove the [native-image] section from Curie.toml");
+    }
+    if test_present {
+        bail!("BOM projects must not declare a [test] section");
+    }
+    if test_deps_present {
+        bail!("BOM projects must not declare [test-dependencies]");
+    }
+    if test_bom_imports_present {
+        bail!("BOM projects must not declare [test-bom-imports]");
+    }
+    if annotation_processors_present {
+        bail!("BOM projects must not declare [annotation-processors]");
+    }
+    if test_annotation_processors_present {
+        bail!("BOM projects must not declare [test-annotation-processors]");
+    }
+    for (coord, dep) in &desc.dependencies {
+        if dep.version().is_empty() {
+            bail!(
+                "BOM dependency \"{}\" must have an explicit version; \
+                 BOM-delegated versions (\"\") are not allowed in [bom] projects",
+                coord
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Validate that every `repository = "id"` reference in `[dependencies]` and
@@ -1183,15 +1264,15 @@ fn format_parse_error(err: toml::de::Error, _source: &str, path: &Path) -> anyho
 /// Return a hint string for well-known error messages, or `None` if the
 /// error is already self-explanatory from the caret context alone.
 fn hint_for(message: &str, _file_name: &str) -> Option<String> {
-    // missing field `name` or `version` — could be in [application] or [library]
+    // missing field `name` or `version` — could be in [application], [library], or [bom]
     if message.contains("missing field") && message.contains("name") {
         return Some(
-            "both [application] and [library] require a `name` field.".to_string(),
+            "[application], [library], and [bom] all require a `name` field.".to_string(),
         );
     }
     if message.contains("missing field") && message.contains("version") {
         return Some(
-            "both [application] and [library] require a `version` field.".to_string(),
+            "[application], [library], and [bom] all require a `version` field.".to_string(),
         );
     }
 
@@ -2094,11 +2175,145 @@ version = "0.1"
         let err = load_str(toml).unwrap_err().to_string();
         assert!(err.contains("library") && err.contains("native-image"), "got: {err}");
     }
+
+    // -- [bom] ---------------------------------------------------------------
+
+    #[test]
+    fn parse_bom_section() {
+        let toml = r#"
+[bom]
+name = "my-platform"
+version = "1.0.0"
+groupId = "com.example"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.is_bom(), "should be recognised as a BOM project");
+        assert_eq!(d.kind_label(), "bom");
+        assert_eq!(d.project_name(), Some("my-platform"));
+        assert_eq!(d.project_version(), Some("1.0.0"));
+        assert_eq!(d.group_id(), Some("com.example"));
+    }
+
+    #[test]
+    fn bom_with_docker_is_rejected() {
+        let toml = r#"
+[bom]
+name = "x"
+version = "0.1"
+[docker]
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("BOM") && err.contains("docker"), "got: {err}");
+    }
+
+    #[test]
+    fn bom_with_test_dependencies_is_rejected() {
+        let toml = r#"
+[bom]
+name = "x"
+version = "0.1"
+[test-dependencies]
+"com.example:foo" = "1.0"
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("BOM") && err.contains("test-dependencies"), "got: {err}");
+    }
+
+    #[test]
+    fn bom_dep_without_explicit_version_is_rejected() {
+        let toml = r#"
+[bom]
+name = "x"
+version = "0.1"
+[dependencies]
+"com.example:foo" = ""
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("explicit version"), "got: {err}");
+        assert!(err.contains("com.example:foo"), "got: {err}");
+    }
+
+    #[test]
+    fn bom_with_two_sections_is_rejected() {
+        let toml = r#"
+[bom]
+name = "x"
+version = "0.1"
+[library]
+name = "y"
+version = "0.1"
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("only one"), "got: {err}");
+    }
+
+    #[test]
+    fn bom_with_explicit_deps_is_accepted() {
+        let toml = r#"
+[bom]
+name = "my-platform"
+version = "1.0.0"
+groupId = "com.example"
+[dependencies]
+"com.google.guava:guava" = "33.0.0-jre"
+[bom-imports]
+"io.micronaut:micronaut-bom" = "4.3.2"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.is_bom());
+        assert_eq!(d.dependencies.len(), 1);
+        assert_eq!(d.bom_imports.len(), 1);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Test helpers (available to sibling modules via `crate::descriptor::tests`)
 // ---------------------------------------------------------------------------
+
+/// Shared test helper: build a minimal BOM [`Descriptor`] with the given
+/// coordinates, managed deps, BOM imports, and publish config.
+#[cfg(test)]
+pub(crate) fn fake_bom_desc(
+    group_id: Option<&str>,
+    name: &str,
+    version: &str,
+    dependencies: BTreeMap<String, DependencyValue>,
+    bom_imports: BTreeMap<String, String>,
+    publish: PublishConfig,
+) -> Descriptor {
+    Descriptor {
+        kind: DescriptorKind::Bom(Bom {
+            name: name.to_string(),
+            version: version.to_string(),
+            group_id: group_id.map(String::from),
+        }),
+        java: Java::default(),
+        test: Test::default(),
+        kotlin: Kotlin::default(),
+        groovy: Groovy::default(),
+        spock: Spock::default(),
+        native_image: NativeImage::default(),
+        docker: Docker::default(),
+        build_info: BuildInfo::default(),
+        dependencies,
+        test_dependencies: BTreeMap::new(),
+        repositories: vec![],
+        bom_imports,
+        test_bom_imports: BTreeMap::new(),
+        inherited_bom_imports: BTreeMap::new(),
+        inherited_test_bom_imports: BTreeMap::new(),
+        workspace_dependencies: BTreeMap::new(),
+        annotation_processors: BTreeMap::new(),
+        test_annotation_processors: BTreeMap::new(),
+        inherited_annotation_processors: BTreeMap::new(),
+        inherited_test_annotation_processors: BTreeMap::new(),
+        annotation_processor_options: BTreeMap::new(),
+        test_annotation_processor_options: BTreeMap::new(),
+        inherited_annotation_processor_options: BTreeMap::new(),
+        inherited_test_annotation_processor_options: BTreeMap::new(),
+        publish,
+    }
+}
 
 /// Shared test helper: build a minimal library [`Descriptor`] with the given
 /// coordinates and publish config.  Used by `pom_writer` and `publish` tests.

@@ -3,13 +3,14 @@
 //! Uses the `quick-xml` writer for correct XML serialisation (automatic
 //! character escaping, well-formed structure).
 
-use crate::descriptor::{Descriptor, PublishConfig};
+use crate::descriptor::{Descriptor, DependencyValue, PublishConfig};
 use anyhow::Result;
 use curie_deps::Gav;
 use quick_xml::{
     events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event},
     Writer,
 };
+use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::Path;
 
@@ -68,6 +69,63 @@ pub fn write_pom(desc: &Descriptor, declared_deps: &[Gav], path: &Path) -> Resul
     let body = build_pom(desc, declared_deps)?;
     std::fs::write(path, body.as_bytes())
         .map_err(|e| anyhow::anyhow!("failed to write POM at {}: {}", path.display(), e))?;
+    Ok(())
+}
+
+/// Build a BOM POM XML document.  The output has `<packaging>pom</packaging>`
+/// and a `<dependencyManagement>` block containing both BOM imports and
+/// explicitly-versioned managed dependencies.  No `<dependencies>` block.
+pub fn build_bom_pom(desc: &Descriptor) -> Result<String> {
+    let group_id = desc
+        .group_id()
+        .ok_or_else(|| anyhow::anyhow!("groupId must be set on [bom] to publish"))?;
+    let artifact_id = desc.buildable_name();
+    let version = desc.buildable_version();
+    let pub_cfg = &desc.publish;
+
+    let mut buf = Vec::new();
+    let mut w = Writer::new_with_indent(Cursor::new(&mut buf), b' ', 2);
+
+    w.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))?;
+
+    let mut project = BytesStart::new("project");
+    project.push_attribute(("xmlns", "http://maven.apache.org/POM/4.0.0"));
+    project.push_attribute(("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance"));
+    project.push_attribute((
+        "xsi:schemaLocation",
+        "http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd",
+    ));
+    w.write_event(Event::Start(project))?;
+
+    text_elem(&mut w, "modelVersion", "4.0.0")?;
+    text_elem(&mut w, "groupId", group_id)?;
+    text_elem(&mut w, "artifactId", artifact_id)?;
+    text_elem(&mut w, "version", version)?;
+    text_elem(&mut w, "packaging", "pom")?;
+    text_elem(&mut w, "name", artifact_id)?;
+
+    if let Some(desc_text) = &pub_cfg.description {
+        text_elem(&mut w, "description", desc_text)?;
+    }
+    if let Some(homepage) = &pub_cfg.homepage {
+        text_elem(&mut w, "url", homepage)?;
+    }
+
+    write_licenses(&mut w, &pub_cfg.licenses)?;
+    write_developers(&mut w, pub_cfg)?;
+    write_scm(&mut w, pub_cfg)?;
+    write_dependency_management(&mut w, &desc.bom_imports, &desc.dependencies)?;
+
+    w.write_event(Event::End(BytesEnd::new("project")))?;
+
+    Ok(String::from_utf8(buf)?)
+}
+
+/// Convenience wrapper: build the BOM POM and write it to `path`.
+pub fn write_bom_pom(desc: &Descriptor, path: &Path) -> Result<()> {
+    let body = build_bom_pom(desc)?;
+    std::fs::write(path, body.as_bytes())
+        .map_err(|e| anyhow::anyhow!("failed to write BOM POM at {}: {}", path.display(), e))?;
     Ok(())
 }
 
@@ -157,6 +215,54 @@ fn write_dependencies(w: &mut XmlWriter<'_>, deps: &[Gav]) -> Result<()> {
     Ok(())
 }
 
+/// Emit a `<dependencyManagement>` block for BOM artifacts.
+///
+/// `bom_imports` — coordinates imported as BOM; each gets `<type>pom</type><scope>import</scope>`.
+/// `managed_deps` — direct managed dependency coordinates with explicit versions.
+fn write_dependency_management(
+    w: &mut XmlWriter<'_>,
+    bom_imports: &BTreeMap<String, String>,
+    managed_deps: &BTreeMap<String, DependencyValue>,
+) -> Result<()> {
+    if bom_imports.is_empty() && managed_deps.is_empty() {
+        return Ok(());
+    }
+    w.write_event(Event::Start(BytesStart::new("dependencyManagement")))?;
+    w.write_event(Event::Start(BytesStart::new("dependencies")))?;
+
+    for (coord, version) in bom_imports {
+        let (group, artifact) = split_coord(coord)?;
+        w.write_event(Event::Start(BytesStart::new("dependency")))?;
+        text_elem(w, "groupId", group)?;
+        text_elem(w, "artifactId", artifact)?;
+        text_elem(w, "version", version)?;
+        text_elem(w, "type", "pom")?;
+        text_elem(w, "scope", "import")?;
+        w.write_event(Event::End(BytesEnd::new("dependency")))?;
+    }
+
+    for (coord, dep) in managed_deps {
+        let (group, artifact) = split_coord(coord)?;
+        w.write_event(Event::Start(BytesStart::new("dependency")))?;
+        text_elem(w, "groupId", group)?;
+        text_elem(w, "artifactId", artifact)?;
+        text_elem(w, "version", dep.version())?;
+        w.write_event(Event::End(BytesEnd::new("dependency")))?;
+    }
+
+    w.write_event(Event::End(BytesEnd::new("dependencies")))?;
+    w.write_event(Event::End(BytesEnd::new("dependencyManagement")))?;
+    Ok(())
+}
+
+/// Split `"group:artifact"` into `("group", "artifact")`.
+fn split_coord(coord: &str) -> Result<(&str, &str)> {
+    let mut parts = coord.splitn(2, ':');
+    let group = parts.next().ok_or_else(|| anyhow::anyhow!("invalid coordinate: {}", coord))?;
+    let artifact = parts.next().ok_or_else(|| anyhow::anyhow!("invalid coordinate (missing ':'): {}", coord))?;
+    Ok((group, artifact))
+}
+
 /// SPDX-id → `(<name>, Some(<url>))` for common licenses.  Unknown ids
 /// return `(spdx_id, None)` so the SPDX id still becomes the `<name>`.
 fn spdx_lookup(spdx: &str) -> (&str, Option<&str>) {
@@ -183,7 +289,7 @@ fn spdx_lookup(spdx: &str) -> (&str, Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::descriptor::{fake_library_desc, Developer, Scm};
+    use crate::descriptor::{fake_bom_desc, fake_library_desc, Developer, Scm};
 
     fn fake_desc(group_id: &str, name: &str, version: &str, pub_cfg: PublishConfig) -> Descriptor {
         fake_library_desc(Some(group_id), name, version, pub_cfg)
@@ -273,6 +379,104 @@ mod tests {
     fn pom_errors_when_group_id_missing() {
         let desc = fake_library_desc(None, "x", "1.0", PublishConfig::default());
         let err = build_pom(&desc, &[]).unwrap_err().to_string();
+        assert!(err.contains("groupId"), "got: {err}");
+    }
+
+    // -- BOM POM tests -------------------------------------------------------
+
+    #[test]
+    fn build_bom_pom_basic() {
+        let desc = fake_bom_desc(
+            Some("com.example"),
+            "my-platform",
+            "1.0.0",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            PublishConfig::default(),
+        );
+        let xml = build_bom_pom(&desc).unwrap();
+        assert!(xml.contains("<groupId>com.example</groupId>"));
+        assert!(xml.contains("<artifactId>my-platform</artifactId>"));
+        assert!(xml.contains("<version>1.0.0</version>"));
+        assert!(xml.contains("<packaging>pom</packaging>"));
+    }
+
+    #[test]
+    fn build_bom_pom_bom_import_has_pom_scope() {
+        let mut bom_imports = BTreeMap::new();
+        bom_imports.insert("io.micronaut:micronaut-bom".to_string(), "4.3.2".to_string());
+        let desc = fake_bom_desc(
+            Some("com.example"),
+            "my-platform",
+            "1.0.0",
+            BTreeMap::new(),
+            bom_imports,
+            PublishConfig::default(),
+        );
+        let xml = build_bom_pom(&desc).unwrap();
+        assert!(xml.contains("<dependencyManagement>"));
+        assert!(xml.contains("<type>pom</type>"));
+        assert!(xml.contains("<scope>import</scope>"));
+        assert!(xml.contains("<artifactId>micronaut-bom</artifactId>"));
+    }
+
+    #[test]
+    fn build_bom_pom_managed_dep_has_version() {
+        let mut deps = BTreeMap::new();
+        deps.insert(
+            "com.google.guava:guava".to_string(),
+            DependencyValue::Version("33.0.0-jre".to_string()),
+        );
+        let desc = fake_bom_desc(
+            Some("com.example"),
+            "my-platform",
+            "1.0.0",
+            deps,
+            BTreeMap::new(),
+            PublishConfig::default(),
+        );
+        let xml = build_bom_pom(&desc).unwrap();
+        assert!(xml.contains("<dependencyManagement>"));
+        assert!(xml.contains("<artifactId>guava</artifactId>"));
+        assert!(xml.contains("<version>33.0.0-jre</version>"));
+    }
+
+    #[test]
+    fn build_bom_pom_no_plain_dependencies_block() {
+        let mut deps = BTreeMap::new();
+        deps.insert(
+            "org.slf4j:slf4j-api".to_string(),
+            DependencyValue::Version("2.0.12".to_string()),
+        );
+        let desc = fake_bom_desc(
+            Some("com.example"),
+            "my-platform",
+            "1.0.0",
+            deps,
+            BTreeMap::new(),
+            PublishConfig::default(),
+        );
+        let xml = build_bom_pom(&desc).unwrap();
+        // <dependencies> must only appear inside <dependencyManagement>
+        let first_dep_management = xml.find("<dependencyManagement>").unwrap();
+        let first_dependencies = xml.find("<dependencies>").unwrap();
+        assert!(
+            first_dependencies > first_dep_management,
+            "<dependencies> must be inside <dependencyManagement>, not before it"
+        );
+        // No standalone <dependencies> outside <dependencyManagement>
+        let after_mgmt = &xml[first_dep_management..];
+        assert!(
+            !xml[..first_dep_management].contains("<dependencies>"),
+            "no <dependencies> block should appear before <dependencyManagement>"
+        );
+        let _ = after_mgmt; // used in assertion above
+    }
+
+    #[test]
+    fn build_bom_pom_errors_when_group_id_missing() {
+        let desc = fake_bom_desc(None, "x", "1.0", BTreeMap::new(), BTreeMap::new(), PublishConfig::default());
+        let err = build_bom_pom(&desc).unwrap_err().to_string();
         assert!(err.contains("groupId"), "got: {err}");
     }
 }

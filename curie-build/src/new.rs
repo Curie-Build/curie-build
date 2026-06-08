@@ -82,6 +82,8 @@ pub enum ProjectKind {
     Lib,
     /// Workspace root (contains member projects)
     Workspace,
+    /// Bill of Materials (produces a POM-only artifact with managed versions)
+    Bom,
 }
 
 impl ProjectKind {
@@ -90,6 +92,7 @@ impl ProjectKind {
             ProjectKind::App => "application",
             ProjectKind::Lib => "library",
             ProjectKind::Workspace => "workspace",
+            ProjectKind::Bom => "bom",
         }
     }
 }
@@ -109,6 +112,7 @@ fn scaffold(
         ProjectKind::App => scaffold_app(dest, name, package)?,
         ProjectKind::Lib => scaffold_lib(dest, name, package)?,
         ProjectKind::Workspace => scaffold_workspace(dest)?,
+        ProjectKind::Bom => scaffold_bom(dest, name)?,
     }
     Ok(())
 }
@@ -168,6 +172,15 @@ fn scaffold_workspace(dest: &Path) -> Result<()> {
     let toml = "[workspace]\nmembers = []\n";
     write_file(&dest.join("Curie.toml"), toml)?;
     Ok(())
+}
+
+fn scaffold_bom(dest: &Path, name: &str) -> Result<()> {
+    let toml = format!(
+        "[bom]\nname = \"{}\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\n# \"com.example:artifact\" = \"1.0.0\"\n",
+        name
+    );
+    write_file(&dest.join("Curie.toml"), &toml)
 }
 
 fn write_gitignore(dest: &Path) -> Result<()> {
@@ -501,5 +514,24 @@ mod tests {
         assert!(ws.contains("# My workspace"), "top comment should be preserved");
         assert!(ws.contains("# list of members"), "inline comment should be preserved");
         assert!(ws.contains("\"new-member\""));
+    }
+
+    // ── bom scaffold ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn new_bom_creates_expected_files() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("my-bom");
+        fs::create_dir_all(&dest).unwrap();
+
+        scaffold(ProjectKind::Bom, &dest, "my-bom", None).unwrap();
+
+        let toml = fs::read_to_string(dest.join("Curie.toml")).unwrap();
+        assert!(toml.contains("[bom]"), "Curie.toml must have [bom] section");
+        assert!(toml.contains("name = \"my-bom\""));
+        assert!(!toml.contains("[application]"));
+        assert!(!toml.contains("[library]"));
+        // BOM projects have no source directory.
+        assert!(!dest.join("src").exists(), "BOM project must not create src/");
     }
 }

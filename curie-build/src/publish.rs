@@ -46,11 +46,12 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
         bail!("`curie publish` cannot run on a workspace root; target a member with --project");
     }
 
+    let section = if desc.is_library() { "library" } else if desc.is_bom() { "bom" } else { "application" };
     let group_id = desc
         .group_id()
         .ok_or_else(|| anyhow::anyhow!(
             "groupId is required for publishing — add `groupId = \"...\"` to the [{}] section",
-            if desc.is_library() { "library" } else { "application" },
+            section,
         ))?
         .to_string();
 
@@ -82,40 +83,49 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
     let version = desc.buildable_version();
     let base_name = format!("{}-{}", artifact_id, version);
 
-    // --- sources jar ---------------------------------------------------------
-    let sources_jar_path = target_dir.join(format!("{}-sources.jar", base_name));
-    let src_roots = collect_src_roots(project_root);
-    let resources_dir = build_out.resources_dir.as_deref();
-    sources_jar::write_sources_jar(&sources_jar_path, &src_roots, resources_dir)
-        .context("failed to build sources jar")?;
-    println!("  Sources jar     {}", sources_jar_path.file_name().unwrap().to_string_lossy());
-
-    // --- javadoc jar (optional) ----------------------------------------------
-    let javadoc_jar_path: Option<PathBuf> = if javadoc {
-        let p = target_dir.join(format!("{}-javadoc.jar", base_name));
-        build_javadoc_jar(project_root, &src_roots, &p)
-            .context("failed to build javadoc jar")?;
-        println!("  Javadoc jar     {}", p.file_name().unwrap().to_string_lossy());
-        Some(p)
-    } else {
-        None
-    };
-
-    // --- POM -----------------------------------------------------------------
-    let declared_gavs = resolve_declared_dep_gavs(&desc)?;
-    let pom_path = target_dir.join(format!("{}.pom", base_name));
-    pom_writer::write_pom(&desc, &declared_gavs, &pom_path)
-        .context("failed to write POM")?;
-    println!("  POM             {}", pom_path.file_name().unwrap().to_string_lossy());
-
     // --- collect all artifacts to upload -------------------------------------
     let mut artifacts: Vec<UploadArtifact> = Vec::new();
-    artifacts.push(UploadArtifact::new(&build_out.jar, "")); // main jar
-    artifacts.push(UploadArtifact::new(&sources_jar_path, "-sources"));
-    if let Some(ref p) = javadoc_jar_path {
-        artifacts.push(UploadArtifact::new(p, "-javadoc"));
+
+    if desc.is_bom() {
+        // BOM projects publish the POM only — no JAR, no sources, no javadoc.
+        // build_with_desc already wrote the BOM POM; its path is in build_out.jar.
+        let pom_path = &build_out.jar;
+        println!("  POM             {}", pom_path.file_name().unwrap().to_string_lossy());
+        artifacts.push(UploadArtifact::pom(pom_path));
+    } else {
+        // --- sources jar -----------------------------------------------------
+        let sources_jar_path = target_dir.join(format!("{}-sources.jar", base_name));
+        let src_roots = collect_src_roots(project_root);
+        let resources_dir = build_out.resources_dir.as_deref();
+        sources_jar::write_sources_jar(&sources_jar_path, &src_roots, resources_dir)
+            .context("failed to build sources jar")?;
+        println!("  Sources jar     {}", sources_jar_path.file_name().unwrap().to_string_lossy());
+
+        // --- javadoc jar (optional) ------------------------------------------
+        let javadoc_jar_path: Option<PathBuf> = if javadoc {
+            let p = target_dir.join(format!("{}-javadoc.jar", base_name));
+            build_javadoc_jar(project_root, &src_roots, &p)
+                .context("failed to build javadoc jar")?;
+            println!("  Javadoc jar     {}", p.file_name().unwrap().to_string_lossy());
+            Some(p)
+        } else {
+            None
+        };
+
+        // --- POM -------------------------------------------------------------
+        let declared_gavs = resolve_declared_dep_gavs(&desc)?;
+        let pom_path = target_dir.join(format!("{}.pom", base_name));
+        pom_writer::write_pom(&desc, &declared_gavs, &pom_path)
+            .context("failed to write POM")?;
+        println!("  POM             {}", pom_path.file_name().unwrap().to_string_lossy());
+
+        artifacts.push(UploadArtifact::new(&build_out.jar, "")); // main jar
+        artifacts.push(UploadArtifact::new(&sources_jar_path, "-sources"));
+        if let Some(ref p) = javadoc_jar_path {
+            artifacts.push(UploadArtifact::new(p, "-javadoc"));
+        }
+        artifacts.push(UploadArtifact::pom(&pom_path));
     }
-    artifacts.push(UploadArtifact::pom(&pom_path));
 
     // --- GPG sign ------------------------------------------------------------
     if sign {
