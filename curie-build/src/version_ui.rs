@@ -20,7 +20,7 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 
-use crate::search_ui::truncate_str;
+use crate::api_search_ui::truncate_str;
 use crate::update::{is_stable, latest_stable};
 
 const MARKER: &str = "  \u{25CF} ";

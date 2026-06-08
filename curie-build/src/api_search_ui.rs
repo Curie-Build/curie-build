@@ -19,8 +19,6 @@ use crossterm::{
 };
 
 use crate::api_search::{search_api, ArtifactHit};
-use crate::search_index::ArtifactRecord;
-use crate::search_ui::{format_result_line, truncate_str};
 
 const SEARCH_LIMIT: usize = 50;
 const DEBOUNCE_MS: u64 = 400;
@@ -256,8 +254,7 @@ fn redraw(stdout: &mut impl Write, state: &UiState) -> Result<()> {
         )?;
         if result_idx < state.results.len() {
             let is_sel = result_idx == state.selected_idx;
-            let record = hit_to_record(&state.results[result_idx]);
-            let line = format_result_line(&record, is_sel, w);
+            let line = format_result_line(&state.results[result_idx], w);
             if is_sel {
                 execute!(stdout, SetAttribute(Attribute::Reverse))?;
                 write!(stdout, "{}", line)?;
@@ -298,12 +295,25 @@ fn redraw(stdout: &mut impl Write, state: &UiState) -> Result<()> {
     Ok(())
 }
 
-fn hit_to_record(hit: &ArtifactHit) -> ArtifactRecord {
-    ArtifactRecord {
-        coord: hit.coord.clone(),
-        name: String::new(),
-        description: String::new(),
-        version: hit.latest_version.clone(),
+fn format_result_line(hit: &ArtifactHit, w: usize) -> String {
+    let marker = "  \u{25CF} ";
+    let marker_width = 4;
+    let version_part = if hit.latest_version.is_empty() {
+        String::new()
+    } else {
+        format!("  {}", hit.latest_version)
+    };
+    let full = format!("{}{}{}", marker, hit.coord, version_part);
+    let _ = marker_width; // keep for layout symmetry with the Tantivy version
+    truncate_str(&full, w)
+}
+
+pub(crate) fn truncate_str(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        s.to_string()
+    } else {
+        chars[..max_chars].iter().collect()
     }
 }
 

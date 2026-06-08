@@ -4,8 +4,6 @@ mod api_search_ui;
 mod version_ui;
 mod audit;
 mod inspect_ui;
-mod search_index;
-mod search_ui;
 mod build;
 mod class_manifest;
 mod compile;
@@ -218,15 +216,6 @@ enum Cmd {
         /// Do not access the network; fail if a version must be resolved
         #[arg(long)]
         offline: bool,
-        /// Re-download the local Maven Central artifact index
-        #[arg(long = "refresh-index")]
-        refresh_index: bool,
-        /// Use the local Tantivy index for search (download it if not yet present)
-        #[arg(long = "use-index")]
-        use_index: bool,
-        /// Force Maven Central REST API search even when a local index is available
-        #[arg(long)]
-        api: bool,
     },
     /// Remove a dependency from Curie.toml
     Remove {
@@ -523,7 +512,7 @@ fn main() {
 
         // Handled above in the early-exit block; unreachable at runtime.
         Cmd::New { .. } | Cmd::Init { .. } => unreachable!(),
-        Cmd::Add { coord, test, annotation_processor, bom, offline, refresh_index, use_index, api } => match &ctx {
+        Cmd::Add { coord, test, annotation_processor, bom, offline } => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(_)
             | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
                 "`curie add` cannot run on a workspace root; \
@@ -534,15 +523,7 @@ fn main() {
                 add_remove::run_add(
                     &cli.project,
                     coord.as_deref(),
-                    add_remove::AddOptions {
-                        test,
-                        annotation_processor,
-                        bom,
-                        offline,
-                        refresh_index,
-                        use_index,
-                        api,
-                    },
+                    add_remove::AddOptions { test, annotation_processor, bom, offline },
                 )
             }
         },

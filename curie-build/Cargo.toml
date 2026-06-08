@@ -36,9 +36,6 @@ ansi-to-tui = "8"
 time = { version = "0.3", features = ["local-offset"] }
 terminal_size = "0.4"
 quick-xml = { version = "0.40", features = ["serialize"] }
-tantivy = { version = "0.22", features = ["mmap"] }
-flate2 = { version = "1", features = ["zlib-rs"] }
-
 tempfile = "3"
 
 [build-dependencies]
