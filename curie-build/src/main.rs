@@ -132,6 +132,10 @@ enum Cmd {
         /// Do not download formatter JARs; fail if not already cached
         #[arg(long)]
         offline: bool,
+
+        /// Maximum number of members to format in parallel
+        #[arg(short, long)]
+        jobs: Option<usize>,
     },
     /// Print the dependency tree; optionally explain why a specific artifact was chosen
     Deps {
@@ -390,12 +394,14 @@ fn main() {
                 workspace::list(project, project, all, crate::term::use_color())
             }
         },
-        Cmd::Fmt { check, offline } => match &ctx {
+        Cmd::Fmt { check, offline, jobs } => {
+            let jobs = resolve_jobs(jobs);
+            match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(root) => {
-                workspace::fmt_all(root, check, offline)
+                workspace::fmt_all(root, check, offline, jobs)
             }
             workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
-                workspace::fmt_subtree(workspace_root, member_indices, check, offline)
+                workspace::fmt_subtree(workspace_root, member_indices, check, offline, jobs)
             }
             workspace::WorkspaceContext::WorkspaceMember { .. } => {
                 fmt::run_fmt(&cli.project, check, offline)
@@ -403,7 +409,7 @@ fn main() {
             workspace::WorkspaceContext::Standalone(project) => {
                 fmt::run_fmt(project, check, offline)
             }
-        },
+        }},
         Cmd::Deps { why, tests, offline } => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(_)
             | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(

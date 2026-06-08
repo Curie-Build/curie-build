@@ -504,6 +504,7 @@ pub fn run_jobs<F>(
     jobs: usize,
     respect_dag: bool,
     allow_tui: bool,
+    done_label: &str,
     run: F,
 ) -> Result<()>
 where
@@ -570,7 +571,7 @@ where
         let (vis, _) = crate::tui::tui_layout(n, term_h);
         let names: Vec<String> = display_names.clone();
         let (renderer, tui_slots) =
-            crate::tui::TuiRenderer::new(names, log_files, vis);
+            crate::tui::TuiRenderer::new(names, log_files, vis, done_label.to_string());
         let sinks: Vec<Arc<dyn LineSink + Send + Sync>> = tui_slots
             .into_iter()
             .map(|s| s as Arc<dyn LineSink + Send + Sync>)

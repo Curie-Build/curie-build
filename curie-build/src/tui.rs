@@ -187,6 +187,7 @@ impl TuiRenderer {
         names: Vec<String>,
         log_files: Vec<std::fs::File>,
         visible_count: usize,
+        done_label: String,
     ) -> (Self, Vec<Arc<TuiSlot>>) {
         // Capacity 1000: large enough to absorb bursts while bounding memory.
         let (sender, receiver) = mpsc::sync_channel::<TuiMsg>(1000);
@@ -204,7 +205,7 @@ impl TuiRenderer {
             .collect();
 
         let thread = std::thread::spawn(move || {
-            render_loop(receiver, names, visible_count);
+            render_loop(receiver, names, visible_count, done_label);
         });
 
         let renderer = TuiRenderer { sender, thread: Some(thread) };
@@ -246,12 +247,15 @@ struct RenderState {
     /// Short reason the build was aborted, shown after the "Skipped" label.
     /// Set from the first [`TuiMsg::SlotSkipped`].
     skip_reason: Option<String>,
+    /// Label shown for successfully completed jobs (e.g. "Done", "Formatted", "Cleaned").
+    done_label: String,
 }
 
 fn render_loop(
     rx: mpsc::Receiver<TuiMsg>,
     names: Vec<String>,
     visible: usize,
+    done_label: String,
 ) {
     let stdout = io::stdout();
     let backend = CrosstermBackend::new(stdout);
@@ -282,6 +286,7 @@ fn render_loop(
         background_queue: VecDeque::new(),
         visible,
         skip_reason: None,
+        done_label,
     };
 
     // Initial draw.
@@ -689,7 +694,7 @@ fn print_build_summary(state: &RenderState, out: &mut dyn io::Write) {
     };
 
     print_summary_group(out, &skip_label, &skipped,  "\x1b[33m",   "\x1b[2m",  term_w);
-    print_summary_group(out, "Done: ",    &done_ok,  "\x1b[1;32m", "\x1b[32m", term_w);
+    print_summary_group(out, &format!("{}: ", state.done_label), &done_ok,  "\x1b[1;32m", "\x1b[32m", term_w);
     print_summary_group(out, "Failed: ",  &done_err, "\x1b[1;31m", "\x1b[31m", term_w);
 }
 
@@ -875,6 +880,7 @@ fn render_frame(f: &mut Frame, state: &RenderState) {
         area.width as usize,
         &groups,
         state.skip_reason.as_deref(),
+        &state.done_label,
     );
 }
 
@@ -1013,6 +1019,7 @@ fn render_overflow_lines(
     width: usize,
     groups: &OverflowGroups<'_>,
     skip_reason: Option<&str>,
+    done_label: &str,
 ) {
     let dim    = Style::new().add_modifier(Modifier::DIM);
     let cyan   = Style::new().fg(Color::Cyan);
@@ -1036,7 +1043,7 @@ fn render_overflow_lines(
         GroupSpec { label: "Running: ".into(), names: &groups.running,  label_style: cyan,   name_style: dim   },
         GroupSpec { label: "Pending: ".into(), names: &groups.pending,  label_style: dim,    name_style: dim   },
         GroupSpec { label: skipped_label,      names: &groups.skipped,  label_style: yellow, name_style: dim   },
-        GroupSpec { label: "Done: ".into(),    names: &groups.done_ok,  label_style: green,  name_style: green },
+        GroupSpec { label: format!("{}: ", done_label), names: &groups.done_ok,  label_style: green,  name_style: green },
         GroupSpec { label: "Failed: ".into(),  names: &groups.done_err, label_style: red,    name_style: red   },
     ];
 
@@ -1317,6 +1324,7 @@ mod tests {
             background_queue: VecDeque::new(),
             visible,
             skip_reason: None,
+            done_label: "Done".to_string(),
         }
     }
 

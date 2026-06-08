@@ -12,7 +12,6 @@ use crate::descriptor;
 use crate::update::{self, UpdateOptions};
 use crate::{build, compile, fmt, jar, run, test};
 use anyhow::{bail, Context, Result};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -139,7 +138,7 @@ pub fn build_all(workspace_root: &Path, opts: build::BuildOptions, jobs: usize) 
     let ws = load(workspace_root)?;
     let subset: Vec<usize> = (0..ws.members.len()).collect();
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, true, |m, extra_cp| {
+        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, true, "Done", |m, extra_cp| {
             build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
         });
     }
@@ -158,7 +157,7 @@ pub fn build_one(
     let ws = load(workspace_root)?;
     let subset = transitive_closure(&ws, member_index);
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, true, |m, extra_cp| {
+        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, true, "Done", |m, extra_cp| {
             build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
         });
     }
@@ -177,7 +176,7 @@ pub fn build_subtree(
     let ws = load(workspace_root)?;
     let subset = transitive_closure_multi(&ws, member_indices);
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, true, |m, extra_cp| {
+        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, true, "Done", |m, extra_cp| {
             build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
         });
     }
@@ -191,7 +190,7 @@ pub fn test_all(workspace_root: &Path, filter: Option<&str>, offline: bool, jobs
     let ws = load(workspace_root)?;
     let subset: Vec<usize> = (0..ws.members.len()).collect();
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, true, |m, extra_cp| {
+        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, true, "Done", |m, extra_cp| {
             test_one_member(m, filter, offline, extra_cp)
         });
     }
@@ -211,7 +210,7 @@ pub fn test_one(
     let ws = load(workspace_root)?;
     let subset = transitive_closure(&ws, member_index);
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, true, |m, extra_cp| {
+        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, true, "Done", |m, extra_cp| {
             test_one_member(m, filter, offline, extra_cp)
         });
     }
@@ -231,7 +230,7 @@ pub fn test_subtree(
     let ws = load(workspace_root)?;
     let subset = transitive_closure_multi(&ws, member_indices);
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, true, |m, extra_cp| {
+        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, true, "Done", |m, extra_cp| {
             test_one_member(m, filter, offline, extra_cp)
         });
     }
@@ -412,7 +411,7 @@ pub fn clean_all(workspace_root: &Path, jobs: usize) -> Result<()> {
     let ws = load(workspace_root)?;
     let subset: Vec<usize> = (0..ws.members.len()).collect();
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "clean", jobs, false, false, |m, _extra_cp| {
+        return crate::parallel::run_jobs(&ws, &subset, "clean", jobs, false, false, "Cleaned", |m, _extra_cp| {
             build::clean(&m.path).map(|_| Vec::new())
         });
     }
@@ -426,8 +425,8 @@ pub fn clean_all(workspace_root: &Path, jobs: usize) -> Result<()> {
 pub fn clean_subtree(workspace_root: &Path, member_indices: &[usize], jobs: usize) -> Result<()> {
     let ws = load(workspace_root)?;
     if member_indices.len() > 1 {
-        return crate::parallel::run_jobs(&ws, member_indices, "clean", jobs, false, false, |m, _| {
-            build::clean(&m.path).map(|_| Vec::new())
+        return crate::parallel::run_jobs(&ws, member_indices, "clean", jobs, false, false, "Cleaned", |m, _: &[PathBuf]| {
+            build::clean(&m.path).map(|_| Vec::<PathBuf>::new())
         });
     }
     fan_out(&ws, "clean", member_indices, |m, _extra_cp| {
@@ -585,10 +584,10 @@ fn override_output(opts: &AuditOptions, _member_path: &Path) -> AuditOptions {
     opts.clone()
 }
 
-pub fn fmt_all(workspace_root: &Path, check_only: bool, offline: bool) -> Result<()> {
+pub fn fmt_all(workspace_root: &Path, check_only: bool, offline: bool, jobs: usize) -> Result<()> {
     let ws = load(workspace_root)?;
-    let members: Vec<&Member> = ws.members.iter().collect();
-    fmt_members(&members, check_only, offline)
+    let subset: Vec<usize> = (0..ws.members.len()).collect();
+    fmt_members(&ws, &subset, check_only, offline, jobs)
 }
 
 /// Format a nested workspace's own members (the subtree).
@@ -597,17 +596,21 @@ pub fn fmt_subtree(
     member_indices: &[usize],
     check_only: bool,
     offline: bool,
+    jobs: usize,
 ) -> Result<()> {
     let ws = load(workspace_root)?;
-    let members: Vec<&Member> = member_indices.iter().map(|&i| &ws.members[i]).collect();
-    fmt_members(&members, check_only, offline)
+    fmt_members(&ws, member_indices, check_only, offline, jobs)
 }
 
-/// Parallel-format a set of members, sharing one formatter resolution across
-/// all of them.  Shared by [`fmt_all`] and [`fmt_subtree`].
-fn fmt_members(members: &[&Member], check_only: bool, offline: bool) -> Result<()> {
-    let n = members.len();
-
+/// Parallel-format a subset of workspace members, sharing one formatter
+/// resolution across all of them.  Shared by [`fmt_all`] and [`fmt_subtree`].
+fn fmt_members(
+    ws: &Workspace,
+    subset: &[usize],
+    check_only: bool,
+    offline: bool,
+    jobs: usize,
+) -> Result<()> {
     // Resolve both formatters exactly once for the whole workspace.
     // The per-member workers share these classpaths; if each resolved
     // independently, the parallel resolve() calls would race on the same
@@ -615,86 +618,27 @@ fn fmt_members(members: &[&Member], check_only: bool, offline: bool) -> Result<(
     let pjf_jars = fmt::resolve_pjf(offline)?;
     // Only resolve ktfmt if at least one member has .kt sources — avoids an
     // unnecessary network round-trip for purely-Java workspaces.
-    let kt_in_workspace = members.iter().any(|m| fmt::has_kotlin_sources(&m.path));
+    let kt_in_workspace = subset
+        .iter()
+        .any(|&i| fmt::has_kotlin_sources(&ws.members[i].path));
     let ktfmt_jars = if kt_in_workspace {
         fmt::resolve_ktfmt(offline)?
     } else {
         Vec::new()
     };
 
-    // --- progress bars (same style as artifact downloading) -----------------
-    let mp = MultiProgress::new();
-
-    let summary = mp.add(ProgressBar::new(n as u64));
-    summary.set_style(
-        ProgressStyle::with_template(
-            "  Formatting      [{bar:40.cyan/blue}] {pos}/{len}",
-        )
-        .unwrap()
-        .progress_chars("=>-"),
-    );
-
-    let spinner_style = ProgressStyle::with_template("    {spinner} {msg}")
-        .unwrap()
-        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ");
-
-    let spinners: Vec<ProgressBar> = members
-        .iter()
-        .map(|m| {
-            let sp = mp.add(ProgressBar::new_spinner());
-            sp.set_style(spinner_style.clone());
-            sp.set_message(m.declared.clone());
-            sp
-        })
-        .collect();
-
-    // --- parallel fan-out ---------------------------------------------------
-    // Run one `java` process per member concurrently.  Collect every error
-    // so that `--check` in CI reports all unformatted members in one pass.
-    let pjf_jars_ref = &pjf_jars;
-    let ktfmt_jars_ref = &ktfmt_jars;
-    let errors: Vec<String> = std::thread::scope(|s| {
-        let handles: Vec<_> = members
-            .iter()
-            .zip(spinners.iter())
-            .map(|(m, sp)| {
-                let path = &m.path;
-                let summary = summary.clone();
-                s.spawn(move || {
-                    sp.enable_steady_tick(std::time::Duration::from_millis(80));
-                    let result = fmt::run_fmt_with_jars(path, check_only, pjf_jars_ref, ktfmt_jars_ref);
-                    match &result {
-                        Ok(_) => sp.finish_and_clear(),
-                        Err(_) => {
-                            sp.set_style(
-                                ProgressStyle::with_template("    {msg}")
-                                    .unwrap(),
-                            );
-                            sp.finish_with_message(
-                                format!("✗ {}", m.declared),
-                            );
-                        }
-                    }
-                    summary.inc(1);
-                    result
-                })
-            })
-            .collect();
-
-        handles
-            .into_iter()
-            .filter_map(|h| h.join().expect("fmt thread panicked").err())
-            .map(|e| format!("{:#}", e))
-            .collect()
-    });
-
-    mp.clear().ok();
-
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        anyhow::bail!("{}", errors.join("\n"))
+    if subset.len() > 1 {
+        return crate::parallel::run_jobs(ws, subset, "fmt", jobs, false, true, "Formatted", |m, _| {
+            fmt::run_fmt_with_jars(&m.path, check_only, &pjf_jars, &ktfmt_jars)
+                .map(|_| Vec::<PathBuf>::new())
+        });
     }
+
+    for &i in subset {
+        let m = &ws.members[i];
+        fmt::run_fmt_with_jars(&m.path, check_only, &pjf_jars, &ktfmt_jars)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -733,7 +677,7 @@ mod tests {
     fn fmt_all_no_java_files_succeeds() {
         let dir = make_workspace(&["alpha", "beta", "gamma"]);
         // No .java files → run_fmt early-returns Ok for every member.
-        fmt_all(dir.path(), false, false).expect("fmt_all should succeed on empty members");
+        fmt_all(dir.path(), false, false, 4).expect("fmt_all should succeed on empty members");
     }
 
     /// fmt_all collects errors from every member and reports them all.
@@ -751,7 +695,7 @@ mod tests {
         // succeed; we just confirm fmt_all propagates Ok in that case and
         // that the function signature accepts multiple members.
         let dir = make_workspace(&["m1", "m2"]);
-        let result = fmt_all(dir.path(), true, false);
+        let result = fmt_all(dir.path(), true, false, 4);
         // No java files → no errors.
         assert!(result.is_ok(), "unexpected error: {:?}", result);
     }
