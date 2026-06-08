@@ -65,6 +65,17 @@
 <span class="prompt">$</span> cargo install --path curie-build</pre>
       </div>
 
+      <h2>Shell completions (fish)</h2>
+      <p>A fish completion script is bundled in the <code>completions/</code> directory of the repository. Copy it to your completions directory to get Tab-completion for all subcommands and flags:</p>
+      <div class="term">
+        <header>
+          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+          <span>fish</span>
+        </header>
+<pre><span class="prompt">$</span> cp completions/curie.fish ~/.config/fish/completions/</pre>
+      </div>
+      <p>After copying, open a new terminal (or run <code>source ~/.config/fish/completions/curie.fish</code>) and press Tab after <code>curie</code> to see subcommands, or after <code>curie build</code> to see its flags.</p>
+
       <h2>3. Create a project</h2>
 
       <p><strong>Shortcut: <code>curie new</code></strong> — scaffold a project in one command. Curie generates the directory, <code>Curie.toml</code>, and a starter source file for you:</p>
