@@ -222,8 +222,7 @@ fn run_formatter(
     for f in files {
         cmd.arg(f);
     }
-    let status = cmd
-        .status()
+    let status = crate::proc::spawn_cmd(&mut cmd)
         .context("failed to launch `java` — is a JDK installed and on PATH?")?;
     if !status.success() {
         if check_only {
@@ -233,7 +232,7 @@ fn run_formatter(
                 spec.language
             );
         } else {
-            bail!("{} exited with status {}", spec.name, status);
+            bail!("{} exited non-zero", spec.name);
         }
     }
     Ok(())
