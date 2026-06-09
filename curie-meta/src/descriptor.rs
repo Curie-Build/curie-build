@@ -656,6 +656,16 @@ pub struct DependencyDetailed {
     /// `[dependencies]`).  Use this for Mockito on JDK 21+ and similar agents.
     #[serde(default, rename = "javaAgent")]
     pub java_agent: bool,
+    /// Transitive dependencies to exclude.  Each entry is a
+    /// `"group:artifact"` string.  These are propagated transitively:
+    /// any transitive dependency matching an exclusion is omitted from
+    /// the resolved closure.
+    ///
+    /// ```toml
+    /// "org.apache.pdfbox:pdfbox" = { version = "3.0.7", exclusions = ["org.bouncycastle:bcprov-jdk18on"] }
+    /// ```
+    #[serde(default)]
+    pub exclusions: Vec<String>,
 }
 
 impl DependencyValue {
@@ -680,6 +690,15 @@ impl DependencyValue {
         match self {
             DependencyValue::Version(_) => false,
             DependencyValue::Detailed(d) => d.java_agent,
+        }
+    }
+
+    /// Exclusion strings declared on this dependency.  Returns references
+    /// to the original strings for zero-copy threading into `DepEntry`.
+    pub fn exclusions(&self) -> Vec<&str> {
+        match self {
+            DependencyValue::Version(_) => vec![],
+            DependencyValue::Detailed(d) => d.exclusions.iter().map(|s| s.as_str()).collect(),
         }
     }
 }
@@ -1839,6 +1858,63 @@ url = "https://repo.example.com/m2"
         let v = d.dependencies.get("com.example:bar").unwrap();
         assert_eq!(v.version(), "3.0.0");
         assert_eq!(v.repository(), Some("my-repo"));
+    }
+
+    #[test]
+    fn parse_dependency_detailed_form_with_exclusions() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+[dependencies]
+"org.apache.pdfbox:pdfbox" = { version = "3.0.7", exclusions = ["org.bouncycastle:bcprov-jdk18on", "org.bouncycastle:bcmail-jdk18on"] }
+"#;
+        let d = load_str(toml).unwrap();
+        let v = d.dependencies.get("org.apache.pdfbox:pdfbox").unwrap();
+        assert_eq!(v.version(), "3.0.7");
+        assert_eq!(v.exclusions(), vec!["org.bouncycastle:bcprov-jdk18on", "org.bouncycastle:bcmail-jdk18on"]);
+    }
+
+    #[test]
+    fn parse_dependency_shorthand_has_no_exclusions() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+[dependencies]
+"com.example:foo" = "1.2.3"
+"#;
+        let d = load_str(toml).unwrap();
+        let v = d.dependencies.get("com.example:foo").unwrap();
+        assert!(v.exclusions().is_empty());
+    }
+
+    #[test]
+    fn parse_dependency_detailed_form_without_exclusions_has_empty_vec() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+[dependencies]
+"com.example:foo" = { version = "2.0.0" }
+"#;
+        let d = load_str(toml).unwrap();
+        let v = d.dependencies.get("com.example:foo").unwrap();
+        assert!(v.exclusions().is_empty());
+    }
+
+    #[test]
+    fn parse_dependency_wildcard_exclusion() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+[dependencies]
+"com.example:foo" = { version = "1.0", exclusions = ["*:*"] }
+"#;
+        let d = load_str(toml).unwrap();
+        let v = d.dependencies.get("com.example:foo").unwrap();
+        assert_eq!(v.exclusions(), vec!["*:*"]);
     }
 
     #[test]

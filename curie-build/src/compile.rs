@@ -243,7 +243,7 @@ pub fn compile(
         let pairs: Vec<DepEntry> = desc
             .dependencies
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository() })
+            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions() })
             .collect();
 
         let jars = resolve(
@@ -272,7 +272,7 @@ pub fn compile(
     } else {
         let ap_entries: Vec<DepEntry> = ap_pairs
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None })
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![] })
             .collect();
         let jars = resolve(
             &ap_entries,
@@ -309,7 +309,7 @@ pub fn compile(
                 .expect("on-cp coord must be in ap_pairs");
             // Resolve the single coord again — second call hits ~/.m2.
             let single = resolve(
-                &[DepEntry { key: coord, version, repo_id: None }],
+                &[DepEntry { key: coord, version, repo_id: None, exclusions: vec![] }],
                 &ResolveOptions {
                     default_repos: central_repos(),
                     named_repos: extra_repos(desc),
@@ -423,8 +423,8 @@ pub fn compile(
         let kver = desc.kotlin.version();
         let kotlin_jars = resolve(
             &[
-                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None },
-                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None },
+                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None, exclusions: vec![] },
+                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None, exclusions: vec![] },
             ],
             &ResolveOptions {
                 default_repos: central_repos(),
@@ -461,7 +461,7 @@ pub fn compile(
     if has_groovy {
         let gver = desc.groovy.version();
         let jars = resolve(
-            &[DepEntry { key: GROOVY_COORD, version: gver, repo_id: None }],
+            &[DepEntry { key: GROOVY_COORD, version: gver, repo_id: None, exclusions: vec![] }],
             &ResolveOptions {
                 default_repos: central_repos(),
                 named_repos: extra_repos(desc),

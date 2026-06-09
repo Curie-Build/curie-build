@@ -63,7 +63,7 @@ const KTFMT_MAIN: &str = "com.facebook.ktfmt.cli.Main";
 /// `resolve()` calls would otherwise race on the same `~/.m2/.part` files.
 pub fn resolve_pjf(offline: bool) -> Result<Vec<PathBuf>> {
     resolve(
-        &[DepEntry { key: PJF_COORD, version: PJF_VERSION, repo_id: None }],
+        &[DepEntry { key: PJF_COORD, version: PJF_VERSION, repo_id: None, exclusions: vec![] }],
         &ResolveOptions {
             default_repos: central_repos(),
             named_repos: vec![],
@@ -81,7 +81,7 @@ pub fn resolve_pjf(offline: bool) -> Result<Vec<PathBuf>> {
 /// and pass the result to [`run_fmt_with_jars`] to avoid concurrent races.
 pub fn resolve_ktfmt(offline: bool) -> Result<Vec<PathBuf>> {
     resolve(
-        &[DepEntry { key: KTFMT_COORD, version: KTFMT_VERSION, repo_id: None }],
+        &[DepEntry { key: KTFMT_COORD, version: KTFMT_VERSION, repo_id: None, exclusions: vec![] }],
         &ResolveOptions {
             default_repos: central_repos(),
             named_repos: vec![],

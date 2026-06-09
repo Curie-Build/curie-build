@@ -90,6 +90,35 @@
 
     <p>An empty version (<code>""</code>) means the version comes from a BOM — see <a href="#bom-imports">BOM imports</a> below. If no BOM provides the version, the build fails immediately with an error.</p>
 
+    <h2 id="exclusions">Excluding transitive dependencies</h2>
+    <p>Some dependencies pull in transitive dependencies you don't need. Use the detailed form with an <code>exclusions</code> list to prevent specific artifacts from appearing on the classpath:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[dependencies]</span>
+<span class="com"># commons-codec is only needed by commons-compress's lz4/snappy compressors</span>
+<span class="pkg">"org.apache.commons:commons-compress"</span> = { version = <span class="str">"1.27.1"</span>, exclusions = [
+    <span class="str">"commons-codec:*"</span>,
+] }</pre>
+    </div>
+
+    <p>Each exclusion is a <code>"group:artifact"</code> string. Exclusions are <strong>transitive</strong>: if A depends on B which depends on C, excluding C on A will prevent C from appearing anywhere in the resolved tree below A.</p>
+
+    <p>Use <code>"*:*"</code> to exclude all transitive dependencies of an artifact (keeping only the artifact itself):</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="pkg">"com.example:fat-lib"</span> = { version = <span class="str">"1.0"</span>, exclusions = [<span class="str">"*:*"</span>] }</pre>
+    </div>
+
+    <p>Curie also honours <code>&lt;exclusions&gt;</code> declared in upstream POM files. If a library's own POM excludes a transitive dependency, Curie respects that exclusion automatically — matching Maven's behaviour.</p>
+
     <h2>curie add</h2>
     <p><code>curie add</code> queries Maven Central for the artifact, picks the latest version, and writes the entry into <code>Curie.toml</code>:</p>
 

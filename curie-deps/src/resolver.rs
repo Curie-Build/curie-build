@@ -97,6 +97,11 @@ pub struct DepEntry<'a> {
     /// * `Some("X")` — artifact is fetched from repo X only; its transitive
     ///   dependencies are searched in both Central and repo X.
     pub repo_id: Option<&'a str>,
+    /// Exclusions declared on this dependency in `Curie.toml`.
+    /// Each entry is a `"group:artifact"` string.  These are propagated
+    /// transitively: any transitive dependency matching an exclusion is
+    /// omitted from the resolved closure.
+    pub exclusions: Vec<&'a str>,
 }
 
 /// Internal BFS work item carrying per-artifact repository context.
@@ -114,6 +119,10 @@ struct BfsWork {
     depth: usize,
     /// The artifact that introduced this one.  `None` for depth-0 deps.
     via: Option<Gav>,
+    /// Accumulated exclusions inherited from all ancestors along the BFS
+    /// path.  Each entry is `("groupId", "artifactId")`.  Wildcard `"*"`
+    /// in either position matches any group/artifact.
+    exclusions: HashSet<(String, String)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +157,50 @@ pub struct DepTree {
     pub resolved: Vec<ResolvedDep>,
     /// Nearest-wins losers keyed by `"group:artifact"`.
     pub skipped: HashMap<String, Vec<SkippedDep>>,
+}
+
+/// Returns `true` when `(group, artifact)` is matched by any entry in
+/// `exclusions`.  An exclusion entry with `"*"` in either position acts
+/// as a wildcard (e.g. `("org.example", "*")` excludes all artifacts in
+/// that group).
+fn is_excluded(group: &str, artifact: &str, exclusions: &HashSet<(String, String)>) -> bool {
+    if exclusions.is_empty() {
+        return false;
+    }
+    for (eg, ea) in exclusions {
+        let group_match = eg == "*" || eg == group;
+        let artifact_match = ea == "*" || ea == artifact;
+        if group_match && artifact_match {
+            return true;
+        }
+    }
+    false
+}
+
+/// Parse `"group:artifact"` exclusion strings from Curie.toml into
+/// `(group, artifact)` pairs suitable for the `exclusions` set.
+fn parse_exclusion_strings(strings: &[&str]) -> HashSet<(String, String)> {
+    let mut set = HashSet::new();
+    for s in strings {
+        if let Some((g, a)) = s.split_once(':') {
+            set.insert((g.trim().to_string(), a.trim().to_string()));
+        }
+    }
+    set
+}
+
+/// Merge POM-level exclusions (from `<exclusions>` in the dep declaration)
+/// into a parent's accumulated exclusion set and return the combined set
+/// for the child.
+fn merge_exclusions(
+    parent_exclusions: &HashSet<(String, String)>,
+    dep_exclusions: &[(String, String)],
+) -> HashSet<(String, String)> {
+    let mut merged = parent_exclusions.clone();
+    for (g, a) in dep_exclusions {
+        merged.insert((g.clone(), a.clone()));
+    }
+    merged
 }
 
 struct RangeViolation {
@@ -538,8 +591,9 @@ pub fn resolve_tree(
 
         let gav = Gav::from_key_version(dep.key, &resolved_version)?;
         let ga = format!("{}:{}", gav.group, gav.artifact);
+        let user_exclusions = parse_exclusion_strings(&dep.exclusions);
         if visited.insert(ga) {
-            current_level.push(BfsWork { gav, fetch_repos, child_repos, depth: 0, via: None });
+            current_level.push(BfsWork { gav, fetch_repos, child_repos, depth: 0, via: None, exclusions: user_exclusions });
         }
     }
 
@@ -560,6 +614,11 @@ pub fn resolve_tree(
                     let artifact = pom.resolve_value(&dep.artifact_id);
                     let ga_key = format!("{}:{}", group, artifact);
                     let child_depth = work.depth + 1;
+
+                    // Check against accumulated exclusions from all ancestors.
+                    if is_excluded(&group, &artifact, &work.exclusions) {
+                        continue;
+                    }
 
                     if visited.contains(&ga_key) {
                         if let Some(raw_version) = resolve_transitive_version(
@@ -590,6 +649,7 @@ pub fn resolve_tree(
                         continue;
                     }
 
+                    let child_exclusions = merge_exclusions(&work.exclusions, &dep.exclusions);
                     let child_gav = Gav { group, artifact, version: raw_version };
                     visited.insert(ga_key);
                     next_level.push(BfsWork {
@@ -598,6 +658,7 @@ pub fn resolve_tree(
                         depth: child_depth,
                         via: Some(work.gav.clone()),
                         gav: child_gav,
+                        exclusions: child_exclusions,
                     });
                 }
             }
@@ -741,8 +802,9 @@ pub fn resolve(
 
         let gav = Gav::from_key_version(dep.key, &resolved_version)?;
         let ga = format!("{}:{}", gav.group, gav.artifact);
+        let user_exclusions = parse_exclusion_strings(&dep.exclusions);
         if visited.insert(ga) {
-            current_level.push(BfsWork { gav, fetch_repos, child_repos, depth: 0, via: None });
+            current_level.push(BfsWork { gav, fetch_repos, child_repos, depth: 0, via: None, exclusions: user_exclusions });
         }
     }
 
@@ -779,6 +841,11 @@ pub fn resolve(
                     let artifact = pom.resolve_value(&dep.artifact_id);
                     let ga_key = format!("{}:{}", group, artifact);
 
+                    // Check against accumulated exclusions from all ancestors.
+                    if is_excluded(&group, &artifact, &work.exclusions) {
+                        continue;
+                    }
+
                     // Nearest-wins short-circuit: already committed to a version
                     // for this GA at a shallower depth — skip.
                     if visited.contains(&ga_key) {
@@ -804,6 +871,7 @@ pub fn resolve(
                         continue;
                     }
 
+                    let child_exclusions = merge_exclusions(&work.exclusions, &dep.exclusions);
                     let child_gav = Gav { group, artifact, version: raw_version };
                     visited.insert(ga_key);
                     // Transitives inherit the parent's child_repos.
@@ -813,6 +881,7 @@ pub fn resolve(
                         child_repos: work.child_repos.clone(),
                         depth: 0,
                         via: None,
+                        exclusions: child_exclusions,
                     });
                 }
             }
@@ -1663,7 +1732,7 @@ mod tests {
         // cache miss produces an immediate error rather than a network attempt.
         let entries: Vec<DepEntry> = deps
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None })
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![] })
             .collect();
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -1845,6 +1914,229 @@ mod tests {
             !gavs.contains(&"foo:bar:9.9.9".to_string()),
             "BOM-pinned version must lose to user's explicit version: {:?}", gavs,
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Exclusion tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pom_exclusion_prevents_transitive_dep() {
+        // lib 1.0 depends on foo:bar 1.0, but declares <exclusions>
+        // on it.  The POM for lib should exclude bar from the classpath.
+        let dir = tempfile::tempdir().unwrap();
+
+        // foo:bar 1.0 depends on foo:baz 1.0 (to test deep exclusion).
+        write_fake_artifact(dir.path(), "foo", "baz", "1.0", &[]);
+        write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[("foo", "baz", "1.0")]);
+
+        // grp:lib 1.0 depends on foo:bar 1.0 with an exclusion on foo:baz.
+        // Build the POM manually to include <exclusions>.
+        let lib_gav = Gav { group: "grp".into(), artifact: "lib".into(), version: "1.0".into() };
+        let m2 = dir.path().join(".m2").join("repository");
+        let pom_xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>grp</groupId><artifactId>lib</artifactId><version>1.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>foo</groupId>
+      <artifactId>bar</artifactId>
+      <version>1.0</version>
+      <exclusions>
+        <exclusion>
+          <groupId>foo</groupId>
+          <artifactId>baz</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+  </dependencies>
+</project>"#;
+        write_with_sidecar(&m2.join(lib_gav.relative_pom_path()), pom_xml.as_bytes());
+        write_with_sidecar(&m2.join(lib_gav.relative_path()), b"");
+
+        let result = run_resolve(
+            dir.path(),
+            &[("grp:lib", "1.0")],
+            vec![],
+        ).unwrap();
+
+        let gavs = jar_gavs(&result);
+        assert!(gavs.contains(&"grp:lib:1.0".to_string()), "lib must be present: {:?}", gavs);
+        assert!(gavs.contains(&"foo:bar:1.0".to_string()), "bar must be present: {:?}", gavs);
+        assert!(
+            !gavs.contains(&"foo:baz:1.0".to_string()),
+            "baz must be excluded by POM exclusion: {:?}", gavs,
+        );
+    }
+
+    #[test]
+    fn user_exclusion_from_dep_entry_prevents_transitive_dep() {
+        // Same as the POM test above, but the exclusion comes from the
+        // DepEntry (simulating Curie.toml exclusions = ["foo:baz"]).
+        let dir = tempfile::tempdir().unwrap();
+
+        write_fake_artifact(dir.path(), "foo", "baz", "1.0", &[]);
+        write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[("foo", "baz", "1.0")]);
+
+        // Use the run_resolve helper but with exclusions on the dep entry.
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", dir.path().to_str().unwrap());
+
+        let entries = [DepEntry {
+            key: "foo:bar",
+            version: "1.0",
+            repo_id: None,
+            exclusions: vec!["foo:baz"],
+        }];
+        let opts = ResolveOptions {
+            default_repos: vec![],
+            named_repos: vec![],
+            progress: false,
+            bom_imports: vec![],
+            offline: true,
+        };
+        let result = resolve(&entries, &opts).unwrap();
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+
+        let gavs = jar_gavs(&result);
+        assert!(gavs.contains(&"foo:bar:1.0".to_string()), "bar must be present: {:?}", gavs);
+        assert!(
+            !gavs.contains(&"foo:baz:1.0".to_string()),
+            "baz must be excluded by user exclusion: {:?}", gavs,
+        );
+    }
+
+    #[test]
+    fn wildcard_exclusion_excludes_all_transitives() {
+        // lib 1.0 depends on foo:a 1.0 and foo:b 1.0.
+        // User declares exclusions = ["*:*"] → neither a nor b should appear.
+        let dir = tempfile::tempdir().unwrap();
+
+        write_fake_artifact(dir.path(), "foo", "a", "1.0", &[]);
+        write_fake_artifact(dir.path(), "foo", "b", "1.0", &[]);
+        write_fake_artifact(dir.path(), "grp", "lib", "1.0",
+            &[("foo", "a", "1.0"), ("foo", "b", "1.0")]);
+
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", dir.path().to_str().unwrap());
+
+        let entries = [DepEntry {
+            key: "grp:lib",
+            version: "1.0",
+            repo_id: None,
+            exclusions: vec!["*:*"],
+        }];
+        let opts = ResolveOptions {
+            default_repos: vec![],
+            named_repos: vec![],
+            progress: false,
+            bom_imports: vec![],
+            offline: true,
+        };
+        let result = resolve(&entries, &opts).unwrap();
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+
+        let gavs = jar_gavs(&result);
+        assert!(gavs.contains(&"grp:lib:1.0".to_string()), "lib itself must be present: {:?}", gavs);
+        assert_eq!(gavs.len(), 1, "only lib should be in result — all transitives excluded: {:?}", gavs);
+    }
+
+    #[test]
+    fn exclusion_propagates_transitively() {
+        // grp:top → grp:mid → foo:leaf
+        // User excludes foo:leaf on grp:top → leaf must not appear even though
+        // the exclusion is two levels up.
+        let dir = tempfile::tempdir().unwrap();
+
+        write_fake_artifact(dir.path(), "foo", "leaf", "1.0", &[]);
+        write_fake_artifact(dir.path(), "grp", "mid", "1.0", &[("foo", "leaf", "1.0")]);
+        write_fake_artifact(dir.path(), "grp", "top", "1.0", &[("grp", "mid", "1.0")]);
+
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", dir.path().to_str().unwrap());
+
+        let entries = [DepEntry {
+            key: "grp:top",
+            version: "1.0",
+            repo_id: None,
+            exclusions: vec!["foo:leaf"],
+        }];
+        let opts = ResolveOptions {
+            default_repos: vec![],
+            named_repos: vec![],
+            progress: false,
+            bom_imports: vec![],
+            offline: true,
+        };
+        let result = resolve(&entries, &opts).unwrap();
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+
+        let gavs = jar_gavs(&result);
+        assert!(gavs.contains(&"grp:top:1.0".to_string()));
+        assert!(gavs.contains(&"grp:mid:1.0".to_string()));
+        assert!(
+            !gavs.contains(&"foo:leaf:1.0".to_string()),
+            "leaf must be excluded transitively: {:?}", gavs,
+        );
+    }
+
+    #[test]
+    fn is_excluded_empty_set_returns_false() {
+        let empty = HashSet::new();
+        assert!(!is_excluded("org.example", "foo", &empty));
+    }
+
+    #[test]
+    fn is_excluded_exact_match() {
+        let mut set = HashSet::new();
+        set.insert(("org.example".to_string(), "foo".to_string()));
+        assert!(is_excluded("org.example", "foo", &set));
+        assert!(!is_excluded("org.example", "bar", &set));
+        assert!(!is_excluded("org.other", "foo", &set));
+    }
+
+    #[test]
+    fn is_excluded_wildcard_artifact() {
+        let mut set = HashSet::new();
+        set.insert(("org.example".to_string(), "*".to_string()));
+        assert!(is_excluded("org.example", "anything", &set));
+        assert!(!is_excluded("org.other", "anything", &set));
+    }
+
+    #[test]
+    fn is_excluded_wildcard_both() {
+        let mut set = HashSet::new();
+        set.insert(("*".to_string(), "*".to_string()));
+        assert!(is_excluded("anything", "anything", &set));
+    }
+
+    #[test]
+    fn parse_exclusion_strings_basic() {
+        let result = parse_exclusion_strings(&["org.example:foo", "com.test:bar"]);
+        assert!(result.contains(&("org.example".to_string(), "foo".to_string())));
+        assert!(result.contains(&("com.test".to_string(), "bar".to_string())));
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn parse_exclusion_strings_ignores_invalid() {
+        let result = parse_exclusion_strings(&["no-colon-here"]);
+        assert!(result.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -2086,7 +2378,7 @@ mod tests {
 
         let entries: Vec<DepEntry> = deps
             .iter()
-            .map(|(k, v, r)| DepEntry { key: k, version: v, repo_id: *r })
+            .map(|(k, v, r)| DepEntry { key: k, version: v, repo_id: *r, exclusions: vec![] })
             .collect();
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -2138,7 +2430,7 @@ mod tests {
             bom_imports: vec![],
             offline: true, // cache-hit path; no network call made
         };
-        let entries = [DepEntry { key: "foo:bar", version: "1.0", repo_id: None }];
+        let entries = [DepEntry { key: "foo:bar", version: "1.0", repo_id: None, exclusions: vec![] }];
         let result = resolve(&entries, &opts).unwrap();
         assert_eq!(result.len(), 1, "should find cached artifact regardless of mirror URL");
 
@@ -2226,7 +2518,7 @@ mod tests {
 
         let entries: Vec<DepEntry> = deps
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None })
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![] })
             .collect();
         let opts = ResolveOptions {
             default_repos: vec![],

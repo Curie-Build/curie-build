@@ -58,6 +58,10 @@ pub struct PomDep {
     /// The `<type>` element value (e.g. `"pom"` for BOM imports).
     pub type_: Option<String>,
     pub optional: bool,
+    /// `<exclusions>` declared on this dependency: each entry is
+    /// `(groupId, artifactId)`.  A wildcard `"*"` in either position
+    /// matches any group or artifact respectively.
+    pub exclusions: Vec<(String, String)>,
 }
 
 impl PomDep {
@@ -232,6 +236,9 @@ pub fn parse(xml: &str) -> Result<Pom> {
     let mut cur_dep: Option<PomDep> = None;
     let mut cur_mgd: Option<PomDep> = None;
     let mut text_buf = String::new();
+    // Scratch buffers for the exclusion currently being parsed.
+    let mut excl_group: String = String::new();
+    let mut excl_artifact: String = String::new();
 
     loop {
         match reader.read_event().context("XML read error")? {
@@ -299,6 +306,14 @@ pub fn parse(xml: &str) -> Result<Pom> {
                             assign_dep_field(d, field, &text_buf);
                         }
                     }
+
+                    // Exclusion leaf fields (inside <exclusion>).
+                    (Ctx::Exclusion, "groupId") | (Ctx::ManagedExclusion, "groupId") => {
+                        excl_group = text_buf.clone();
+                    }
+                    (Ctx::Exclusion, "artifactId") | (Ctx::ManagedExclusion, "artifactId") => {
+                        excl_artifact = text_buf.clone();
+                    }
                     _ => {}
                 }
 
@@ -311,6 +326,26 @@ pub fn parse(xml: &str) -> Result<Pom> {
                 // (unrecognized child inherits parent ctx).  The real container
                 // close leaves Ctx=Dependency and returns to Ctx=Dependencies.
                 match (leaving_ctx, parent_ctx) {
+                    (Ctx::Exclusion, Ctx::Exclusions) => {
+                        if !excl_group.is_empty() || !excl_artifact.is_empty() {
+                            if let Some(d) = cur_dep.as_mut() {
+                                d.exclusions.push((
+                                    std::mem::take(&mut excl_group),
+                                    std::mem::take(&mut excl_artifact),
+                                ));
+                            }
+                        }
+                    }
+                    (Ctx::ManagedExclusion, Ctx::ManagedExclusions) => {
+                        if !excl_group.is_empty() || !excl_artifact.is_empty() {
+                            if let Some(d) = cur_mgd.as_mut() {
+                                d.exclusions.push((
+                                    std::mem::take(&mut excl_group),
+                                    std::mem::take(&mut excl_artifact),
+                                ));
+                            }
+                        }
+                    }
                     (Ctx::Dependency, Ctx::Dependencies) => {
                         if let Some(d) = cur_dep.take() {
                             pom.dependencies.push(d);
@@ -363,6 +398,7 @@ impl PomDep {
             scope: None,
             type_: None,
             optional: false,
+            exclusions: Vec::new(),
         }
     }
 }
@@ -633,6 +669,111 @@ mod tests {
         assert_eq!(dep.group_id, "org.codehaus.woodstox", "exclusion groupId must not overwrite dep groupId");
         assert_eq!(dep.artifact_id, "stax2-api", "exclusion artifactId must not overwrite dep artifactId");
         assert_eq!(dep.version.as_deref(), Some("4.2.2"));
+        // The exclusion itself is captured.
+        assert_eq!(dep.exclusions.len(), 1);
+        assert_eq!(dep.exclusions[0], ("javax.xml.stream".to_string(), "stax-api".to_string()));
+    }
+
+    #[test]
+    fn parse_exclusions_are_captured() {
+        let xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>com.example</groupId><artifactId>x</artifactId><version>1.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.apache.pdfbox</groupId>
+      <artifactId>pdfbox</artifactId>
+      <version>3.0.7</version>
+      <exclusions>
+        <exclusion>
+          <groupId>org.bouncycastle</groupId>
+          <artifactId>bcprov-jdk18on</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.bouncycastle</groupId>
+          <artifactId>bcmail-jdk18on</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+  </dependencies>
+</project>"#;
+        let pom = parse(xml).unwrap();
+        assert_eq!(pom.dependencies.len(), 1);
+        let dep = &pom.dependencies[0];
+        assert_eq!(dep.group_id, "org.apache.pdfbox");
+        assert_eq!(dep.artifact_id, "pdfbox");
+        assert_eq!(dep.exclusions.len(), 2);
+        assert_eq!(dep.exclusions[0], ("org.bouncycastle".to_string(), "bcprov-jdk18on".to_string()));
+        assert_eq!(dep.exclusions[1], ("org.bouncycastle".to_string(), "bcmail-jdk18on".to_string()));
+    }
+
+    #[test]
+    fn parse_wildcard_exclusion() {
+        let xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>com.example</groupId><artifactId>x</artifactId><version>1.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>lib</artifactId>
+      <version>1.0</version>
+      <exclusions>
+        <exclusion>
+          <groupId>*</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+  </dependencies>
+</project>"#;
+        let pom = parse(xml).unwrap();
+        let dep = &pom.dependencies[0];
+        assert_eq!(dep.exclusions.len(), 1);
+        assert_eq!(dep.exclusions[0], ("*".to_string(), "*".to_string()));
+    }
+
+    #[test]
+    fn parse_dep_without_exclusions_has_empty_vec() {
+        let xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>com.example</groupId><artifactId>x</artifactId><version>1.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>com.google.guava</groupId>
+      <artifactId>guava</artifactId>
+      <version>33.2.0-jre</version>
+    </dependency>
+  </dependencies>
+</project>"#;
+        let pom = parse(xml).unwrap();
+        assert!(pom.dependencies[0].exclusions.is_empty());
+    }
+
+    #[test]
+    fn parse_managed_dep_exclusions_are_captured() {
+        let xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>com.example</groupId><artifactId>x</artifactId><version>1.0</version>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.example</groupId>
+        <artifactId>managed-lib</artifactId>
+        <version>2.0</version>
+        <exclusions>
+          <exclusion>
+            <groupId>org.unwanted</groupId>
+            <artifactId>bad-lib</artifactId>
+          </exclusion>
+        </exclusions>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>"#;
+        // Managed deps currently only store version info, but the parser
+        // should not crash when exclusions are present.
+        let pom = parse(xml).unwrap();
+        assert_eq!(pom.managed_versions.get("org.example:managed-lib").map(String::as_str), Some("2.0"));
     }
 
     #[test]

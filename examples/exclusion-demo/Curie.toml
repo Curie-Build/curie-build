@@ -1,0 +1,23 @@
+# exclusion-demo
+#
+# Demonstrates how to exclude an unwanted transitive dependency.
+#
+# commons-compress normally pulls in commons-codec as a transitive
+# dependency, even though commons-codec is only needed by its LZ4/Snappy
+# compressors. Declaring `exclusions = ["commons-codec:*"]` keeps it off
+# the classpath. This is equivalent to Maven's <exclusions> in pom.xml.
+#
+# Curie also honours <exclusions> declared in upstream POM files
+# automatically, with no configuration needed here.
+
+[application]
+name = "exclusion-demo"
+version = "0.1.0"
+mainClass = "com.example.ExclusionDemo"
+
+[dependencies]
+# commons-codec is only needed by commons-compress's lz4/snappy
+# compressors, which this demo doesn't use, so it's safe to exclude.
+"org.apache.commons:commons-compress" = { version = "1.27.1", exclusions = [
+    "commons-codec:*",
+] }

@@ -97,7 +97,7 @@ pub fn run_tests(
         let pairs: Vec<DepEntry> = desc
             .test_dependencies
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository() })
+            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions() })
             .collect();
 
         resolve(
@@ -133,6 +133,7 @@ pub fn run_tests(
                 key: "org.spockframework:spock-core",
                 version: spock_version,
                 repo_id: None,
+                exclusions: vec![],
             }],
             &ResolveOptions {
                 default_repos: central_repos(),
@@ -158,8 +159,8 @@ pub fn run_tests(
         let kver = desc.kotlin.version();
         let kotlin_jars = resolve(
             &[
-                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None },
-                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None },
+                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None, exclusions: vec![] },
+                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None, exclusions: vec![] },
             ],
             &ResolveOptions {
                 default_repos: central_repos(),
@@ -188,8 +189,8 @@ pub fn run_tests(
         let kver = desc.kotlin.version();
         let kotlin_jars = resolve(
             &[
-                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None },
-                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None },
+                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None, exclusions: vec![] },
+                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None, exclusions: vec![] },
             ],
             &ResolveOptions {
                 default_repos: central_repos(),
@@ -220,7 +221,7 @@ pub fn run_tests(
     } else {
         let ap_entries: Vec<DepEntry> = test_ap_coords
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None })
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![] })
             .collect();
         let jars = resolve(
             &ap_entries,
@@ -245,7 +246,7 @@ pub fn run_tests(
                 .map(|(_, v)| *v)
                 .expect("on-cp coord must be in test_ap_coords");
             let single = resolve(
-                &[DepEntry { key: coord, version, repo_id: None }],
+                &[DepEntry { key: coord, version, repo_id: None, exclusions: vec![] }],
                 &ResolveOptions {
                     default_repos: central_repos(),
                     named_repos: extra_repos.clone(),
@@ -429,7 +430,7 @@ pub fn run_tests(
                     // → resolve the Groovy runtime now.
                     use crate::compile::GROOVY_COORD;
                     resolve(
-                        &[DepEntry { key: GROOVY_COORD, version: desc.groovy.version(), repo_id: None }],
+                        &[DepEntry { key: GROOVY_COORD, version: desc.groovy.version(), repo_id: None, exclusions: vec![] }],
                         &ResolveOptions {
                             default_repos: central_repos(),
                             named_repos: extra_repos.clone(),
@@ -771,7 +772,7 @@ fn resolve_standalone(
     // coord is "group:artifact:version" — split off the version for the resolver.
     // The resolver takes (key, version) pairs where key = "group:artifact".
     let jars = resolve(
-        &[DepEntry { key: JUNIT_STANDALONE_COORD, version: junit_version, repo_id: None }],
+        &[DepEntry { key: JUNIT_STANDALONE_COORD, version: junit_version, repo_id: None, exclusions: vec![] }],
         &ResolveOptions {
             default_repos: central_repos(),
             named_repos: extra_repos.to_vec(),

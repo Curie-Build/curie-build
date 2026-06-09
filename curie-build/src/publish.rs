@@ -527,7 +527,7 @@ fn resolve_declared_dep_gavs(desc: &Descriptor) -> Result<Vec<Gav>> {
     let entries: Vec<DepEntry> = desc
         .dependencies
         .iter()
-        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository() })
+        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions() })
         .collect();
     let opts = ResolveOptions {
         default_repos: crate::build::central_repos(),
