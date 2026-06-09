@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Plugins · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/installation.html">Installation</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/plugins.html">Plugins</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · plugins</span>
+    <h1>Plugins</h1>
+    <p class="lede">Extend the build with external source generators. Any binary named <code>curie-&lt;name&gt;</code> on <code>PATH</code> becomes a plugin — Curie invokes it before compilation, feeds it the resolved tool paths, and adds its output directories to the compiler's source roots.</p>
+
+    <h2>Activating a plugin</h2>
+    <p>Add a <code>[plugin.&lt;name&gt;]</code> table to <code>Curie.toml</code>. The key after <code>plugin.</code> is the plugin name; Curie will look for a binary called <code>curie-&lt;name&gt;</code> on <code>PATH</code>.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[application]</span>
+<span class="kw">name</span>    = <span class="str">"proto-greeter"</span>
+<span class="kw">version</span> = <span class="str">"0.1.0"</span>
+
+<span class="kw">[java]</span>
+<span class="kw">version</span> = <span class="str">"21"</span>
+
+<span class="kw">[dependencies]</span>
+<span class="str">"com.google.protobuf:protobuf-java"</span> = <span class="str">"3.25.0"</span>
+
+<span class="kw">[plugin.protobuf]</span>
+<span class="kw">version</span>   = <span class="str">"3.25.0"</span>
+<span class="kw">sourceDir</span> = <span class="str">"proto"</span></pre>
+    </div>
+
+    <p>The entire <code>[plugin.protobuf]</code> table — including any nested subtables like <code>[plugin.protobuf.importPaths]</code> — is forwarded verbatim as JSON to the plugin. Plugin keys are camelCase by convention.</p>
+
+    <p>Multiple plugins can be active at once: each <code>[plugin.&lt;name&gt;]</code> key activates one binary. Order of execution follows alphabetical key order.</p>
+
+    <h2>What Curie handles</h2>
+    <p>Plugins are pure logic — they never download anything. Curie owns the parts that touch the network and the filesystem:</p>
+    <ul>
+      <li><strong>Staleness tracking</strong> — the plugin declares which input directories and files to watch. Curie records their mtimes in a stamp file (<code>target/.curie-plugins/&lt;name&gt;.stamp</code>) and skips generation when nothing has changed.</li>
+      <li><strong>Artifact downloading</strong> — the plugin's manifest lists the Maven artifacts it needs (e.g. the <code>protoc</code> binary). Curie downloads them from Maven Central into the local <code>~/.m2/repository/</code> cache, verifies with SHA-1, and sets the executable bit.</li>
+      <li><strong>Source root wiring</strong> — the plugin's declared output directories are added to <code>javac</code>'s source root list, so generated <code>.java</code> files are picked up automatically on the next compile.</li>
+    </ul>
+
+    <h2>Protobuf plugin</h2>
+    <p><a href="https://github.com/atteo/curie-protobuf" target="_blank" rel="noopener"><code>curie-protobuf</code></a> is the reference plugin. It generates Java stubs from <code>.proto</code> files and optionally gRPC service interfaces.</p>
+
+    <h3>Installation</h3>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>terminal</span>
+      </header>
+<pre>cargo install curie-protobuf</pre>
+    </div>
+
+    <h3>Plain protobuf</h3>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[plugin.protobuf]</span>
+<span class="kw">version</span>   = <span class="str">"3.25.0"</span>   <span class="com"># protobuf + protoc version</span>
+<span class="kw">sourceDir</span> = <span class="str">"proto"</span>    <span class="com"># directory containing .proto files (default: "proto")</span></pre>
+    </div>
+
+    <p>Generated sources land in <code>target/generated-sources/protobuf/</code>. After a successful run the stamp records the mtime of every file under <code>proto/</code>, so subsequent builds skip protoc when nothing changed.</p>
+
+    <h3>gRPC</h3>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[plugin.protobuf]</span>
+<span class="kw">version</span>     = <span class="str">"3.25.0"</span>
+<span class="kw">grpc</span>        = <span class="kw">true</span>
+<span class="kw">grpcVersion</span> = <span class="str">"1.60.0"</span>
+<span class="kw">sourceDir</span>   = <span class="str">"proto"</span></pre>
+    </div>
+
+    <p>With <code>grpc = true</code>, the plugin also downloads <code>protoc-gen-grpc-java</code> and passes it as a <code>protoc</code> plugin, producing both message classes and service stubs.</p>
+
+    <h3>Build output</h3>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build</span>
+      </header>
+<pre><span class="dim">Building proto-greeter v0.1.0</span>
+  Plugin protobuf  generate-sources  <span class="pkg">proto/greeter.proto</span>
+  Compile          3 source file(s)
+  Tests            no test sources found
+  Package          proto-greeter-0.1.0.jar
+  Done             <span class="em">target/proto-greeter-0.1.0.jar</span></pre>
+    </div>
+
+    <p>On the second run with no changes the <code>Plugin protobuf</code> line is omitted — the stamp matched, so protoc is not invoked and the previously generated sources are used directly.</p>
+
+    <h2>Plugin protocol (for plugin authors)</h2>
+    <p>A plugin is any binary that implements two subcommands. The full stdin/stdout protocol is described here so you can write your own.</p>
+
+    <h3>Subcommand 1: manifest</h3>
+    <p>Called on every build, even when up-to-date. Must be fast — no I/O other than reading stdin.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>invocation</span>
+      </header>
+<pre>curie-&lt;name&gt; manifest --project &lt;dir&gt;</pre>
+    </div>
+
+    <p><strong>Stdin</strong> — JSON envelope:</p>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>stdin (manifest)</span>
+      </header>
+<pre>{
+  <span class="str">"curie_version"</span>: <span class="str">"0.6.0"</span>,
+  <span class="str">"config"</span>: {
+    <span class="str">"version"</span>: <span class="str">"3.25.0"</span>,
+    <span class="str">"sourceDir"</span>: <span class="str">"proto"</span>
+  }
+}</pre>
+    </div>
+
+    <p><code>config</code> is the full <code>[plugin.&lt;name&gt;]</code> TOML tree converted to JSON, including nested tables. Ignore unknown top-level fields for forward-compatibility.</p>
+
+    <p><strong>Stdout</strong> — manifest JSON:</p>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>stdout (manifest response)</span>
+      </header>
+<pre>{
+  <span class="str">"name"</span>:        <span class="str">"protobuf"</span>,
+  <span class="str">"description"</span>: <span class="str">"Generate Java stubs from .proto files"</span>,
+  <span class="str">"version"</span>:     <span class="str">"0.1.0"</span>,
+  <span class="str">"types"</span>:       [<span class="str">"source-generator"</span>],
+  <span class="str">"inputs"</span>: {
+    <span class="str">"dirs"</span>:       [<span class="str">"proto"</span>],
+    <span class="str">"file_regex"</span>: <span class="str">"\\.proto$"</span>
+  },
+  <span class="str">"outputs"</span>: {
+    <span class="str">"source_dirs"</span>: [<span class="str">"target/generated-sources/protobuf"</span>]
+  },
+  <span class="str">"artifacts"</span>: [
+    {
+      <span class="str">"id"</span>:         <span class="str">"protoc"</span>,
+      <span class="str">"group"</span>:     <span class="str">"com.google.protobuf"</span>,
+      <span class="str">"artifact"</span>:  <span class="str">"protoc"</span>,
+      <span class="str">"version"</span>:   <span class="str">"3.25.0"</span>,
+      <span class="str">"classifier"</span>:<span class="str">"linux-x86_64"</span>,
+      <span class="str">"extension"</span>: <span class="str">"exe"</span>,
+      <span class="str">"executable"</span>:<span class="kw">true</span>
+    }
+  ]
+}</pre>
+    </div>
+
+    <table>
+      <thead><tr><th>Field</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>types</code></td><td>Capability array. Only <code>"source-generator"</code> is acted on today; list multiple to serve future roles.</td></tr>
+        <tr><td><code>inputs.dirs</code></td><td>Directories Curie watches for new/removed/modified files.</td></tr>
+        <tr><td><code>inputs.file_regex</code></td><td>Optional regex filter applied to files within <code>dirs</code>.</td></tr>
+        <tr><td><code>inputs.files</code></td><td>Optional explicit file list, used instead of (or in addition to) <code>dirs</code>.</td></tr>
+        <tr><td><code>outputs.source_dirs</code></td><td>Directories added to javac's source root list after generation.</td></tr>
+        <tr><td><code>artifacts[].id</code></td><td>Logical key used in the <code>generate-sources</code> call's artifact map.</td></tr>
+        <tr><td><code>artifacts[].classifier</code></td><td>Platform-specific (the plugin detects OS/arch here).</td></tr>
+        <tr><td><code>artifacts[].executable</code></td><td>Curie sets the executable bit on the cached file when <code>true</code>.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Subcommand 2: generate-sources</h3>
+    <p>Called only when the stamp is stale. Curie has already downloaded all declared artifacts before this call.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>invocation</span>
+      </header>
+<pre>curie-&lt;name&gt; generate-sources --project &lt;dir&gt; [--offline]</pre>
+    </div>
+
+    <p><strong>Stdin</strong> — the same envelope as <code>manifest</code>, extended with <code>artifacts</code>:</p>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>stdin (generate-sources)</span>
+      </header>
+<pre>{
+  <span class="str">"curie_version"</span>: <span class="str">"0.6.0"</span>,
+  <span class="str">"config"</span>: { <span class="str">"version"</span>: <span class="str">"3.25.0"</span>, <span class="str">"sourceDir"</span>: <span class="str">"proto"</span> },
+  <span class="str">"artifacts"</span>: {
+    <span class="str">"protoc"</span>: <span class="str">"/home/user/.m2/repository/com/google/protobuf/protoc/3.25.0/protoc-3.25.0-linux-x86_64.exe"</span>
+  }
+}</pre>
+    </div>
+
+    <p>Write progress to <strong>stderr</strong>. Exit 0 on success. Curie writes the stamp after a successful exit.</p>
+
+    <h3>Artifact caching</h3>
+    <p>Curie caches downloaded artifacts in the standard Maven local repository layout:</p>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>cache path</span>
+      </header>
+<pre>~/.m2/repository/&lt;group/path&gt;/&lt;artifact&gt;/&lt;version&gt;/&lt;artifact&gt;-&lt;version&gt;[-&lt;classifier&gt;].&lt;ext&gt;</pre>
+    </div>
+    <p>Downloads are verified against a SHA-1 sidecar fetched from the same repository. A cached file is never re-downloaded. The <code>--offline</code> flag passed to <code>generate-sources</code> reflects <code>curie build --offline</code>; the plugin can use it to skip any network calls of its own.</p>
+
+    <h2>Example: proto-greeter</h2>
+    <p>The <a href="https://github.com/atteo/curie-build/tree/master/examples/proto-greeter" target="_blank" rel="noopener"><code>examples/proto-greeter</code></a> project shows the full setup end-to-end.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>proto/greeter.proto</span>
+      </header>
+<pre>syntax = <span class="str">"proto3"</span>;
+
+<span class="kw">option</span> java_package = <span class="str">"com.example.greeter"</span>;
+<span class="kw">option</span> java_multiple_files = <span class="kw">true</span>;
+
+<span class="kw">message</span> GreetRequest  { <span class="kw">string</span> name    = 1; }
+<span class="kw">message</span> GreetResponse { <span class="kw">string</span> message = 1; }</pre>
+    </div>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>src/com.example/Greeter.java</span>
+      </header>
+<pre><span class="kw">package</span> com.example;
+
+<span class="kw">import</span> com.example.greeter.GreetRequest;
+<span class="kw">import</span> com.example.greeter.GreetResponse;
+
+<span class="kw">public class</span> Greeter {
+    <span class="kw">public static</span> GreetResponse greet(<span class="kw">String</span> name) {
+        <span class="kw">return</span> GreetResponse.newBuilder()
+            .setMessage(<span class="str">"Hello, "</span> + name + <span class="str">"!"</span>)
+            .build();
+    }
+}</pre>
+    </div>
+
+    <div class="pager">
+      <a href="/docs/testing.html">
+        <span>← Previous</span>
+        <strong>Testing</strong>
+      </a>
+      <a href="/docs/docker.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Docker</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

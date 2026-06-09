@@ -51,6 +51,7 @@
       <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
       <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
       <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/plugins.html">Plugins</a></li>
 
       <li><span class="nav-group">Deploy</span></li>
       <li><a href="/docs/docker.html">Docker</a></li>
@@ -141,21 +142,26 @@
         <h3>Testing</h3>
         <p>JUnit 5 platform console runner with configurable version, co-located <code>*Test.java</code>/<code>*Spec.java</code> and top-level <code>tests/</code> integration sources, optional filter argument.</p>
       </a>
+      <a class="feature-card" href="/docs/plugins.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">12</span>
+        <h3>Plugins</h3>
+        <p>Extend the build with external source generators. Any binary named <code>curie-&lt;name&gt;</code> on PATH is activated via <code>[plugin.&lt;name&gt;]</code>. Curie handles staleness, artifact downloading, and source-root wiring.</p>
+      </a>
 
       <p style="font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-lo); margin: 1.5rem 0 0.5rem;">Deploy</p>
 
       <a class="feature-card" href="/docs/docker.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">12</span>
+        <span class="badge">13</span>
         <h3>Docker</h3>
         <p>Generated layer-friendly Dockerfile + <code>.dockerignore</code>, eclipse-temurin JRE base by default, configurable <code>baseImage</code>, dep JARs in their own cached layer.</p>
       </a>
       <a class="feature-card" href="/docs/publish.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">13</span>
+        <span class="badge">14</span>
         <h3>Publishing</h3>
         <p><code>curie publish</code> generates a POM, sources jar, javadoc jar, and GPG signatures, then uploads everything via HTTP PUT to any Maven 2-layout repository.</p>
       </a>
       <a class="feature-card" href="/docs/native.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">14</span>
+        <span class="badge">15</span>
         <h3>GraalVM native-image</h3>
         <p><code>curie native</code> compiles the project to a standalone native binary using GraalVM's <code>native-image</code> tool. Configure reachability metadata, output name, and extra flags via <code>[native-image]</code>.</p>
       </a>
@@ -163,27 +169,27 @@
       <p style="font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-lo); margin: 1.5rem 0 0.5rem;">Tools</p>
 
       <a class="feature-card" href="/docs/fmt.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">15</span>
+        <span class="badge">16</span>
         <h3>Formatter</h3>
         <p><code>curie fmt</code> runs palantir-java-format (Java) and ktfmt (Kotlin) in one command. <code>--check</code> mode for CI; workspace fan-out shares one resolved classpath across all members.</p>
       </a>
       <a class="feature-card" href="/docs/deps.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">16</span>
+        <span class="badge">17</span>
         <h3>Dependency tree</h3>
         <p><code>curie deps</code> prints the full transitive tree. <code>--why org.foo:bar</code> explains which path introduced an artifact and why nearest-wins chose its version.</p>
       </a>
       <a class="feature-card" href="/docs/audit.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">17</span>
+        <span class="badge">18</span>
         <h3>Audit (SBOM)</h3>
         <p><code>curie audit</code> emits a CycloneDX 1.6 SBOM and cross-references every artifact against the OSV vulnerability database, printing findings grouped by artifact with ANSI-coloured severity.</p>
       </a>
       <a class="feature-card" href="/docs/scaffold.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">18</span>
+        <span class="badge">19</span>
         <h3>Scaffolding</h3>
         <p><code>curie new app|lib|bom &lt;name&gt;</code> generates a ready-to-build project skeleton in one command. <code>curie init</code> does the same in the current directory.</p>
       </a>
       <a class="feature-card" href="/docs/inspect.html" style="text-decoration: none; color: inherit;">
-        <span class="badge">19</span>
+        <span class="badge">20</span>
         <h3>Build Inspect</h3>
         <p>Terminal UI for browsing build logs across an entire workspace. Drill into per-test output, grep log content with live highlights, filter by member name, and reload without restarting.</p>
       </a>
@@ -195,6 +201,7 @@
     <table>
       <thead><tr><th>Example</th><th>What it shows</th></tr></thead>
       <tbody>
+        <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/proto-greeter" target="_blank" rel="noopener"><code>proto-greeter</code></a></td><td>Plugin framework — <code>curie-protobuf</code> generates Java stubs from <code>.proto</code> files before compilation</td></tr>
         <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/hello-world" target="_blank" rel="noopener"><code>hello-world</code></a></td><td>Flat-package source layout — <code>src/com.example/HelloWorld.java</code></td></tr>
         <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/maven-hello-world" target="_blank" rel="noopener"><code>maven-hello-world</code></a></td><td>Maven source layout — <code>src/main/java/com/example/</code></td></tr>
         <tr><td><a href="https://github.com/atteo/curie-build/tree/master/examples/simplified-main" target="_blank" rel="noopener"><code>simplified-main</code></a></td><td>Instance main methods (Java 21+ preview) — bare <code>void main()</code> with no class or package</td></tr>
