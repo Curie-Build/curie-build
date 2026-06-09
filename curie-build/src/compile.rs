@@ -197,9 +197,16 @@ pub fn compile(
                 .join(".curie-plugins")
                 .join(format!("{plugin_name}.stamp"));
             if !crate::plugin::is_up_to_date(&manifest, &stamp_path, project_root) {
+                let input_summary = summarise_plugin_inputs(&manifest, project_root);
+                crate::parallel::emit(&crate::style::active(
+                    &format!("Plugin {plugin_name}"),
+                    &input_summary,
+                ));
                 let resolved = crate::plugin::download_artifacts(&manifest.artifacts, offline)?;
                 crate::plugin::generate_sources(plugin_name, &envelope, &resolved, project_root, offline)?;
                 crate::plugin::write_stamp(&manifest, &stamp_path, project_root)?;
+            } else {
+                crate::parallel::emit(&crate::style::up_to_date(&format!("Plugin {plugin_name}")));
             }
             for dir in &manifest.outputs.source_dirs {
                 src_roots.push(project_root.join(dir));
@@ -759,6 +766,28 @@ pub fn compile(
         resources_dir, test_resources_dir,
     })
 }
+fn summarise_plugin_inputs(manifest: &crate::plugin::PluginManifest, project_root: &Path) -> String {
+    let files: Vec<_> = manifest
+        .inputs
+        .dirs
+        .iter()
+        .flat_map(|d| {
+            let full = project_root.join(d);
+            walkdir::WalkDir::new(&full)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if files.is_empty() {
+        "(no inputs)".to_string()
+    } else {
+        files.join(", ")
+    }
+}
+
 fn build_plugin_envelope(config: &toml::Value) -> Result<String> {
     let envelope = serde_json::json!({
         "curie_version": env!("CARGO_PKG_VERSION"),
