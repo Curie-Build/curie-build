@@ -608,6 +608,10 @@ fn main() {
 /// (see `workspace::run_member_tests`) without duplicating the printf.
 fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: bool) -> anyhow::Result<()> {
     let desc = descriptor::load(project)?;
+    if desc.is_bom() {
+        println!("{}", style::neutral("Tests", "skipped for BOM"));
+        return Ok(());
+    }
     println!(
         "Testing {} v{}",
         desc.buildable_name(),
@@ -716,4 +720,25 @@ fn resolve_jobs(jobs: Option<usize>) -> usize {
             .map(|n| n.get())
             .unwrap_or(1)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_single_module_skips_bom_project() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            r#"[bom]
+name    = "test-bom"
+version = "1.0.0"
+groupId = "com.example"
+"#,
+        )
+        .unwrap();
+        let result = test_single_module(dir.path(), None, true);
+        assert!(result.is_ok(), "expected Ok for BOM project, got: {result:?}");
+    }
 }

@@ -248,6 +248,10 @@ fn test_one_member(
     offline: bool,
     extra_cp: &[PathBuf],
 ) -> Result<Vec<PathBuf>> {
+    if m.descriptor.is_bom() {
+        crate::parallel::emit(&crate::style::neutral("Tests", "skipped for BOM"));
+        return Ok(vec![]);
+    }
     crate::parallel::emit(&crate::style::headline(
         "Testing", m.descriptor.buildable_name(), m.descriptor.buildable_version(),
     ));
