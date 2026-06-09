@@ -767,24 +767,28 @@ pub fn compile(
     })
 }
 fn summarise_plugin_inputs(manifest: &crate::plugin::PluginManifest, project_root: &Path) -> String {
-    let files: Vec<_> = manifest
-        .inputs
-        .dirs
-        .iter()
-        .flat_map(|d| {
-            let full = project_root.join(d);
-            walkdir::WalkDir::new(&full)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    if files.is_empty() {
+    let from_dirs = manifest.inputs.dirs.iter().flat_map(|d| {
+        let full = project_root.join(d);
+        walkdir::WalkDir::new(&full)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    });
+
+    let from_files = manifest.inputs.files.iter().map(|f| {
+        Path::new(f)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| f.to_string_lossy().into_owned())
+    });
+
+    let all: Vec<_> = from_dirs.chain(from_files).collect();
+    if all.is_empty() {
         "(no inputs)".to_string()
     } else {
-        files.join(", ")
+        all.join(", ")
     }
 }
 

@@ -278,6 +278,64 @@
     </div>
     <p>Downloads are verified against a SHA-1 sidecar fetched from the same repository. A cached file is never re-downloaded. The <code>--offline</code> flag passed to <code>generate-sources</code> reflects <code>curie build --offline</code>; the plugin can use it to skip any network calls of its own.</p>
 
+    <h2>OpenAPI plugin</h2>
+    <p><a href="https://github.com/atteo/curie-openapi" target="_blank" rel="noopener"><code>curie-openapi</code></a> generates Java model and API sources from an OpenAPI 3.x spec using <a href="https://openapi-generator.tech" target="_blank" rel="noopener">openapi-generator-cli</a>. The CLI JAR is cross-platform; no native binary or platform classifier is needed.</p>
+
+    <h3>Installation</h3>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>terminal</span>
+      </header>
+<pre>cargo install curie-openapi</pre>
+    </div>
+
+    <h3>Configuration</h3>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[plugin.openapi]</span>
+<span class="kw">version</span>       = <span class="str">"7.2.0"</span>        <span class="com"># openapi-generator-cli version</span>
+<span class="kw">specFile</span>      = <span class="str">"api/greeter.yaml"</span>
+<span class="kw">generatorName</span> = <span class="str">"java"</span>
+
+<span class="com"># optional</span>
+<span class="kw">modelPackage</span>   = <span class="str">"com.example.model"</span>
+<span class="kw">apiPackage</span>     = <span class="str">"com.example.api"</span>
+<span class="kw">invokerPackage</span> = <span class="str">"com.example"</span>
+<span class="kw">outputDir</span>      = <span class="str">"target/generated-sources/openapi"</span>  <span class="com"># default</span>
+<span class="kw">sourceFolder</span>   = <span class="str">"src/main/java"</span>                     <span class="com"># default</span>
+
+<span class="kw">[plugin.openapi.additionalProperties]</span>
+<span class="kw">library</span>                 = <span class="str">"native"</span>  <span class="com"># use java.net.http + Jackson; no OkHttp needed</span>
+<span class="kw">openApiNullable</span>         = <span class="str">"false"</span>
+<span class="kw">hideGenerationTimestamp</span> = <span class="str">"true"</span>
+
+<span class="kw">[plugin.openapi.globalProperties]</span>
+<span class="kw">models</span>          = <span class="str">""</span>
+<span class="kw">supportingFiles</span> = <span class="str">""</span></pre>
+    </div>
+
+    <p>All keys under <code>[plugin.openapi.additionalProperties]</code> are forwarded to openapi-generator as <code>--additional-properties key=val,...</code>. Keys under <code>[plugin.openapi.globalProperties]</code> are passed as repeated <code>--global-property key=val</code> flags.</p>
+
+    <p>Generated sources land in <code>target/generated-sources/openapi/src/main/java/</code> and are added to javac's source root automatically. The <code>specFile</code> mtime is stamped so protoc-style incremental builds work: regeneration only happens when the spec file changes.</p>
+
+    <h3>Build output</h3>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build</span>
+      </header>
+<pre><span class="dim">Building openapi-greeter v0.1.0</span>
+  Plugin openapi  <span class="pkg">greeter.yaml</span>
+  Resolve deps    6 JAR(s)
+  Compile         14 source file(s)  <span class="dim">[no class files]</span>
+  Package         openapi-greeter-0.1.0.jar
+  Done            <span class="em">target/openapi-greeter-0.1.0.jar</span></pre>
+    </div>
+
     <h2>Example: proto-greeter</h2>
     <p>The <a href="https://github.com/atteo/curie-build/tree/master/examples/proto-greeter" target="_blank" rel="noopener"><code>examples/proto-greeter</code></a> project shows the full setup end-to-end.</p>
 

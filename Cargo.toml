@@ -4,5 +4,6 @@ members = [
     "curie-deps",
     "curie-meta",
     "plugins/curie-protobuf",
+    "plugins/curie-openapi",
 ]
 resolver = "2"

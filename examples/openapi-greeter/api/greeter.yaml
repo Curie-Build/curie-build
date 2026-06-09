@@ -1,0 +1,35 @@
+openapi: "3.0.3"
+info:
+  title: Greeter API
+  version: "1.0.0"
+paths:
+  /greet:
+    post:
+      operationId: greet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GreetRequest'
+      responses:
+        '200':
+          description: Greeting response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GreetResponse'
+components:
+  schemas:
+    GreetRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          example: "World"
+    GreetResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "Hello, World!"
