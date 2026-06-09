@@ -202,7 +202,11 @@ pub fn compile(
                     &format!("Plugin {plugin_name}"),
                     &input_summary,
                 ));
-                let resolved = crate::plugin::download_artifacts(&manifest.artifacts, offline)?;
+                let resolved = crate::plugin::download_artifacts(
+                    &manifest.artifacts,
+                    &crate::build::central_repos(),
+                    offline,
+                )?;
                 crate::plugin::generate_sources(plugin_name, &envelope, &resolved, project_root, offline)?;
                 crate::plugin::write_stamp(&manifest, &stamp_path, project_root)?;
             } else {

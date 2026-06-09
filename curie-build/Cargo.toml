@@ -49,3 +49,4 @@ sha2 = "0.11"
 
 [dev-dependencies]
 filetime = "0.2"
+mockito = "1.7.2"

@@ -12,6 +12,7 @@
 //!    stderr: progress, visible to the user
 
 use anyhow::{bail, Context, Result};
+use curie_deps::repo::Repository;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Write as _;
@@ -161,11 +162,12 @@ pub fn is_up_to_date(
 /// local filesystem path.  Cache hits never touch the network.
 pub fn download_artifacts(
     artifacts: &[PluginArtifact],
+    repos: &[Repository],
     offline: bool,
 ) -> Result<BTreeMap<String, PathBuf>> {
     let mut resolved = BTreeMap::new();
     for art in artifacts {
-        let path = download_artifact(art, offline)?;
+        let path = download_artifact(art, repos, offline)?;
         resolved.insert(art.id.clone(), path);
     }
     Ok(resolved)
@@ -317,7 +319,7 @@ fn collect_input_files(manifest: &PluginManifest, project_root: &Path) -> Vec<Pa
     files
 }
 
-fn download_artifact(art: &PluginArtifact, offline: bool) -> Result<PathBuf> {
+fn download_artifact(art: &PluginArtifact, repos: &[Repository], offline: bool) -> Result<PathBuf> {
     let cache_path = artifact_cache_path(art)?;
 
     if cache_path.exists() {
@@ -333,18 +335,45 @@ fn download_artifact(art: &PluginArtifact, offline: bool) -> Result<PathBuf> {
         );
     }
 
-    let url = artifact_url(art);
-    let sha1_url = format!("{url}.sha1");
+    let rel = artifact_relative_path(art);
+    let mut last_err: Option<anyhow::Error> = None;
 
-    let bytes = reqwest::blocking::get(&url)
+    for repo in repos {
+        let url = repo.artifact_url(&rel);
+        let sha1_url = format!("{url}.sha1");
+        match try_download(&url, &sha1_url, &art.artifact) {
+            Ok(bytes) => {
+                if let Some(parent) = cache_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("failed to create cache dir {}", parent.display()))?;
+                }
+                std::fs::write(&cache_path, &bytes)
+                    .with_context(|| format!("failed to write {}", cache_path.display()))?;
+                if art.executable {
+                    set_executable(&cache_path)?;
+                }
+                return Ok(cache_path);
+            }
+            Err(e) => {
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no repositories configured")))
+        .with_context(|| format!("could not download {}:{} from any configured repository", art.group, art.artifact))
+}
+
+fn try_download(url: &str, sha1_url: &str, artifact_name: &str) -> Result<Vec<u8>> {
+    let bytes = reqwest::blocking::get(url)
         .with_context(|| format!("GET {url}"))?
         .error_for_status()
         .with_context(|| format!("HTTP error for {url}"))?
         .bytes()
-        .with_context(|| format!("failed to read body from {url}"))?;
+        .with_context(|| format!("failed to read body from {url}"))?
+        .to_vec();
 
-    // Verify SHA-1.
-    let expected_sha1 = reqwest::blocking::get(&sha1_url)
+    let expected_sha1 = reqwest::blocking::get(sha1_url)
         .with_context(|| format!("GET {sha1_url}"))?
         .error_for_status()
         .with_context(|| format!("HTTP error for {sha1_url}"))?
@@ -356,22 +385,10 @@ fn download_artifact(art: &PluginArtifact, offline: bool) -> Result<PathBuf> {
     let actual_sha1 = hex::encode(sha1::Sha1::digest(&bytes));
     anyhow::ensure!(
         actual_sha1 == expected_sha1,
-        "SHA-1 mismatch for {}: expected {expected_sha1}, got {actual_sha1}",
-        art.artifact
+        "SHA-1 mismatch for {artifact_name}: expected {expected_sha1}, got {actual_sha1}",
     );
 
-    if let Some(parent) = cache_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create cache dir {}", parent.display()))?;
-    }
-    std::fs::write(&cache_path, &bytes)
-        .with_context(|| format!("failed to write {}", cache_path.display()))?;
-
-    if art.executable {
-        set_executable(&cache_path)?;
-    }
-
-    Ok(cache_path)
+    Ok(bytes)
 }
 
 fn artifact_cache_path(art: &PluginArtifact) -> Result<PathBuf> {
@@ -390,16 +407,13 @@ fn artifact_cache_path(art: &PluginArtifact) -> Result<PathBuf> {
         .join(filename))
 }
 
-fn artifact_url(art: &PluginArtifact) -> String {
+fn artifact_relative_path(art: &PluginArtifact) -> String {
     let group_path = art.group.replace('.', "/");
     let filename = match &art.classifier {
         Some(c) => format!("{}-{}-{}.{}", art.artifact, art.version, c, art.extension),
         None => format!("{}-{}.{}", art.artifact, art.version, art.extension),
     };
-    format!(
-        "https://repo1.maven.org/maven2/{}/{}/{}/{}",
-        group_path, art.artifact, art.version, filename
-    )
+    format!("{}/{}/{}/{}", group_path, art.artifact, art.version, filename)
 }
 
 #[cfg(unix)]
@@ -423,6 +437,60 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn fake_art() -> PluginArtifact {
+        PluginArtifact {
+            id: "testlib".into(),
+            group: "com.example".into(),
+            artifact: "testlib".into(),
+            version: "1.0.0".into(),
+            classifier: None,
+            extension: "jar".into(),
+            executable: false,
+        }
+    }
+
+    fn nonexistent_art() -> PluginArtifact {
+        // Coordinate that will never exist in a real ~/.m2 cache.
+        PluginArtifact {
+            id: "x".into(),
+            group: "com.example.curie-test".into(),
+            artifact: "nonexistent-test-artifact".into(),
+            version: "0.0.0-TEST-ONLY".into(),
+            classifier: None,
+            extension: "jar".into(),
+            executable: false,
+        }
+    }
+
+    fn test_repo(url: &str) -> Repository {
+        Repository { id: "test".into(), name: "Test".into(), url: url.to_string() }
+    }
+
+    fn sha1_hex(data: &[u8]) -> String {
+        use sha1::Digest as _;
+        hex::encode(sha1::Sha1::digest(data))
+    }
+
+    /// Override HOME for the duration of the closure so artifact cache
+    /// paths land in `tmp` instead of the real ~/.m2.
+    ///
+    /// # Safety
+    /// `std::env::set_var` is not thread-safe; callers must ensure no
+    /// other thread is concurrently reading or writing HOME.  Use only
+    /// in tests that are unlikely to race (single-threaded or isolated).
+    fn with_home<F: FnOnce()>(tmp: &TempDir, f: F) {
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: test-only override; we restore below.
+        unsafe { std::env::set_var("HOME", tmp.path()); }
+        f();
+        match prev {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None    => unsafe { std::env::remove_var("HOME") },
+        }
+    }
 
     fn sample_manifest() -> PluginManifest {
         serde_json::from_str(r#"{
@@ -520,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_url_format() {
+    fn artifact_relative_path_with_classifier() {
         let art = PluginArtifact {
             id: "protoc".into(),
             group: "com.google.protobuf".into(),
@@ -530,10 +598,118 @@ mod tests {
             extension: "exe".into(),
             executable: true,
         };
-        let url = artifact_url(&art);
         assert_eq!(
-            url,
-            "https://repo1.maven.org/maven2/com/google/protobuf/protoc/3.25.0/protoc-3.25.0-linux-x86_64.exe"
+            artifact_relative_path(&art),
+            "com/google/protobuf/protoc/3.25.0/protoc-3.25.0-linux-x86_64.exe"
         );
+    }
+
+    #[test]
+    fn artifact_relative_path_no_classifier() {
+        let art = PluginArtifact {
+            id: "foo".into(),
+            group: "com.example".into(),
+            artifact: "foo".into(),
+            version: "1.0".into(),
+            classifier: None,
+            extension: "jar".into(),
+            executable: false,
+        };
+        assert_eq!(
+            artifact_relative_path(&art),
+            "com/example/foo/1.0/foo-1.0.jar"
+        );
+    }
+
+    // ── download_artifact behaviour ──────────────────────────────────────────
+
+    #[test]
+    fn download_artifact_errors_when_no_repos_configured() {
+        let art = nonexistent_art();
+        let result = download_artifact(&art, &[], false);
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("no repositories configured") || msg.contains("could not download"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn download_artifact_offline_without_cache_fails() {
+        let art = nonexistent_art();
+        // Pass any repo; the offline check fires before any network call.
+        let result = download_artifact(&art, &[test_repo("https://example.com/m2")], true);
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("offline"), "expected 'offline' in: {msg}");
+    }
+
+    #[test]
+    fn download_artifact_fetches_from_provided_repo_not_hardcoded_central() {
+        let tmp = TempDir::new().unwrap();
+        let art = fake_art();
+        let body: &[u8] = b"fake-jar-bytes";
+        let sha1 = sha1_hex(body);
+        let rel = artifact_relative_path(&art);
+
+        let mut server = mockito::Server::new();
+        let _m_jar = server
+            .mock("GET", format!("/{rel}").as_str())
+            .with_status(200)
+            .with_body(body)
+            .create();
+        let _m_sha1 = server
+            .mock("GET", format!("/{rel}.sha1").as_str())
+            .with_status(200)
+            .with_body(sha1.as_str())
+            .create();
+
+        let repos = vec![test_repo(&server.url())];
+        with_home(&tmp, || {
+            let result = download_artifact(&art, &repos, false);
+            assert!(result.is_ok(), "expected success: {:#}", result.unwrap_err());
+        });
+
+        // The mock was hit — meaning the repo URL was used, not Maven Central.
+        _m_jar.assert();
+        _m_sha1.assert();
+    }
+
+    #[test]
+    fn download_artifact_falls_back_to_second_repo_when_first_returns_404() {
+        let tmp = TempDir::new().unwrap();
+        let art = fake_art();
+        let body: &[u8] = b"fake-jar-bytes";
+        let sha1 = sha1_hex(body);
+        let rel = artifact_relative_path(&art);
+
+        let mut server = mockito::Server::new();
+        // First repo: artifact returns 404.
+        let _m_404_jar = server
+            .mock("GET", format!("/{rel}").as_str())
+            .with_status(404)
+            .create();
+        // Second repo (different server instance via a second mockito server).
+        let mut server2 = mockito::Server::new();
+        let _m2_jar = server2
+            .mock("GET", format!("/{rel}").as_str())
+            .with_status(200)
+            .with_body(body)
+            .create();
+        let _m2_sha1 = server2
+            .mock("GET", format!("/{rel}.sha1").as_str())
+            .with_status(200)
+            .with_body(sha1.as_str())
+            .create();
+
+        let repos = vec![test_repo(&server.url()), test_repo(&server2.url())];
+        with_home(&tmp, || {
+            let result = download_artifact(&art, &repos, false);
+            assert!(result.is_ok(), "expected fallback success: {:#}", result.unwrap_err());
+        });
+
+        _m2_jar.assert();
+        _m2_sha1.assert();
     }
 }
