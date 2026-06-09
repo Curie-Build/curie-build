@@ -22,6 +22,7 @@ mod main_class;
 mod native;
 mod new;
 mod parallel;
+mod plugin;
 mod pom_writer;
 mod proc;
 mod publish;

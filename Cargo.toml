@@ -3,5 +3,6 @@ members = [
     "curie-build",
     "curie-deps",
     "curie-meta",
+    "plugins/curie-protobuf",
 ]
 resolver = "2"

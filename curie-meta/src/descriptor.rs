@@ -80,6 +80,10 @@ pub struct Descriptor {
     /// `[publish]` — empty/default when the section is absent.  Validated at
     /// publish time, not load time.
     pub publish: PublishConfig,
+    /// `[plugin.<name>]` sections — each key activates a plugin binary
+    /// named `curie-<key>` on PATH.  The value is the raw TOML tree for
+    /// that plugin, passed verbatim as JSON to the plugin on stdin.
+    pub plugins: BTreeMap<String, toml::Value>,
 }
 
 /// One entry in `[annotation-processors]` or `[test-annotation-processors]`.
@@ -195,6 +199,8 @@ struct RawDescriptor {
     native_image: NativeImage,
     #[serde(default)]
     publish: PublishConfig,
+    #[serde(default, rename = "plugin")]
+    plugin: BTreeMap<String, toml::Value>,
 }
 
 /// One entry in `[workspace-dependencies]`.
@@ -1035,6 +1041,7 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         inherited_annotation_processor_options: BTreeMap::new(),
         inherited_test_annotation_processor_options: BTreeMap::new(),
         publish: parsed.publish,
+        plugins: parsed.plugin,
     };
 
     // Workspace-only restrictions: they describe member layout, not
@@ -2192,5 +2199,84 @@ groupId = "com.example"
         assert!(d.is_bom());
         assert_eq!(d.dependencies.len(), 1);
         assert_eq!(d.bom_imports.len(), 1);
+    }
+
+    // ── plugin section ────────────────────────────────────────────────────
+
+    #[test]
+    fn plugin_section_absent_gives_empty_map() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.plugins.is_empty());
+    }
+
+    #[test]
+    fn plugin_simple_section_parsed() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+
+[plugin.protobuf]
+version   = "3.25.0"
+sourceDir = "proto"
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.plugins.len(), 1);
+        let proto = d.plugins.get("protobuf").expect("protobuf plugin present");
+        let table = proto.as_table().expect("protobuf config is a table");
+        assert_eq!(
+            table.get("version").and_then(|v| v.as_str()),
+            Some("3.25.0")
+        );
+    }
+
+    #[test]
+    fn plugin_nested_table_preserved() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+
+[plugin.foo.bar]
+key = "value"
+"#;
+        let d = load_str(toml).unwrap();
+        let foo = d.plugins.get("foo").expect("foo plugin present");
+        let bar = foo
+            .get("bar")
+            .and_then(|v| v.as_table())
+            .expect("nested bar table");
+        assert_eq!(bar.get("key").and_then(|v| v.as_str()), Some("value"));
+    }
+
+    #[test]
+    fn plugin_array_of_tables_preserved() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+
+[[plugin.foo.items]]
+path = "vendor/a"
+
+[[plugin.foo.items]]
+path = "vendor/b"
+"#;
+        let d = load_str(toml).unwrap();
+        let foo = d.plugins.get("foo").expect("foo plugin present");
+        let items = foo
+            .get("items")
+            .and_then(|v| v.as_array())
+            .expect("items is an array");
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0].get("path").and_then(|v| v.as_str()),
+            Some("vendor/a")
+        );
     }
 }

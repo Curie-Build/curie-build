@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+option java_package = "com.example.greeter";
+option java_outer_classname = "GreeterProto";
+option java_multiple_files = true;
+
+message GreetRequest {
+  string name = 1;
+}
+
+message GreetResponse {
+  string message = 1;
+}

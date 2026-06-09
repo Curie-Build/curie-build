@@ -42,6 +42,7 @@ pub(crate) fn fake_bom_desc(
         inherited_annotation_processor_options: std::collections::BTreeMap::new(),
         inherited_test_annotation_processor_options: std::collections::BTreeMap::new(),
         publish,
+        plugins: std::collections::BTreeMap::new(),
     }
 }
 
@@ -83,5 +84,6 @@ pub(crate) fn fake_library_desc(
         inherited_annotation_processor_options: std::collections::BTreeMap::new(),
         inherited_test_annotation_processor_options: std::collections::BTreeMap::new(),
         publish,
+        plugins: std::collections::BTreeMap::new(),
     }
 }

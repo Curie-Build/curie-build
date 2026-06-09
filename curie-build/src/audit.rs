@@ -928,6 +928,7 @@ mod tests {
             inherited_annotation_processor_options: BTreeMap::new(),
             inherited_test_annotation_processor_options: BTreeMap::new(),
             publish: PublishConfig::default(),
+            plugins: BTreeMap::new(),
         }
     }
 }

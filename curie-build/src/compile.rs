@@ -185,6 +185,28 @@ pub fn compile(
         }
     }
 
+    // --- plugins: source generators -----------------------------------------
+    // Each [plugin.<name>] activates curie-<name> to produce extra source dirs.
+    // curie-build owns staleness tracking; the plugin only runs when inputs changed.
+    if !desc.plugins.is_empty() {
+        for (plugin_name, plugin_config) in &desc.plugins {
+            let envelope = build_plugin_envelope(plugin_config)?;
+            let manifest = crate::plugin::fetch_manifest(plugin_name, &envelope, project_root)?;
+            let stamp_path = project_root
+                .join("target")
+                .join(".curie-plugins")
+                .join(format!("{plugin_name}.stamp"));
+            if !crate::plugin::is_up_to_date(&manifest, &stamp_path, project_root) {
+                let resolved = crate::plugin::download_artifacts(&manifest.artifacts, offline)?;
+                crate::plugin::generate_sources(plugin_name, &envelope, &resolved, project_root, offline)?;
+                crate::plugin::write_stamp(&manifest, &stamp_path, project_root)?;
+            }
+            for dir in &manifest.outputs.source_dirs {
+                src_roots.push(project_root.join(dir));
+            }
+        }
+    }
+
     if src_roots.is_empty() {
         bail!(
             "no source directory found: expected src/main/java/, src/main/kotlin/, \
@@ -737,6 +759,14 @@ pub fn compile(
         resources_dir, test_resources_dir,
     })
 }
+fn build_plugin_envelope(config: &toml::Value) -> Result<String> {
+    let envelope = serde_json::json!({
+        "curie_version": env!("CARGO_PKG_VERSION"),
+        "config": serde_json::to_value(config).context("failed to convert plugin config to JSON")?,
+    });
+    serde_json::to_string(&envelope).context("failed to serialize plugin envelope")
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
