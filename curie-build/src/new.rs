@@ -5,7 +5,7 @@
 //!
 //! Both commands share the same core logic in [`scaffold`].
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
@@ -39,11 +39,14 @@ pub fn run_new(kind: ProjectKind, name: Option<String>, package: Option<String>)
     std::fs::create_dir_all(&dest)
         .with_context(|| format!("failed to create directory `{}`", dest.display()))?;
 
-    scaffold(kind, &dest, &name, package)?;
+    let created = scaffold(kind, &dest, &name, package)?;
+
+    for path in &created {
+        let rel = path.strip_prefix(&cwd).unwrap_or(path);
+        println!("{}", crate::style::info("Created", &rel.display().to_string()));
+    }
 
     maybe_register_in_workspace(&dest)?;
-
-    println!("  Created {} `{}` at {}", kind.label(), name, dest.display());
     Ok(())
 }
 
@@ -64,11 +67,14 @@ pub fn run_init(kind: ProjectKind, package: Option<String>) -> Result<()> {
         );
     }
 
-    scaffold(kind, &cwd, &name, package)?;
+    let created = scaffold(kind, &cwd, &name, package)?;
+
+    for path in &created {
+        let rel = path.strip_prefix(&cwd).unwrap_or(path);
+        println!("{}", crate::style::info("Created", &rel.display().to_string()));
+    }
 
     maybe_register_in_workspace(&cwd)?;
-
-    println!("  Initialised {} `{}` in {}", kind.label(), name, cwd.display());
     Ok(())
 }
 
@@ -86,50 +92,41 @@ pub enum ProjectKind {
     Bom,
 }
 
-impl ProjectKind {
-    fn label(self) -> &'static str {
-        match self {
-            ProjectKind::App => "application",
-            ProjectKind::Lib => "library",
-            ProjectKind::Workspace => "workspace",
-            ProjectKind::Bom => "bom",
-        }
-    }
-}
 
 // ── core scaffolding ───────────────────────────────────────────────────────
 
-/// Write all scaffold files into `dest`.
+/// Write all scaffold files into `dest`.  Returns the absolute paths of every
+/// file created, in the order they were written.
 fn scaffold(
     kind: ProjectKind,
     dest: &Path,
     name: &str,
     package: Option<String>,
-) -> Result<()> {
-    write_gitignore(dest)?;
+) -> Result<Vec<PathBuf>> {
+    let mut files = vec![write_gitignore(dest)?];
 
-    match kind {
+    let kind_files = match kind {
         ProjectKind::App => scaffold_app(dest, name, package)?,
         ProjectKind::Lib => scaffold_lib(dest, name, package)?,
         ProjectKind::Workspace => scaffold_workspace(dest)?,
         ProjectKind::Bom => scaffold_bom(dest, name)?,
-    }
-    Ok(())
+    };
+    files.extend(kind_files);
+    Ok(files)
 }
 
-fn scaffold_app(dest: &Path, name: &str, package: Option<String>) -> Result<()> {
+fn scaffold_app(dest: &Path, name: &str, package: Option<String>) -> Result<Vec<PathBuf>> {
     let pkg = package.unwrap_or_else(|| derive_package(name));
     let class = derive_class_name(name);
     let main_class = format!("{}.{}", pkg, class);
 
-    // Curie.toml
     let toml = format!(
         "[application]\nname = \"{}\"\nversion = \"0.1.0\"\nmainClass = \"{}\"\n",
         name, main_class
     );
-    write_file(&dest.join("Curie.toml"), &toml)?;
+    let toml_path = dest.join("Curie.toml");
+    write_file(&toml_path, &toml)?;
 
-    // src/<package>/<Class>.java
     let src_dir = dest.join("src").join(&pkg);
     std::fs::create_dir_all(&src_dir)
         .with_context(|| format!("failed to create `{}`", src_dir.display()))?;
@@ -138,23 +135,23 @@ fn scaffold_app(dest: &Path, name: &str, package: Option<String>) -> Result<()> 
         "package {};\n\npublic class {} {{\n    public static void main(String[] args) {{\n        System.out.println(\"Hello from {}!\");\n    }}\n}}\n",
         pkg, class, class
     );
-    write_file(&src_dir.join(format!("{}.java", class)), &java)?;
+    let java_path = src_dir.join(format!("{}.java", class));
+    write_file(&java_path, &java)?;
 
-    Ok(())
+    Ok(vec![toml_path, java_path])
 }
 
-fn scaffold_lib(dest: &Path, name: &str, package: Option<String>) -> Result<()> {
+fn scaffold_lib(dest: &Path, name: &str, package: Option<String>) -> Result<Vec<PathBuf>> {
     let pkg = package.unwrap_or_else(|| derive_package(name));
     let class = derive_class_name(name);
 
-    // Curie.toml
     let toml = format!(
         "[library]\nname = \"{}\"\nversion = \"0.1.0\"\n",
         name
     );
-    write_file(&dest.join("Curie.toml"), &toml)?;
+    let toml_path = dest.join("Curie.toml");
+    write_file(&toml_path, &toml)?;
 
-    // src/<package>/<Class>.java
     let src_dir = dest.join("src").join(&pkg);
     std::fs::create_dir_all(&src_dir)
         .with_context(|| format!("failed to create `{}`", src_dir.display()))?;
@@ -163,28 +160,33 @@ fn scaffold_lib(dest: &Path, name: &str, package: Option<String>) -> Result<()> 
         "package {};\n\npublic class {} {{\n    // TODO: implement\n}}\n",
         pkg, class
     );
-    write_file(&src_dir.join(format!("{}.java", class)), &java)?;
+    let java_path = src_dir.join(format!("{}.java", class));
+    write_file(&java_path, &java)?;
 
-    Ok(())
+    Ok(vec![toml_path, java_path])
 }
 
-fn scaffold_workspace(dest: &Path) -> Result<()> {
-    let toml = "[workspace]\nmembers = []\n";
-    write_file(&dest.join("Curie.toml"), toml)?;
-    Ok(())
+fn scaffold_workspace(dest: &Path) -> Result<Vec<PathBuf>> {
+    let toml_path = dest.join("Curie.toml");
+    write_file(&toml_path, "[workspace]\nmembers = []\n")?;
+    Ok(vec![toml_path])
 }
 
-fn scaffold_bom(dest: &Path, name: &str) -> Result<()> {
+fn scaffold_bom(dest: &Path, name: &str) -> Result<Vec<PathBuf>> {
     let toml = format!(
         "[bom]\nname = \"{}\"\nversion = \"0.1.0\"\n\n\
          [dependencies]\n# \"com.example:artifact\" = \"1.0.0\"\n",
         name
     );
-    write_file(&dest.join("Curie.toml"), &toml)
+    let toml_path = dest.join("Curie.toml");
+    write_file(&toml_path, &toml)?;
+    Ok(vec![toml_path])
 }
 
-fn write_gitignore(dest: &Path) -> Result<()> {
-    write_file(&dest.join(".gitignore"), "target/\n")
+fn write_gitignore(dest: &Path) -> Result<PathBuf> {
+    let path = dest.join(".gitignore");
+    write_file(&path, "target/\n")?;
+    Ok(path)
 }
 
 fn write_file(path: &Path, content: &str) -> Result<()> {
@@ -240,7 +242,10 @@ fn maybe_register_in_workspace(dest: &Path) -> Result<()> {
     std::fs::write(&ws_toml_path, doc.to_string())
         .with_context(|| format!("failed to write `{}`", ws_toml_path.display()))?;
 
-    println!("  Added \"{}\" to workspace at {}", member_name, ws_toml_path.display());
+    println!("{}", crate::style::info(
+        "Registered",
+        &format!("{} in {}", member_name, ws_toml_path.display()),
+    ));
     Ok(())
 }
 
