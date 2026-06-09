@@ -43,7 +43,7 @@ pub fn run_new(kind: ProjectKind, name: Option<String>, package: Option<String>)
 
     for path in &created {
         let rel = path.strip_prefix(&cwd).unwrap_or(path);
-        println!("{}", crate::style::info("Created", &rel.display().to_string()));
+        println!("{}", crate::style::created_file(&rel.display().to_string()));
     }
 
     maybe_register_in_workspace(&dest)?;
@@ -71,7 +71,7 @@ pub fn run_init(kind: ProjectKind, package: Option<String>) -> Result<()> {
 
     for path in &created {
         let rel = path.strip_prefix(&cwd).unwrap_or(path);
-        println!("{}", crate::style::info("Created", &rel.display().to_string()));
+        println!("{}", crate::style::created_file(&rel.display().to_string()));
     }
 
     maybe_register_in_workspace(&cwd)?;
@@ -242,8 +242,7 @@ fn maybe_register_in_workspace(dest: &Path) -> Result<()> {
     std::fs::write(&ws_toml_path, doc.to_string())
         .with_context(|| format!("failed to write `{}`", ws_toml_path.display()))?;
 
-    println!("{}", crate::style::info(
-        "Registered",
+    println!("{}", crate::style::registered(
         &format!("{} in {}", member_name, ws_toml_path.display()),
     ));
     Ok(())

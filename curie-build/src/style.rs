@@ -146,6 +146,16 @@ pub fn publish_step(label: &str, value: &str) -> String {
     line(CYAN, ICON_PUBLISH, label, value)
 }
 
+/// `curie new` / `curie init` file creation.  Bold green `✓`.
+pub fn created_file(value: &str) -> String {
+    line(BOLD_GREEN, ICON_DONE, "Created", value)
+}
+
+/// `curie new` / `curie init` workspace registration.  Bold green `✓`.
+pub fn registered(value: &str) -> String {
+    line(BOLD_GREEN, ICON_DONE, "Registered", value)
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
