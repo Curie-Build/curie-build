@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Installation · Curie docs</title>
+  <meta name="description" content="Install Curie via Cargo, build from source, upgrade, and configure shell completions for fish, bash, and zsh.">
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/installation.html">Installation</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Setup · installation</span>
+    <h1>Installation</h1>
+    <p class="lede">Install the Curie binary, keep it up to date, and configure shell completions.</p>
+
+    <h2>Prerequisites</h2>
+    <ul>
+      <li><strong>JDK 21</strong> or newer on <code>PATH</code> — Curie shells out to <code>javac</code>.</li>
+      <li><strong>Cargo</strong> (from <a href="https://rustup.rs" target="_blank" rel="noopener">rustup</a>) — required for the install methods below.</li>
+    </ul>
+
+    <h2>Install via Cargo</h2>
+    <p>Curie is published on <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">crates.io</a>. Cargo pulls the sources, builds a release binary, and drops it on your <code>PATH</code>:</p>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>shell</span>
+      </header>
+<pre><span class="prompt">$</span> cargo install curie-build
+<span class="prompt">$</span> curie --version
+<span class="ok">curie 0.6.0</span></pre>
+    </div>
+
+    <h2>Upgrading</h2>
+    <p>Re-run the install command with <code>--force</code> to upgrade to the latest release. To pin to a specific version, pass <code>--version</code>:</p>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>shell</span>
+      </header>
+<pre><span class="prompt">$</span> cargo install curie-build --force
+<span class="prompt">$</span> cargo install curie-build --version 0.5.0</pre>
+    </div>
+
+    <h2>Build from source</h2>
+    <p>Clone the repository and install from the workspace. This is useful when contributing to Curie or testing unreleased changes:</p>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>shell</span>
+      </header>
+<pre><span class="prompt">$</span> git clone https://github.com/atteo/curie-build.git
+<span class="prompt">$</span> cd curie-build
+<span class="prompt">$</span> cargo install --path curie-build</pre>
+    </div>
+
+    <h2>Shell completions</h2>
+    <p>Run <code>curie setup</code> to automatically detect your shell and install the matching completion script:</p>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>shell</span>
+      </header>
+<pre><span class="prompt">$</span> curie setup
+  Shell           fish
+  Downloading     https://raw.githubusercontent.com/atteo/curie-build/&lt;commit&gt;/completions/curie.fish
+  Installed       /home/you/.config/fish/completions/curie.fish
+  Open a new terminal, or run: source /home/you/.config/fish/completions/curie.fish</pre>
+    </div>
+    <p>The script is downloaded at the exact commit matching your installed binary, so it always reflects the correct subcommands and flags. Override shell detection with <code>--shell</code>:</p>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>shell</span>
+      </header>
+<pre><span class="prompt">$</span> curie setup --shell zsh</pre>
+    </div>
+
+    <p>Alternatively, copy the scripts manually from the <code>completions/</code> directory of the repository:</p>
+
+    <h3>fish (manual)</h3>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>fish</span>
+      </header>
+<pre><span class="prompt">$</span> cp completions/curie.fish ~/.config/fish/completions/</pre>
+    </div>
+
+    <h3>bash (manual)</h3>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>bash</span>
+      </header>
+<pre><span class="prompt">$</span> cp completions/curie.bash ~/.local/share/bash-completion/completions/curie</pre>
+    </div>
+
+    <h3>zsh (manual)</h3>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>zsh</span>
+      </header>
+<pre><span class="prompt">$</span> mkdir -p ~/.zsh/completions
+<span class="prompt">$</span> cp completions/curie.zsh ~/.zsh/completions/_curie</pre>
+    </div>
+    <p>Add to <code>~/.zshrc</code> if not already present, then open a new terminal:</p>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>~/.zshrc</span>
+      </header>
+<pre>fpath=(~/.zsh/completions $fpath)
+autoload -Uz compinit &amp;&amp; compinit</pre>
+    </div>
+
+    <h2>Creating a project manually</h2>
+    <p>The <a href="/docs/scaffold.html">scaffolding</a> commands (<code>curie new</code>, <code>curie init</code>) are the recommended way to start a project. If you prefer to lay out files by hand, Curie expects this structure:</p>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>tree</span>
+      </header>
+<pre>hello/
+├── Curie.toml
+└── src/
+    └── com.example/
+        └── Hello.java</pre>
+    </div>
+    <p>The flat-package layout (<code>src/com.example/...</code>) keeps the source tree shallow — the directory name <em>is</em> the package. Maven-style layout (<code>src/main/java/com/example/</code>) is equally supported; both can coexist in the same project.</p>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[application]</span>
+<span class="kw">name</span>      = <span class="str">"hello"</span>
+<span class="kw">version</span>   = <span class="str">"0.1.0"</span>
+<span class="kw">mainClass</span> = <span class="str">"com.example.Hello"</span>
+</pre>
+    </div>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>src/com.example/Hello.java</span>
+      </header>
+<pre><span class="kw">package</span> com.example;
+
+<span class="kw">public class</span> Hello {
+    <span class="kw">public static void</span> main(String[] args) {
+        System.out.println(<span class="str">"Hello, Curie."</span>);
+    }
+}
+</pre>
+    </div>
+
+    <div class="pager">
+      <a href="/docs/">
+        <span>← Previous</span>
+        <strong>Overview</strong>
+      </a>
+      <a href="/docs/java.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Java</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

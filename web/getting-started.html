@@ -54,77 +54,7 @@
 <span class="ok">curie 0.6.0</span></pre>
       </div>
 
-      <p>Upgrading is the same command with <code>--force</code>; pinning to an exact version uses <code>--version</code>. To build from source instead — useful when contributing to Curie itself — clone the repo and <code>cargo install --path curie-build</code> from the workspace root:</p>
-      <div class="term">
-        <header>
-          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-          <span>shell</span>
-        </header>
-<pre><span class="prompt">$</span> git clone https://github.com/atteo/curie-build.git
-<span class="prompt">$</span> cd curie-build
-<span class="prompt">$</span> cargo install --path curie-build</pre>
-      </div>
-
-      <h2>Shell completions</h2>
-      <p>Run <code>curie setup</code> to automatically detect your shell and install the matching completion script in one command:</p>
-      <div class="term">
-        <header>
-          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-          <span>shell</span>
-        </header>
-<pre><span class="prompt">$</span> curie setup
-  Shell           fish
-  Downloading     https://raw.githubusercontent.com/atteo/curie-build/&lt;commit&gt;/completions/curie.fish
-  Installed       /home/you/.config/fish/completions/curie.fish
-  Open a new terminal, or run: source /home/you/.config/fish/completions/curie.fish</pre>
-      </div>
-      <p>The script is downloaded from GitHub at the exact commit that matches your installed binary, so it always reflects the correct set of subcommands and flags. Pass <code>--shell</code> to override detection:</p>
-      <div class="term">
-        <header>
-          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-          <span>shell</span>
-        </header>
-<pre><span class="prompt">$</span> curie setup --shell zsh</pre>
-      </div>
-
-      <p>Alternatively, install manually from the <code>completions/</code> directory of the repository:</p>
-
-      <h3>fish (manual)</h3>
-      <div class="term">
-        <header>
-          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-          <span>fish</span>
-        </header>
-<pre><span class="prompt">$</span> cp completions/curie.fish ~/.config/fish/completions/</pre>
-      </div>
-
-      <h3>bash (manual)</h3>
-      <div class="term">
-        <header>
-          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-          <span>bash</span>
-        </header>
-<pre><span class="prompt">$</span> cp completions/curie.bash ~/.local/share/bash-completion/completions/curie</pre>
-      </div>
-
-      <h3>zsh (manual)</h3>
-      <div class="term">
-        <header>
-          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-          <span>zsh</span>
-        </header>
-<pre><span class="prompt">$</span> mkdir -p ~/.zsh/completions
-<span class="prompt">$</span> cp completions/curie.zsh ~/.zsh/completions/_curie</pre>
-      </div>
-      <p>Add to <code>~/.zshrc</code> if not already present, then open a new terminal:</p>
-      <div class="code">
-        <header>
-          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-          <span>~/.zshrc</span>
-        </header>
-<pre>fpath=(~/.zsh/completions $fpath)
-autoload -Uz compinit &amp;&amp; compinit</pre>
-      </div>
+      <p>For upgrading, building from source, and shell completions see <a href="/docs/installation.html">Installation</a>.</p>
 
       <h2>3. Create a project</h2>
 
@@ -138,48 +68,6 @@ autoload -Uz compinit &amp;&amp; compinit</pre>
 <span class="ok">Created</span> hello/src/com.example/Hello.java
 <span class="dim">
 Run `curie build` inside hello/ to compile and package.</span></pre>
-      </div>
-
-      <p>Or create the files manually. Anywhere on disk, lay out:</p>
-      <div class="term">
-        <header>
-          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-          <span>tree</span>
-        </header>
-<pre>hello/
-├── Curie.toml
-└── src/
-    └── com.example/
-        └── Hello.java</pre>
-      </div>
-
-      <p><code>Curie.toml</code> describes the build target. The flat-package layout (<code>src/com.example/...</code>) keeps the source tree shallow — the directory name <em>is</em> the package.</p>
-
-      <div class="code">
-        <header>
-          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-          <span>Curie.toml</span>
-        </header>
-<pre><span class="kw">[application]</span>
-<span class="kw">name</span>      = <span class="str">"hello"</span>
-<span class="kw">version</span>   = <span class="str">"0.1.0"</span>
-<span class="kw">mainClass</span> = <span class="str">"com.example.Hello"</span>
-</pre>
-      </div>
-
-      <div class="code">
-        <header>
-          <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-          <span>src/com.example/Hello.java</span>
-        </header>
-<pre><span class="kw">package</span> com.example;
-
-<span class="kw">public class</span> Hello {
-    <span class="kw">public static void</span> main(String[] args) {
-        System.out.println(<span class="str">"Hello, Curie."</span>);
-    }
-}
-</pre>
       </div>
 
       <h2>4. Build</h2>
@@ -233,7 +121,8 @@ Run `curie build` inside hello/ to compile and package.</span></pre>
 
       <h2>Next steps</h2>
       <ul>
-        <li><a href="/docs/resolver.html">Dependency resolution & checksums</a> — Maven Central, BOM imports, <code>curie deps --why</code> conflict traces</li>
+        <li><a href="/docs/installation.html">Installation</a> — upgrading, building from source, shell completions, manual project layout</li>
+        <li><a href="/docs/resolver.html">Dependency resolution &amp; checksums</a> — Maven Central, BOM imports, <code>curie deps --why</code> conflict traces</li>
         <li><a href="/docs/kotlin.html">Kotlin support</a> — drop in <code>.kt</code> files, no config</li>
         <li><a href="/docs/groovy.html">Groovy &amp; Spock</a> — <code>.groovy</code> sources and Spock specs, auto-detected</li>
         <li><a href="/docs/workspaces.html">Workspaces</a> — multi-module monorepos with one root <code>Curie.toml</code></li>
