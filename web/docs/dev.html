@@ -108,7 +108,7 @@ Hello, Curie.</pre>
     <ol>
       <li><strong>Compile</strong> — sources are compiled to <code>target/classes/</code>. No JAR is written.</li>
       <li><strong>Launch</strong> — the JVM is started as <code>java -cp target/classes:&lt;deps&gt; com.example.Hello</code>.</li>
-      <li><strong>Watch</strong> — curie polls <code>src/</code> and <code>Curie.toml</code> every 300 ms for changes.</li>
+      <li><strong>Watch</strong> — curie watches <code>src/</code> and <code>Curie.toml</code> for changes. On Linux, inotify delivers near-instant notifications; on other platforms, curie polls every 300 ms.</li>
     </ol>
 
     <h2>Automatic restart on change</h2>
@@ -148,7 +148,7 @@ Hello, updated Curie.</pre>
         <tr><td>Runs tests</td><td>Yes</td><td>No</td></tr>
         <tr><td>Docker support</td><td>Yes</td><td>No</td></tr>
         <tr><td>Classpath</td><td><code>-jar target/app.jar</code></td><td><code>-cp target/classes:deps…</code></td></tr>
-        <tr><td>Restart on change</td><td>No</td><td>Yes (300 ms)</td></tr>
+        <tr><td>Restart on change</td><td>No</td><td>Yes (inotify on Linux; 300 ms poll elsewhere)</td></tr>
       </tbody>
     </table>
 

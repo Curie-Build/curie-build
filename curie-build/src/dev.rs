@@ -4,8 +4,12 @@
 //! launches the JVM with a `-cp` that points directly at that directory plus
 //! the resolved dependency JARs — exactly how IDEs launch Java apps.
 //!
-//! After the initial launch, the process polls `src/` and `Curie.toml` every
-//! 300 ms.  When any file changes, the running process is killed, sources are
+//! After the initial launch, the process watches `src/` and `Curie.toml` for
+//! changes.  On Linux, inotify provides event-driven, near-zero-latency
+//! notifications.  On other platforms (and as a fallback when inotify fails
+//! to initialise), the watcher polls mtime every 300 ms.
+//!
+//! When any change is detected, the running process is killed, sources are
 //! recompiled, and the app restarts.  On a compile failure the process stays
 //! down and curie keeps watching so the user can fix the error and save again.
 
@@ -42,18 +46,16 @@ pub fn run_dev(project_root: &Path, opts: DevOptions, extra_args: &[String]) -> 
     println!("{}", style::dev_step("Watching", &main));
     println!();
 
-    let mut last_check = SystemTime::now();
+    let mut watcher = ChangeWatcher::create(project_root);
 
     loop {
-        std::thread::sleep(POLL_INTERVAL);
-
         reap_if_exited(&mut proc);
 
-        if !inputs_changed_since(project_root, last_check) {
+        if !watcher.wait_for_change(POLL_INTERVAL) {
             continue;
         }
+        watcher.acknowledge();
 
-        last_check = SystemTime::now();
         kill_and_wait(&mut proc);
 
         println!("{}", style::dev_step("Restarting", "source changed"));
@@ -158,6 +160,70 @@ fn kill_and_wait(proc: &mut Option<Child>) {
 
 // ── Change detection ──────────────────────────────────────────────────────────
 
+/// Unified watcher: inotify on Linux, mtime polling everywhere else.
+struct ChangeWatcher {
+    inner: WatcherInner,
+}
+
+enum WatcherInner {
+    #[cfg(target_os = "linux")]
+    Inotify(std::sync::mpsc::Receiver<()>),
+    Poll {
+        project_root: PathBuf,
+        last_check: SystemTime,
+    },
+}
+
+impl ChangeWatcher {
+    fn create(project_root: &Path) -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            match start_inotify_thread(project_root) {
+                Ok(rx) => {
+                    return ChangeWatcher {
+                        inner: WatcherInner::Inotify(rx),
+                    };
+                }
+                Err(_) => {
+                    // inotify unavailable (container without user-namespaces, etc.) — fall through
+                }
+            }
+        }
+        ChangeWatcher {
+            inner: WatcherInner::Poll {
+                project_root: project_root.to_path_buf(),
+                last_check: SystemTime::now(),
+            },
+        }
+    }
+
+    /// Block for up to `timeout`.  Returns `true` the moment a source change
+    /// is detected; `false` when the timeout expires with no change.
+    fn wait_for_change(&mut self, timeout: Duration) -> bool {
+        match &mut self.inner {
+            #[cfg(target_os = "linux")]
+            WatcherInner::Inotify(rx) => {
+                rx.recv_timeout(timeout).is_ok()
+            }
+            WatcherInner::Poll { project_root, last_check } => {
+                std::thread::sleep(timeout);
+                inputs_changed_since(project_root, *last_check)
+            }
+        }
+    }
+
+    /// Reset the watcher state after a change has been handled.
+    ///
+    /// For the poll watcher this advances `last_check` to the current time so
+    /// the same mtime change is not reported a second time.  For inotify the
+    /// kernel event queue is already consumed, so this is a no-op.
+    fn acknowledge(&mut self) {
+        if let WatcherInner::Poll { last_check, .. } = &mut self.inner {
+            *last_check = SystemTime::now();
+        }
+    }
+}
+
 /// Returns `true` when any file under `<project_root>/src/` or
 /// `<project_root>/Curie.toml` is strictly newer than `since`.
 fn inputs_changed_since(project_root: &Path, since: SystemTime) -> bool {
@@ -165,6 +231,109 @@ fn inputs_changed_since(project_root: &Path, since: SystemTime) -> bool {
     let toml_path = project_root.join("Curie.toml");
     incremental::newest_mtime_in_dir(&src_dir) > since
         || incremental::mtime(&toml_path) > since
+}
+
+// ── inotify watcher (Linux only) ──────────────────────────────────────────────
+
+/// Spawn a background thread that watches `src/` recursively and
+/// `Curie.toml` via inotify.  Sends `()` on the returned receiver whenever
+/// any source file changes.  Errors from the background thread are silent —
+/// the thread simply exits, causing the channel to become disconnected and
+/// `recv_timeout` to return an error, which `wait_for_change` treats as a
+/// spurious timeout.
+#[cfg(target_os = "linux")]
+fn start_inotify_thread(project_root: &Path) -> Result<std::sync::mpsc::Receiver<()>> {
+    use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
+    use std::collections::HashMap;
+
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let project_root = project_root.to_path_buf();
+
+    std::thread::spawn(move || -> anyhow::Result<()> {
+        let mut inotify = Inotify::init()?;
+        let mut wd_paths: HashMap<WatchDescriptor, PathBuf> = HashMap::new();
+
+        let mask = WatchMask::CLOSE_WRITE
+            | WatchMask::CREATE
+            | WatchMask::DELETE
+            | WatchMask::MOVED_FROM
+            | WatchMask::MOVED_TO;
+
+        // Watch the project root so that edits to Curie.toml are caught.
+        let wd = inotify.watches().add(&project_root, mask)?;
+        wd_paths.insert(wd, project_root.clone());
+
+        // Recursively watch every existing subdirectory of src/.
+        let src_dir = project_root.join("src");
+        if src_dir.exists() {
+            watch_dir_recursive(&mut inotify, &src_dir, mask, &mut wd_paths)?;
+        }
+
+        let mut buf = vec![0u8; 4096];
+
+        loop {
+            // Collect events into owned data so we can mutate `inotify`
+            // afterwards to add watches for newly created directories.
+            let owned: Vec<(WatchDescriptor, EventMask, Option<std::ffi::OsString>)> = inotify
+                .read_events_blocking(&mut buf)?
+                .map(|e| (e.wd, e.mask, e.name.map(|n| n.to_os_string())))
+                .collect();
+
+            let mut source_changed = false;
+
+            for (wd, event_mask, name) in owned {
+                let is_dir = event_mask.contains(EventMask::ISDIR);
+                let is_new_dir = is_dir
+                    && (event_mask.contains(EventMask::CREATE)
+                        || event_mask.contains(EventMask::MOVED_TO));
+
+                if is_new_dir {
+                    // Add a watch for the new directory so files created
+                    // inside it are also tracked.
+                    if let (Some(parent), Some(name)) = (wd_paths.get(&wd), name) {
+                        let new_dir = parent.join(&name);
+                        if let Ok(new_wd) = inotify.watches().add(&new_dir, mask) {
+                            wd_paths.insert(new_wd, new_dir);
+                        }
+                    }
+                } else if !is_dir {
+                    source_changed = true;
+                }
+            }
+
+            if source_changed {
+                // Non-blocking send; if the receiver is behind, older signals
+                // are already sufficient — no need to queue duplicates.
+                let _ = tx.send(());
+            }
+        }
+    });
+
+    Ok(rx)
+}
+
+/// Walk `dir` recursively and add an inotify watch for every subdirectory
+/// (including `dir` itself).
+#[cfg(target_os = "linux")]
+fn watch_dir_recursive(
+    inotify: &mut inotify::Inotify,
+    dir: &Path,
+    mask: inotify::WatchMask,
+    wd_paths: &mut std::collections::HashMap<inotify::WatchDescriptor, PathBuf>,
+) -> Result<()> {
+    use walkdir::WalkDir;
+    for entry in WalkDir::new(dir).follow_links(false) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if entry.file_type().is_dir() {
+            if let Ok(wd) = inotify.watches().add(entry.path(), mask) {
+                wd_paths.insert(wd, entry.path().to_path_buf());
+            }
+        }
+    }
+    Ok(())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -201,6 +370,12 @@ mod tests {
         }
         std::fs::write(path, b"").unwrap();
         filetime::set_file_mtime(path, filetime::FileTime::from_system_time(mtime)).unwrap();
+    }
+
+    fn poll_watcher(project_root: PathBuf, last_check: SystemTime) -> ChangeWatcher {
+        ChangeWatcher {
+            inner: WatcherInner::Poll { project_root, last_check },
+        }
     }
 
     // -- exploded_classpath ---------------------------------------------------
@@ -298,5 +473,57 @@ mod tests {
         write_with_mtime(&toml, base);
 
         assert!(!inputs_changed_since(dir.path(), base + Duration::from_secs(10)));
+    }
+
+    // -- ChangeWatcher (poll path) -------------------------------------------
+
+    #[test]
+    fn poll_watcher_detects_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000_000);
+
+        let src = dir.path().join("src").join("Hello.java");
+        write_with_mtime(&src, base + Duration::from_secs(1));
+        let toml = dir.path().join("Curie.toml");
+        write_with_mtime(&toml, base);
+
+        let mut w = poll_watcher(dir.path().to_path_buf(), base);
+        assert!(w.wait_for_change(Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn poll_watcher_no_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000_000);
+
+        let src = dir.path().join("src").join("Hello.java");
+        write_with_mtime(&src, base);
+        let toml = dir.path().join("Curie.toml");
+        write_with_mtime(&toml, base);
+
+        // last_check is after both files → no change
+        let mut w = poll_watcher(dir.path().to_path_buf(), base + Duration::from_secs(10));
+        assert!(!w.wait_for_change(Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn poll_watcher_acknowledge_prevents_double_trigger() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000_000);
+
+        let src = dir.path().join("src").join("Hello.java");
+        write_with_mtime(&src, base + Duration::from_secs(1));
+        let toml = dir.path().join("Curie.toml");
+        write_with_mtime(&toml, base);
+
+        let mut w = poll_watcher(dir.path().to_path_buf(), base);
+
+        // First call detects the change.
+        assert!(w.wait_for_change(Duration::from_millis(1)));
+
+        // After acknowledge, last_check advances to ~now; the file's mtime
+        // (base + 1s ≈ year 1970) is far in the past → no second trigger.
+        w.acknowledge();
+        assert!(!w.wait_for_change(Duration::from_millis(1)));
     }
 }
