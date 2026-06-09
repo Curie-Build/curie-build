@@ -27,6 +27,7 @@ _curie() {
                 'build:Compile, test, package JAR, and build Docker image'
                 'test:Compile and run tests (no JAR or Docker)'
                 'run:Build and run the project'
+                'dev:Run in development mode: exploded form, watch and restart on changes'
                 'clean:Remove the target/ build directory'
                 'native:Compile a GraalVM native binary'
                 'list:Show the workspace tree'
@@ -62,6 +63,10 @@ _curie() {
                 run)
                     _arguments \
                         '--no-docker[Run directly with java -jar (skip Docker)]' \
+                        '--offline[Use only locally cached artifacts]'
+                    ;;
+                dev)
+                    _arguments \
                         '--offline[Use only locally cached artifacts]'
                     ;;
                 clean)

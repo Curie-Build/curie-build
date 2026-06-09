@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dev mode · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/installation.html">Installation</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/dev.html" class="active">Dev mode</a></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Tools · curie dev</span>
+    <h1>Dev mode</h1>
+    <p class="lede"><code>curie dev</code> runs your application in <em>exploded form</em> — straight from compiled class files, without packaging a JAR — and restarts it automatically whenever a source file changes.</p>
+
+    <h2>Usage</h2>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>shell</span>
+      </header>
+<pre><span class="prompt">$</span> curie dev</pre>
+    </div>
+
+    <p>Pass arguments to the application after <code>--</code>:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>shell</span>
+      </header>
+<pre><span class="prompt">$</span> curie dev -- --server.port=9090 --spring.profiles.active=dev</pre>
+    </div>
+
+    <h2>What happens on startup</h2>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie dev</span>
+      </header>
+<pre><span class="dim">Dev hello v0.1.0</span>
+  Compile         3 source file(s)
+  ▸ Watching      com.example.Hello
+
+Hello, Curie.</pre>
+    </div>
+
+    <ol>
+      <li><strong>Compile</strong> — sources are compiled to <code>target/classes/</code>. No JAR is written.</li>
+      <li><strong>Launch</strong> — the JVM is started as <code>java -cp target/classes:&lt;deps&gt; com.example.Hello</code>.</li>
+      <li><strong>Watch</strong> — curie polls <code>src/</code> and <code>Curie.toml</code> every 300 ms for changes.</li>
+    </ol>
+
+    <h2>Automatic restart on change</h2>
+
+    <p>When any file under <code>src/</code> or <code>Curie.toml</code> is saved, curie:</p>
+    <ol>
+      <li>Kills the running JVM process.</li>
+      <li>Recompiles all sources.</li>
+      <li>Relaunches the application with the same classpath and arguments.</li>
+    </ol>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>after editing Hello.java</span>
+      </header>
+<pre>
+  ▸ Restarting    source changed
+  Compile         3 source file(s)  <span class="dim">[source changed]</span>
+  ▸ Watching      com.example.Hello
+
+Hello, updated Curie.</pre>
+    </div>
+
+    <p>If the recompile fails, the process stays down and curie keeps watching. Save the file again once the error is fixed — curie will retry immediately.</p>
+
+    <h2>Exploded form vs. JAR</h2>
+
+    <p><code>curie run</code> packages a self-contained JAR before launching; <code>curie dev</code> skips that step and points the JVM directly at <code>target/classes/</code>. The difference:</p>
+
+    <table>
+      <thead>
+        <tr><th></th><th><code>curie run</code></th><th><code>curie dev</code></th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Packages a JAR</td><td>Yes</td><td>No</td></tr>
+        <tr><td>Runs tests</td><td>Yes</td><td>No</td></tr>
+        <tr><td>Docker support</td><td>Yes</td><td>No</td></tr>
+        <tr><td>Classpath</td><td><code>-jar target/app.jar</code></td><td><code>-cp target/classes:deps…</code></td></tr>
+        <tr><td>Restart on change</td><td>No</td><td>Yes (300 ms)</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Remote debugging</h2>
+
+    <p>Pass the JVM debug agent via <code>--</code>. Java 21 and newer support the simplified form:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>shell</span>
+      </header>
+<pre><span class="prompt">$</span> curie dev -- -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005</pre>
+    </div>
+
+    <p>Attach your IDE's remote debugger to port 5005. The connection survives restarts because curie relaunches the JVM with the same arguments.</p>
+
+    <h2>Stopping</h2>
+
+    <p>Press <kbd>Ctrl-C</kbd>. The signal is forwarded to the application process, and both curie and the JVM exit.</p>
+
+    <h2>Flags</h2>
+
+    <table>
+      <thead>
+        <tr><th>Flag</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>--offline</code></td><td>Use only locally cached artifacts; do not access the network.</td></tr>
+        <tr><td><code>-- &lt;args&gt;</code></td><td>Arguments forwarded to the Java application.</td></tr>
+      </tbody>
+    </table>
+
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

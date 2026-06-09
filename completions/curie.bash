@@ -12,7 +12,7 @@ _curie() {
     local cur prev words cword
     _init_completion || return
 
-    local subcommands="build test run clean native list fmt deps publish update audit add remove inspect setup new init"
+    local subcommands="build test run dev clean native list fmt deps publish update audit add remove inspect setup new init"
 
     # Find the subcommand already typed (first non-flag word after 'curie')
     local subcommand=""
@@ -54,6 +54,9 @@ _curie() {
             ;;
         run)
             COMPREPLY=( $(compgen -W "--no-docker --offline" -- "$cur") )
+            ;;
+        dev)
+            COMPREPLY=( $(compgen -W "--offline" -- "$cur") )
             ;;
         clean)
             case "$prev" in

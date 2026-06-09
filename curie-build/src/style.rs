@@ -146,6 +146,11 @@ pub fn publish_step(label: &str, value: &str) -> String {
     line(CYAN, ICON_PUBLISH, label, value)
 }
 
+/// `curie dev` status line (watching / restarting).  Bold-green `▸`.
+pub fn dev_step(label: &str, value: &str) -> String {
+    line(BOLD_GREEN, ICON_RUN, label, value)
+}
+
 /// `curie new` / `curie init` file creation.  Bold green `✓`.
 pub fn created_file(value: &str) -> String {
     line(BOLD_GREEN, ICON_DONE, "Created", value)

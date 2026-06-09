@@ -10,7 +10,7 @@
 function __curie_needs_subcommand
     for i in (commandline -opc)
         if contains -- $i \
-                build test run clean native list fmt deps \
+                build test run dev clean native list fmt deps \
                 publish update audit add remove inspect setup new init
             return 1
         end
@@ -26,6 +26,7 @@ complete -c curie -l project -d "Path to project root (default: .)" -r
 complete -c curie -f -n __curie_needs_subcommand -a build   -d "Compile, test, package JAR, and build Docker image"
 complete -c curie -f -n __curie_needs_subcommand -a test    -d "Compile and run tests (no JAR or Docker)"
 complete -c curie -f -n __curie_needs_subcommand -a run     -d "Build and run the project"
+complete -c curie -f -n __curie_needs_subcommand -a dev     -d "Run in development mode: exploded form, watch and restart on changes"
 complete -c curie -f -n __curie_needs_subcommand -a clean   -d "Remove the target/ build directory"
 complete -c curie -f -n __curie_needs_subcommand -a native  -d "Compile a GraalVM native binary"
 complete -c curie -f -n __curie_needs_subcommand -a list    -d "Show the workspace tree"
@@ -55,6 +56,9 @@ complete -c curie -f -n "__fish_seen_subcommand_from test" -s j -l jobs -d "Max 
 # ── run ───────────────────────────────────────────────────────────────────────
 complete -c curie -f -n "__fish_seen_subcommand_from run" -l no-docker -d "Run directly with java -jar (skip Docker)"
 complete -c curie -f -n "__fish_seen_subcommand_from run" -l offline   -d "Use only locally cached artifacts"
+
+# ── dev ───────────────────────────────────────────────────────────────────────
+complete -c curie -f -n "__fish_seen_subcommand_from dev" -l offline -d "Use only locally cached artifacts"
 
 # ── clean ─────────────────────────────────────────────────────────────────────
 complete -c curie -f -n "__fish_seen_subcommand_from clean" -s j -l jobs -d "Max parallel members (default: CPU count)" -r

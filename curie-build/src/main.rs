@@ -3,6 +3,7 @@ mod api_search;
 mod api_search_ui;
 mod version_ui;
 mod audit;
+mod dev;
 mod setup;
 mod inspect_ui;
 mod build;
@@ -94,6 +95,17 @@ enum Cmd {
         #[arg(long)]
         no_docker: bool,
 
+        /// Do not access the network; use only locally cached artifacts
+        #[arg(long)]
+        offline: bool,
+
+        /// Arguments to pass to the application (after --)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compile and run in development mode: launches from class files (no JAR),
+    /// watches sources for changes, and restarts automatically on every edit
+    Dev {
         /// Do not access the network; use only locally cached artifacts
         #[arg(long)]
         offline: bool,
@@ -377,6 +389,18 @@ fn main() {
             }
             workspace::WorkspaceContext::Standalone(project) => {
                 run::run(project, run::RunOptions { no_docker, offline }, &args)
+            }
+        },
+        Cmd::Dev { offline, args } => match &ctx {
+            workspace::WorkspaceContext::WorkspaceRoot(_)
+            | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
+                "`curie dev` is ambiguous in a workspace.  Re-run with \
+                 --project <member> to choose one, e.g.\n  \
+                 curie --project examples/hello-world dev"
+            )),
+            workspace::WorkspaceContext::WorkspaceMember { .. }
+            | workspace::WorkspaceContext::Standalone(_) => {
+                dev::run_dev(&cli.project, dev::DevOptions { offline }, &args)
             }
         },
         Cmd::Clean { jobs } => {
