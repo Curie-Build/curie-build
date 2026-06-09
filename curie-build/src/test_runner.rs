@@ -81,6 +81,7 @@ pub fn build_runner_command(
     output_dir: &Path,
     include_classname: Option<&str>,
     enable_preview: bool,
+    agent_jars: &[std::path::PathBuf],
 ) -> Command {
     let classpath = format!(
         "{}{}{}{}{}",
@@ -92,6 +93,9 @@ pub fn build_runner_command(
     let mut cmd = Command::new("java");
     if enable_preview {
         cmd.arg("--enable-preview");
+    }
+    for agent in agent_jars {
+        cmd.arg(format!("-javaagent:{}", agent.display()));
     }
     cmd.arg("-cp").arg(&classpath)
         .arg("com.curie.runner.CurieTestRunner")

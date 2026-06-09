@@ -44,6 +44,7 @@ baseImage = "eclipse-temurin:21-jre-alpine"
 [test-dependencies]
 "org.springframework.boot:spring-boot-starter-test" = ""
 "org.spockframework:spock-spring"                   = "2.4-groovy-5.0"
+"org.mockito:mockito-core"                          = { version = "", javaAgent = true }
 
 [test]
 # Spring Boot 4 / Spock 2.4 both target JUnit Platform 1.x.

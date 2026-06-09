@@ -629,15 +629,18 @@ impl RepositoryEntry {
 /// # Shorthand: the value is just the version string.
 /// "com.example:foo" = "1.2.3"
 ///
-/// # Detailed: include an explicit repository id.
+/// # Detailed: extra knobs.
 /// "net.example:bar" = { version = "2.0.0", repository = "my-repo" }
+///
+/// # Mark as a Java agent — Curie adds -javaagent:<jar> to the JVM at runtime.
+/// "org.mockito:mockito-core" = { version = "", javaAgent = true }
 /// ```
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum DependencyValue {
     /// `"key" = "1.0.0"` shorthand form.
     Version(String),
-    /// `"key" = { version = "1.0.0", repository = "id" }` detailed form.
+    /// `"key" = { version = "1.0.0", ... }` detailed form.
     Detailed(DependencyDetailed),
 }
 
@@ -648,6 +651,11 @@ pub struct DependencyDetailed {
     /// `[[repositories]]` entry's `id`).  When absent, Maven Central is used.
     #[serde(default)]
     pub repository: Option<String>,
+    /// When `true`, the JAR is also passed as `-javaagent:<jar>` to the JVM
+    /// that runs the tests (for `[test-dependencies]`) or the application (for
+    /// `[dependencies]`).  Use this for Mockito on JDK 21+ and similar agents.
+    #[serde(default, rename = "javaAgent")]
+    pub java_agent: bool,
 }
 
 impl DependencyValue {
@@ -664,6 +672,14 @@ impl DependencyValue {
         match self {
             DependencyValue::Version(_) => None,
             DependencyValue::Detailed(d) => d.repository.as_deref(),
+        }
+    }
+
+    /// `true` when `javaAgent = true` is set in the detailed form.
+    pub fn java_agent(&self) -> bool {
+        match self {
+            DependencyValue::Version(_) => false,
+            DependencyValue::Detailed(d) => d.java_agent,
         }
     }
 }
@@ -886,6 +902,30 @@ impl Descriptor {
                 }
             }
         }
+        out
+    }
+
+    /// Coordinates of production `[dependencies]` entries marked `javaAgent = true`.
+    /// The returned strings are the TOML keys (`"group:artifact"`).
+    pub fn dep_java_agent_coords(&self) -> Vec<&str> {
+        self.dependencies
+            .iter()
+            .filter(|(_, v)| v.java_agent())
+            .map(|(k, _)| k.as_str())
+            .collect()
+    }
+
+    /// Coordinates of test-scoped deps marked `javaAgent = true`.
+    /// Includes both production deps (agents visible on the test classpath too)
+    /// and test-only deps from `[test-dependencies]`.
+    pub fn test_dep_java_agent_coords(&self) -> Vec<&str> {
+        let mut out = self.dep_java_agent_coords();
+        out.extend(
+            self.test_dependencies
+                .iter()
+                .filter(|(_, v)| v.java_agent())
+                .map(|(k, _)| k.as_str()),
+        );
         out
     }
 

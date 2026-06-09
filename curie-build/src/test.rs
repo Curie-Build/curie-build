@@ -545,6 +545,9 @@ pub fn run_tests(
     let runner_jar = crate::test_runner::ensure_runner_jar(&standalone_jar)
         .context("failed to prepare Curie test runner")?;
 
+    let agent_coords = desc.test_dep_java_agent_coords();
+    let agent_jars   = crate::java_agent::find_agent_jars(&agent_coords, &run_cp);
+
     let mut java = crate::test_runner::build_runner_command(
         &runner_jar,
         &standalone_jar,
@@ -553,6 +556,7 @@ pub fn run_tests(
         &output_dir,
         effective_filter,
         desc.java.preview_enabled(),
+        &agent_jars,
     );
 
     let status = crate::proc::spawn_cmd(&mut java)

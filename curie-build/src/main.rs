@@ -17,6 +17,7 @@ mod fmt;
 mod git;
 mod incremental;
 mod jar;
+mod java_agent;
 mod kt_stale;
 mod main_class;
 mod native;

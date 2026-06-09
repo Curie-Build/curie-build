@@ -165,6 +165,26 @@
 
     <p>See <a href="/docs/groovy.html">Groovy &amp; Spock</a> for the full Groovy/Spock reference.</p>
 
+    <h2>Java agents (Mockito)</h2>
+    <p>Mockito 5 uses the inline mock maker by default, which requires attaching
+    <code>mockito-core</code> as a JVM agent on JDK&nbsp;21+. Without it the JVM prints a
+    warning and future releases may refuse self-attachment entirely.</p>
+
+    <p>Mark any dependency with <code>javaAgent = true</code> in its detailed inline-table form
+    to have Curie pass it as <code>-javaagent:&lt;jar&gt;</code> automatically:</p>
+
+    <div class="code">
+      <header>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[test-dependencies]</span>
+<span class="kw">"org.springframework.boot:spring-boot-starter-test"</span> = <span class="str">""</span>
+<span class="kw">"org.mockito:mockito-core"</span> = { <span class="kw">version</span> = <span class="str">""</span>, <span class="kw">javaAgent</span> = <span class="kw">true</span> }</pre>
+    </div>
+
+    <p>The flag works on <code>[dependencies]</code> too, for agents that must be active at
+    application runtime (<code>curie run</code> / <code>curie dev</code>).</p>
+
     <h2>Incremental test runs</h2>
     <p>Curie stamps the test classes directory + the dep JARs + the test resources, and skips the JVM round-trip when none of those have changed since the last green run. A pure <code>curie test</code> on an unchanged tree exits in milliseconds with <code>Tests up to date</code>.</p>
 

@@ -39,6 +39,16 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
             java.arg("--enable-preview");
         }
 
+        let agent_coords = desc.dep_java_agent_coords();
+        let all_jars: Vec<_> = std::iter::once(&output.jar)
+            .chain(output.dep_jars.iter())
+            .cloned()
+            .collect();
+        let agent_jars = crate::java_agent::find_agent_jars(&agent_coords, &all_jars);
+        for agent in &agent_jars {
+            java.arg(format!("-javaagent:{}", agent.display()));
+        }
+
         // When running with deps (can't use -jar), build a full classpath.
         // Also include src/main/resources so resource loading via getResourceAsStream works.
         let resources_dir = output.resources_dir.as_deref();

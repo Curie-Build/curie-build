@@ -42,7 +42,10 @@ pub fn run_dev(project_root: &Path, opts: DevOptions, extra_args: &[String]) -> 
     let main = resolve_main_class(app, &compiled)?;
     let classpath = exploded_classpath(&compiled);
 
-    let mut proc = Some(spawn_app(&main, &classpath, enable_preview, extra_args)?);
+    let agent_coords = desc.dep_java_agent_coords();
+    let agent_jars = crate::java_agent::find_agent_jars(&agent_coords, &classpath);
+
+    let mut proc = Some(spawn_app(&main, &classpath, enable_preview, &agent_jars, extra_args)?);
     println!("{}", style::dev_step("Watching", &main));
     println!();
 
@@ -63,7 +66,7 @@ pub fn run_dev(project_root: &Path, opts: DevOptions, extra_args: &[String]) -> 
         match compile::compile(project_root, &desc, opts.offline, &[]) {
             Ok(new_compiled) => {
                 let new_cp = exploded_classpath(&new_compiled);
-                match spawn_app(&main, &new_cp, enable_preview, extra_args) {
+                match spawn_app(&main, &new_cp, enable_preview, &agent_jars, extra_args) {
                     Ok(child) => {
                         proc = Some(child);
                         println!("{}", style::dev_step("Watching", &main));
@@ -122,11 +125,15 @@ fn spawn_app(
     main: &str,
     classpath: &[PathBuf],
     enable_preview: bool,
+    agent_jars: &[PathBuf],
     extra_args: &[String],
 ) -> Result<Child> {
     let mut cmd = Command::new("java");
     if enable_preview {
         cmd.arg("--enable-preview");
+    }
+    for agent in agent_jars {
+        cmd.arg(format!("-javaagent:{}", agent.display()));
     }
     cmd.arg("-cp").arg(jar::classpath_string(classpath));
     cmd.arg(main);
