@@ -162,6 +162,8 @@ struct InspectState {
     grep_job_matches:  HashSet<usize>,
     /// Job indices whose build_id is older than the latest build_id seen across all jobs.
     stale_jobs:        HashSet<usize>,
+    /// Horizontal character offset for the log pane (scrolled with Left/Right).
+    h_scroll:          usize,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────
@@ -209,6 +211,7 @@ pub(crate) fn run_inspect_ui(
         pre_search_pane:  ActivePane::Members,
         grep_job_matches: HashSet::new(),
         stale_jobs,
+        h_scroll:         0,
     };
 
     // Auto-focus first failure; fall back to explicit preselect index.
@@ -528,6 +531,7 @@ fn apply_selection(state: &mut InspectState) {
 
     state.log_title = title;
     state.filter    = filter;
+    state.h_scroll  = 0;
 
     if let Some((job_idx, test_idx)) = test_ref {
         load_test_view(state, job_idx, test_idx);
@@ -925,13 +929,37 @@ fn render_log_block(f: &mut Frame, state: &InspectState, area: Rect) {
     let start = state.scroll.min(state.rows.len());
     let end   = (start + vis_h).min(state.rows.len());
 
+    let h_off = state.h_scroll;
     let lines: Vec<Line<'static>> = state.rows[start..end]
         .iter()
-        .map(|row| render_row(row, &state.jobs, &state.test_lines, &state.grep))
+        .map(|row| {
+            let line = render_row(row, &state.jobs, &state.test_lines, &state.grep);
+            trim_line_left(line, h_off)
+        })
         .collect();
 
     f.render_widget(block, area);
     f.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+/// Remove the first `offset` characters from a line's span list, preserving per-span styles.
+fn trim_line_left(line: Line<'static>, offset: usize) -> Line<'static> {
+    if offset == 0 { return line; }
+    let mut skip = offset;
+    let spans: Vec<Span<'static>> = line.spans.into_iter().filter_map(|span| {
+        let n = span.content.chars().count();
+        if skip >= n {
+            skip -= n;
+            None
+        } else if skip > 0 {
+            let trimmed: String = span.content.chars().skip(skip).collect();
+            skip = 0;
+            Some(Span::styled(trimmed, span.style))
+        } else {
+            Some(span)
+        }
+    }).collect();
+    Line::from(spans)
 }
 
 fn render_row(row: &Row, jobs: &[Job], test_lines: &[String], grep: &str) -> Line<'static> {
@@ -1054,6 +1082,8 @@ fn render_status_bar(f: &mut Frame, state: &InspectState, area: Rect) {
     f.render_widget(Paragraph::new(content).style(style), area);
 }
 
+const H_SCROLL_STEP: usize = 4;
+
 // ── Event loop ────────────────────────────────────────────────────────────
 
 fn event_loop(
@@ -1114,6 +1144,14 @@ fn handle_key(state: &mut InspectState, key: KeyEvent) -> bool {
         }
         KeyCode::Left if members_active => {
             collapse_test_node(state);
+        }
+
+        // Horizontal log scroll (log pane only; members pane uses Left/Right for tree).
+        KeyCode::Left => {
+            state.h_scroll = state.h_scroll.saturating_sub(H_SCROLL_STEP);
+        }
+        KeyCode::Right => {
+            state.h_scroll += H_SCROLL_STEP;
         }
 
         // Log scrolling.
@@ -1200,6 +1238,12 @@ fn handle_key_search(state: &mut InspectState, key: KeyEvent) -> bool {
         KeyCode::PageDown => {
             let max = state.rows.len().saturating_sub(1);
             state.scroll = (state.scroll + log_ph).min(max);
+        }
+        KeyCode::Left => {
+            state.h_scroll = state.h_scroll.saturating_sub(H_SCROLL_STEP);
+        }
+        KeyCode::Right => {
+            state.h_scroll += H_SCROLL_STEP;
         }
         _ => {}
     }
