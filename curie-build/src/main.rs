@@ -10,6 +10,7 @@ mod build;
 mod class_manifest;
 mod compile;
 mod config;
+mod coverage;
 mod deps;
 mod descriptor;
 mod docker;
@@ -87,6 +88,10 @@ enum Cmd {
         /// Do not access the network; use only locally cached artifacts
         #[arg(long)]
         offline: bool,
+
+        /// Collect code coverage via JaCoCo and produce a report under target/coverage/
+        #[arg(long)]
+        coverage: bool,
 
         /// Maximum number of workspace members to test in parallel (default: CPU count)
         #[arg(short = 'j', long)]
@@ -348,7 +353,7 @@ fn main() {
 
     let result = match cli.command {
         Cmd::Build { no_docker, no_native, offline, jobs } => {
-            let opts = build::BuildOptions { no_docker, no_native, offline };
+            let opts = build::BuildOptions { no_docker, no_native, offline, coverage: false };
             let jobs = resolve_jobs(jobs);
             match &ctx {
                 workspace::WorkspaceContext::WorkspaceRoot(root) => {
@@ -365,20 +370,20 @@ fn main() {
                 }
             }
         }
-        Cmd::Test { filter, offline, jobs } => {
+        Cmd::Test { filter, offline, coverage, jobs } => {
             let jobs = resolve_jobs(jobs);
             match &ctx {
                 workspace::WorkspaceContext::WorkspaceRoot(root) => {
-                    workspace::test_all(root, filter.as_deref(), offline, jobs)
+                    workspace::test_all(root, filter.as_deref(), offline, coverage, jobs)
                 }
                 workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
-                    workspace::test_one(workspace_root, *member_index, filter.as_deref(), offline, jobs)
+                    workspace::test_one(workspace_root, *member_index, filter.as_deref(), offline, coverage, jobs)
                 }
                 workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
-                    workspace::test_subtree(workspace_root, member_indices, filter.as_deref(), offline, jobs)
+                    workspace::test_subtree(workspace_root, member_indices, filter.as_deref(), offline, coverage, jobs)
                 }
                 workspace::WorkspaceContext::Standalone(project) => {
-                    test_single_module(project, filter.as_deref(), offline)
+                    test_single_module(project, filter.as_deref(), offline, coverage)
                 }
             }
         }
@@ -639,7 +644,7 @@ fn main() {
 /// Single-module variant of the test pipeline.  Lifted out of the inline
 /// match arm so the workspace fan-out can reuse the same conceptual flow
 /// (see `workspace::run_member_tests`) without duplicating the printf.
-fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: bool) -> anyhow::Result<()> {
+fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: bool, cli_coverage: bool) -> anyhow::Result<()> {
     let desc = descriptor::load(project)?;
     if desc.is_bom() {
         println!("{}", style::neutral("Tests", "skipped for BOM"));
@@ -651,6 +656,7 @@ fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: 
         desc.buildable_version()
     );
     let compiled = compile::compile(project, &desc, offline, &[])?;
+    let enable_coverage = cli_coverage || desc.test.coverage_enabled();
     test::run_tests(
         project,
         &desc,
@@ -662,6 +668,7 @@ fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: 
         compiled.test_resources_dir.as_deref(),
         filter,
         offline,
+        enable_coverage,
         &[],
     )?;
     Ok(())
@@ -695,6 +702,7 @@ fn native_single_module(project: &std::path::Path, offline: bool) -> anyhow::Res
         no_docker: true,
         no_native: true, // we call native::build_native ourselves below
         offline,
+        coverage: false,
     };
     let output = build::build_with_desc(project, &desc, opts, &[])?;
 
@@ -771,7 +779,7 @@ groupId = "com.example"
 "#,
         )
         .unwrap();
-        let result = test_single_module(dir.path(), None, true);
+        let result = test_single_module(dir.path(), None, true, false);
         assert!(result.is_ok(), "expected Ok for BOM project, got: {result:?}");
     }
 }

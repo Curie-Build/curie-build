@@ -18,7 +18,13 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
 
     let app = desc.application().expect("non-library has application");
 
-    let output = build::do_build(project_root, &desc, opts.offline, &[])?;
+    let build_opts = build::BuildOptions {
+        no_docker: opts.no_docker,
+        no_native: false,
+        offline: opts.offline,
+        coverage: false,
+    };
+    let output = build::do_build(project_root, &desc, build_opts, &[])?;
 
     // main_class is always Some for application projects after do_build succeeds.
     let main_class = output

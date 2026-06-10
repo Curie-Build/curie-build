@@ -56,7 +56,7 @@ pub fn run_deps_with_desc(
 
     let entries: Vec<DepEntry> = dep_map
         .iter()
-        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions() })
+        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None })
         .collect();
     let opts = ResolveOptions {
         default_repos: central_repos(),

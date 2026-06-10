@@ -198,7 +198,7 @@ fn resolve_components(
     let prod_entries: Vec<DepEntry> = desc
         .dependencies
         .iter()
-        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions() })
+        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None })
         .collect();
 
     let mut components: Vec<Component> = Vec::new();
@@ -231,7 +231,7 @@ fn resolve_components(
         let test_entries: Vec<DepEntry> = desc
             .test_dependencies
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions() })
+            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None })
             .collect();
         if !test_entries.is_empty() {
             let tree = curie_deps::resolve_tree(&test_entries, &opts_test)

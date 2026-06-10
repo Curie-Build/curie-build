@@ -57,6 +57,8 @@ pub struct PomDep {
     pub scope: Option<String>,
     /// The `<type>` element value (e.g. `"pom"` for BOM imports).
     pub type_: Option<String>,
+    /// `<classifier>` if declared on the dependency.
+    pub classifier: Option<String>,
     pub optional: bool,
     /// `<exclusions>` declared on this dependency: each entry is
     /// `(groupId, artifactId)`.  A wildcard `"*"` in either position
@@ -202,6 +204,7 @@ fn assign_dep_field(dep: &mut PomDep, field: &str, text: &str) {
         "version" => dep.version = Some(text.to_string()),
         "scope" => dep.scope = Some(text.to_string()),
         "type" => dep.type_ = Some(text.to_string()),
+        "classifier" => dep.classifier = Some(text.to_string()),
         "optional" => dep.optional = text.trim() == "true",
         _ => {}
     }
@@ -397,6 +400,7 @@ impl PomDep {
             version: None,
             scope: None,
             type_: None,
+            classifier: None,
             optional: false,
             exclusions: Vec::new(),
         }

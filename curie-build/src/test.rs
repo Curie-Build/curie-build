@@ -46,6 +46,7 @@ pub fn run_tests(
     test_resources_dir: Option<&Path>,
     filter: Option<&str>,
     offline: bool,
+    coverage: bool,
     extra_cp: &[PathBuf],
 ) -> Result<()> {
     // --- discover test sources -----------------------------------------------
@@ -97,7 +98,7 @@ pub fn run_tests(
         let pairs: Vec<DepEntry> = desc
             .test_dependencies
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions() })
+            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None })
             .collect();
 
         resolve(
@@ -134,6 +135,7 @@ pub fn run_tests(
                 version: spock_version,
                 repo_id: None,
                 exclusions: vec![],
+                classifier: None,
             }],
             &ResolveOptions {
                 default_repos: central_repos(),
@@ -159,8 +161,8 @@ pub fn run_tests(
         let kver = desc.kotlin.version();
         let kotlin_jars = resolve(
             &[
-                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None, exclusions: vec![] },
-                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None, exclusions: vec![] },
+                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None, exclusions: vec![], classifier: None },
+                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None, exclusions: vec![], classifier: None },
             ],
             &ResolveOptions {
                 default_repos: central_repos(),
@@ -189,8 +191,8 @@ pub fn run_tests(
         let kver = desc.kotlin.version();
         let kotlin_jars = resolve(
             &[
-                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None, exclusions: vec![] },
-                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None, exclusions: vec![] },
+                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None, exclusions: vec![], classifier: None },
+                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None, exclusions: vec![], classifier: None },
             ],
             &ResolveOptions {
                 default_repos: central_repos(),
@@ -221,7 +223,7 @@ pub fn run_tests(
     } else {
         let ap_entries: Vec<DepEntry> = test_ap_coords
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![] })
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None })
             .collect();
         let jars = resolve(
             &ap_entries,
@@ -246,7 +248,7 @@ pub fn run_tests(
                 .map(|(_, v)| *v)
                 .expect("on-cp coord must be in test_ap_coords");
             let single = resolve(
-                &[DepEntry { key: coord, version, repo_id: None, exclusions: vec![] }],
+                &[DepEntry { key: coord, version, repo_id: None, exclusions: vec![], classifier: None }],
                 &ResolveOptions {
                     default_repos: central_repos(),
                     named_repos: extra_repos.clone(),
@@ -430,7 +432,7 @@ pub fn run_tests(
                     // → resolve the Groovy runtime now.
                     use crate::compile::GROOVY_COORD;
                     resolve(
-                        &[DepEntry { key: GROOVY_COORD, version: desc.groovy.version(), repo_id: None, exclusions: vec![] }],
+                        &[DepEntry { key: GROOVY_COORD, version: desc.groovy.version(), repo_id: None, exclusions: vec![], classifier: None }],
                         &ResolveOptions {
                             default_repos: central_repos(),
                             named_repos: extra_repos.clone(),
@@ -549,6 +551,28 @@ pub fn run_tests(
     let agent_coords = desc.test_dep_java_agent_coords();
     let agent_jars   = crate::java_agent::find_agent_jars(&agent_coords, &run_cp);
 
+    // --- coverage: resolve JaCoCo agent and prepare exec output path ---------
+    let coverage_dir  = project_root.join("target").join("coverage");
+    let coverage_exec = coverage_dir.join("jacoco.exec");
+    let jacoco_agent_jar: Option<PathBuf> = if coverage {
+        std::fs::create_dir_all(&coverage_dir)
+            .context("failed to create target/coverage")?;
+        let default_repos = build::central_repos();
+        let extra_repos   = build::extra_repos(desc);
+        let jar = crate::coverage::resolve_agent_jar(&default_repos, &extra_repos, offline)
+            .context("failed to resolve JaCoCo agent for coverage")?;
+        crate::parallel::emit(&crate::style::resolve("Coverage", "JaCoCo agent"));
+        Some(jar)
+    } else {
+        None
+    };
+
+    // Build extra JVM args (e.g. JaCoCo agent for coverage).
+    let mut extra_jvm_args: Vec<String> = Vec::new();
+    if let Some(ref agent_jar) = jacoco_agent_jar {
+        extra_jvm_args.push(crate::coverage::agent_jvm_arg(agent_jar, &coverage_exec));
+    }
+
     let mut java = crate::test_runner::build_runner_command(
         &runner_jar,
         &standalone_jar,
@@ -558,6 +582,7 @@ pub fn run_tests(
         effective_filter,
         desc.java.preview_enabled(),
         &agent_jars,
+        &extra_jvm_args,
     );
 
     let status = crate::proc::spawn_cmd(&mut java)
@@ -569,11 +594,67 @@ pub fn run_tests(
         bail!("tests failed");
     }
 
+    // --- coverage report generation ------------------------------------------
+    if coverage && coverage_exec.exists() {
+        let default_repos = build::central_repos();
+        let extra_repos   = build::extra_repos(desc);
+        let cli_jar = crate::coverage::resolve_cli_jar(&default_repos, &extra_repos, offline)
+            .context("failed to resolve JaCoCo CLI for report generation")?;
+
+        // Collect source roots for the HTML report (production sources only).
+        let source_dirs = discover_source_roots(project_root);
+
+        let summary = crate::coverage::generate_report(
+            &cli_jar,
+            &coverage_exec,
+            classes_dir,
+            &source_dirs,
+            &coverage_dir,
+        )?;
+
+        let html_index = coverage_dir.join("html").join("index.html");
+        let rel_html = html_index
+            .strip_prefix(project_root)
+            .unwrap_or(&html_index);
+
+        crate::parallel::emit(&crate::style::active("Coverage", &summary.summary_line()));
+        crate::parallel::emit(&crate::style::info(
+            "Report",
+            &rel_html.display().to_string(),
+        ));
+    }
+
     // --- write stamp on success ----------------------------------------------
     std::fs::write(&stamp_path, b"")
         .with_context(|| format!("failed to write test stamp {}", stamp_path.display()))?;
 
     Ok(())
+}
+
+/// Collect production source root directories for the coverage report.
+///
+/// Checks Maven-style (`src/main/java`, `src/main/kotlin`, `src/main/groovy`)
+/// and flat-package source directories under `src/`.
+fn discover_source_roots(project_root: &Path) -> Vec<PathBuf> {
+    use crate::compile::flat_package_src_dirs;
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+
+    let maven_java = project_root.join("src").join("main").join("java");
+    if maven_java.exists() {
+        roots.push(maven_java);
+    }
+    let maven_kotlin = project_root.join("src").join("main").join("kotlin");
+    if maven_kotlin.exists() {
+        roots.push(maven_kotlin);
+    }
+    let maven_groovy = project_root.join("src").join("main").join("groovy");
+    if maven_groovy.exists() {
+        roots.push(maven_groovy);
+    }
+    roots.extend(flat_package_src_dirs(project_root));
+
+    roots
 }
 
 // ---------------------------------------------------------------------------
@@ -772,7 +853,7 @@ fn resolve_standalone(
     // coord is "group:artifact:version" — split off the version for the resolver.
     // The resolver takes (key, version) pairs where key = "group:artifact".
     let jars = resolve(
-        &[DepEntry { key: JUNIT_STANDALONE_COORD, version: junit_version, repo_id: None, exclusions: vec![] }],
+        &[DepEntry { key: JUNIT_STANDALONE_COORD, version: junit_version, repo_id: None, exclusions: vec![], classifier: None }],
         &ResolveOptions {
             default_repos: central_repos(),
             named_repos: extra_repos.to_vec(),

@@ -336,6 +336,16 @@ pub struct Test {
     /// `sourceCompatibility`, `mainClass`, `baseImage`, etc.
     #[serde(rename = "junitPlatformVersion", default)]
     pub junit_platform_version: Option<String>,
+    /// When `true`, test runs collect code coverage via JaCoCo and produce
+    /// a report under `target/coverage/`.  Can be enabled permanently in
+    /// `Curie.toml` or per-invocation with `curie test --coverage`.
+    ///
+    /// ```toml
+    /// [test]
+    /// coverage = true
+    /// ```
+    #[serde(default)]
+    pub coverage: Option<bool>,
 }
 
 impl Test {
@@ -354,6 +364,12 @@ impl Test {
     /// runner to decide whether to override the version for Spock compatibility.
     pub fn junit_platform_version_is_user_set(&self) -> bool {
         self.junit_platform_version.is_some()
+    }
+
+    /// Resolved coverage flag (default `false`).  `true` when the user set
+    /// `coverage = true` in `[test]` (or inherited it from a workspace).
+    pub fn coverage_enabled(&self) -> bool {
+        self.coverage.unwrap_or(false)
     }
 }
 
@@ -2394,5 +2410,69 @@ path = "vendor/b"
             items[0].get("path").and_then(|v| v.as_str()),
             Some("vendor/a")
         );
+    }
+
+    // ── coverage ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn coverage_defaults_to_false() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(!d.test.coverage_enabled(), "coverage must default to false");
+        assert!(d.test.coverage.is_none(), "absent key must stay None for inheritance");
+    }
+
+    #[test]
+    fn coverage_can_be_enabled() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[test]
+coverage = true
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.test.coverage_enabled());
+        assert_eq!(d.test.coverage, Some(true));
+    }
+
+    #[test]
+    fn coverage_explicit_false_is_distinct_from_absent() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[test]
+coverage = false
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(!d.test.coverage_enabled());
+        assert_eq!(d.test.coverage, Some(false), "explicit false must be Some(false), not None");
+    }
+
+    #[test]
+    fn coverage_coexists_with_junit_version() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[test]
+junitPlatformVersion = "6.0.3"
+coverage = true
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.test.coverage_enabled());
+        assert_eq!(d.test.junit_platform_version(), "6.0.3");
     }
 }

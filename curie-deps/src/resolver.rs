@@ -102,6 +102,10 @@ pub struct DepEntry<'a> {
     /// transitively: any transitive dependency matching an exclusion is
     /// omitted from the resolved closure.
     pub exclusions: Vec<&'a str>,
+    /// Optional classifier (e.g. Some("runtime") for JaCoCo agent, Some("sources")).
+    /// When set, the resolved JAR filename will include `-classifier`.
+    /// Most user dependencies do not need this.
+    pub classifier: Option<&'a str>,
 }
 
 /// Internal BFS work item carrying per-artifact repository context.
@@ -214,7 +218,7 @@ fn is_version_range(version: &str) -> bool {
 }
 
 fn curie_toml_gav() -> Gav {
-    Gav { group: String::new(), artifact: "Curie.toml".to_string(), version: String::new() }
+    Gav { group: String::new(), artifact: "Curie.toml".to_string(), version: String::new(), classifier: None }
 }
 
 fn format_range_error(violations: &[RangeViolation]) -> String {
@@ -268,6 +272,7 @@ fn merge_parent_chain(
             group: parent_ref.group_id.clone(),
             artifact: parent_ref.artifact_id.clone(),
             version: parent_ref.version.clone(),
+            classifier: None,
         };
 
         let pom_path = match ensure_artifact(&parent_gav, repos, client, ArtifactKind::Pom, offline, None, None) {
@@ -362,6 +367,7 @@ fn fetch_and_parse_pom(
                 group: bom_ref.group_id.clone(),
                 artifact: bom_ref.artifact_id.clone(),
                 version,
+                classifier: None,
             };
             // Fetch the BOM POM directly without further BOM-import expansion.
             if let Ok(path) = ensure_artifact(&bom_gav, repos, client, ArtifactKind::Pom, offline, None, None) {
@@ -500,6 +506,7 @@ pub fn resolve_boms(
                             group: bom_ref.group_id.clone(),
                             artifact: bom_ref.artifact_id.clone(),
                             version: v,
+                            classifier: None,
                         };
                         queue.push_front(BomWork::Fetch(nested_gav));
                     }
@@ -589,7 +596,7 @@ pub fn resolve_tree(
             (central.clone(), central.clone())
         };
 
-        let gav = Gav::from_key_version(dep.key, &resolved_version)?;
+        let gav = Gav::from_key_version_classifier(dep.key, &resolved_version, dep.classifier)?;
         let ga = format!("{}:{}", gav.group, gav.artifact);
         let user_exclusions = parse_exclusion_strings(&dep.exclusions);
         if visited.insert(ga) {
@@ -650,7 +657,12 @@ pub fn resolve_tree(
                     }
 
                     let child_exclusions = merge_exclusions(&work.exclusions, &dep.exclusions);
-                    let child_gav = Gav { group, artifact, version: raw_version };
+                    let child_gav = Gav {
+                        group,
+                        artifact,
+                        version: raw_version,
+                        classifier: dep.classifier.clone(),
+                    };
                     visited.insert(ga_key);
                     next_level.push(BfsWork {
                         fetch_repos: work.child_repos.clone(),
@@ -702,7 +714,8 @@ pub fn resolve_declared_gavs(
         } else {
             dep.version.to_string()
         };
-        out.push(Gav::from_key_version(dep.key, &version)?);
+        let g = Gav::from_key_version_classifier(dep.key, &version, dep.classifier)?;
+        out.push(g);
     }
     Ok(out)
 }
@@ -800,7 +813,13 @@ pub fn resolve(
                 (central.clone(), central.clone())
             };
 
-        let gav = Gav::from_key_version(dep.key, &resolved_version)?;
+        let gav = if let Some(c) = dep.classifier {
+            let mut g = Gav::from_key_version(dep.key, &resolved_version)?;
+            g.classifier = Some(c.to_string());
+            g
+        } else {
+            Gav::from_key_version(dep.key, &resolved_version)?
+        };
         let ga = format!("{}:{}", gav.group, gav.artifact);
         let user_exclusions = parse_exclusion_strings(&dep.exclusions);
         if visited.insert(ga) {
@@ -872,7 +891,12 @@ pub fn resolve(
                     }
 
                     let child_exclusions = merge_exclusions(&work.exclusions, &dep.exclusions);
-                    let child_gav = Gav { group, artifact, version: raw_version };
+                    let child_gav = Gav {
+                        group,
+                        artifact,
+                        version: raw_version,
+                        classifier: dep.classifier.clone(),
+                    };
                     visited.insert(ga_key);
                     // Transitives inherit the parent's child_repos.
                     next_level.push(BfsWork {
@@ -1535,6 +1559,7 @@ mod tests {
             group: group.to_string(),
             artifact: artifact.to_string(),
             version: version.to_string(),
+            classifier: None,
         };
         let rel = gav.relative_pom_path();
         let path = home_dir.join(".m2").join("repository").join(&rel);
@@ -1643,7 +1668,7 @@ mod tests {
             &[("org.foo", "y", "2.0")],
             &[("com.example", "bom-a", "1.0.0")],
         );
-        let bom_a = Gav { group: "com.example".into(), artifact: "bom-a".into(), version: "1.0.0".into() };
+        let bom_a = Gav { group: "com.example".into(), artifact: "bom-a".into(), version: "1.0.0".into(), classifier: None };
         let result = run_resolve_boms(dir.path(), &[bom_a]).unwrap();
         assert_eq!(result.get("org.foo:x").map(String::as_str), Some("1.0"));
         assert_eq!(result.get("org.foo:y").map(String::as_str), Some("2.0"));
@@ -1709,6 +1734,7 @@ mod tests {
             group: group.to_string(),
             artifact: artifact.to_string(),
             version: version.to_string(),
+            classifier: None,
         };
         let m2 = home_dir.join(".m2").join("repository");
 
@@ -1720,6 +1746,43 @@ mod tests {
         // Empty JAR (placeholder — resolver only checks existence + checksum).
         let jar_path = m2.join(gav.relative_path());
         write_with_sidecar(&jar_path, b"");
+
+        gav
+    }
+
+    /// Write a fake classified artifact (e.g. with "runtime" classifier).
+    /// The JAR filename will include the classifier suffix.
+    /// Returns the corresponding Gav (with classifier set).
+    fn write_fake_classified_artifact(
+        home_dir: &std::path::Path,
+        group: &str,
+        artifact: &str,
+        version: &str,
+        classifier: &str,
+        deps: &[(&str, &str, &str)],
+    ) -> Gav {
+        let key = format!("{}:{}", group, artifact);
+        let mut gav = Gav::from_key_version(&key, version).unwrap();
+        gav.classifier = Some(classifier.to_string());
+        let m2 = home_dir.join(".m2").join("repository");
+
+        // POM is always for the main GAV (no classifier in POM filename).
+        let pom_gav = Gav {
+            group: group.to_string(),
+            artifact: artifact.to_string(),
+            version: version.to_string(),
+            classifier: None,
+        };
+        let pom_path = m2.join(pom_gav.relative_pom_path());
+        let pom_xml = make_pom(group, artifact, version, deps);
+        write_with_sidecar(&pom_path, pom_xml.as_bytes());
+
+        // Classified JAR.
+        let jar_path = m2.join(gav.relative_path());
+        if let Some(parent) = jar_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        write_with_sidecar(&jar_path, b"fake-classified-jar");
 
         gav
     }
@@ -1741,7 +1804,7 @@ mod tests {
         // cache miss produces an immediate error rather than a network attempt.
         let entries: Vec<DepEntry> = deps
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![] })
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None })
             .collect();
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -1941,7 +2004,7 @@ mod tests {
 
         // grp:lib 1.0 depends on foo:bar 1.0 with an exclusion on foo:baz.
         // Build the POM manually to include <exclusions>.
-        let lib_gav = Gav { group: "grp".into(), artifact: "lib".into(), version: "1.0".into() };
+        let lib_gav = Gav { group: "grp".into(), artifact: "lib".into(), version: "1.0".into(), classifier: None };
         let m2 = dir.path().join(".m2").join("repository");
         let pom_xml = r#"<?xml version="1.0"?>
 <project>
@@ -1997,6 +2060,7 @@ mod tests {
             version: "1.0",
             repo_id: None,
             exclusions: vec!["foo:baz"],
+            classifier: None,
         }];
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -2040,6 +2104,7 @@ mod tests {
             version: "1.0",
             repo_id: None,
             exclusions: vec!["*:*"],
+            classifier: None,
         }];
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -2080,6 +2145,7 @@ mod tests {
             version: "1.0",
             repo_id: None,
             exclusions: vec!["foo:leaf"],
+            classifier: None,
         }];
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -2426,7 +2492,7 @@ mod tests {
 
         let entries: Vec<DepEntry> = deps
             .iter()
-            .map(|(k, v, r)| DepEntry { key: k, version: v, repo_id: *r, exclusions: vec![] })
+            .map(|(k, v, r)| DepEntry { key: k, version: v, repo_id: *r, exclusions: vec![], classifier: None })
             .collect();
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -2478,7 +2544,7 @@ mod tests {
             bom_imports: vec![],
             offline: true, // cache-hit path; no network call made
         };
-        let entries = [DepEntry { key: "foo:bar", version: "1.0", repo_id: None, exclusions: vec![] }];
+        let entries = [DepEntry { key: "foo:bar", version: "1.0", repo_id: None, exclusions: vec![], classifier: None }];
         let result = resolve(&entries, &opts).unwrap();
         assert_eq!(result.len(), 1, "should find cached artifact regardless of mirror URL");
 
@@ -2566,7 +2632,7 @@ mod tests {
 
         let entries: Vec<DepEntry> = deps
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![] })
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None })
             .collect();
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -2751,5 +2817,57 @@ mod tests {
             msg.contains("[1.0]"),
             "expected [1.0] range notation in error, got {:?}", msg,
         );
+    }
+
+    #[test]
+    fn resolve_respects_classifier_on_declared_dep_entry() {
+        // Declared dep with classifier should fetch the -classifier.jar
+        // using the updated relative_path logic. Uses a pre-written classified
+        // artifact (no network).
+        let dir = tempfile::tempdir().unwrap();
+        let _gav = write_fake_classified_artifact(
+            dir.path(),
+            "org.jacoco",
+            "org.jacoco.agent",
+            "0.8.13",
+            "runtime",
+            &[], // no further deps for the fake
+        );
+
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", dir.path().to_str().unwrap());
+
+        let entries = [DepEntry {
+            key: "org.jacoco:org.jacoco.agent",
+            version: "0.8.13",
+            repo_id: None,
+            exclusions: vec![],
+            classifier: Some("runtime"),
+        }];
+        let opts = ResolveOptions {
+            default_repos: vec![],
+            named_repos: vec![],
+            progress: false,
+            bom_imports: vec![],
+            offline: true,
+        };
+        let result = resolve(&entries, &opts).unwrap();
+
+        if let Some(h) = prev_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        assert_eq!(result.len(), 1, "expected exactly the classified jar");
+        let path = &result[0];
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(
+            name.contains("runtime"),
+            "expected runtime classifier in filename, got {}",
+            name
+        );
+        assert!(path.exists());
     }
 }

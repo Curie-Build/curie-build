@@ -306,6 +306,9 @@ fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
     if member.test.junit_platform_version.is_none() {
         member.test.junit_platform_version = ws.test.junit_platform_version.clone();
     }
+    if member.test.coverage.is_none() {
+        member.test.coverage = ws.test.coverage;
+    }
     if member.kotlin.version.is_none() {
         member.kotlin.version = ws.kotlin.version.clone();
     }
@@ -1716,5 +1719,55 @@ mod tests {
     fn rel_from_self() {
         let p = PathBuf::from("/a/b");
         assert_eq!(rel_from(&p, &p), ".");
+    }
+
+    #[test]
+    fn coverage_inherits_from_workspace_when_member_omits() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\n[test]\ncoverage = true\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
+        ).unwrap();
+        assert!(
+            ws.members[0].descriptor.test.coverage_enabled(),
+            "member must inherit coverage=true from workspace",
+        );
+        assert_eq!(ws.members[0].descriptor.test.coverage, Some(true));
+    }
+
+    #[test]
+    fn coverage_member_explicit_false_overrides_workspace_true() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\n[test]\ncoverage = true\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                    [test]\ncoverage = false\n")],
+        ).unwrap();
+        assert!(
+            !ws.members[0].descriptor.test.coverage_enabled(),
+            "member coverage=false must override workspace coverage=true",
+        );
+        assert_eq!(ws.members[0].descriptor.test.coverage, Some(false));
+    }
+
+    #[test]
+    fn coverage_defaults_to_false_when_neither_sets_it() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
+        ).unwrap();
+        assert!(
+            !ws.members[0].descriptor.test.coverage_enabled(),
+            "coverage must default to false when neither workspace nor member sets it",
+        );
+    }
+
+    #[test]
+    fn coverage_inherits_alongside_junit_version() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\n[test]\njunitPlatformVersion = \"5.10.0\"\ncoverage = true\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
+        ).unwrap();
+        let t = &ws.members[0].descriptor.test;
+        assert!(t.coverage_enabled());
+        assert_eq!(t.junit_platform_version(), "5.10.0");
     }
 }

@@ -73,6 +73,7 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
             no_docker: true, // publishing never builds docker
             no_native: true, // publishing never builds native binaries
             offline: false,
+            coverage: false,
         },
         &[],
     )
@@ -527,7 +528,7 @@ fn resolve_declared_dep_gavs(desc: &Descriptor) -> Result<Vec<Gav>> {
     let entries: Vec<DepEntry> = desc
         .dependencies
         .iter()
-        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions() })
+        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None })
         .collect();
     let opts = ResolveOptions {
         default_repos: crate::build::central_repos(),

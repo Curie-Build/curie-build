@@ -20,6 +20,7 @@ pub struct BuildOptions {
     pub no_docker: bool,
     pub no_native: bool,
     pub offline: bool,
+    pub coverage: bool,
 }
 
 /// Output paths produced by a successful build.
@@ -66,7 +67,7 @@ pub fn build_with_desc(
         );
     }
 
-    let output = do_build(project_root, desc, opts.offline, extra_cp)?;
+    let output = do_build(project_root, desc, opts, extra_cp)?;
 
     crate::parallel::emit(&crate::style::done(
         &output.jar
@@ -144,9 +145,10 @@ fn build_bom(project_root: &Path, desc: &descriptor::Descriptor) -> Result<Build
 pub fn do_build(
     project_root: &Path,
     desc: &descriptor::Descriptor,
-    offline: bool,
+    opts: BuildOptions,
     extra_cp: &[PathBuf],
 ) -> Result<BuildOutput> {
+    let offline = opts.offline;
     let compiled = compile(project_root, desc, offline, extra_cp)?;
 
     // --- run tests before packaging ------------------------------------------
@@ -161,6 +163,7 @@ pub fn do_build(
         compiled.test_resources_dir.as_deref(),
         None,
         offline,
+        opts.coverage || desc.test.coverage_enabled(),
         extra_cp,
     )?;
 

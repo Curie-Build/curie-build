@@ -82,6 +82,7 @@ pub fn build_runner_command(
     include_classname: Option<&str>,
     enable_preview: bool,
     agent_jars: &[std::path::PathBuf],
+    extra_jvm_args: &[String],
 ) -> Command {
     let classpath = format!(
         "{}{}{}{}{}",
@@ -96,6 +97,9 @@ pub fn build_runner_command(
     }
     for agent in agent_jars {
         cmd.arg(format!("-javaagent:{}", agent.display()));
+    }
+    for arg in extra_jvm_args {
+        cmd.arg(arg);
     }
     cmd.arg("-cp").arg(&classpath)
         .arg("com.curie.runner.CurieTestRunner")
