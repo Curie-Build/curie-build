@@ -213,8 +213,16 @@ pub(crate) fn write_deterministic_jar(
             } else {
                 rel
             };
-            // Skip META-INF from resources — we already wrote the manifest.
-            if zip_path.starts_with("META-INF") {
+            // Skip exactly the entries we already wrote ourselves above: the
+            // META-INF/ directory entry, MANIFEST.MF (always regenerated),
+            // and build-info.properties (only when we generated one).
+            // Everything else under META-INF/ — service loader
+            // registrations, annotation-processor metadata, native-image
+            // configs, Kotlin module files, etc. — is preserved.
+            if zip_path == "META-INF/" || zip_path == "META-INF/MANIFEST.MF" {
+                continue;
+            }
+            if build_info.is_some() && zip_path == "META-INF/build-info.properties" {
                 continue;
             }
             // Class files take precedence; skip if already inserted from classes.
@@ -327,6 +335,47 @@ mod tests {
             .collect()
     }
 
+    /// Read a single ZIP entry's contents as a UTF-8 string.
+    fn zip_entry_content(bytes: &[u8], name: &str) -> String {
+        use std::io::{Cursor, Read};
+        let cursor = Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor).unwrap();
+        let mut entry = archive.by_name(name).unwrap();
+        let mut content = String::new();
+        entry.read_to_string(&mut content).unwrap();
+        content
+    }
+
+    /// Helper: write a JAR with a `Foo.class` in `classes_dir` plus the given
+    /// `(rel_path, content)` files under `resources_dir`, and return the raw
+    /// bytes so we can inspect the ZIP entries.
+    fn jar_bytes_with_resources(build_info: Option<&str>, resource_files: &[(&str, &[u8])]) -> Vec<u8> {
+        let tmp = tempfile::tempdir().unwrap();
+        let classes_dir = tmp.path().join("classes");
+        std::fs::create_dir_all(&classes_dir).unwrap();
+        std::fs::write(classes_dir.join("Foo.class"), b"\xca\xfe\xba\xbe").unwrap();
+
+        let resources_dir = tmp.path().join("resources");
+        for (rel_path, content) in resource_files {
+            let full = resources_dir.join(rel_path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, content).unwrap();
+        }
+
+        let jar_path = tmp.path().join("out.jar");
+        write_deterministic_jar(
+            &jar_path,
+            &classes_dir,
+            Some(&resources_dir),
+            None,
+            &[],
+            build_info,
+        )
+        .unwrap();
+
+        std::fs::read(&jar_path).unwrap()
+    }
+
     #[test]
     fn no_build_info_when_none() {
         let bytes = jar_bytes_with_build_info(None);
@@ -375,5 +424,87 @@ mod tests {
             props_pos > manifest_pos,
             "build-info.properties ({props_pos}) must come after MANIFEST.MF ({manifest_pos})",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // META-INF/** resources from classes_dir/resources_dir
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn meta_inf_services_resource_is_preserved() {
+        let bytes = jar_bytes_with_resources(
+            None,
+            &[("META-INF/services/java.sql.Driver", b"com.example.MyDriver\n")],
+        );
+        let names = zip_entry_names(&bytes);
+        assert!(
+            names.iter().any(|n| n == "META-INF/services/java.sql.Driver"),
+            "META-INF/services/java.sql.Driver must be preserved; entries: {:?}",
+            names,
+        );
+        assert_eq!(
+            zip_entry_content(&bytes, "META-INF/services/java.sql.Driver"),
+            "com.example.MyDriver\n",
+        );
+    }
+
+    #[test]
+    fn manifest_mf_resource_is_not_duplicated() {
+        let bytes = jar_bytes_with_resources(None, &[("META-INF/MANIFEST.MF", b"Custom: yes\r\n")]);
+        let names = zip_entry_names(&bytes);
+        let count = names.iter().filter(|n| *n == "META-INF/MANIFEST.MF").count();
+        assert_eq!(count, 1, "expected exactly one MANIFEST.MF entry; entries: {:?}", names);
+        let manifest = zip_entry_content(&bytes, "META-INF/MANIFEST.MF");
+        assert!(
+            manifest.contains("Manifest-Version: 1.0"),
+            "the generated manifest must win; got: {manifest:?}",
+        );
+        assert!(
+            !manifest.contains("Custom: yes"),
+            "the user-provided MANIFEST.MF resource must not leak through; got: {manifest:?}",
+        );
+    }
+
+    #[test]
+    fn build_info_resource_is_not_duplicated_when_generated() {
+        let bytes = jar_bytes_with_resources(
+            Some("git.commit.id=generated\n"),
+            &[("META-INF/build-info.properties", b"git.commit.id=user-provided\n")],
+        );
+        let names = zip_entry_names(&bytes);
+        let count = names
+            .iter()
+            .filter(|n| *n == "META-INF/build-info.properties")
+            .count();
+        assert_eq!(count, 1, "expected exactly one build-info.properties entry; entries: {:?}", names);
+        assert_eq!(
+            zip_entry_content(&bytes, "META-INF/build-info.properties"),
+            "git.commit.id=generated\n",
+            "the generated build-info.properties must win",
+        );
+    }
+
+    #[test]
+    fn build_info_resource_preserved_when_not_generated() {
+        let bytes = jar_bytes_with_resources(
+            None,
+            &[("META-INF/build-info.properties", b"git.commit.id=user-provided\n")],
+        );
+        assert_eq!(
+            zip_entry_content(&bytes, "META-INF/build-info.properties"),
+            "git.commit.id=user-provided\n",
+            "with no generated build_info, the user's resource must be preserved",
+        );
+    }
+
+    #[test]
+    fn meta_inf_root_directory_entry_is_not_duplicated() {
+        let bytes = jar_bytes_with_resources(
+            None,
+            &[("META-INF/services/java.sql.Driver", b"com.example.MyDriver\n")],
+        );
+        let names = zip_entry_names(&bytes);
+        let count = names.iter().filter(|n| *n == "META-INF/").count();
+        assert_eq!(count, 1, "expected exactly one META-INF/ directory entry; entries: {:?}", names);
     }
 }
