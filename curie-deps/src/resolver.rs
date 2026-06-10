@@ -946,7 +946,7 @@ pub fn resolve(
     let missing: u64 = ordered_gavs
         .iter()
         .filter(|(g, _)| {
-            g.local_cache_path()
+            g.local_repository_path()
                 .map(|p| !p.exists())
                 .unwrap_or(false)
         })
@@ -1164,8 +1164,8 @@ fn ensure_artifact(
     thread_pb: Option<&ProgressBar>,
 ) -> Result<PathBuf> {
     let local_path = match kind {
-        ArtifactKind::Jar => gav.local_cache_path()?,
-        ArtifactKind::Pom => gav.local_pom_cache_path()?,
+        ArtifactKind::Jar => gav.local_repository_path()?,
+        ArtifactKind::Pom => gav.pom_local_repository_path()?,
     };
     let relative = match kind {
         ArtifactKind::Jar => gav.relative_path(),
@@ -1730,6 +1730,19 @@ mod tests {
         version: &str,
         deps: &[(&str, &str, &str)],
     ) -> Gav {
+        write_fake_artifact_with_pom(home_dir, group, artifact, version, &make_pom(group, artifact, version, deps))
+    }
+
+    /// Like [`write_fake_artifact`], but with caller-supplied POM XML — for
+    /// tests that need a `<parent>` reference or `<properties>` beyond what
+    /// [`make_pom`] covers.
+    fn write_fake_artifact_with_pom(
+        home_dir: &std::path::Path,
+        group: &str,
+        artifact: &str,
+        version: &str,
+        pom_xml: &str,
+    ) -> Gav {
         let gav = Gav {
             group: group.to_string(),
             artifact: artifact.to_string(),
@@ -1740,7 +1753,6 @@ mod tests {
 
         // POM (+ sidecar).
         let pom_path = m2.join(gav.relative_pom_path());
-        let pom_xml = make_pom(group, artifact, version, deps);
         write_with_sidecar(&pom_path, pom_xml.as_bytes());
 
         // Empty JAR (placeholder — resolver only checks existence + checksum).
@@ -1748,6 +1760,80 @@ mod tests {
         write_with_sidecar(&jar_path, b"");
 
         gav
+    }
+
+    /// Write a POM-only artifact (no JAR) into the fake local Maven cache —
+    /// for parent POMs, which `merge_parent_chain` fetches but never needs a
+    /// JAR for.
+    fn write_fake_pom(home_dir: &std::path::Path, group: &str, artifact: &str, version: &str, pom_xml: &str) -> Gav {
+        let gav = Gav {
+            group: group.to_string(),
+            artifact: artifact.to_string(),
+            version: version.to_string(),
+            classifier: None,
+        };
+        let pom_path = home_dir.join(".m2").join("repository").join(gav.relative_pom_path());
+        write_with_sidecar(&pom_path, pom_xml.as_bytes());
+        gav
+    }
+
+    /// Build a POM with `<properties>` and no dependencies — used as a
+    /// parent POM whose properties are inherited by a child's `<parent>`.
+    fn make_pom_with_properties(group: &str, artifact: &str, version: &str, properties: &[(&str, &str)]) -> String {
+        let mut xml = format!(
+            r#"<?xml version="1.0"?>
+<project>
+  <groupId>{group}</groupId>
+  <artifactId>{artifact}</artifactId>
+  <version>{version}</version>
+  <properties>
+"#
+        );
+        for (k, v) in properties {
+            xml.push_str(&format!("    <{k}>{v}</{k}>\n"));
+        }
+        xml.push_str("  </properties>\n</project>");
+        xml
+    }
+
+    /// Build a POM with a `<parent>` reference and a flat `<dependencies>`
+    /// list, where each dependency's version string is used verbatim — so
+    /// it may contain an unresolved `${...}` placeholder for testing
+    /// property inheritance through the parent chain.
+    fn make_pom_with_parent(
+        group: &str,
+        artifact: &str,
+        version: &str,
+        parent: (&str, &str, &str),
+        deps: &[(&str, &str, &str)],
+    ) -> String {
+        let (parent_group, parent_artifact, parent_version) = parent;
+        let mut xml = format!(
+            r#"<?xml version="1.0"?>
+<project>
+  <parent>
+    <groupId>{parent_group}</groupId>
+    <artifactId>{parent_artifact}</artifactId>
+    <version>{parent_version}</version>
+  </parent>
+  <groupId>{group}</groupId>
+  <artifactId>{artifact}</artifactId>
+  <version>{version}</version>
+  <dependencies>
+"#
+        );
+        for (g, a, v) in deps {
+            xml.push_str(&format!(
+                "    <dependency>\
+\n      <groupId>{g}</groupId>\
+\n      <artifactId>{a}</artifactId>\
+\n      <version>{v}</version>\
+\n      <scope>compile</scope>\
+\n    </dependency>\n"
+            ));
+        }
+        xml.push_str("  </dependencies>\n</project>");
+        xml
     }
 
     /// Write a fake classified artifact (e.g. with "runtime" classifier).
@@ -1985,6 +2071,37 @@ mod tests {
         assert!(
             !gavs.contains(&"foo:bar:9.9.9".to_string()),
             "BOM-pinned version must lose to user's explicit version: {:?}", gavs,
+        );
+    }
+
+    #[test]
+    fn dependency_version_from_parent_pom_property_is_resolved() {
+        // my-app's POM declares <version>${guava.version}</version> for its
+        // guava dependency, but `guava.version` is only defined in its
+        // <parent> POM's <properties> — not in my-app's own POM.
+        // merge_parent_chain must merge the parent's properties into my-app's
+        // before resolve_transitive_version resolves the placeholder.
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "com.google.guava", "guava", "30.0-jre", &[]);
+        write_fake_pom(
+            dir.path(), "com.example", "parent-pom", "1.0",
+            &make_pom_with_properties("com.example", "parent-pom", "1.0", &[("guava.version", "30.0-jre")]),
+        );
+        write_fake_artifact_with_pom(
+            dir.path(), "com.example", "my-app", "1.0",
+            &make_pom_with_parent(
+                "com.example", "my-app", "1.0",
+                ("com.example", "parent-pom", "1.0"),
+                &[("com.google.guava", "guava", "${guava.version}")],
+            ),
+        );
+
+        let result = run_resolve(dir.path(), &[("com.example:my-app", "1.0")], vec![]).unwrap();
+
+        let gavs = jar_gavs(&result);
+        assert!(
+            gavs.contains(&"com.google.guava:guava:30.0-jre".to_string()),
+            "guava version from parent POM property must resolve: {:?}", gavs,
         );
     }
 
@@ -2391,7 +2508,7 @@ mod tests {
         std::env::set_var("HOME", dir.path().to_str().unwrap());
 
         let result = fetch_artifact(&gav, &[], true);
-        let expected = gav.local_cache_path().unwrap();
+        let expected = gav.local_repository_path().unwrap();
 
         match prev_home {
             Some(h) => std::env::set_var("HOME", h),

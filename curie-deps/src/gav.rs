@@ -100,13 +100,13 @@ impl Gav {
     }
 
     /// Absolute path in the local `~/.m2/repository` cache.
-    pub fn local_cache_path(&self) -> Result<PathBuf> {
+    pub fn local_repository_path(&self) -> Result<PathBuf> {
         let home = home_dir()?;
         Ok(home.join(".m2").join("repository").join(self.relative_path()))
     }
 
     /// Absolute POM path in the local `~/.m2/repository` cache.
-    pub fn local_pom_cache_path(&self) -> Result<PathBuf> {
+    pub fn pom_local_repository_path(&self) -> Result<PathBuf> {
         let home = home_dir()?;
         Ok(home.join(".m2").join("repository").join(self.relative_pom_path()))
     }
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn relative_path_with_classifier() {
-        let mut g = Gav::from_key_version_classifier("org.jacoco:org.jacoco.agent", "0.8.13", Some("runtime")).unwrap();
+        let g = Gav::from_key_version_classifier("org.jacoco:org.jacoco.agent", "0.8.13", Some("runtime")).unwrap();
         assert_eq!(
             g.relative_path(),
             "org/jacoco/org.jacoco.agent/0.8.13/org.jacoco.agent-0.8.13-runtime.jar"
