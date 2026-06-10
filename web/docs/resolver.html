@@ -109,6 +109,42 @@
   Done            <span class="em">target/greeter-0.1.0.jar</span></pre>
     </div>
 
+    <h2>Pre-fetching dependencies</h2>
+    <p><code>curie fetch</code> downloads artifacts into <code>~/.m2/repository</code> without compiling or testing anything — useful for warming the cache before <code>--offline</code> builds, in CI, or in air-gapped environments.</p>
+
+    <p>With no arguments, it downloads everything declared in <code>Curie.toml</code>: <code>[dependencies]</code>, <code>[test-dependencies]</code>, <code>[annotation-processors]</code>, and <code>[test-annotation-processors]</code>, with BOM-managed versions resolved.</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie fetch</span>
+      </header>
+<pre>  Dependencies    3 JAR(s)
+  Done            <span class="em">3 JAR(s) cached</span>
+
+$ curie build --offline   <span class="dim"># succeeds entirely from the local cache</span></pre>
+    </div>
+
+    <p>Pass a <code>group:artifact:version</code> coordinate to fetch one extra artifact and its full transitive closure — without adding it to <code>Curie.toml</code>:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie fetch org.apache.commons:commons-compress:1.27.1</span>
+      </header>
+<pre>  Done            <span class="em">4 JAR(s) cached for org.apache.commons:commons-compress:1.27.1</span></pre>
+    </div>
+
+    <p>Add <code>--no-transitive</code> to download just that one artifact's POM and JAR, skipping its dependencies:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie fetch org.apache.commons:commons-compress:1.27.1 --no-transitive</span>
+      </header>
+<pre>  Done            <span class="em">~/.m2/repository/org/apache/commons/commons-compress/1.27.1/commons-compress-1.27.1.jar</span></pre>
+    </div>
+
     <h2>Per-dependency repository selection</h2>
     <p>By default every artifact is fetched from Maven Central. To pull a specific artifact from a different repository, declare the repository with a unique <code>id</code> and reference it from the dependency:</p>
 

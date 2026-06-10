@@ -1113,6 +1113,15 @@ enum ArtifactKind {
     Pom,
 }
 
+/// Download the POM and JAR for a single artifact into the local Maven
+/// cache, without resolving its transitive dependencies.  Returns the
+/// cached JAR path.  Used by `curie fetch <gav> --no-transitive`.
+pub fn fetch_artifact(gav: &Gav, repos: &[Repository], offline: bool) -> Result<PathBuf> {
+    let client = build_http_client()?;
+    ensure_artifact(gav, repos, &client, ArtifactKind::Pom, offline, None, None)?;
+    ensure_artifact(gav, repos, &client, ArtifactKind::Jar, offline, None, None)
+}
+
 /// Return the local path for an artifact, downloading it if necessary.
 ///
 /// When `offline` is `true`, any cache miss is an immediate error — no HTTP
@@ -2304,6 +2313,45 @@ mod tests {
         )
         .unwrap();
         assert!(verify_with_local_sidecar(&jar).is_err());
+    }
+
+    #[test]
+    fn fetch_artifact_offline_returns_cached_jar() {
+        let dir = tempfile::tempdir().unwrap();
+        let gav = write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
+
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", dir.path().to_str().unwrap());
+
+        let result = fetch_artifact(&gav, &[], true);
+        let expected = gav.local_cache_path().unwrap();
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert_eq!(result.unwrap(), expected);
+    }
+
+    #[test]
+    fn fetch_artifact_offline_errors_when_not_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let gav = Gav::from_key_version("foo:bar", "1.0").unwrap();
+
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", dir.path().to_str().unwrap());
+
+        let result = fetch_artifact(&gav, &[], true);
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert!(result.is_err());
     }
 
     #[test]

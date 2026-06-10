@@ -13,6 +13,7 @@ mod config;
 mod deps;
 mod descriptor;
 mod docker;
+mod fetch;
 mod fmt;
 mod git;
 mod incremental;
@@ -166,6 +167,22 @@ enum Cmd {
         #[arg(long)]
         tests: bool,
         /// Use only locally cached POMs; do not download
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Download dependency artifacts into the local Maven cache (~/.m2/repository)
+    Fetch {
+        /// Coordinate "group:artifact:version" to fetch. Omit to fetch every
+        /// dependency declared in Curie.toml, including [test-dependencies]
+        /// and annotation processors.
+        coord: Option<String>,
+
+        /// With a coordinate, download only that artifact — skip its
+        /// transitive dependencies. Requires `coord`.
+        #[arg(long)]
+        no_transitive: bool,
+
+        /// Do not access the network; fail if any artifact is not already cached
         #[arg(long)]
         offline: bool,
     },
@@ -469,6 +486,21 @@ fn main() {
             }
             workspace::WorkspaceContext::Standalone(project) => {
                 deps::run_deps(project, why.as_deref(), tests, offline)
+            }
+        },
+        Cmd::Fetch { coord, no_transitive, offline } => match &ctx {
+            workspace::WorkspaceContext::WorkspaceRoot(_)
+            | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
+                "`curie fetch` cannot run on a workspace root; \
+                 target a member with --project"
+            )),
+            workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+                fetch::run_fetch_workspace_member(
+                    workspace_root, *member_index, coord.as_deref(), no_transitive, offline,
+                )
+            }
+            workspace::WorkspaceContext::Standalone(project) => {
+                fetch::run_fetch(project, coord.as_deref(), no_transitive, offline)
             }
         },
         Cmd::Publish { repo, no_sign, no_javadoc, dry_run } => {
