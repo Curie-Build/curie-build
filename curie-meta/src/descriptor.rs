@@ -33,6 +33,7 @@ pub struct Descriptor {
     pub native_image: NativeImage,
     pub docker: Docker,
     pub build_info: BuildInfo,
+    pub fat_jar: FatJar,
     pub dependencies: BTreeMap<String, DependencyValue>,
     pub test_dependencies: BTreeMap<String, DependencyValue>,
     pub repositories: Vec<RepositoryEntry>,
@@ -167,6 +168,8 @@ struct RawDescriptor {
     docker: Docker,
     #[serde(rename = "build-info", default)]
     build_info: BuildInfo,
+    #[serde(rename = "fat-jar", default)]
+    fat_jar: FatJar,
     #[serde(default)]
     dependencies: BTreeMap<String, DependencyValue>,
     #[serde(rename = "test-dependencies", default)]
@@ -459,6 +462,65 @@ impl NativeImage {
     }
 }
 
+/// Configuration for the `[fat-jar]` table.
+///
+/// When present, Curie produces an uber/fat JAR that merges all dependency
+/// classes into a single JAR.  By default every dependency is included;
+/// per-dep include/exclude overrides are available via `fatJar = false` on
+/// individual `[dependencies]` entries.
+///
+/// ```toml
+/// [fat-jar]
+/// # Enable fat JAR output (default when the section is present).
+/// enabled = true
+///
+/// # Relocate packages to avoid classpath conflicts.
+/// [[fat-jar.relocations]]
+/// pattern = "com.google.common"
+/// shadedPattern = "shaded.com.google.common"
+/// ```
+///
+/// Only meaningful for `[application]` and `[library]` projects.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct FatJar {
+    /// `true` when fat-JAR packaging is active.  Defaults to `true` when
+    /// the `[fat-jar]` section is present, `false` when it is absent.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Package relocations applied to dependency classes.  Each entry
+    /// rewrites every reference to `pattern` → `shadedPattern` inside
+    /// class files and resource paths.
+    #[serde(default)]
+    pub relocations: Vec<Relocation>,
+
+    /// Whether the `[fat-jar]` section was explicitly present in
+    /// `Curie.toml`.  Set by [`load`]; never written by serde.
+    #[serde(skip)]
+    pub section_present: bool,
+}
+
+/// One `[[fat-jar.relocations]]` entry — rewrites a package prefix in
+/// both class bytecode and resource paths.
+///
+/// ```toml
+/// [[fat-jar.relocations]]
+/// pattern = "com.google.common"
+/// shadedPattern = "shaded.com.google.common"
+/// excludes = ["com.google.common.annotations.*"]
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+pub struct Relocation {
+    /// The original package prefix to match (dot-separated).
+    pub pattern: String,
+    /// The replacement package prefix.
+    #[serde(rename = "shadedPattern")]
+    pub shaded_pattern: String,
+    /// Patterns to exclude from relocation (glob syntax, optional).
+    #[serde(default)]
+    pub excludes: Vec<String>,
+}
+
 /// Configuration for the `[groovy]` table.
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct Groovy {
@@ -682,6 +744,16 @@ pub struct DependencyDetailed {
     /// ```
     #[serde(default)]
     pub exclusions: Vec<String>,
+    /// Controls whether this dependency is included in the fat/uber JAR.
+    /// - `None` (absent) → follow the global `[fat-jar]` default (include all).
+    /// - `Some(true)` → always include regardless of the global default.
+    /// - `Some(false)` → always exclude from the fat JAR.
+    ///
+    /// ```toml
+    /// "org.example:logging-api" = { version = "1.0", fatJar = false }
+    /// ```
+    #[serde(default, rename = "fatJar")]
+    pub fat_jar: Option<bool>,
 }
 
 impl DependencyValue {
@@ -715,6 +787,15 @@ impl DependencyValue {
         match self {
             DependencyValue::Version(_) => vec![],
             DependencyValue::Detailed(d) => d.exclusions.iter().map(|s| s.as_str()).collect(),
+        }
+    }
+
+    /// Per-dependency fat-JAR include/exclude override.
+    /// `None` → follow the global `[fat-jar]` default (include all).
+    pub fn fat_jar_include(&self) -> Option<bool> {
+        match self {
+            DependencyValue::Version(_) => None,
+            DependencyValue::Detailed(d) => d.fat_jar,
         }
     }
 }
@@ -1085,6 +1166,10 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     let mut native_image = parsed.native_image;
     native_image.section_present = native_image_section_present;
 
+    let fat_jar_section_present = table.map(|t| t.contains_key("fat-jar")).unwrap_or(false);
+    let mut fat_jar = parsed.fat_jar;
+    fat_jar.section_present = fat_jar_section_present;
+
     let spock_section_present = table.map(|t| t.contains_key("spock")).unwrap_or(false);
     let mut spock = parsed.spock;
     spock.section_present = spock_section_present;
@@ -1099,6 +1184,7 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         native_image,
         docker,
         build_info: parsed.build_info,
+        fat_jar,
         dependencies: parsed.dependencies,
         test_dependencies: parsed.test_dependencies,
         repositories: parsed.repositories,
@@ -1275,6 +1361,12 @@ pub fn docker_enabled(project_root: &Path, desc: &Descriptor) -> bool {
 /// trigger (no Dockerfile analogue); the section must always be declared.
 pub fn native_image_enabled(desc: &Descriptor) -> bool {
     desc.native_image.section_present
+}
+
+/// Fat-JAR packaging is enabled when the `[fat-jar]` section is present and
+/// `enabled` is `true` (the default when the section is present).
+pub fn fat_jar_enabled(desc: &Descriptor) -> bool {
+    desc.fat_jar.section_present && desc.fat_jar.enabled
 }
 
 // ---------------------------------------------------------------------------
@@ -2474,5 +2566,114 @@ coverage = true
         let d = load_str(toml).unwrap();
         assert!(d.test.coverage_enabled());
         assert_eq!(d.test.junit_platform_version(), "6.0.3");
+    }
+
+    // -- fat-jar -----------------------------------------------------------------
+
+    #[test]
+    fn fat_jar_disabled_by_default() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(!fat_jar_enabled(&d));
+        assert!(!d.fat_jar.section_present);
+    }
+
+    #[test]
+    fn fat_jar_enabled_when_section_present() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+
+[fat-jar]
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(fat_jar_enabled(&d));
+        assert!(d.fat_jar.section_present);
+        assert!(d.fat_jar.enabled);
+    }
+
+    #[test]
+    fn fat_jar_can_be_disabled_explicitly() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+
+[fat-jar]
+enabled = false
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(!fat_jar_enabled(&d));
+        assert!(d.fat_jar.section_present);
+        assert!(!d.fat_jar.enabled);
+    }
+
+    #[test]
+    fn fat_jar_parses_relocations() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+
+[fat-jar]
+
+[[fat-jar.relocations]]
+pattern = "com.google.common"
+shadedPattern = "shaded.com.google.common"
+
+[[fat-jar.relocations]]
+pattern = "com.google.thirdparty"
+shadedPattern = "shaded.com.google.thirdparty"
+excludes = ["com.google.thirdparty.publicsuffix.*"]
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(fat_jar_enabled(&d));
+        assert_eq!(d.fat_jar.relocations.len(), 2);
+        assert_eq!(d.fat_jar.relocations[0].pattern, "com.google.common");
+        assert_eq!(d.fat_jar.relocations[0].shaded_pattern, "shaded.com.google.common");
+        assert!(d.fat_jar.relocations[0].excludes.is_empty());
+        assert_eq!(d.fat_jar.relocations[1].pattern, "com.google.thirdparty");
+        assert_eq!(d.fat_jar.relocations[1].excludes.len(), 1);
+    }
+
+    #[test]
+    fn fat_jar_on_library_is_accepted() {
+        let toml = r#"
+[library]
+name = "x"
+version = "1.0"
+
+[fat-jar]
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(fat_jar_enabled(&d));
+    }
+
+    #[test]
+    fn fat_jar_dep_include_exclude() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+
+[fat-jar]
+
+[dependencies]
+"com.example:included" = "1.0"
+"com.example:excluded" = { version = "1.0", fatJar = false }
+"com.example:force-included" = { version = "1.0", fatJar = true }
+"#;
+        let d = load_str(toml).unwrap();
+        let included = d.dependencies.get("com.example:included").unwrap();
+        assert_eq!(included.fat_jar_include(), None);
+        let excluded = d.dependencies.get("com.example:excluded").unwrap();
+        assert_eq!(excluded.fat_jar_include(), Some(false));
+        let forced = d.dependencies.get("com.example:force-included").unwrap();
+        assert_eq!(forced.fat_jar_include(), Some(true));
     }
 }

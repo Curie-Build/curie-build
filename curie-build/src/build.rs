@@ -32,6 +32,10 @@ pub struct BuildOutput {
     pub main_class: Option<String>,
     /// `src/main/resources` if the directory exists, otherwise `None`.
     pub resources_dir: Option<PathBuf>,
+    /// Fat/uber JAR path when `[fat-jar]` is enabled.  This is the single
+    /// self-contained JAR used by downstream stages (run, docker, native)
+    /// instead of the regular JAR + libs/.
+    pub fat_jar: Option<PathBuf>,
 }
 
 /// Single-module entry point used by `curie build` outside a workspace.
@@ -69,20 +73,27 @@ pub fn build_with_desc(
 
     let output = do_build(project_root, desc, opts, extra_cp)?;
 
+    // When a fat JAR was produced, show that as the primary output.
+    let display_jar = output.fat_jar.as_ref().unwrap_or(&output.jar);
     crate::parallel::emit(&crate::style::done(
-        &output.jar
+        &display_jar
             .strip_prefix(project_root)
-            .unwrap_or(&output.jar)
+            .unwrap_or(display_jar)
             .display()
             .to_string(),
     ));
 
+    // When a fat JAR exists, downstream stages (docker, native) use it
+    // instead of the regular JAR + libs/, since it is self-contained.
+    let effective_jar = output.fat_jar.as_ref().unwrap_or(&output.jar);
+    let effective_deps: &[PathBuf] = if output.fat_jar.is_some() { &[] } else { &output.dep_jars };
+
     if !desc.is_library() && !opts.no_docker && descriptor::docker_enabled(project_root, desc) {
-        docker::docker_build(project_root, desc, &output.jar, &output.dep_jars)?;
+        docker::docker_build(project_root, desc, effective_jar, effective_deps)?;
     }
 
     if !desc.is_library() && !opts.no_native && descriptor::native_image_enabled(desc) {
-        native::build_native(project_root, desc, &output.jar, &output.dep_jars)?;
+        native::build_native(project_root, desc, effective_jar, effective_deps)?;
     }
 
     Ok(output)
@@ -138,6 +149,7 @@ fn build_bom(project_root: &Path, desc: &descriptor::Descriptor) -> Result<Build
         dep_jars: vec![],
         main_class: None,
         resources_dir: None,
+        fat_jar: None,
     })
 }
 
@@ -247,17 +259,60 @@ pub fn do_build(
         v.extend(compiled.groovy_jars);
         v
     };
-    if !effective_dep_jars.is_empty() && desc.application().is_some() {
+    if !effective_dep_jars.is_empty() && desc.application().is_some()
+        && !descriptor::fat_jar_enabled(desc)
+    {
         let libs_dir = project_root.join("target").join("libs");
         populate_libs_dir(&libs_dir, &effective_dep_jars)
             .context("failed to populate target/libs/")?;
     }
+
+    // --- fat/uber JAR (when [fat-jar] is enabled) ----------------------------
+    let fat_jar_path = if descriptor::fat_jar_enabled(desc) {
+        let fat_name = format!(
+            "{}-{}-fat.jar",
+            desc.buildable_name().replace(':', "-"),
+            desc.buildable_version()
+        );
+        let fat_path = project_root.join("target").join(&fat_name);
+        let toml_path = project_root.join("Curie.toml");
+
+        // Filter deps according to per-dep fatJar = false overrides.
+        let fat_dep_jars = crate::fat_jar::filter_fat_jar_deps(&effective_dep_jars, desc);
+
+        if crate::fat_jar::needs_rebuild(
+            &fat_path,
+            &compiled.classes_dir,
+            compiled.resources_dir.as_deref(),
+            &fat_dep_jars,
+            &toml_path,
+        ) {
+            crate::parallel::emit(&crate::style::active("Fat JAR", &fat_name));
+            crate::fat_jar::write_fat_jar(
+                &fat_path,
+                &compiled.classes_dir,
+                compiled.resources_dir.as_deref(),
+                resolved_main_class.as_deref(),
+                &fat_dep_jars,
+                build_info_content.as_deref(),
+                &desc.fat_jar.relocations,
+            )
+            .context("failed to write fat JAR")?;
+        } else {
+            crate::parallel::emit(&crate::style::up_to_date("Fat JAR"));
+        }
+
+        Some(fat_path)
+    } else {
+        None
+    };
 
     Ok(BuildOutput {
         jar: compiled.jar_path,
         dep_jars: effective_dep_jars,
         main_class: resolved_main_class,
         resources_dir: compiled.resources_dir,
+        fat_jar: fat_jar_path,
     })
 }
 

@@ -14,6 +14,7 @@ mod coverage;
 mod deps;
 mod descriptor;
 mod docker;
+mod fat_jar;
 mod fetch;
 mod fmt;
 mod git;
@@ -706,7 +707,9 @@ fn native_single_module(project: &std::path::Path, offline: bool) -> anyhow::Res
     };
     let output = build::build_with_desc(project, &desc, opts, &[])?;
 
-    native::build_native(project, &desc, &output.jar, &output.dep_jars)?;
+    let effective_jar = output.fat_jar.as_ref().unwrap_or(&output.jar);
+    let effective_deps: &[std::path::PathBuf] = if output.fat_jar.is_some() { &[] } else { &output.dep_jars };
+    native::build_native(project, &desc, effective_jar, effective_deps)?;
 
     Ok(())
 }

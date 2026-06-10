@@ -1,0 +1,41 @@
+# fat-jar-demo
+#
+# Demonstrates fat/uber JAR packaging with Curie:
+#
+#   - All dependencies are bundled into a single self-contained JAR
+#   - META-INF/services files are merged across all JARs
+#   - Per-dependency include/exclude via `fatJar = false`
+#   - Package relocations to avoid classpath conflicts
+#
+# Build:   curie --project examples/fat-jar-demo build
+# Run:     java -jar target/fat-jar-demo-0.1.0-fat.jar
+
+[application]
+name = "fat-jar-demo"
+version = "0.1.0"
+mainClass = "com.example.fatjar.FatJarApp"
+
+[java]
+sourceCompatibility = "21"
+
+[dependencies]
+# Jackson for JSON processing — included in fat JAR (default)
+"com.fasterxml.jackson.core:jackson-databind" = "2.17.2"
+
+# Guava for collections — included and relocated to avoid version conflicts
+"com.google.guava:guava" = "33.2.1-jre"
+
+# SLF4J API — excluded from fat JAR (provided at runtime by the container)
+"org.slf4j:slf4j-api" = { version = "2.0.13", fatJar = false }
+
+[fat-jar]
+enabled = true
+
+# Relocate Guava so downstream consumers don't conflict with their own version.
+[[fat-jar.relocations]]
+pattern = "com.google.common"
+shadedPattern = "com.example.fatjar.shaded.com.google.common"
+
+[[fat-jar.relocations]]
+pattern = "com.google.thirdparty"
+shadedPattern = "com.example.fatjar.shaded.com.google.thirdparty"

@@ -911,6 +911,7 @@ mod tests {
             native_image: NativeImage::default(),
             docker: Docker::default(),
             build_info: BuildInfo::default(),
+            fat_jar: FatJar::default(),
             dependencies: BTreeMap::new(),
             test_dependencies: BTreeMap::new(),
             repositories: vec![],

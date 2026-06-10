@@ -37,8 +37,16 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
 
     let use_docker = !opts.no_docker && descriptor::docker_enabled(project_root, &desc);
 
+    // When a fat JAR is available, use it as the single self-contained JAR.
+    let effective_jar = output.fat_jar.as_ref().unwrap_or(&output.jar);
+    let effective_deps: Vec<std::path::PathBuf> = if output.fat_jar.is_some() {
+        vec![]
+    } else {
+        output.dep_jars.clone()
+    };
+
     if use_docker {
-        docker::docker_run(project_root, &desc, &output.jar, &output.dep_jars, extra_args)?;
+        docker::docker_run(project_root, &desc, effective_jar, &effective_deps, extra_args)?;
     } else {
         let mut java = Command::new("java");
         if desc.java.preview_enabled() {
@@ -46,8 +54,8 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
         }
 
         let agent_coords = desc.dep_java_agent_coords();
-        let all_jars: Vec<_> = std::iter::once(&output.jar)
-            .chain(output.dep_jars.iter())
+        let all_jars: Vec<_> = std::iter::once(effective_jar)
+            .chain(effective_deps.iter())
             .cloned()
             .collect();
         let agent_jars = crate::java_agent::find_agent_jars(&agent_coords, &all_jars);
@@ -57,23 +65,24 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
 
         // When running with deps (can't use -jar), build a full classpath.
         // Also include src/main/resources so resource loading via getResourceAsStream works.
+        // Fat JARs are self-contained — run directly with -jar.
         let resources_dir = output.resources_dir.as_deref();
-        let has_deps = !output.dep_jars.is_empty();
+        let has_deps = !effective_deps.is_empty();
         let has_resources = resources_dir.map(|p| p.exists()).unwrap_or(false);
 
-        if has_deps || has_resources {
+        if has_deps || (has_resources && output.fat_jar.is_none()) {
             let mut cp_entries = Vec::new();
-            cp_entries.push(output.jar.clone());
+            cp_entries.push(effective_jar.clone());
             if let Some(rd) = resources_dir {
                 if rd.exists() {
                     cp_entries.push(rd.to_path_buf());
                 }
             }
-            cp_entries.extend_from_slice(&output.dep_jars);
+            cp_entries.extend_from_slice(&effective_deps);
             java.arg("-cp").arg(classpath_string(&cp_entries));
             java.arg(main_class);
         } else {
-            java.arg("-jar").arg(&output.jar);
+            java.arg("-jar").arg(effective_jar);
         }
 
         for arg in extra_args {
