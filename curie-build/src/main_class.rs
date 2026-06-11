@@ -259,14 +259,13 @@ pub fn validate_main_class(
 /// Both `.java` and `.kt` files are scanned.  Kotlin top-level `fun main`
 /// functions are mapped to the `<FileNameKt>` JVM class that the Kotlin
 /// compiler generates.
-pub fn detect_main_class(
-    src_roots: &[PathBuf],
-    sources: &[PathBuf],
-    classes_dir: &Path,
-    dep_jars: &[PathBuf],
-) -> Result<String> {
-    // Phase 1: fast source heuristic — collect (fqcn, source_path) candidates.
-    let mut source_candidates: Vec<(String, PathBuf)> = Vec::new();
+/// Phase 1: fast source heuristic — scan `sources` for any recognised
+/// main-method shape and return `(fqcn, source_path)` candidates. Shared by
+/// [`detect_main_class`] (which validates candidates against compiled
+/// bytecode) and [`detect_main_class_from_source`] (which has no compiled
+/// bytecode to validate against).
+fn scan_main_candidates(src_roots: &[PathBuf], sources: &[PathBuf]) -> Vec<(String, PathBuf)> {
+    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
     for source in sources {
         let text = match std::fs::read_to_string(source) {
             Ok(t) => t,
@@ -277,31 +276,80 @@ pub fn detect_main_class(
             "java" => {
                 if java_source_has_main(&text) {
                     if let Some(fqcn) = fqcn_from_java_source(src_roots, source) {
-                        source_candidates.push((fqcn, source.clone()));
+                        candidates.push((fqcn, source.clone()));
                     }
                 }
             }
             "kt" => {
                 if kotlin_source_has_main(&text) {
                     if let Some(fqcn) = fqcn_from_kotlin_source(src_roots, source) {
-                        source_candidates.push((fqcn, source.clone()));
+                        candidates.push((fqcn, source.clone()));
                     }
                 }
             }
             _ => {}
         }
     }
+    candidates
+}
+
+/// Error returned when [`scan_main_candidates`] finds nothing — shared by
+/// [`detect_main_class`] and [`detect_main_class_from_source`].
+fn no_main_candidates_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "no main method found in any production source file\n\
+         \n\
+         Add a main method to one of your classes, or declare it explicitly:\n\
+         \n\
+           # Curie.toml\n\
+           [application]\n\
+           mainClass = \"com.example.YourMainClass\""
+    )
+}
+
+/// Phase-1-only variant of [`detect_main_class`] for use before compilation
+/// (e.g. `curie maven sync`), where no `target/classes` exists yet for
+/// bytecode validation. A single source candidate is used as-is — Maven's
+/// jar plugin doesn't validate `<mainClass>` at packaging time either, so
+/// this matches `mvn`'s behaviour. Zero or multiple candidates are errors.
+pub fn detect_main_class_from_source(src_roots: &[PathBuf], sources: &[PathBuf]) -> Result<String> {
+    let candidates = scan_main_candidates(src_roots, sources);
+    match candidates.len() {
+        0 => Err(no_main_candidates_error()),
+        1 => Ok(candidates.into_iter().next().unwrap().0),
+        _ => anyhow::bail!(
+            "multiple source files contain a main method — curie maven sync cannot pick \
+             one without compiled bytecode:\n\
+             \n\
+             {}\n\
+             \n\
+             Declare the main class explicitly in Curie.toml:\n\
+             \n\
+               [application]\n\
+               mainClass = \"com.example.YourChosenMainClass\"\n\
+             \n\
+             (or run `curie build` once — Curie's detector can then pick the class with \
+             a launchable main method via bytecode inspection)",
+            candidates
+                .iter()
+                .map(|(n, _)| format!("  {}", n))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    }
+}
+
+pub fn detect_main_class(
+    src_roots: &[PathBuf],
+    sources: &[PathBuf],
+    classes_dir: &Path,
+    dep_jars: &[PathBuf],
+) -> Result<String> {
+    // Phase 1: fast source heuristic — collect (fqcn, source_path) candidates.
+    let source_candidates = scan_main_candidates(src_roots, sources);
 
     if source_candidates.is_empty() {
-        anyhow::bail!(
-            "no main method found in any production source file\n\
-             \n\
-             Add a main method to one of your classes, or declare it explicitly:\n\
-             \n\
-               # Curie.toml\n\
-               [application]\n\
-               mainClass = \"com.example.YourMainClass\""
-        );
+        return Err(no_main_candidates_error());
     }
 
     // Phase 2: bytecode validation.
@@ -456,5 +504,65 @@ mod tests {
     fn javap_no_main() {
         let out = "public void helper();\npublic java.lang.String getName();";
         assert!(!javap_output_has_main(out));
+    }
+
+    // --- detect_main_class_from_source ---
+
+    fn write_java_source(dir: &Path, rel_path: &str, contents: &str) -> PathBuf {
+        let path = dir.join(rel_path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn detect_main_class_from_source_single_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src/main/java");
+        let source = write_java_source(
+            &src_root,
+            "com/example/App.java",
+            "package com.example;\npublic class App { public static void main(String[] args) {} }",
+        );
+
+        let fqcn = detect_main_class_from_source(&[src_root], &[source]).unwrap();
+        assert_eq!(fqcn, "com.example.App");
+    }
+
+    #[test]
+    fn detect_main_class_from_source_no_candidates_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src/main/java");
+        let source = write_java_source(
+            &src_root,
+            "com/example/Lib.java",
+            "package com.example;\npublic class Lib { public void run() {} }",
+        );
+
+        let err = detect_main_class_from_source(&[src_root], &[source]).unwrap_err().to_string();
+        assert!(err.contains("no main method found"), "got: {err}");
+        assert!(err.contains("mainClass"), "got: {err}");
+    }
+
+    #[test]
+    fn detect_main_class_from_source_multiple_candidates_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_root = dir.path().join("src/main/java");
+        let foo = write_java_source(
+            &src_root,
+            "com/example/Foo.java",
+            "package com.example;\npublic class Foo { public static void main(String[] args) {} }",
+        );
+        let bar = write_java_source(
+            &src_root,
+            "com/example/Bar.java",
+            "package com.example;\npublic class Bar { public static void main(String[] args) {} }",
+        );
+
+        let err = detect_main_class_from_source(&[src_root], &[foo, bar]).unwrap_err().to_string();
+        assert!(err.contains("multiple source files contain a main method"), "got: {err}");
+        assert!(err.contains("com.example.Foo"), "got: {err}");
+        assert!(err.contains("com.example.Bar"), "got: {err}");
+        assert!(err.contains("curie build"), "got: {err}");
     }
 }

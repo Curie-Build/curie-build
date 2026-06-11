@@ -42,6 +42,7 @@ _curie() {
                 'setup:Download and install shell completions'
                 'new:Scaffold a new Curie project in a subdirectory'
                 'init:Initialise a Curie project in the current directory'
+                'maven:Maven interop: generate pom.xml from Curie.toml'
             )
             _describe 'subcommand' subcommands
             ;;
@@ -146,6 +147,27 @@ _curie() {
                         '--package[Root Java package (e.g. com.example.myapp)]:package'
                     case $state in
                         kind) _describe 'project kind' project_kinds ;;
+                    esac
+                    ;;
+                maven)
+                    local -a maven_subcommands
+                    maven_subcommands=(
+                        'sync:Generate or refresh pom.xml from Curie.toml'
+                    )
+                    _arguments \
+                        '1:maven subcommand:->maven_subcommand' \
+                        '*::maven_args:->maven_args'
+                    case $state in
+                        maven_subcommand) _describe 'maven subcommand' maven_subcommands ;;
+                        maven_args)
+                            case $line[1] in
+                                sync)
+                                    _arguments \
+                                        '--check[Write nothing; exit 1 if any pom.xml is missing or stale]' \
+                                        '--force[Overwrite a pom.xml without the generated-by-Curie marker]'
+                                    ;;
+                            esac
+                            ;;
                     esac
                     ;;
             esac

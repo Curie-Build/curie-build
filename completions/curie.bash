@@ -12,7 +12,7 @@ _curie() {
     local cur prev words cword
     _init_completion || return
 
-    local subcommands="build test run dev clean native list fmt deps publish update audit add remove inspect setup new init"
+    local subcommands="build test run dev clean native list fmt deps publish update audit add remove inspect setup new init maven"
 
     # Find the subcommand already typed (first non-flag word after 'curie')
     local subcommand=""
@@ -112,6 +112,27 @@ _curie() {
                 --shell) COMPREPLY=( $(compgen -W "fish bash zsh" -- "$cur") ); return ;;
             esac
             COMPREPLY=( $(compgen -W "--shell" -- "$cur") )
+            ;;
+        maven)
+            # Find the maven subcommand (e.g. "sync") already typed
+            local maven_cmd=""
+            local j
+            for (( j = i + 1; j < cword; j++ )); do
+                if [[ "${words[$j]}" != -* ]]; then
+                    maven_cmd="${words[$j]}"
+                    break
+                fi
+            done
+            case "$maven_cmd" in
+                "")
+                    if [[ "$cur" != -* ]]; then
+                        COMPREPLY=( $(compgen -W "sync" -- "$cur") )
+                    fi
+                    ;;
+                sync)
+                    COMPREPLY=( $(compgen -W "--check --force" -- "$cur") )
+                    ;;
+            esac
             ;;
         new|init)
             case "$prev" in

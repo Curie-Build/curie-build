@@ -23,8 +23,6 @@ mod jar;
 mod java_agent;
 mod kt_stale;
 mod main_class;
-// Wired into the CLI by `curie maven sync` (added in a later step).
-#[allow(dead_code)]
 mod maven;
 mod native;
 mod new;
@@ -322,6 +320,25 @@ enum Cmd {
         #[arg(long)]
         package: Option<String>,
     },
+    /// Maven interop: generate pom.xml from Curie.toml
+    Maven {
+        #[command(subcommand)]
+        cmd: MavenCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum MavenCmd {
+    /// Generate or refresh pom.xml (and, in a workspace, the aggregator pom.xml) from Curie.toml
+    Sync {
+        /// Write nothing; exit 1 if any generated pom.xml is missing or stale
+        #[arg(long)]
+        check: bool,
+
+        /// Overwrite a pom.xml that does not carry the generated-by-Curie marker
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() {
@@ -614,6 +631,32 @@ fn main() {
                     std::process::exit(1);
                 }
                 Ok(false) => return,
+                Err(e) => Err(e),
+            }
+        }
+        Cmd::Maven { cmd: MavenCmd::Sync { check, force } } => {
+            // Phase 1 has no `--offline` flag for `maven sync`; pinTransitive
+            // and BOM-managed annotation-processor resolution (when needed)
+            // are allowed to hit the network.
+            let any_written = match &ctx {
+                workspace::WorkspaceContext::WorkspaceRoot(root) => {
+                    maven::run_maven_sync_workspace_root(root, force, check, false)
+                }
+                workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+                    maven::run_maven_sync_workspace_member(workspace_root, *member_index, force, check, false)
+                }
+                workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
+                    maven::run_maven_sync_workspace_subtree(workspace_root, member_indices, force, check, false)
+                }
+                workspace::WorkspaceContext::Standalone(project) => {
+                    maven::run_maven_sync_standalone(project, force, check, false)
+                }
+            };
+            match any_written {
+                Ok(true) if check => {
+                    std::process::exit(1);
+                }
+                Ok(_) => return,
                 Err(e) => Err(e),
             }
         }

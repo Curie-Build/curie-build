@@ -11,7 +11,7 @@ function __curie_needs_subcommand
     for i in (commandline -opc)
         if contains -- $i \
                 build test run dev clean native list fmt deps \
-                publish update audit add remove inspect setup new init
+                publish update audit add remove inspect setup new init maven
             return 1
         end
     end
@@ -41,6 +41,7 @@ complete -c curie -f -n __curie_needs_subcommand -a inspect -d "Inspect last bui
 complete -c curie -f -n __curie_needs_subcommand -a setup   -d "Download and install shell completions"
 complete -c curie -f -n __curie_needs_subcommand -a new     -d "Scaffold a new Curie project in a subdirectory"
 complete -c curie -f -n __curie_needs_subcommand -a init    -d "Initialise a Curie project in the current directory"
+complete -c curie -f -n __curie_needs_subcommand -a maven   -d "Maven interop: generate pom.xml from Curie.toml"
 
 # ── build ─────────────────────────────────────────────────────────────────────
 complete -c curie -f -n "__fish_seen_subcommand_from build" -l no-docker -d "Skip Docker build"
@@ -124,3 +125,8 @@ complete -c curie -f -n "__fish_seen_subcommand_from init" -a lib       -d "Reus
 complete -c curie -f -n "__fish_seen_subcommand_from init" -a workspace -d "Multi-module workspace"
 complete -c curie -f -n "__fish_seen_subcommand_from init" -a bom       -d "Bill of materials"
 complete -c curie -f -n "__fish_seen_subcommand_from init" -l package   -d "Root Java package (e.g. com.example.myapp)" -r
+
+# ── maven ─────────────────────────────────────────────────────────────────────
+complete -c curie -f -n "__fish_seen_subcommand_from maven; and not __fish_seen_subcommand_from sync" -a sync -d "Generate or refresh pom.xml from Curie.toml"
+complete -c curie -f -n "__fish_seen_subcommand_from maven; and __fish_seen_subcommand_from sync" -l check -d "Write nothing; exit 1 if any pom.xml is missing or stale"
+complete -c curie -f -n "__fish_seen_subcommand_from maven; and __fish_seen_subcommand_from sync" -l force -d "Overwrite a pom.xml without the generated-by-Curie marker"

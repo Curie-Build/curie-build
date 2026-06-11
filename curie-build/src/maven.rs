@@ -13,8 +13,9 @@
 //!   the "don't clobber a hand-written pom.xml" safety check.
 
 use crate::compile::{flat_package_src_dirs, flat_package_test_dirs};
-use crate::descriptor::{Descriptor, DependencyValue, Relocation};
+use crate::descriptor::{self, Descriptor, DependencyValue, Relocation};
 use crate::incremental::walk_files;
+use crate::workspace;
 use anyhow::{Context, Result};
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::Writer;
@@ -1607,14 +1608,60 @@ pub enum SyncOutcome {
     Written,
 }
 
-/// Generate (or refresh) `pom_path` for `desc`, writing only when the
-/// content actually changes.
+/// Render `project` to `pom_path`, writing only when the content actually
+/// changes. Shared by [`sync_pom`], [`sync_bom_pom`], and
+/// [`sync_workspace_pom`].
+///
+/// `member_toml`/`workspace_toml`/`pinned` feed [`fingerprint`]. When
+/// `pom_path` already exists without a `curie-maven-fingerprint` marker (a
+/// hand-written POM), this errors unless `force` is `true`. When `check` is
+/// `true`, nothing is written to disk — `SyncOutcome::Written` then means
+/// the file would change.
+fn sync_project(
+    pom_path: &Path,
+    project: &MavenProject,
+    member_toml: &[u8],
+    workspace_toml: Option<&[u8]>,
+    pinned: &[PinnedDependency],
+    force: bool,
+    check: bool,
+) -> Result<SyncOutcome> {
+    let fp = fingerprint(SCHEMA_VERSION, member_toml, workspace_toml, &project.layout, pinned);
+
+    if let Ok(existing) = std::fs::read_to_string(pom_path) {
+        match extract_fingerprint(&existing) {
+            Some(existing_fp) if existing_fp == fp => return Ok(SyncOutcome::UpToDate),
+            None if !force => return Err(unmarked_pom_error(pom_path)),
+            _ => {}
+        }
+    }
+
+    let rendered = render(project, &fp)?;
+    let unchanged = std::fs::read(pom_path).map(|existing| existing == rendered.as_bytes()).unwrap_or(false);
+    if unchanged {
+        return Ok(SyncOutcome::UpToDate);
+    }
+
+    if check {
+        return Ok(SyncOutcome::Written);
+    }
+
+    if let Some(parent) = pom_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::write(pom_path, rendered.as_bytes())
+        .with_context(|| format!("failed to write {}", pom_path.display()))?;
+    Ok(SyncOutcome::Written)
+}
+
+/// Generate (or refresh) `pom_path` for an `[application]`/`[library]`
+/// `desc`, writing only when the content actually changes.
 ///
 /// `member_toml`/`workspace_toml`/`pinned` feed [`fingerprint`].
 /// `resolved_ap_versions`/`main_class`/`workspace_member_gavs` are forwarded
 /// to [`build_project`]. When `pom_path` already exists without a
 /// `curie-maven-fingerprint` marker (a hand-written POM), this errors unless
-/// `force` is `true`.
+/// `force` is `true`. When `check` is `true`, nothing is written to disk.
 #[allow(clippy::too_many_arguments)]
 pub fn sync_pom(
     project_root: &Path,
@@ -1627,30 +1674,42 @@ pub fn sync_pom(
     main_class: Option<&str>,
     workspace_member_gavs: &BTreeMap<String, MavenCoordinate>,
     force: bool,
+    check: bool,
 ) -> Result<SyncOutcome> {
     let project = build_project(desc, project_root, pinned, resolved_ap_versions, main_class, workspace_member_gavs)?;
-    let fp = fingerprint(SCHEMA_VERSION, member_toml, workspace_toml, &project.layout, pinned);
+    sync_project(pom_path, &project, member_toml, workspace_toml, pinned, force, check)
+}
 
-    if let Ok(existing) = std::fs::read_to_string(pom_path) {
-        match extract_fingerprint(&existing) {
-            Some(existing_fp) if existing_fp == fp => return Ok(SyncOutcome::UpToDate),
-            None if !force => return Err(unmarked_pom_error(pom_path)),
-            _ => {}
-        }
-    }
+/// Generate (or refresh) `pom_path` for a `[bom]` `desc`. See [`sync_pom`]
+/// for the `member_toml`/`workspace_toml`/`pinned`/`force`/`check` contract.
+pub fn sync_bom_pom(
+    pom_path: &Path,
+    desc: &Descriptor,
+    member_toml: &[u8],
+    workspace_toml: Option<&[u8]>,
+    pinned: &[PinnedDependency],
+    force: bool,
+    check: bool,
+) -> Result<SyncOutcome> {
+    let project = build_bom_project(desc, pinned)?;
+    sync_project(pom_path, &project, member_toml, workspace_toml, pinned, force, check)
+}
 
-    let rendered = render(&project, &fp)?;
-    let unchanged = std::fs::read(pom_path).map(|existing| existing == rendered.as_bytes()).unwrap_or(false);
-    if unchanged {
-        return Ok(SyncOutcome::UpToDate);
-    }
-
-    if let Some(parent) = pom_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    std::fs::write(pom_path, rendered.as_bytes())
-        .with_context(|| format!("failed to write {}", pom_path.display()))?;
-    Ok(SyncOutcome::Written)
+/// Generate (or refresh) the aggregator `pom_path` for a `[workspace]`
+/// `desc`. See [`sync_pom`] for the
+/// `member_toml`/`workspace_toml`/`force`/`check` contract; a workspace
+/// aggregator has no dependencies to pin.
+pub fn sync_workspace_pom(
+    project_root: &Path,
+    pom_path: &Path,
+    desc: &Descriptor,
+    member_toml: &[u8],
+    workspace_toml: Option<&[u8]>,
+    force: bool,
+    check: bool,
+) -> Result<SyncOutcome> {
+    let project = build_workspace_project(desc, project_root)?;
+    sync_project(pom_path, &project, member_toml, workspace_toml, &[], force, check)
 }
 
 /// Extract the `curie-maven-fingerprint: <hex>` value from a generated
@@ -1668,6 +1727,229 @@ fn unmarked_pom_error(pom_path: &Path) -> anyhow::Error {
          \x20 - remove `[maven] sync = true` from Curie.toml to disable sync.",
         path = pom_path.display(),
     )
+}
+
+// ---------------------------------------------------------------------------
+// `curie maven sync` entry points
+// ---------------------------------------------------------------------------
+
+/// Resolve `<mainClass>` for an `[application]` descriptor before
+/// compilation: the declared `mainClass` wins; otherwise
+/// [`crate::main_class::detect_main_class_from_source`] picks the single
+/// source candidate via Curie's Phase-1 heuristic. `None` for
+/// libraries/BOMs (anything without an `[application]` section).
+fn resolve_main_class_for_sync(desc: &Descriptor, project_root: &Path, layout: &MavenLayout) -> Result<Option<String>> {
+    let app = match desc.application() {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    if let Some(declared) = &app.main_class {
+        return Ok(Some(declared.clone()));
+    }
+    let src_roots: Vec<PathBuf> = layout.src_roots.iter().map(|r| project_root.join(r)).collect();
+    let sources = production_sources(&src_roots);
+    crate::main_class::detect_main_class_from_source(&src_roots, &sources).map(Some)
+}
+
+/// Production `.java`/`.kt` sources under `src_roots`, excluding co-located
+/// `*Test`/`*Tests`/`*Spec` files — the subset
+/// [`crate::main_class::detect_main_class_from_source`] scans, mirroring
+/// `compile.rs`'s production-source discovery.
+fn production_sources(src_roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut sources = Vec::new();
+    for src_root in src_roots {
+        for entry in walk_files(src_root) {
+            let name = entry.file_name().to_string_lossy();
+            let is_test = name.ends_with("Test.java") || name.ends_with("Tests.java") || name.ends_with("Spec.java")
+                || name.ends_with("Test.kt") || name.ends_with("Tests.kt") || name.ends_with("Spec.kt");
+            if !is_test && (name.ends_with(".java") || name.ends_with(".kt")) {
+                sources.push(entry.into_path());
+            }
+        }
+    }
+    sources.sort();
+    sources.dedup();
+    sources
+}
+
+/// Resolved coordinates for `member_index`'s `[workspace-dependencies]`,
+/// keyed by each entry's declared `path` — see [`build_project`]'s
+/// `workspace_member_gavs` parameter. `member.descriptor.workspace_dependencies`
+/// (label-sorted, `BTreeMap`) and `member.workspace_deps` correspond
+/// entry-by-entry (see `curie-meta/src/workspace.rs::load`).
+fn workspace_member_gavs(ws: &workspace::Workspace, member_index: usize) -> BTreeMap<String, MavenCoordinate> {
+    let member = &ws.members[member_index];
+    member
+        .descriptor
+        .workspace_dependencies
+        .iter()
+        .enumerate()
+        .map(|(k, (_label, dep))| {
+            let target = &ws.members[member.workspace_deps[k]].descriptor;
+            let gav = MavenCoordinate {
+                group_id: target.group_id().unwrap_or(GENERATED_GROUP_ID).to_string(),
+                artifact_id: target.buildable_name().to_string(),
+                version: target.buildable_version().to_string(),
+            };
+            (dep.path.clone(), gav)
+        })
+        .collect()
+}
+
+/// Sync `pom.xml` for a single `[application]`/`[library]`/`[bom]` project
+/// (a workspace member or a standalone project), resolving the
+/// `pinTransitive`/annotation-processor/main-class inputs that
+/// [`build_project`]/[`build_bom_project`] need.
+fn sync_member_pom(
+    project_root: &Path,
+    desc: &Descriptor,
+    workspace_toml: Option<&[u8]>,
+    workspace_member_gavs: &BTreeMap<String, MavenCoordinate>,
+    force: bool,
+    check: bool,
+    offline: bool,
+) -> Result<(PathBuf, SyncOutcome)> {
+    let pom_path = project_root.join("pom.xml");
+    let member_toml = std::fs::read(project_root.join("Curie.toml"))
+        .with_context(|| format!("failed to read {}", project_root.join("Curie.toml").display()))?;
+    let pinned = crate::deps::resolve_pinned_dependencies(desc, offline)?;
+
+    let outcome = if desc.is_bom() {
+        sync_bom_pom(&pom_path, desc, &member_toml, workspace_toml, &pinned, force, check)?
+    } else {
+        let resolved_ap_versions = crate::deps::resolve_ap_versions_for_sync(desc, offline)?;
+        let layout = discover_layout(project_root);
+        let main_class = resolve_main_class_for_sync(desc, project_root, &layout)?;
+        sync_pom(
+            project_root, &pom_path, desc, &member_toml, workspace_toml,
+            &pinned, &resolved_ap_versions, main_class.as_deref(),
+            workspace_member_gavs, force, check,
+        )?
+    };
+    Ok((pom_path, outcome))
+}
+
+/// Sync one workspace member's `pom.xml`, reading the immediately-enclosing
+/// workspace's `Curie.toml` for the fingerprint's `workspace_toml` input.
+/// That workspace's directory is always `member.path`'s parent — even for
+/// members of a nested workspace, since `Member.path` is built by joining
+/// path segments down through each nested `[workspace.members]` entry (see
+/// `_design/MAVEN-SYNC.md`).
+fn sync_one_workspace_member(ws: &workspace::Workspace, member_index: usize, force: bool, check: bool, offline: bool) -> Result<bool> {
+    let member = &ws.members[member_index];
+    let gavs = workspace_member_gavs(ws, member_index);
+    let workspace_dir = member
+        .path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("workspace member {} has no parent directory", member.path.display()))?;
+    let workspace_toml = std::fs::read(workspace_dir.join("Curie.toml"))
+        .with_context(|| format!("failed to read {}", workspace_dir.join("Curie.toml").display()))?;
+
+    let (pom_path, outcome) = sync_member_pom(&member.path, &member.descriptor, Some(&workspace_toml), &gavs, force, check, offline)?;
+    print_sync_outcome(&pom_path, outcome);
+    Ok(outcome == SyncOutcome::Written)
+}
+
+/// Sync the aggregator `pom.xml` for `workspace_root` and, recursively, for
+/// every nested workspace declared in its `[workspace.members]`. Returns
+/// `true` if any aggregator was written (or, under `--check`, would be).
+fn sync_aggregators_recursive(workspace_root: &Path, force: bool, check: bool) -> Result<bool> {
+    let desc = descriptor::load(workspace_root)
+        .with_context(|| format!("failed to load workspace at {}", workspace_root.display()))?;
+    let member_toml = std::fs::read(workspace_root.join("Curie.toml"))
+        .with_context(|| format!("failed to read {}", workspace_root.join("Curie.toml").display()))?;
+
+    let pom_path = workspace_root.join("pom.xml");
+    let outcome = sync_workspace_pom(workspace_root, &pom_path, &desc, &member_toml, None, force, check)?;
+    print_sync_outcome(&pom_path, outcome);
+    let mut any_written = outcome == SyncOutcome::Written;
+
+    let workspace_section = desc
+        .workspace()
+        .expect("sync_aggregators_recursive: descriptor is not a [workspace]");
+    for name in &workspace_section.members {
+        let member_path = workspace_root.join(name);
+        let member_desc = descriptor::load(&member_path)
+            .with_context(|| format!("failed to load workspace member \"{name}\""))?;
+        if member_desc.is_workspace() && sync_aggregators_recursive(&member_path, force, check)? {
+            any_written = true;
+        }
+    }
+    Ok(any_written)
+}
+
+/// Print one `pom.xml` sync result, with the path shown relative to the
+/// current working directory when possible.
+fn print_sync_outcome(pom_path: &Path, outcome: SyncOutcome) {
+    let rel = path_to_maven(&display_path(pom_path));
+    match outcome {
+        SyncOutcome::Written => crate::parallel::emit(&crate::style::active("Maven", &format!("{rel} written"))),
+        SyncOutcome::UpToDate => crate::parallel::emit(&crate::style::up_to_date(&format!("Maven {rel}"))),
+    }
+}
+
+/// Best-effort path for [`print_sync_outcome`]: `pom_path` relative to the
+/// current working directory when both it and `pom_path`'s parent
+/// directory can be canonicalized, else `pom_path` as given.
+fn display_path(pom_path: &Path) -> PathBuf {
+    let cwd = std::env::current_dir().ok().and_then(|c| c.canonicalize().ok());
+    let parent = pom_path.parent().and_then(|p| p.canonicalize().ok());
+    match (cwd, parent) {
+        (Some(cwd), Some(parent)) => {
+            let abs = parent.join(pom_path.file_name().unwrap_or_default());
+            abs.strip_prefix(&cwd).map(Path::to_path_buf).unwrap_or(abs)
+        }
+        _ => pom_path.to_path_buf(),
+    }
+}
+
+/// `curie maven sync` for a standalone (non-workspace) project. Returns
+/// `true` if `pom.xml` was written (or, under `--check`, would be).
+pub fn run_maven_sync_standalone(project_root: &Path, force: bool, check: bool, offline: bool) -> Result<bool> {
+    let desc = descriptor::load(project_root)?;
+    let (pom_path, outcome) = sync_member_pom(project_root, &desc, None, &BTreeMap::new(), force, check, offline)?;
+    print_sync_outcome(&pom_path, outcome);
+    Ok(outcome == SyncOutcome::Written)
+}
+
+/// `curie maven sync` for a single workspace member (`--project <member>`).
+/// Syncs only that member's `pom.xml` — the aggregator POM(s) come from
+/// running the command at the workspace root.
+pub fn run_maven_sync_workspace_member(workspace_root: &Path, member_index: usize, force: bool, check: bool, offline: bool) -> Result<bool> {
+    let ws = workspace::load(workspace_root)?;
+    sync_one_workspace_member(&ws, member_index, force, check, offline)
+}
+
+/// `curie maven sync` for a `--project <nested-workspace>` subtree: syncs
+/// every flattened member under it. The subtree's own aggregator POM(s) are
+/// produced by [`run_maven_sync_workspace_root`] at the outermost root.
+pub fn run_maven_sync_workspace_subtree(workspace_root: &Path, member_indices: &[usize], force: bool, check: bool, offline: bool) -> Result<bool> {
+    let ws = workspace::load(workspace_root)?;
+    let mut any_written = false;
+    for &member_index in member_indices {
+        if sync_one_workspace_member(&ws, member_index, force, check, offline)? {
+            any_written = true;
+        }
+    }
+    Ok(any_written)
+}
+
+/// `curie maven sync` for a workspace root: syncs the aggregator `pom.xml`
+/// (recursively for nested workspaces) plus every member's `pom.xml`.
+///
+/// `workspace::load` runs first — besides being needed for the member loop,
+/// it walks the same `[workspace.members]` structure
+/// [`sync_aggregators_recursive`] recurses over and rejects cycles/duplicate
+/// members, so a successful load guarantees that recursion terminates.
+pub fn run_maven_sync_workspace_root(workspace_root: &Path, force: bool, check: bool, offline: bool) -> Result<bool> {
+    let ws = workspace::load(workspace_root)?;
+    let mut any_written = sync_aggregators_recursive(workspace_root, force, check)?;
+    for member_index in 0..ws.members.len() {
+        if sync_one_workspace_member(&ws, member_index, force, check, offline)? {
+            any_written = true;
+        }
+    }
+    Ok(any_written)
 }
 
 // ---------------------------------------------------------------------------
@@ -2691,13 +2973,13 @@ mod tests {
         let desc = minimal_app("my-app", Some("com.example"));
         let pom_path = dir.path().join("pom.xml");
 
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml-bytes", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap();
+        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml-bytes", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap();
         assert_eq!(outcome, SyncOutcome::Written);
 
         let metadata_before = std::fs::metadata(&pom_path).unwrap();
         let modified_before = metadata_before.modified().unwrap();
 
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml-bytes", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap();
+        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml-bytes", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap();
         assert_eq!(outcome, SyncOutcome::UpToDate);
 
         let modified_after = std::fs::metadata(&pom_path).unwrap().modified().unwrap();
@@ -2711,8 +2993,8 @@ mod tests {
         let desc = minimal_app("my-app", Some("com.example"));
         let pom_path = dir.path().join("pom.xml");
 
-        sync_pom(dir.path(), &pom_path, &desc, b"v1", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap();
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"v2", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap();
+        sync_pom(dir.path(), &pom_path, &desc, b"v1", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap();
+        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"v2", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap();
         assert_eq!(outcome, SyncOutcome::Written);
     }
 
@@ -2723,12 +3005,12 @@ mod tests {
         let desc = minimal_app("my-app", Some("com.example"));
         let pom_path = dir.path().join("pom.xml");
 
-        sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap();
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap();
+        sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap();
+        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap();
         assert_eq!(outcome, SyncOutcome::UpToDate);
 
         write_file(dir.path(), "src/main/kotlin/com/example/World.kt", "package com.example\nclass World");
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap();
+        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap();
         assert_eq!(outcome, SyncOutcome::Written);
     }
 
@@ -2740,7 +3022,7 @@ mod tests {
         let pom_path = dir.path().join("pom.xml");
         std::fs::write(&pom_path, "<project>hand written</project>").unwrap();
 
-        let err = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap_err().to_string();
+        let err = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap_err().to_string();
         assert!(err.contains("--force"), "got: {err}");
         assert_eq!(std::fs::read_to_string(&pom_path).unwrap(), "<project>hand written</project>");
     }
@@ -2753,8 +3035,129 @@ mod tests {
         let pom_path = dir.path().join("pom.xml");
         std::fs::write(&pom_path, "<project>hand written</project>").unwrap();
 
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), true).unwrap();
+        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), true, false).unwrap();
         assert_eq!(outcome, SyncOutcome::Written);
         assert!(std::fs::read_to_string(&pom_path).unwrap().contains("curie-maven-fingerprint"));
+    }
+
+    // -- `curie maven sync` entry points -----------------------------------------
+
+    #[test]
+    fn check_mode_exits_nonzero_when_stale_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"my-app\"\nversion = \"1.0.0\"\ngroupId = \"com.example\"\nmainClass = \"com.example.Main\"\n",
+        )
+        .unwrap();
+        let pom_path = dir.path().join("pom.xml");
+
+        // No pom.xml yet: --check reports "would write" but writes nothing.
+        assert!(run_maven_sync_standalone(dir.path(), false, true, true).unwrap());
+        assert!(!pom_path.exists());
+
+        // Without --check, the file is actually written.
+        assert!(run_maven_sync_standalone(dir.path(), false, false, true).unwrap());
+        assert!(pom_path.exists());
+
+        // Now it's up to date — --check reports nothing to do.
+        assert!(!run_maven_sync_standalone(dir.path(), false, true, true).unwrap());
+    }
+
+    #[test]
+    fn main_class_declared_wins_over_detection() {
+        let dir = tempfile::tempdir().unwrap();
+        // A production source with its own `main` method — proves the
+        // declared `mainClass` ("Main", from `minimal_app`) is returned
+        // without scanning sources at all.
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Other.java",
+            "package com.example;\npublic class Other { public static void main(String[] args) {} }",
+        );
+        let desc = minimal_app("my-app", Some("com.example"));
+        let layout = discover_layout(dir.path());
+
+        let main_class = resolve_main_class_for_sync(&desc, dir.path(), &layout).unwrap();
+        assert_eq!(main_class, Some("Main".to_string()));
+    }
+
+    #[test]
+    fn main_class_detection_fails_with_helpful_error_when_no_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        match &mut desc.kind {
+            DescriptorKind::Application(app) => app.main_class = None,
+            _ => unreachable!(),
+        }
+        let layout = discover_layout(dir.path());
+
+        let err = resolve_main_class_for_sync(&desc, dir.path(), &layout).unwrap_err().to_string();
+        assert!(err.contains("no main method found"), "got: {err}");
+        assert!(err.contains("mainClass"), "got: {err}");
+    }
+
+    /// Write a two-member workspace (`lib`, depended on by `app`) under
+    /// `dir`'s root `Curie.toml`, returning the member directories.
+    fn write_two_member_workspace(dir: &Path) -> (PathBuf, PathBuf) {
+        std::fs::write(dir.join("Curie.toml"), "[workspace]\nmembers = [\"lib\", \"app\"]\n").unwrap();
+
+        let lib_dir = dir.join("lib");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        std::fs::write(
+            lib_dir.join("Curie.toml"),
+            "[library]\nname = \"lib\"\nversion = \"0.1.0\"\ngroupId = \"com.example\"\n",
+        )
+        .unwrap();
+
+        let app_dir = dir.join("app");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::write(
+            app_dir.join("Curie.toml"),
+            "[application]\nname = \"app\"\nversion = \"0.1.0\"\ngroupId = \"com.example\"\nmainClass = \"com.example.App\"\n\
+             [workspace-dependencies]\nlib = { path = \"../lib\" }\n",
+        )
+        .unwrap();
+
+        (lib_dir, app_dir)
+    }
+
+    #[test]
+    fn run_maven_sync_workspace_root_writes_aggregator_and_member_poms() {
+        let dir = tempfile::tempdir().unwrap();
+        let (lib_dir, app_dir) = write_two_member_workspace(dir.path());
+
+        assert!(run_maven_sync_workspace_root(dir.path(), false, false, true).unwrap());
+
+        let root_pom = std::fs::read_to_string(dir.path().join("pom.xml")).unwrap();
+        assert!(root_pom.contains("<module>lib</module>"));
+        assert!(root_pom.contains("<module>app</module>"));
+
+        // The workspace dependency on `lib` is materialized into `app`'s POM
+        // with `lib`'s resolved groupId/version (via `workspace_member_gavs`).
+        let app_pom = std::fs::read_to_string(app_dir.join("pom.xml")).unwrap();
+        assert!(app_pom.contains("<artifactId>lib</artifactId>"));
+        assert!(app_pom.contains("<groupId>com.example</groupId>"));
+
+        assert!(lib_dir.join("pom.xml").exists());
+
+        // Second run: nothing changed → up to date everywhere.
+        assert!(!run_maven_sync_workspace_root(dir.path(), false, false, true).unwrap());
+    }
+
+    #[test]
+    fn run_maven_sync_workspace_member_syncs_only_that_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let (lib_dir, app_dir) = write_two_member_workspace(dir.path());
+
+        let ws = workspace::load(dir.path()).unwrap();
+        let app_index = ws.members.iter().position(|m| m.declared == "app").unwrap();
+
+        assert!(run_maven_sync_workspace_member(dir.path(), app_index, false, false, true).unwrap());
+
+        assert!(app_dir.join("pom.xml").exists());
+        assert!(!dir.path().join("pom.xml").exists(), "aggregator POM is only synced at the workspace root");
+        assert!(!lib_dir.join("pom.xml").exists(), "only the targeted member is synced");
     }
 }
