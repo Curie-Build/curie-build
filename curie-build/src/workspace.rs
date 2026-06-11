@@ -9,6 +9,7 @@ pub use curie_meta::workspace::{
 
 use crate::audit::{self, AuditOptions};
 use crate::descriptor;
+use crate::maven;
 use crate::update::{self, UpdateOptions};
 use crate::{build, compile, fmt, jar, run, test};
 use anyhow::{bail, Context, Result};
@@ -136,6 +137,10 @@ where
 /// and there are multiple members, runs them in parallel with PTY output.
 pub fn build_all(workspace_root: &Path, opts: build::BuildOptions, jobs: usize) -> Result<()> {
     let ws = load(workspace_root)?;
+    maven::sync_aggregator_for_build(workspace_root)?;
+    for member_index in 0..ws.members.len() {
+        maven::sync_member_for_build(&ws, member_index, opts.offline)?;
+    }
     let subset: Vec<usize> = (0..ws.members.len()).collect();
     if subset.len() > 1 {
         return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, crate::parallel::TuiMode::Full, "Done", |m, extra_cp| {
@@ -156,6 +161,9 @@ pub fn build_one(
 ) -> Result<()> {
     let ws = load(workspace_root)?;
     let subset = transitive_closure(&ws, member_index);
+    for &idx in &subset {
+        maven::sync_member_for_build(&ws, idx, opts.offline)?;
+    }
     if subset.len() > 1 {
         return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, crate::parallel::TuiMode::Full, "Done", |m, extra_cp| {
             build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
@@ -175,6 +183,9 @@ pub fn build_subtree(
 ) -> Result<()> {
     let ws = load(workspace_root)?;
     let subset = transitive_closure_multi(&ws, member_indices);
+    for &idx in &subset {
+        maven::sync_member_for_build(&ws, idx, opts.offline)?;
+    }
     if subset.len() > 1 {
         return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, crate::parallel::TuiMode::Full, "Done", |m, extra_cp| {
             build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)

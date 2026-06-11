@@ -9,6 +9,7 @@ use crate::git;
 use crate::incremental::needs_repackage;
 use crate::jar::{populate_libs_dir, write_deterministic_jar};
 use crate::main_class::{detect_main_class, validate_main_class};
+use crate::maven;
 use crate::native;
 use crate::test;
 use anyhow::{Context, Result};
@@ -43,6 +44,7 @@ pub struct BuildOutput {
 /// extra-classpath.
 pub fn build(project_root: &Path, opts: BuildOptions) -> Result<()> {
     let desc = descriptor::load(project_root)?;
+    maven::sync_for_build(project_root, &desc, opts.offline)?;
     build_with_desc(project_root, &desc, opts, &[]).map(|_| ())
 }
 

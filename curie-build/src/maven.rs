@@ -1953,6 +1953,47 @@ pub fn run_maven_sync_workspace_root(workspace_root: &Path, force: bool, check: 
 }
 
 // ---------------------------------------------------------------------------
+// `curie build` sync hooks (`[maven] sync = true`)
+// ---------------------------------------------------------------------------
+
+/// Sync `pom.xml` for a standalone project at the start of `curie build`,
+/// when `[maven] sync = true`. No-op otherwise. Errors (including the
+/// unmarked-`pom.xml` safety check) fail the build, per
+/// `_design/MAVEN-SYNC.md`'s "Safety: pre-existing `pom.xml`" section.
+pub fn sync_for_build(project_root: &Path, desc: &Descriptor, offline: bool) -> Result<()> {
+    if !desc.maven.sync_enabled() {
+        return Ok(());
+    }
+    let (pom_path, outcome) = sync_member_pom(project_root, desc, None, &BTreeMap::new(), false, false, offline)?;
+    print_sync_outcome(&pom_path, outcome);
+    Ok(())
+}
+
+/// Sync `member_index`'s `pom.xml` at the start of `curie build`, when that
+/// member's effective (possibly inherited) `[maven] sync = true`. No-op
+/// otherwise.
+pub fn sync_member_for_build(ws: &workspace::Workspace, member_index: usize, offline: bool) -> Result<()> {
+    if !ws.members[member_index].descriptor.maven.sync_enabled() {
+        return Ok(());
+    }
+    sync_one_workspace_member(ws, member_index, false, false, offline)?;
+    Ok(())
+}
+
+/// Sync the aggregator `pom.xml` (recursively, for nested workspaces) for
+/// `workspace_root` at the start of `curie build`, when the workspace root's
+/// own `[maven] sync = true`. No-op otherwise.
+pub fn sync_aggregator_for_build(workspace_root: &Path) -> Result<()> {
+    let desc = descriptor::load(workspace_root)
+        .with_context(|| format!("failed to load workspace at {}", workspace_root.display()))?;
+    if !desc.maven.sync_enabled() {
+        return Ok(());
+    }
+    sync_aggregators_recursive(workspace_root, false, false)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -3159,5 +3200,106 @@ mod tests {
         assert!(app_dir.join("pom.xml").exists());
         assert!(!dir.path().join("pom.xml").exists(), "aggregator POM is only synced at the workspace root");
         assert!(!lib_dir.join("pom.xml").exists(), "only the targeted member is synced");
+    }
+
+    // -- `curie build` sync hooks -------------------------------------------------
+
+    #[test]
+    fn sync_for_build_noop_when_sync_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"my-app\"\nversion = \"1.0.0\"\ngroupId = \"com.example\"\nmainClass = \"com.example.Main\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+
+        sync_for_build(dir.path(), &desc, true).unwrap();
+        assert!(!dir.path().join("pom.xml").exists());
+    }
+
+    #[test]
+    fn sync_for_build_writes_pom_when_sync_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"my-app\"\nversion = \"1.0.0\"\ngroupId = \"com.example\"\nmainClass = \"com.example.Main\"\n\
+             [maven]\nsync = true\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+
+        sync_for_build(dir.path(), &desc, true).unwrap();
+        let pom = std::fs::read_to_string(dir.path().join("pom.xml")).unwrap();
+        assert!(pom.contains("curie-maven-fingerprint"));
+    }
+
+    #[test]
+    fn sync_for_build_fails_on_unmarked_pom() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"my-app\"\nversion = \"1.0.0\"\ngroupId = \"com.example\"\nmainClass = \"com.example.Main\"\n\
+             [maven]\nsync = true\n",
+        )
+        .unwrap();
+        let pom_path = dir.path().join("pom.xml");
+        std::fs::write(&pom_path, "<project>hand written</project>").unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+
+        let err = sync_for_build(dir.path(), &desc, true).unwrap_err().to_string();
+        assert!(err.contains("--force"), "got: {err}");
+        assert_eq!(std::fs::read_to_string(&pom_path).unwrap(), "<project>hand written</project>");
+    }
+
+    /// Write a two-member workspace like [`write_two_member_workspace`], but
+    /// with `[maven] sync = true` set only on `app` (not inherited from the
+    /// workspace root, which has no `[maven]` section of its own).
+    fn write_two_member_workspace_with_member_sync(dir: &Path) -> (PathBuf, PathBuf) {
+        let (lib_dir, app_dir) = write_two_member_workspace(dir);
+        let mut app_toml = std::fs::read_to_string(app_dir.join("Curie.toml")).unwrap();
+        app_toml.push_str("\n[maven]\nsync = true\n");
+        std::fs::write(app_dir.join("Curie.toml"), app_toml).unwrap();
+        (lib_dir, app_dir)
+    }
+
+    #[test]
+    fn sync_member_for_build_respects_per_member_sync_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let (lib_dir, app_dir) = write_two_member_workspace_with_member_sync(dir.path());
+
+        let ws = workspace::load(dir.path()).unwrap();
+        for index in 0..ws.members.len() {
+            sync_member_for_build(&ws, index, true).unwrap();
+        }
+
+        assert!(app_dir.join("pom.xml").exists(), "app has [maven] sync = true");
+        assert!(!lib_dir.join("pom.xml").exists(), "lib has no [maven] section, sync stays disabled");
+    }
+
+    #[test]
+    fn sync_aggregator_for_build_gated_on_workspace_roots_own_sync_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        // Only `app` enables [maven] sync — the workspace root does not, so
+        // the aggregator hook (gated on the root's own, non-inherited flag)
+        // must be a no-op even though a member's sync is enabled.
+        write_two_member_workspace_with_member_sync(dir.path());
+
+        sync_aggregator_for_build(dir.path()).unwrap();
+        assert!(!dir.path().join("pom.xml").exists());
+
+        // Enable [maven] sync on the workspace root itself: the aggregator
+        // is now written.
+        let mut root_toml = std::fs::read_to_string(dir.path().join("Curie.toml")).unwrap();
+        root_toml.push_str("\n[maven]\nsync = true\n");
+        std::fs::write(dir.path().join("Curie.toml"), root_toml).unwrap();
+
+        sync_aggregator_for_build(dir.path()).unwrap();
+        let root_pom = std::fs::read_to_string(dir.path().join("pom.xml")).unwrap();
+        assert!(root_pom.contains("<module>lib</module>"));
+        assert!(root_pom.contains("<module>app</module>"));
     }
 }
