@@ -26,6 +26,11 @@ use std::path::{Path, PathBuf};
 /// `groupId` fallback for projects that don't declare one in `Curie.toml`.
 pub const GENERATED_GROUP_ID: &str = "curie.generated";
 
+/// `<version>` fallback for the workspace aggregator POM. `[workspace]`
+/// has no `name`/`groupId`/`version` in `Curie.toml` — only members are
+/// versioned artifacts — so the aggregator gets a fixed placeholder.
+pub const GENERATED_VERSION: &str = "0";
+
 /// Maven's reproducible-builds property; matches `jar.rs::epoch()`.
 pub const OUTPUT_TIMESTAMP: &str = "2024-01-01T00:00:00Z";
 
@@ -333,6 +338,9 @@ pub struct MavenProject {
     pub dependencies: Vec<MavenDependency>,
     pub managed_dependencies: Vec<MavenManagedDependency>,
     pub plugins: Vec<MavenPlugin>,
+    /// `<modules>` entries for a `[workspace]` aggregator POM; empty for
+    /// `[application]`/`[library]`/`[bom]` projects.
+    pub modules: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +363,11 @@ pub struct MavenProject {
 ///   projects (the declared `mainClass`, or Curie's detected one) and
 ///   `None` for libraries. Curie resolves this the same way `build.rs`
 ///   does before calling this function.
+/// - `workspace_member_gavs` maps each `[workspace-dependencies]` entry's
+///   declared `path` to the referenced member's resolved coordinates
+///   (`group:artifact:version`); the caller resolves these from the loaded
+///   `Workspace` before calling this function. Pass an empty map for
+///   standalone projects (no `[workspace-dependencies]`).
 #[allow(clippy::too_many_arguments)]
 pub fn build_project(
     desc: &Descriptor,
@@ -362,6 +375,7 @@ pub fn build_project(
     pinned: &[PinnedDependency],
     resolved_ap_versions: &BTreeMap<String, String>,
     main_class: Option<&str>,
+    workspace_member_gavs: &BTreeMap<String, MavenCoordinate>,
 ) -> Result<MavenProject> {
     if desc.is_workspace() {
         anyhow::bail!("build_project: workspace descriptors are handled by the aggregator generator");
@@ -378,6 +392,7 @@ pub fn build_project(
     let test_ap = merge_ap_coordinates(&prod_ap, &desc.test_ap_pairs(), resolved_ap_versions)?;
 
     let mut dependencies = build_dependencies(desc)?;
+    dependencies.extend(workspace_dependency_entries(desc, workspace_member_gavs)?);
     dependencies.extend(provided_dependencies(desc, &prod_ap, &test_ap)?);
     dependencies.extend(junit_standalone_dependency(desc));
     if has_kotlin {
@@ -420,6 +435,76 @@ pub fn build_project(
         managed_dependencies: build_managed_dependencies(desc, pinned)?,
         layout,
         plugins,
+        modules: Vec::new(),
+    })
+}
+
+/// Build the [`MavenProject`] model for a `[bom]` descriptor:
+/// `<packaging>pom</packaging>` + `<dependencyManagement>`, with no
+/// `<dependencies>` and no `<build>`. Mirrors
+/// [`crate::pom_writer::build_bom_pom`]'s content rules: `[bom-imports]`
+/// (plus any inherited/pinned entries via [`build_managed_dependencies`])
+/// become `<type>pom</type><scope>import</scope>` imports, and
+/// `[dependencies]` become plain managed-version entries.
+pub fn build_bom_project(desc: &Descriptor, pinned: &[PinnedDependency]) -> Result<MavenProject> {
+    if !desc.is_bom() {
+        anyhow::bail!("build_bom_project: descriptor is not a [bom]");
+    }
+    let group_id = desc
+        .group_id()
+        .ok_or_else(|| anyhow::anyhow!("groupId must be set on [bom] to sync a pom.xml"))?
+        .to_string();
+
+    let mut managed_dependencies = build_managed_dependencies(desc, pinned)?;
+    for (coord, dep) in &desc.dependencies {
+        let (group_id, artifact_id) = split_coord(coord)?;
+        managed_dependencies.push(MavenManagedDependency {
+            group_id,
+            artifact_id,
+            version: dep.version().to_string(),
+            is_import: false,
+        });
+    }
+
+    Ok(MavenProject {
+        group_id,
+        artifact_id: desc.buildable_name().to_string(),
+        version: desc.buildable_version().to_string(),
+        packaging: "pom".to_string(),
+        managed_dependencies,
+        ..Default::default()
+    })
+}
+
+/// Build the [`MavenProject`] model for a `[workspace]` descriptor: an
+/// aggregator POM (`<packaging>pom</packaging>` + `<modules>`) listing the
+/// directly declared members (`desc.workspace().members`, declaration
+/// order). Nested workspaces recurse — each nested member with its own
+/// `[workspace]` section gets its own aggregator from a separate call to
+/// this function with that member's descriptor and root.
+///
+/// `[workspace]` has no `name`/`groupId`/`version` in `Curie.toml` — only
+/// members are versioned artifacts — so the aggregator's coordinates are
+/// [`GENERATED_GROUP_ID`] / [`GENERATED_VERSION`], with `artifactId`
+/// derived from `project_root`'s directory name.
+pub fn build_workspace_project(desc: &Descriptor, project_root: &Path) -> Result<MavenProject> {
+    let workspace = desc
+        .workspace()
+        .ok_or_else(|| anyhow::anyhow!("build_workspace_project: descriptor is not a [workspace]"))?;
+
+    let artifact_id = project_root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    Ok(MavenProject {
+        group_id: GENERATED_GROUP_ID.to_string(),
+        artifact_id,
+        version: GENERATED_VERSION.to_string(),
+        packaging: "pom".to_string(),
+        modules: workspace.members.clone(),
+        ..Default::default()
     })
 }
 
@@ -438,6 +523,29 @@ fn build_dependencies(desc: &Descriptor) -> Result<Vec<MavenDependency>> {
     }
     for (coord, dep) in &desc.test_dependencies {
         deps.push(maven_dependency(coord, dep, "test")?);
+    }
+    Ok(deps)
+}
+
+/// `[workspace-dependencies]` -> `<dependency>` entries on the referenced
+/// member's resolved GAV. `workspace_member_gavs` maps each entry's
+/// declared `path` to that member's coordinates — see [`build_project`].
+fn workspace_dependency_entries(
+    desc: &Descriptor,
+    workspace_member_gavs: &BTreeMap<String, MavenCoordinate>,
+) -> Result<Vec<MavenDependency>> {
+    let mut deps = Vec::new();
+    for (label, dep) in &desc.workspace_dependencies {
+        let gav = workspace_member_gavs.get(&dep.path).ok_or_else(|| {
+            anyhow::anyhow!("[workspace-dependencies.{label}]: no resolved GAV for member path \"{}\"", dep.path)
+        })?;
+        deps.push(MavenDependency {
+            group_id: gav.group_id.clone(),
+            artifact_id: gav.artifact_id.clone(),
+            version: Some(gav.version.clone()),
+            scope: Some("compile".to_string()),
+            exclusions: Vec::new(),
+        });
     }
     Ok(deps)
 }
@@ -1196,6 +1304,7 @@ pub fn render(project: &MavenProject, fingerprint_hex: &str) -> Result<String> {
     text_elem(&mut w, "packaging", &project.packaging)?;
     text_elem(&mut w, "name", &project.artifact_id)?;
 
+    write_modules(&mut w, &project.modules)?;
     write_properties(&mut w, &project.properties)?;
     write_dependency_management(&mut w, &project.managed_dependencies)?;
     write_dependencies(&mut w, &project.dependencies)?;
@@ -1210,6 +1319,18 @@ pub fn render(project: &MavenProject, fingerprint_hex: &str) -> Result<String> {
 
 fn text_elem(w: &mut XmlWriter<'_>, name: &str, text: &str) -> Result<()> {
     w.create_element(name).write_text_content(BytesText::new(text))?;
+    Ok(())
+}
+
+fn write_modules(w: &mut XmlWriter<'_>, modules: &[String]) -> Result<()> {
+    if modules.is_empty() {
+        return Ok(());
+    }
+    w.write_event(Event::Start(BytesStart::new("modules")))?;
+    for module in modules {
+        text_elem(w, "module", module)?;
+    }
+    w.write_event(Event::End(BytesEnd::new("modules")))?;
     Ok(())
 }
 
@@ -1490,9 +1611,10 @@ pub enum SyncOutcome {
 /// content actually changes.
 ///
 /// `member_toml`/`workspace_toml`/`pinned` feed [`fingerprint`].
-/// `resolved_ap_versions`/`main_class` are forwarded to [`build_project`].
-/// When `pom_path` already exists without a `curie-maven-fingerprint`
-/// marker (a hand-written POM), this errors unless `force` is `true`.
+/// `resolved_ap_versions`/`main_class`/`workspace_member_gavs` are forwarded
+/// to [`build_project`]. When `pom_path` already exists without a
+/// `curie-maven-fingerprint` marker (a hand-written POM), this errors unless
+/// `force` is `true`.
 #[allow(clippy::too_many_arguments)]
 pub fn sync_pom(
     project_root: &Path,
@@ -1503,9 +1625,10 @@ pub fn sync_pom(
     pinned: &[PinnedDependency],
     resolved_ap_versions: &BTreeMap<String, String>,
     main_class: Option<&str>,
+    workspace_member_gavs: &BTreeMap<String, MavenCoordinate>,
     force: bool,
 ) -> Result<SyncOutcome> {
-    let project = build_project(desc, project_root, pinned, resolved_ap_versions, main_class)?;
+    let project = build_project(desc, project_root, pinned, resolved_ap_versions, main_class, workspace_member_gavs)?;
     let fp = fingerprint(SCHEMA_VERSION, member_toml, workspace_toml, &project.layout, pinned);
 
     if let Ok(existing) = std::fs::read_to_string(pom_path) {
@@ -1606,6 +1729,22 @@ mod tests {
         desc
     }
 
+    fn minimal_bom(name: &str, group_id: Option<&str>) -> Descriptor {
+        let mut desc = minimal_app(name, group_id);
+        desc.kind = DescriptorKind::Bom(Bom {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            group_id: group_id.map(String::from),
+        });
+        desc
+    }
+
+    fn minimal_workspace(members: &[&str]) -> Descriptor {
+        let mut desc = minimal_app("unused", None);
+        desc.kind = DescriptorKind::Workspace(WorkspaceSection { members: members.iter().map(|m| m.to_string()).collect() });
+        desc
+    }
+
     fn write_file(dir: &Path, rel: &str, contents: &str) {
         let path = dir.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1618,14 +1757,14 @@ mod tests {
     fn coordinates_and_groupid_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let with_group = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&with_group, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&with_group, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         assert_eq!(project.group_id, "com.example");
         assert_eq!(project.artifact_id, "my-app");
         assert_eq!(project.version, "1.0.0");
         assert_eq!(project.packaging, "jar");
 
         let without_group = minimal_app("my-app", None);
-        let project = build_project(&without_group, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&without_group, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         assert_eq!(project.group_id, GENERATED_GROUP_ID);
     }
 
@@ -1634,7 +1773,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.java.source_compatibility = Some("17".to_string());
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<maven.compiler.release>17</maven.compiler.release>"));
         assert!(xml.contains("<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>"));
@@ -1662,7 +1801,7 @@ mod tests {
             "org.junit.jupiter:junit-jupiter".to_string(),
             DependencyValue::Version("5.10.0".to_string()),
         );
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
 
         let prod = project.dependencies.iter().find(|d| d.artifact_id == "jackson-databind").unwrap();
         assert_eq!(prod.scope.as_deref(), Some("compile"));
@@ -1686,7 +1825,7 @@ mod tests {
             "com.fasterxml.jackson.core:jackson-databind".to_string(),
             DependencyValue::Version(String::new()),
         );
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let dep = project.dependencies.iter().find(|d| d.artifact_id == "jackson-databind").unwrap();
         assert_eq!(dep.version, None);
 
@@ -1703,7 +1842,7 @@ mod tests {
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.bom_imports.insert("com.example:member-bom".to_string(), "1.0".to_string());
         desc.inherited_bom_imports.insert("com.example:workspace-bom".to_string(), "2.0".to_string());
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
 
         assert_eq!(project.managed_dependencies.len(), 2);
         assert_eq!(project.managed_dependencies[0].artifact_id, "member-bom");
@@ -1720,7 +1859,7 @@ mod tests {
     fn pin_transitive_off_by_default_no_pinned_entries() {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         assert!(project.managed_dependencies.is_empty());
         assert!(!desc.maven.pin_transitive_enabled());
     }
@@ -1734,7 +1873,7 @@ mod tests {
             PinnedDependency { group_id: "org.slf4j".into(), artifact_id: "slf4j-api".into(), version: "2.0.12".into() },
             PinnedDependency { group_id: "com.google.guava".into(), artifact_id: "guava".into(), version: "33.2.0-jre".into() },
         ];
-        let project = build_project(&desc, dir.path(), &pinned, &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &pinned, &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
 
         // Sorted by group:artifact, listed before BOM imports, not marked as imports.
         assert_eq!(project.managed_dependencies[0].group_id, "com.google.guava");
@@ -1747,6 +1886,121 @@ mod tests {
         let guava_pos = xml.find("guava").unwrap();
         let bom_pos = xml.find("member-bom").unwrap();
         assert!(guava_pos < bom_pos);
+    }
+
+    // -- BOM / workspace projects -------------------------------------------------
+
+    #[test]
+    fn bom_project_renders_packaging_pom() {
+        let mut desc = minimal_bom("my-bom", Some("com.example"));
+        desc.bom_imports.insert("com.example:other-bom".to_string(), "2.0".to_string());
+        desc.dependencies.insert("org.slf4j:slf4j-api".to_string(), DependencyValue::Version("2.0.13".to_string()));
+
+        let project = build_bom_project(&desc, &[]).unwrap();
+
+        assert_eq!(project.group_id, "com.example");
+        assert_eq!(project.artifact_id, "my-bom");
+        assert_eq!(project.version, "1.0.0");
+        assert_eq!(project.packaging, "pom");
+        assert!(project.dependencies.is_empty());
+        assert!(project.modules.is_empty());
+
+        assert_eq!(project.managed_dependencies.len(), 2);
+        let import = project.managed_dependencies.iter().find(|d| d.artifact_id == "other-bom").unwrap();
+        assert!(import.is_import);
+        let plain = project.managed_dependencies.iter().find(|d| d.artifact_id == "slf4j-api").unwrap();
+        assert!(!plain.is_import);
+        assert_eq!(plain.version, "2.0.13");
+
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(xml.contains("<packaging>pom</packaging>"));
+        // No `<dependencies>` outside of `<dependencyManagement>`.
+        assert_eq!(xml.matches("<dependencies>").count(), 1);
+        assert!(!xml.contains("<build>"));
+    }
+
+    #[test]
+    fn bom_project_requires_group_id() {
+        let desc = minimal_bom("my-bom", None);
+        let err = build_bom_project(&desc, &[]).unwrap_err().to_string();
+        assert!(err.contains("groupId"), "got: {err}");
+    }
+
+    #[test]
+    fn workspace_renders_aggregator_modules_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("my-workspace");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let desc = minimal_workspace(&["b-member", "a-member", "nested-workspace-demo"]);
+
+        let project = build_workspace_project(&desc, &workspace_root).unwrap();
+
+        assert_eq!(project.group_id, GENERATED_GROUP_ID);
+        assert_eq!(project.artifact_id, "my-workspace");
+        assert_eq!(project.version, GENERATED_VERSION);
+        assert_eq!(project.packaging, "pom");
+        assert_eq!(project.modules, vec!["b-member", "a-member", "nested-workspace-demo"]);
+        assert!(project.dependencies.is_empty());
+        assert!(project.managed_dependencies.is_empty());
+        assert!(project.plugins.is_empty());
+
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(xml.contains("<packaging>pom</packaging>"));
+        let b_pos = xml.find("<module>b-member</module>").unwrap();
+        let a_pos = xml.find("<module>a-member</module>").unwrap();
+        let nested_pos = xml.find("<module>nested-workspace-demo</module>").unwrap();
+        assert!(b_pos < a_pos && a_pos < nested_pos, "modules must render in declaration order: {xml}");
+        assert!(!xml.contains("<dependencyManagement>"));
+        assert!(!xml.contains("<build>"));
+    }
+
+    #[test]
+    fn member_pom_has_no_parent_element() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.inherited_bom_imports.insert("com.example:workspace-bom".to_string(), "2.0".to_string());
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(!xml.contains("<parent>"), "member POMs must be self-contained, with no <parent>: {xml}");
+        assert!(xml.contains("workspace-bom"), "inherited BOM imports must be materialized into the member POM: {xml}");
+    }
+
+    #[test]
+    fn workspace_dep_becomes_module_gav() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desc = minimal_app("app", Some("com.example"));
+        desc.workspace_dependencies.insert("core".to_string(), WorkspaceDep { path: "../core".to_string(), version: None });
+
+        let mut gavs = BTreeMap::new();
+        gavs.insert(
+            "../core".to_string(),
+            MavenCoordinate { group_id: "com.example".to_string(), artifact_id: "core".to_string(), version: "1.0.0".to_string() },
+        );
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &gavs).unwrap();
+
+        let dep = project.dependencies.iter().find(|d| d.artifact_id == "core").unwrap();
+        assert_eq!(dep.group_id, "com.example");
+        assert_eq!(dep.version, Some("1.0.0".to_string()));
+        assert_eq!(dep.scope, Some("compile".to_string()));
+
+        let xml = render(&project, "deadbeef").unwrap();
+        let dep_block = xml.split("<dependency>").find(|b| b.contains("<artifactId>core</artifactId>")).unwrap();
+        assert!(dep_block.contains("<groupId>com.example</groupId>"));
+        assert!(dep_block.contains("<version>1.0.0</version>"));
+        assert!(dep_block.contains("<scope>compile</scope>"));
+    }
+
+    #[test]
+    fn workspace_dep_without_resolved_gav_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desc = minimal_app("app", Some("com.example"));
+        desc.workspace_dependencies.insert("core".to_string(), WorkspaceDep { path: "../core".to_string(), version: None });
+
+        let err = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap_err().to_string();
+        assert!(err.contains("workspace-dependencies"), "got: {err}");
+        assert!(err.contains("../core"), "got: {err}");
     }
 
     // -- layout -----------------------------------------------------------------
@@ -1763,7 +2017,7 @@ mod tests {
         assert!(layout.colocated_test_excludes.is_empty());
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(!xml.contains("<sourceDirectory>"));
         assert!(!xml.contains("<testSourceDirectory>"));
@@ -1780,7 +2034,7 @@ mod tests {
         assert_eq!(layout.test_roots, vec![PathBuf::from("tests/com.example.app")]);
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<sourceDirectory>src/com.example.app</sourceDirectory>"));
         assert!(xml.contains("<testSourceDirectory>tests/com.example.app</testSourceDirectory>"));
@@ -1796,7 +2050,7 @@ mod tests {
         assert_eq!(layout.src_roots, vec![PathBuf::from("src/main/java"), PathBuf::from("src/main/kotlin")]);
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         // src/main/java is the Maven default and stays implicit.
         assert!(!xml.contains("<sourceDirectory>"));
@@ -1824,7 +2078,7 @@ mod tests {
         write_file(dir.path(), "src/main/resources/app.properties", "a=b");
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<resources>"));
         assert!(xml.contains("<directory>src/main/resources</directory>"));
@@ -1847,7 +2101,7 @@ mod tests {
         let mut resolved = BTreeMap::new();
         resolved.insert("com.example:bom-managed-processor".to_string(), "1.2.3".to_string());
 
-        let project = build_project(&desc, dir.path(), &[], &resolved, None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &resolved, None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         assert!(xml.contains("<id>default-compile</id>"));
@@ -1868,7 +2122,7 @@ mod tests {
             AnnotationProcessor::Version(String::new()),
         );
 
-        let err = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap_err().to_string();
+        let err = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap_err().to_string();
         assert!(err.contains("com.example:bom-managed-processor"), "{err}");
     }
 
@@ -1884,7 +2138,7 @@ mod tests {
             }),
         );
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let dep = project.dependencies.iter().find(|d| d.artifact_id == "lombok").unwrap();
         assert_eq!(dep.group_id, "org.projectlombok");
         assert_eq!(dep.version.as_deref(), Some("1.18.34"));
@@ -1907,7 +2161,7 @@ mod tests {
         options.insert("verbose".to_string(), "true".to_string());
         desc.annotation_processor_options.insert("dagger".to_string(), options);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<compilerArgs>"));
         assert!(xml.contains("<arg>-Adagger.verbose=true</arg>"));
@@ -1919,7 +2173,7 @@ mod tests {
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.java.enable_preview = Some(true);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         let compile = xml.split("<execution>").find(|b| b.contains("default-compile")).unwrap();
@@ -1936,7 +2190,7 @@ mod tests {
         write_file(dir.path(), "src/main/java/com/example/HelloTest.java", "package com.example; class HelloTest {}");
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         let compile = xml.split("<execution>").find(|b| b.contains("default-compile")).unwrap();
@@ -1959,7 +2213,7 @@ mod tests {
             AnnotationProcessor::Version("5.12.0".to_string()),
         );
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         let compile = xml.split("<execution>").find(|b| b.contains("default-compile")).unwrap();
@@ -1980,7 +2234,7 @@ mod tests {
         write_file(dir.path(), "src/test/kotlin/com/example/HelloTest.kt", "package com.example\nclass HelloTest");
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         let kotlin_plugin = xml.split("<plugin>").find(|b| b.contains("kotlin-maven-plugin")).unwrap();
@@ -2002,7 +2256,7 @@ mod tests {
         write_file(dir.path(), "src/test/kotlin/com/example/HelloTest.kt", "package com.example\nclass HelloTest");
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         let compiler_plugin = xml.split("<plugin>").find(|b| b.contains("maven-compiler-plugin")).unwrap();
@@ -2029,7 +2283,7 @@ mod tests {
         write_file(dir.path(), "src/test/groovy/com/example/HelloTest.groovy", "package com.example\nclass HelloTest {}");
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         let gmavenplus = xml.split("<plugin>").find(|b| b.contains("gmavenplus-plugin")).unwrap();
@@ -2083,7 +2337,7 @@ mod tests {
         };
         desc.dependencies.insert("org.slf4j:slf4j-api".to_string(), shaded_dependency("2.0.13", Some(false), vec![]));
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main")).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main"), &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         let shade_plugin = xml.split("<plugin>").find(|b| b.contains("maven-shade-plugin")).unwrap();
@@ -2115,7 +2369,7 @@ mod tests {
         desc.dependencies.insert("com.google.guava:guava".to_string(), shaded_dependency("33.2.1-jre", Some(true), vec![]));
         desc.dependencies.insert("org.slf4j:slf4j-api".to_string(), DependencyValue::Version("2.0.13".to_string()));
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         let shade_plugin = xml.split("<plugin>").find(|b| b.contains("maven-shade-plugin")).unwrap();
@@ -2134,7 +2388,7 @@ mod tests {
     fn fat_jar_disabled_omits_shade_plugin() {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main")).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main"), &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(!xml.contains("maven-shade-plugin"));
     }
@@ -2168,7 +2422,7 @@ mod tests {
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.spock.enabled = Some(true);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains(&format!("<include>%regex[{}]</include>", surefire_patterns::SPOCK)));
     }
@@ -2178,7 +2432,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_app("my-app", Some("com.example"));
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains(&format!("<include>%regex[{}]</include>", surefire_patterns::DEFAULT)));
         assert!(!xml.contains("<argLine>"));
@@ -2190,7 +2444,7 @@ mod tests {
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.java.enable_preview = Some(true);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<argLine>--enable-preview</argLine>"));
     }
@@ -2211,7 +2465,7 @@ mod tests {
             }),
         );
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<argLine>-javaagent:${org.mockito:mockito-core:jar}</argLine>"));
         assert!(xml.contains("<artifactId>maven-dependency-plugin</artifactId>"));
@@ -2225,7 +2479,7 @@ mod tests {
         desc.test.coverage = Some(true);
         desc.java.enable_preview = Some(true);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<argLine>@{argLine} --enable-preview</argLine>"));
         assert!(xml.contains("<artifactId>jacoco-maven-plugin</artifactId>"));
@@ -2241,7 +2495,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_app("my-app", Some("com.example"));
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(!xml.contains("jacoco-maven-plugin"));
     }
@@ -2251,7 +2505,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_app("my-app", Some("com.example"));
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let dep = project
             .dependencies
             .iter()
@@ -2270,7 +2524,7 @@ mod tests {
             DependencyValue::Version("5.10.0".to_string()),
         );
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         assert!(!project
             .dependencies
             .iter()
@@ -2283,7 +2537,7 @@ mod tests {
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.spock.enabled = Some(true);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         assert!(!project
             .dependencies
             .iter()
@@ -2304,7 +2558,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_library("my-lib", Some("com.example"));
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<artifactId>maven-jar-plugin</artifactId>"));
         assert!(xml.contains("<addMavenDescriptor>false</addMavenDescriptor>"));
@@ -2315,7 +2569,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_library("my-lib", Some("com.example"));
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(!xml.contains("<manifest>"));
     }
@@ -2326,7 +2580,7 @@ mod tests {
         let mut desc = minimal_app("my-app", Some("com.example"));
         jackson_databind_dep(&mut desc);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main")).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main"), &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         assert!(xml.contains("<mainClass>com.example.Main</mainClass>"));
@@ -2346,7 +2600,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_app("my-app", Some("com.example"));
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main")).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main"), &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         assert!(xml.contains("<mainClass>com.example.Main</mainClass>"));
@@ -2362,7 +2616,7 @@ mod tests {
         jackson_databind_dep(&mut desc);
         desc.fat_jar.enabled = true;
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main")).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main"), &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         assert!(xml.contains("<mainClass>com.example.Main</mainClass>"));
@@ -2377,7 +2631,7 @@ mod tests {
         let mut desc = minimal_library("my-lib", Some("com.example"));
         jackson_databind_dep(&mut desc);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         assert!(!xml.contains("<manifest>"));
@@ -2401,7 +2655,7 @@ mod tests {
             }),
         );
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main")).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main"), &BTreeMap::new()).unwrap();
         assert_eq!(project.plugins.iter().filter(|p| p.artifact_id == "maven-dependency-plugin").count(), 1);
 
         let xml = render(&project, "deadbeef").unwrap();
@@ -2417,8 +2671,8 @@ mod tests {
         write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
         let desc = minimal_app("my-app", Some("com.example"));
 
-        let p1 = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
-        let p2 = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let p1 = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let p2 = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         assert_eq!(render(&p1, "deadbeef").unwrap(), render(&p2, "deadbeef").unwrap());
     }
 
@@ -2437,13 +2691,13 @@ mod tests {
         let desc = minimal_app("my-app", Some("com.example"));
         let pom_path = dir.path().join("pom.xml");
 
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml-bytes", None, &[], &BTreeMap::new(), None, false).unwrap();
+        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml-bytes", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap();
         assert_eq!(outcome, SyncOutcome::Written);
 
         let metadata_before = std::fs::metadata(&pom_path).unwrap();
         let modified_before = metadata_before.modified().unwrap();
 
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml-bytes", None, &[], &BTreeMap::new(), None, false).unwrap();
+        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml-bytes", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap();
         assert_eq!(outcome, SyncOutcome::UpToDate);
 
         let modified_after = std::fs::metadata(&pom_path).unwrap().modified().unwrap();
@@ -2457,8 +2711,8 @@ mod tests {
         let desc = minimal_app("my-app", Some("com.example"));
         let pom_path = dir.path().join("pom.xml");
 
-        sync_pom(dir.path(), &pom_path, &desc, b"v1", None, &[], &BTreeMap::new(), None, false).unwrap();
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"v2", None, &[], &BTreeMap::new(), None, false).unwrap();
+        sync_pom(dir.path(), &pom_path, &desc, b"v1", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap();
+        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"v2", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap();
         assert_eq!(outcome, SyncOutcome::Written);
     }
 
@@ -2469,12 +2723,12 @@ mod tests {
         let desc = minimal_app("my-app", Some("com.example"));
         let pom_path = dir.path().join("pom.xml");
 
-        sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, false).unwrap();
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, false).unwrap();
+        sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap();
+        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap();
         assert_eq!(outcome, SyncOutcome::UpToDate);
 
         write_file(dir.path(), "src/main/kotlin/com/example/World.kt", "package com.example\nclass World");
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, false).unwrap();
+        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap();
         assert_eq!(outcome, SyncOutcome::Written);
     }
 
@@ -2486,7 +2740,7 @@ mod tests {
         let pom_path = dir.path().join("pom.xml");
         std::fs::write(&pom_path, "<project>hand written</project>").unwrap();
 
-        let err = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, false).unwrap_err().to_string();
+        let err = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false).unwrap_err().to_string();
         assert!(err.contains("--force"), "got: {err}");
         assert_eq!(std::fs::read_to_string(&pom_path).unwrap(), "<project>hand written</project>");
     }
@@ -2499,7 +2753,7 @@ mod tests {
         let pom_path = dir.path().join("pom.xml");
         std::fs::write(&pom_path, "<project>hand written</project>").unwrap();
 
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, true).unwrap();
+        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), true).unwrap();
         assert_eq!(outcome, SyncOutcome::Written);
         assert!(std::fs::read_to_string(&pom_path).unwrap().contains("curie-maven-fingerprint"));
     }
