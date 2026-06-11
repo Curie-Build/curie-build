@@ -343,10 +343,18 @@ pub fn build_project(
 
     let mut plugins = Vec::new();
     plugins.extend(build_compiler_plugin(desc, &layout, &prod_ap, &test_ap)?);
+    plugins.push(build_surefire_plugin(desc));
+    if !desc.test_dep_java_agent_coords().is_empty() {
+        plugins.push(build_dependency_properties_plugin());
+    }
+    if desc.test.coverage_enabled() {
+        plugins.push(build_jacoco_plugin());
+    }
     plugins.extend(build_helper_plugins(&layout));
 
     let mut dependencies = build_dependencies(desc)?;
     dependencies.extend(provided_dependencies(desc, &prod_ap, &test_ap)?);
+    dependencies.extend(junit_standalone_dependency(desc));
 
     Ok(MavenProject {
         group_id: desc.group_id().unwrap_or(GENERATED_GROUP_ID).to_string(),
@@ -625,6 +633,130 @@ fn annotation_processor_paths_node(coords: &[MavenCoordinate]) -> XmlNode {
 /// `<compilerArgs><arg>...</arg>...</compilerArgs>`.
 fn compiler_args_node(args: &[String]) -> XmlNode {
     XmlNode::element("compilerArgs", args.iter().map(|a| XmlNode::text("arg", a.clone())).collect())
+}
+
+// ---------------------------------------------------------------------------
+// Test execution (Surefire / JaCoCo)
+// ---------------------------------------------------------------------------
+
+/// Class-name include patterns for `maven-surefire-plugin`, mirroring
+/// `test.rs::run_tests`'s `effective_filter` (default vs. Spock-broadened).
+pub mod surefire_patterns {
+    pub const DEFAULT: &str = ".*Tests?$|^Test.*|.*TestCase$";
+    pub const SPOCK: &str = ".*Tests?$|^Test.*|.*TestCase$|.*Spec$";
+}
+
+/// `<argLine>` for `maven-surefire-plugin`: `--enable-preview` and
+/// `-javaagent:` mappings for `[dependencies]`/`[test-dependencies]` entries
+/// marked `javaAgent = true` (resolved to jar paths via
+/// `maven-dependency-plugin:properties`, see [`build_dependency_properties_plugin`]).
+/// Returns `None` when there's nothing to add. When JaCoCo's `prepare-agent`
+/// is also active, `@{argLine}` is prepended so its dynamically-injected
+/// `-javaagent` is preserved.
+fn surefire_arg_line(desc: &Descriptor) -> Option<String> {
+    let mut args = Vec::new();
+    if desc.java.preview_enabled() {
+        args.push("--enable-preview".to_string());
+    }
+    for coord in desc.test_dep_java_agent_coords() {
+        args.push(format!("-javaagent:${{{coord}:jar}}"));
+    }
+    if args.is_empty() {
+        return None;
+    }
+    if desc.test.coverage_enabled() {
+        args.insert(0, "@{argLine}".to_string());
+    }
+    Some(args.join(" "))
+}
+
+/// `maven-surefire-plugin` with class-name includes mirroring the runner's
+/// default/Spock-broadened filters, plus `<argLine>` (see [`surefire_arg_line`]).
+fn build_surefire_plugin(desc: &Descriptor) -> MavenPlugin {
+    let pattern = if desc.spock.enabled() { surefire_patterns::SPOCK } else { surefire_patterns::DEFAULT };
+    let mut configuration =
+        vec![XmlNode::element("includes", vec![XmlNode::text("include", format!("%regex[{pattern}]"))])];
+    if let Some(arg_line) = surefire_arg_line(desc) {
+        configuration.push(XmlNode::text("argLine", arg_line));
+    }
+    MavenPlugin {
+        artifact_id: "maven-surefire-plugin".to_string(),
+        version: plugin_versions::SUREFIRE.to_string(),
+        configuration,
+        ..Default::default()
+    }
+}
+
+/// `maven-dependency-plugin:properties`, run during `initialize` to define
+/// `${groupId:artifactId:jar}` properties for the `-javaagent:` paths in
+/// [`surefire_arg_line`].
+fn build_dependency_properties_plugin() -> MavenPlugin {
+    MavenPlugin {
+        artifact_id: "maven-dependency-plugin".to_string(),
+        version: plugin_versions::DEPENDENCY.to_string(),
+        executions: vec![MavenExecution { goals: vec!["properties".to_string()], ..Default::default() }],
+        ..Default::default()
+    }
+}
+
+/// `jacoco-maven-plugin` for `[test].coverage = true`: `prepare-agent` wires
+/// the coverage agent into Surefire's `argLine`, and `report` runs in the
+/// `test` phase (after Surefire, by `<plugins>` declaration order) so that
+/// `mvn test` produces a coverage report.
+fn build_jacoco_plugin() -> MavenPlugin {
+    MavenPlugin {
+        group_id: Some("org.jacoco".to_string()),
+        artifact_id: "jacoco-maven-plugin".to_string(),
+        version: plugin_versions::JACOCO.to_string(),
+        executions: vec![
+            MavenExecution { goals: vec!["prepare-agent".to_string()], ..Default::default() },
+            MavenExecution {
+                id: Some("report".to_string()),
+                phase: Some("test".to_string()),
+                goals: vec!["report".to_string()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+const JUNIT_STANDALONE_GROUP_ID: &str = "org.junit.platform";
+const JUNIT_STANDALONE_ARTIFACT_ID: &str = "junit-platform-console-standalone";
+
+/// Coordinates of test engines that, if declared, mean the project's test
+/// classpath already provides a JUnit Platform engine and doesn't need
+/// `junit-platform-console-standalone`.
+const KNOWN_TEST_ENGINE_COORDS: &[&str] = &[
+    "org.junit.jupiter:junit-jupiter",
+    "org.junit.jupiter:junit-jupiter-engine",
+    "org.junit.vintage:junit-vintage-engine",
+    "org.spockframework:spock-core",
+];
+
+fn has_test_engine_dependency(desc: &Descriptor) -> bool {
+    desc.spock.enabled()
+        || desc
+            .dependencies
+            .keys()
+            .chain(desc.test_dependencies.keys())
+            .any(|coord| KNOWN_TEST_ENGINE_COORDS.contains(&coord.as_str()))
+}
+
+/// `junit-platform-console-standalone` as a `test`-scope dependency,
+/// replicating Curie's effective test classpath (`test.rs::resolve_standalone`
+/// always resolves it) for projects with no declared test engine.
+fn junit_standalone_dependency(desc: &Descriptor) -> Option<MavenDependency> {
+    if has_test_engine_dependency(desc) {
+        return None;
+    }
+    Some(MavenDependency {
+        group_id: JUNIT_STANDALONE_GROUP_ID.to_string(),
+        artifact_id: JUNIT_STANDALONE_ARTIFACT_ID.to_string(),
+        version: Some(desc.test.junit_platform_version().to_string()),
+        scope: Some("test".to_string()),
+        exclusions: vec![],
+    })
 }
 
 /// `build-helper-maven-plugin:add-source`/`add-test-source` for source
@@ -1453,6 +1585,157 @@ mod tests {
         let test_compile = xml.split("<execution>").find(|b| b.contains("default-testCompile")).unwrap();
         assert!(test_compile.contains("<artifactId>dagger-compiler</artifactId>"));
         assert!(test_compile.contains("<artifactId>mockito-core</artifactId>"));
+    }
+
+    // -- test execution (surefire / jacoco) --------------------------------------
+
+    #[test]
+    fn surefire_includes_match_runner_default() {
+        let re = regex::Regex::new(surefire_patterns::DEFAULT).unwrap();
+        for name in ["FooTest", "TestFoo", "FooTests", "FooTestCase"] {
+            assert!(re.is_match(name), "{name} should match");
+        }
+        for name in ["Foo", "FooSpec"] {
+            assert!(!re.is_match(name), "{name} should not match");
+        }
+    }
+
+    #[test]
+    fn surefire_includes_match_runner_spock_broadened() {
+        assert_eq!(surefire_patterns::SPOCK, ".*Tests?$|^Test.*|.*TestCase$|.*Spec$");
+        let re = regex::Regex::new(surefire_patterns::SPOCK).unwrap();
+        for name in ["FooTest", "TestFoo", "FooTests", "FooTestCase", "FooSpec"] {
+            assert!(re.is_match(name), "{name} should match");
+        }
+        assert!(!re.is_match("Foo"));
+    }
+
+    #[test]
+    fn surefire_plugin_uses_spock_broadened_pattern_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.spock.enabled = Some(true);
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(xml.contains(&format!("<include>%regex[{}]</include>", surefire_patterns::SPOCK)));
+    }
+
+    #[test]
+    fn surefire_plugin_uses_default_pattern_without_argline_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let desc = minimal_app("my-app", Some("com.example"));
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(xml.contains(&format!("<include>%regex[{}]</include>", surefire_patterns::DEFAULT)));
+        assert!(!xml.contains("<argLine>"));
+    }
+
+    #[test]
+    fn enable_preview_adds_surefire_arg_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.java.enable_preview = Some(true);
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(xml.contains("<argLine>--enable-preview</argLine>"));
+    }
+
+    #[test]
+    fn java_agent_dependency_adds_argline_and_dependency_properties_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.test_dependencies.insert(
+            "org.mockito:mockito-core".to_string(),
+            DependencyValue::Detailed(DependencyDetailed {
+                version: String::new(),
+                repository: None,
+                java_agent: true,
+                exclusions: vec![],
+                shade: None,
+                relocations: vec![],
+            }),
+        );
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(xml.contains("<argLine>-javaagent:${org.mockito:mockito-core:jar}</argLine>"));
+        assert!(xml.contains("<artifactId>maven-dependency-plugin</artifactId>"));
+        assert!(xml.contains("<goal>properties</goal>"));
+    }
+
+    #[test]
+    fn coverage_enabled_prepends_argline_placeholder_and_adds_jacoco_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.test.coverage = Some(true);
+        desc.java.enable_preview = Some(true);
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(xml.contains("<argLine>@{argLine} --enable-preview</argLine>"));
+        assert!(xml.contains("<artifactId>jacoco-maven-plugin</artifactId>"));
+        assert!(xml.contains("<goal>prepare-agent</goal>"));
+
+        let report = xml.split("<execution>").find(|b| b.contains("<id>report</id>")).unwrap();
+        assert!(report.contains("<phase>test</phase>"));
+        assert!(report.contains("<goal>report</goal>"));
+    }
+
+    #[test]
+    fn coverage_disabled_has_no_jacoco_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let desc = minimal_app("my-app", Some("com.example"));
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(!xml.contains("jacoco-maven-plugin"));
+    }
+
+    #[test]
+    fn junit_standalone_added_when_no_engine_declared() {
+        let dir = tempfile::tempdir().unwrap();
+        let desc = minimal_app("my-app", Some("com.example"));
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new()).unwrap();
+        let dep = project
+            .dependencies
+            .iter()
+            .find(|d| d.group_id == JUNIT_STANDALONE_GROUP_ID && d.artifact_id == JUNIT_STANDALONE_ARTIFACT_ID)
+            .unwrap();
+        assert_eq!(dep.scope.as_deref(), Some("test"));
+        assert_eq!(dep.version.as_deref(), Some(desc.test.junit_platform_version()));
+    }
+
+    #[test]
+    fn junit_standalone_omitted_when_jupiter_declared() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.test_dependencies.insert(
+            "org.junit.jupiter:junit-jupiter".to_string(),
+            DependencyValue::Version("5.10.0".to_string()),
+        );
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new()).unwrap();
+        assert!(!project
+            .dependencies
+            .iter()
+            .any(|d| d.artifact_id == JUNIT_STANDALONE_ARTIFACT_ID));
+    }
+
+    #[test]
+    fn junit_standalone_omitted_when_spock_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.spock.enabled = Some(true);
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new()).unwrap();
+        assert!(!project
+            .dependencies
+            .iter()
+            .any(|d| d.artifact_id == JUNIT_STANDALONE_ARTIFACT_ID));
     }
 
     // -- determinism / incrementality --------------------------------------------
