@@ -13,9 +13,10 @@ import java.util.ServiceLoader;
  *
  * <ul>
  *   <li>Multiple dependencies (Jackson, Guava) merged into one JAR</li>
- *   <li>Package relocations (Guava → shaded) to avoid version conflicts</li>
+ *   <li>Package relocations using from/to (Guava → shaded) to avoid version conflicts</li>
  *   <li>META-INF/services merged from all dependency JARs</li>
- *   <li>Per-dependency exclusion (SLF4J excluded via fatJar = false)</li>
+ *   <li>Per-dependency control via shade = false (legacy fatJar also works)</li>
+ *   <li>Global shadeAll default under [fat-jar]</li>
  * </ul>
  *
  * Run directly with: {@code java -jar target/fat-jar-demo-0.1.0-fat.jar}

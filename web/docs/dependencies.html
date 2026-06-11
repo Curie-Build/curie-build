@@ -141,6 +141,43 @@
 <pre>  Added  <span class="ok">com.google.guava:guava = "33.2.1-jre"</span>  →  [dependencies]</pre>
     </div>
 
+    <h2 id="fat-jar-shading">Fat JAR shading (shadeAll, shade, relocations)</h2>
+    <p>When a project has a <code>[fat-jar]</code> section, Curie can produce a self-contained <code>-fat.jar</code>. The global default for whether dependencies are bundled is controlled by <code>shadeAll</code>:</p>
+
+<div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[fat-jar]</span>
+<span class="kw">enabled</span> = <span class="bool">true</span>
+<span class="kw">shadeAll</span> = <span class="bool">true</span>   <span class="com"># default: bundle (shade) deps unless overridden</span>
+
+<span class="kw">[[fat-jar.relocations]]</span>
+<span class="kw">from</span> = <span class="str">"com.google.common"</span>
+<span class="kw">to</span>   = <span class="str">"com.example.shaded.com.google.common"</span>
+</pre>
+    </div>
+
+    <p>Per-dependency control:</p>
+    <ul>
+      <li><code>shade = true/false</code> (the legacy <code>fatJar</code> key is still accepted)</li>
+      <li>A <code>relocations</code> array on a dependency forces it to be shaded and applies the rules only to classes from that dependency (Curie checks that the "from" packages do not appear in other bundled deps; if they do you get an error suggesting to move the rule to the top-level <code>[[fat-jar.relocations]]</code>).</li>
+    </ul>
+
+<div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[dependencies]</span>
+<span class="pkg">"com.google.guava:guava"</span> = { <span class="kw">version</span> = <span class="str">"33.2"</span>, <span class="kw">relocations</span> = [
+  { <span class="kw">from</span> = <span class="str">"com.google.common"</span>, <span class="kw">to</span> = <span class="str">"com.example.shaded.com.google.common"</span> }
+] }
+<span class="pkg">"org.slf4j:slf4j-api"</span> = { <span class="kw">version</span> = <span class="str">"2.0"</span>, <span class="kw">shade</span> = <span class="bool">false</span> }
+</pre>
+    </div>
+
     <h2>curie add flags</h2>
     <table>
       <thead><tr><th>Flag</th><th>Effect</th></tr></thead>

@@ -277,8 +277,25 @@ pub fn do_build(
         let fat_path = project_root.join("target").join(&fat_name);
         let toml_path = project_root.join("Curie.toml");
 
-        // Filter deps according to per-dep fatJar = false overrides.
+        // Filter deps according to [fat-jar].shadeAll + per-dep shade/relocations.
         let fat_dep_jars = crate::fat_jar::filter_fat_jar_deps(&effective_dep_jars, desc);
+
+        // Compute active relocation rules: global + those declared on any
+        // direct dep that will be shaded (per should_shade).
+        let mut active_relocs: Vec<crate::descriptor::Relocation> =
+            desc.fat_jar.relocations.clone();
+        for (_coord, v) in &desc.dependencies {
+            if v.should_shade(desc.fat_jar.shade_all) {
+                active_relocs.extend(v.relocations().iter().cloned());
+            }
+        }
+
+        // Overlap safety check for per-dep relocations (required by the feature).
+        // For every relocation declared on a direct dep that is being shaded,
+        // verify that its "from" package prefix does not appear in any *other*
+        // JAR that will actually be bundled.
+        crate::fat_jar::check_per_dep_relocation_overlap(desc, &fat_dep_jars)
+            .context("fat-jar relocation overlap check failed")?;
 
         if crate::fat_jar::needs_rebuild(
             &fat_path,
@@ -295,7 +312,7 @@ pub fn do_build(
                 resolved_main_class.as_deref(),
                 &fat_dep_jars,
                 build_info_content.as_deref(),
-                &desc.fat_jar.relocations,
+                &active_relocs,
             )
             .context("failed to write fat JAR")?;
         } else {

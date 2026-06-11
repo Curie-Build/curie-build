@@ -465,32 +465,53 @@ impl NativeImage {
 /// Configuration for the `[fat-jar]` table.
 ///
 /// When present, Curie produces an uber/fat JAR that merges all dependency
-/// classes into a single JAR.  By default every dependency is included;
-/// per-dep include/exclude overrides are available via `fatJar = false` on
-/// individual `[dependencies]` entries.
+/// classes into a single JAR.
+///
+/// The `shadeAll` key controls the default policy for whether (direct)
+/// dependencies are shaded into the fat JAR:
+/// - `shadeAll = true` (default when the section is present) — dependencies
+///   are included unless a per-dep `shade = false` or `fatJar = false` (legacy)
+///   says otherwise.
+/// - `shadeAll = false` — dependencies are excluded unless a per-dep
+///   `shade = true` (or `relocations` on the dep, which forces shading) opts in.
+///
+/// Per-dependency `shade` (or the legacy `fatJar`) and `relocations` act as
+/// overrides and can force inclusion even when `shadeAll = false`.
 ///
 /// ```toml
 /// [fat-jar]
 /// # Enable fat JAR output (default when the section is present).
 /// enabled = true
 ///
+/// # Global default: shade (bundle) all dependencies unless overridden per-dep.
+/// shadeAll = true
+///
 /// # Relocate packages to avoid classpath conflicts.
 /// [[fat-jar.relocations]]
-/// pattern = "com.google.common"
-/// shadedPattern = "shaded.com.google.common"
+/// from = "com.google.common"
+/// to = "shaded.com.google.common"
 /// ```
 ///
 /// Only meaningful for `[application]` and `[library]` projects.
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct FatJar {
     /// `true` when fat-JAR packaging is active.  Defaults to `true` when
     /// the `[fat-jar]` section is present, `false` when it is absent.
     #[serde(default = "default_true")]
     pub enabled: bool,
 
+    /// Global default policy for shading dependencies into the fat JAR.
+    /// `true` (default) means dependencies are shaded unless a per-dep
+    /// `shade = false` (or legacy `fatJar = false`) excludes them.
+    /// `false` means dependencies are excluded unless a per-dep `shade = true`
+    /// or `relocations` forces them in.
+    #[serde(rename = "shadeAll", default = "default_true")]
+    pub shade_all: bool,
+
     /// Package relocations applied to dependency classes.  Each entry
-    /// rewrites every reference to `pattern` → `shadedPattern` inside
-    /// class files and resource paths.
+    /// rewrites every reference to `from` → `to` inside class files and
+    /// resource paths (global rules; per-dep rules may also be declared on
+    /// individual `[dependencies]` entries).
     #[serde(default)]
     pub relocations: Vec<Relocation>,
 
@@ -500,22 +521,44 @@ pub struct FatJar {
     pub section_present: bool,
 }
 
-/// One `[[fat-jar.relocations]]` entry — rewrites a package prefix in
-/// both class bytecode and resource paths.
+impl Default for FatJar {
+    fn default() -> Self {
+        FatJar {
+            enabled: false,
+            shade_all: true, // historical "include all unless per-dep says no"
+            relocations: vec![],
+            section_present: false,
+        }
+    }
+}
+
+/// One relocation entry (used both in `[[fat-jar.relocations]]` and in the
+/// `relocations` array on a per-dependency entry).
+///
+/// Rewrites a package prefix in both class bytecode (constant pool) and
+/// resource paths. When declared on a specific dependency the rule applies
+/// only to classes/resources originating from that dependency (after an
+/// overlap safety check).
 ///
 /// ```toml
 /// [[fat-jar.relocations]]
-/// pattern = "com.google.common"
-/// shadedPattern = "shaded.com.google.common"
+/// from = "com.google.common"
+/// to = "shaded.com.google.common"
 /// excludes = ["com.google.common.annotations.*"]
+///
+/// # Or per-dependency:
+/// "com.google.guava:guava" = { version = "33", relocations = [
+///   { from = "com.google.common", to = "com.example.shaded.com.google.common" }
+/// ] }
 /// ```
 #[derive(Debug, Deserialize, Clone)]
 pub struct Relocation {
     /// The original package prefix to match (dot-separated).
-    pub pattern: String,
+    #[serde(rename = "from")]
+    pub from: String,
     /// The replacement package prefix.
-    #[serde(rename = "shadedPattern")]
-    pub shaded_pattern: String,
+    #[serde(rename = "to")]
+    pub to: String,
     /// Patterns to exclude from relocation (glob syntax, optional).
     #[serde(default)]
     pub excludes: Vec<String>,
@@ -744,16 +787,38 @@ pub struct DependencyDetailed {
     /// ```
     #[serde(default)]
     pub exclusions: Vec<String>,
-    /// Controls whether this dependency is included in the fat/uber JAR.
-    /// - `None` (absent) → follow the global `[fat-jar]` default (include all).
-    /// - `Some(true)` → always include regardless of the global default.
-    /// - `Some(false)` → always exclude from the fat JAR.
+    /// Per-dependency control for shading (including) this dependency into
+    /// the fat/uber JAR.
+    ///
+    /// - `None` (absent) → follow the global `[fat-jar].shadeAll` default.
+    /// - `Some(true)` / `shade = true` → always shade (include) this dep.
+    /// - `Some(false)` / `shade = false` → never shade this dep.
+    ///
+    /// Declaring a non-empty `relocations` array on the dependency also
+    /// forces shading (implies `shade = true`).
     ///
     /// ```toml
-    /// "org.example:logging-api" = { version = "1.0", fatJar = false }
+    /// "org.example:logging-api" = { version = "1.0", shade = false }
+    /// "com.google.guava:guava" = { version = "33", shade = true, relocations = [
+    ///   { from = "com.google.common", to = "com.example.shaded.com.google.common" }
+    /// ]}
     /// ```
-    #[serde(default, rename = "fatJar")]
-    pub fat_jar: Option<bool>,
+    #[serde(default, rename = "shade")]
+    pub shade: Option<bool>,
+
+    /// Per-dependency package relocations. When non-empty this dependency
+    /// is always shaded into the fat JAR (the relocation rules are applied
+    /// only to classes/resources coming from this dependency, after an
+    /// overlap safety check against other bundled deps).
+    ///
+    /// ```toml
+    /// "com.google.guava:guava" = { version = "33.2.1-jre", relocations = [
+    ///   { from = "com.google.common", to = "com.example.fatjar.shaded.com.google.common" },
+    ///   { from = "com.google.thirdparty", to = "com.example.fatjar.shaded.com.google.thirdparty" }
+    /// ]}
+    /// ```
+    #[serde(default)]
+    pub relocations: Vec<Relocation>,
 }
 
 impl DependencyValue {
@@ -790,12 +855,46 @@ impl DependencyValue {
         }
     }
 
-    /// Per-dependency fat-JAR include/exclude override.
-    /// `None` → follow the global `[fat-jar]` default (include all).
+    /// Per-dependency fat-JAR include/exclude override (legacy name).
+    /// Prefer `shade` for new code. `None` → follow the global `shadeAll` default.
     pub fn fat_jar_include(&self) -> Option<bool> {
         match self {
             DependencyValue::Version(_) => None,
-            DependencyValue::Detailed(d) => d.fat_jar,
+            DependencyValue::Detailed(d) => d.shade, // the underlying storage is now `shade`
+        }
+    }
+
+    /// Per-dependency shade override (`shade = true/false`).
+    /// `None` means "follow the global `[fat-jar].shadeAll` default".
+    pub fn shade(&self) -> Option<bool> {
+        match self {
+            DependencyValue::Version(_) => None,
+            DependencyValue::Detailed(d) => d.shade,
+        }
+    }
+
+    /// Per-dependency relocation rules (empty when none declared on this dep).
+    pub fn relocations(&self) -> &[Relocation] {
+        match self {
+            DependencyValue::Version(_) => &[],
+            DependencyValue::Detailed(d) => &d.relocations,
+        }
+    }
+
+    /// Whether this dependency should be shaded (included) into the fat JAR,
+    /// given the global `shadeAll` policy from `[fat-jar]`.
+    ///
+    /// Precedence (highest first):
+    /// - Non-empty `relocations` on the dep → true (forces shading)
+    /// - Explicit `shade = Some(b)` (or legacy `fatJar`) → b
+    /// - Otherwise the `shade_all` global default
+    pub fn should_shade(&self, shade_all: bool) -> bool {
+        if !self.relocations().is_empty() {
+            return true;
+        }
+        match self.shade() {
+            Some(b) => b,
+            None => shade_all,
         }
     }
 }
@@ -2621,23 +2720,25 @@ name = "x"
 version = "1.0"
 
 [fat-jar]
+shadeAll = true
 
 [[fat-jar.relocations]]
-pattern = "com.google.common"
-shadedPattern = "shaded.com.google.common"
+from = "com.google.common"
+to = "shaded.com.google.common"
 
 [[fat-jar.relocations]]
-pattern = "com.google.thirdparty"
-shadedPattern = "shaded.com.google.thirdparty"
+from = "com.google.thirdparty"
+to = "shaded.com.google.thirdparty"
 excludes = ["com.google.thirdparty.publicsuffix.*"]
 "#;
         let d = load_str(toml).unwrap();
         assert!(fat_jar_enabled(&d));
+        assert!(d.fat_jar.shade_all);
         assert_eq!(d.fat_jar.relocations.len(), 2);
-        assert_eq!(d.fat_jar.relocations[0].pattern, "com.google.common");
-        assert_eq!(d.fat_jar.relocations[0].shaded_pattern, "shaded.com.google.common");
+        assert_eq!(d.fat_jar.relocations[0].from, "com.google.common");
+        assert_eq!(d.fat_jar.relocations[0].to, "shaded.com.google.common");
         assert!(d.fat_jar.relocations[0].excludes.is_empty());
-        assert_eq!(d.fat_jar.relocations[1].pattern, "com.google.thirdparty");
+        assert_eq!(d.fat_jar.relocations[1].from, "com.google.thirdparty");
         assert_eq!(d.fat_jar.relocations[1].excludes.len(), 1);
     }
 
@@ -2662,18 +2763,45 @@ name = "x"
 version = "1.0"
 
 [fat-jar]
+shadeAll = true
 
 [dependencies]
 "com.example:included" = "1.0"
-"com.example:excluded" = { version = "1.0", fatJar = false }
-"com.example:force-included" = { version = "1.0", fatJar = true }
+"com.example:excluded" = { version = "1.0", shade = false }
+"com.example:force-included" = { version = "1.0", shade = true }
 "#;
         let d = load_str(toml).unwrap();
         let included = d.dependencies.get("com.example:included").unwrap();
-        assert_eq!(included.fat_jar_include(), None);
+        assert_eq!(included.shade(), None);
+        assert_eq!(included.fat_jar_include(), None); // legacy accessor still works
         let excluded = d.dependencies.get("com.example:excluded").unwrap();
+        assert_eq!(excluded.shade(), Some(false));
         assert_eq!(excluded.fat_jar_include(), Some(false));
         let forced = d.dependencies.get("com.example:force-included").unwrap();
+        assert_eq!(forced.shade(), Some(true));
         assert_eq!(forced.fat_jar_include(), Some(true));
+    }
+
+    #[test]
+    fn fat_jar_dep_shade_all_and_relocations_force() {
+        // shadeAll = false + per-dep shade/relocations
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+
+[fat-jar]
+shadeAll = false
+
+[dependencies]
+"com.example:by-shade" = { version = "1.0", shade = true }
+"com.example:by-reloc" = { version = "1.0", relocations = [ { from = "com.foo", to = "shaded.com.foo" } ] }
+"com.example:not-shaded" = "1.0"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(!d.fat_jar.shade_all);
+        assert!(d.dependencies.get("com.example:by-shade").unwrap().should_shade(false));
+        assert!(d.dependencies.get("com.example:by-reloc").unwrap().should_shade(false));
+        assert!(!d.dependencies.get("com.example:not-shaded").unwrap().should_shade(false));
     }
 }

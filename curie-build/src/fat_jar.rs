@@ -22,23 +22,25 @@ fn epoch() -> zip::DateTime {
         .expect("epoch constant is valid")
 }
 
-/// Filter dependency JARs according to per-dep fat-jar include/exclude overrides.
+/// Filter dependency JARs according to the global `shadeAll` policy and
+/// per-dependency `shade` / `relocations` overrides.
 ///
-/// `dep_jars` are the resolved paths.  `desc` provides the per-dependency
-/// configuration.  A dep JAR is included in the fat JAR iff:
-///   - The dependency's `fatJar` field is `Some(true)`, OR
-///   - The dependency's `fatJar` field is `None` (follow default = include all).
-///
-/// A dep with `fatJar = false` is excluded.
+/// A declared direct dependency is shaded (its JAR(s) included) when
+/// `dep.should_shade(desc.fat_jar.shade_all)` is true.  `relocations` on a
+/// dependency force inclusion.  The filename-prefix heuristic (artifact name
+/// from the declared "group:artifact" key) is used to map resolved JARs back
+/// to direct dependencies for filtering and for per-dep relocation attribution.
 pub fn filter_fat_jar_deps(
     dep_jars: &[PathBuf],
     desc: &descriptor::Descriptor,
 ) -> Vec<PathBuf> {
-    // Build a set of excluded artifact filenames by scanning deps whose fatJar = false.
+    let shade_all = desc.fat_jar.shade_all;
+
+    // Artifact prefixes of direct deps that should NOT be shaded.
     let excluded_prefixes: Vec<String> = desc
         .dependencies
         .iter()
-        .filter(|(_, v)| v.fat_jar_include() == Some(false))
+        .filter(|(_, v)| !v.should_shade(shade_all))
         .map(|(k, _)| {
             // key is "group:artifact", extract artifact for filename matching
             let artifact = k.split(':').nth(1).unwrap_or(k);
@@ -53,11 +55,94 @@ pub fn filter_fat_jar_deps(
                 .file_name()
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_default();
-            // Check if any excluded artifact prefix matches this JAR filename
+            // Keep the JAR unless its filename matches an excluded direct-dep prefix.
             !excluded_prefixes.iter().any(|prefix| fname.starts_with(prefix))
         })
         .cloned()
         .collect()
+}
+
+/// Check that per-dependency relocation rules do not target packages that
+/// also exist in other bundled dependency JARs.
+///
+/// If a "from" package declared on a direct dep appears (by ZIP entry prefix)
+/// in any other JAR that will be included in the fat JAR, we emit a clear
+/// error recommending that the user move the rule(s) to the top-level
+/// `[[fat-jar.relocations]]` section.
+pub fn check_per_dep_relocation_overlap(
+    desc: &descriptor::Descriptor,
+    fat_dep_jars: &[PathBuf],
+) -> Result<()> {
+    let shade_all = desc.fat_jar.shade_all;
+
+    for (coord, v) in &desc.dependencies {
+        if !v.should_shade(shade_all) {
+            continue;
+        }
+        let relocs = v.relocations();
+        if relocs.is_empty() {
+            continue;
+        }
+
+        // Artifact prefix for this declaring direct dep (used to identify "our" JARs)
+        let own_prefix = coord
+            .split(':')
+            .nth(1)
+            .unwrap_or(coord)
+            .to_string();
+
+        for reloc in relocs {
+            let internal_from = reloc.from.replace('.', "/");
+            if internal_from.is_empty() {
+                continue;
+            }
+
+            for jar in fat_dep_jars {
+                let fname = jar
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default();
+
+                // Skip JARs that belong to the same direct dep (by the coarse prefix)
+                if fname.starts_with(&own_prefix) {
+                    continue;
+                }
+
+                if jar_contains_prefix(jar, &internal_from) {
+                    anyhow::bail!(
+                        "Package '{}' (from relocation on dependency \"{}\") also appears in another bundled dependency JAR ({}). \
+                         Move the relocation rule to the top-level [[fat-jar.relocations]] section so it is applied consistently.",
+                        reloc.from,
+                        coord,
+                        fname
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Return true if the given JAR (opened as a zip) contains any entry whose
+/// name starts with the given internal (slash-separated) package prefix.
+fn jar_contains_prefix(jar_path: &Path, internal_prefix: &str) -> bool {
+    let file = match std::fs::File::open(jar_path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    for i in 0..archive.len() {
+        if let Ok(entry) = archive.by_index(i) {
+            let name = entry.name();
+            if name.starts_with(internal_prefix) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Apply relocations to a ZIP entry path (resource path relocation).
@@ -67,8 +152,8 @@ pub fn filter_fat_jar_deps(
 pub fn relocate_path(path: &str, relocations: &[Relocation]) -> String {
     let mut result = path.to_string();
     for reloc in relocations {
-        let from = reloc.pattern.replace('.', "/");
-        let to = reloc.shaded_pattern.replace('.', "/");
+        let from = reloc.from.replace('.', "/");
+        let to = reloc.to.replace('.', "/");
         if result.starts_with(&from) {
             // Check excludes
             if is_excluded(&result, &reloc.excludes) {
@@ -204,12 +289,12 @@ fn apply_relocations_to_utf8_content(content: &[u8], relocations: &[Relocation])
     };
     let mut result = s.to_string();
     for reloc in relocations {
-        let from_slash = reloc.pattern.replace('.', "/");
-        let to_slash = reloc.shaded_pattern.replace('.', "/");
+        let from_slash = reloc.from.replace('.', "/");
+        let to_slash = reloc.to.replace('.', "/");
         result = replace_pattern_occurrences(&result, &from_slash, &to_slash, &reloc.excludes);
 
-        let from_dot = reloc.pattern.clone();
-        let to_dot = reloc.shaded_pattern.clone();
+        let from_dot = reloc.from.clone();
+        let to_dot = reloc.to.clone();
         result = replace_pattern_occurrences(&result, &from_dot, &to_dot, &reloc.excludes);
     }
     result.into_bytes()
@@ -350,9 +435,9 @@ fn merge_services(
 fn relocate_dotted_name(name: &str, relocations: &[Relocation]) -> String {
     let mut result = name.to_string();
     for reloc in relocations {
-        if result.starts_with(&reloc.pattern) {
+        if result.starts_with(&reloc.from) {
             if !is_excluded(&result.replace('.', "/"), &reloc.excludes) {
-                result = format!("{}{}", reloc.shaded_pattern, &result[reloc.pattern.len()..]);
+                result = format!("{}{}", reloc.to, &result[reloc.from.len()..]);
             }
         }
     }
@@ -716,8 +801,8 @@ mod tests {
     #[test]
     fn relocate_path_matches() {
         let relocs = vec![Relocation {
-            pattern: "com.google.common".into(),
-            shaded_pattern: "shaded.com.google.common".into(),
+            from: "com.google.common".into(),
+            to: "shaded.com.google.common".into(),
             excludes: vec![],
         }];
         let result = relocate_path("com/google/common/collect/ImmutableList.class", &relocs);
@@ -727,8 +812,8 @@ mod tests {
     #[test]
     fn relocate_path_no_match() {
         let relocs = vec![Relocation {
-            pattern: "com.google.common".into(),
-            shaded_pattern: "shaded.com.google.common".into(),
+            from: "com.google.common".into(),
+            to: "shaded.com.google.common".into(),
             excludes: vec![],
         }];
         let result = relocate_path("org/example/Foo.class", &relocs);
@@ -738,8 +823,8 @@ mod tests {
     #[test]
     fn relocate_path_with_exclude() {
         let relocs = vec![Relocation {
-            pattern: "com.google.common".into(),
-            shaded_pattern: "shaded.com.google.common".into(),
+            from: "com.google.common".into(),
+            to: "shaded.com.google.common".into(),
             excludes: vec!["com.google.common.annotations.*".into()],
         }];
         // Excluded path should not be relocated
@@ -885,8 +970,8 @@ mod tests {
         let pattern = "com/google/common/collect/ImmutableList";
         let (data, indices) = make_minimal_class_with_utf8s(&[pattern]);
         let relocs = vec![Relocation {
-            pattern: "com.google.common".into(),
-            shaded_pattern: "com.example.fatjar.shaded.com.google.common".into(),
+            from: "com.google.common".into(),
+            to: "com.example.fatjar.shaded.com.google.common".into(),
             excludes: vec![],
         }];
         let result = relocate_class_bytes(&data, &relocs);
@@ -905,8 +990,8 @@ mod tests {
         let desc = "(Ljava/lang/Object;)Lcom/google/common/collect/ImmutableList;";
         let (data, indices) = make_minimal_class_with_utf8s(&[desc]);
         let relocs = vec![Relocation {
-            pattern: "com.google.common".into(),
-            shaded_pattern: "shaded.com.google.common".into(),
+            from: "com.google.common".into(),
+            to: "shaded.com.google.common".into(),
             excludes: vec![],
         }];
         let result = relocate_class_bytes(&data, &relocs);
@@ -921,8 +1006,8 @@ mod tests {
         let target = "com/google/common/annotations/Nullable";
         let (data, indices) = make_minimal_class_with_utf8s(&[target]);
         let relocs = vec![Relocation {
-            pattern: "com.google.common".into(),
-            shaded_pattern: "shaded.com.google.common".into(),
+            from: "com.google.common".into(),
+            to: "shaded.com.google.common".into(),
             excludes: vec!["com.google.common.annotations.*".into()],
         }];
         let result = relocate_class_bytes(&data, &relocs);
@@ -937,8 +1022,8 @@ mod tests {
         let dotted = "com.google.common.base.Preconditions";
         let (data, indices) = make_minimal_class_with_utf8s(&[dotted]);
         let relocs = vec![Relocation {
-            pattern: "com.google.common".into(),
-            shaded_pattern: "shaded.com.google.common".into(),
+            from: "com.google.common".into(),
+            to: "shaded.com.google.common".into(),
             excludes: vec![],
         }];
         let result = relocate_class_bytes(&data, &relocs);
@@ -1026,8 +1111,8 @@ mod tests {
         );
 
         let relocs = vec![Relocation {
-            pattern: "com.google.inject".into(),
-            shaded_pattern: "shaded.com.google.inject".into(),
+            from: "com.google.inject".into(),
+            to: "shaded.com.google.inject".into(),
             excludes: vec![],
         }];
 
@@ -1241,8 +1326,8 @@ mod tests {
         );
 
         let relocs = vec![Relocation {
-            pattern: "com.google.common".into(),
-            shaded_pattern: "shaded.com.google.common".into(),
+            from: "com.google.common".into(),
+            to: "shaded.com.google.common".into(),
             excludes: vec![],
         }];
 
@@ -1435,7 +1520,8 @@ mod tests {
                 repository: None,
                 java_agent: false,
                 exclusions: vec![],
-                fat_jar: Some(false),
+                shade: Some(false),
+                relocations: vec![],
             }),
         );
 
