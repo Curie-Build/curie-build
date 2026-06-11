@@ -13,7 +13,7 @@
 //!   the "don't clobber a hand-written pom.xml" safety check.
 
 use crate::compile::{flat_package_src_dirs, flat_package_test_dirs};
-use crate::descriptor::{Descriptor, DependencyValue};
+use crate::descriptor::{Descriptor, DependencyValue, Relocation};
 use crate::incremental::walk_files;
 use anyhow::{Context, Result};
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
@@ -281,6 +281,10 @@ pub enum XmlNode {
     Text(String, String),
     /// `<name>child1 child2 ...</name>`
     Element(String, Vec<XmlNode>),
+    /// `<name attr="value">child1 child2 ...</name>`, or
+    /// `<name attr="value"/>` when `children` is empty — used for
+    /// maven-shade-plugin's `<transformer implementation="...">`.
+    ElementWithAttr(String, (String, String), Vec<XmlNode>),
 }
 
 impl XmlNode {
@@ -290,6 +294,10 @@ impl XmlNode {
 
     pub fn element(name: impl Into<String>, children: Vec<XmlNode>) -> Self {
         XmlNode::Element(name.into(), children)
+    }
+
+    pub fn element_with_attr(name: impl Into<String>, attr: (impl Into<String>, impl Into<String>), children: Vec<XmlNode>) -> Self {
+        XmlNode::ElementWithAttr(name.into(), (attr.0.into(), attr.1.into()), children)
     }
 }
 
@@ -396,6 +404,9 @@ pub fn build_project(
     plugins.push(build_jar_plugin(main_class, populate_libs));
     if let Some(dep_plugin) = build_dependency_plugin(dependency_plugin_executions(desc, populate_libs)) {
         plugins.push(dep_plugin);
+    }
+    if let Some(shade_plugin) = build_shade_plugin(desc, main_class) {
+        plugins.push(shade_plugin);
     }
     plugins.extend(build_helper_plugins(&layout));
 
@@ -1044,6 +1055,115 @@ fn path_to_maven(p: &Path) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Fat JAR (maven-shade-plugin)
+// ---------------------------------------------------------------------------
+
+const SHADE_SERVICES_TRANSFORMER: &str = "org.apache.maven.plugins.shade.resource.ServicesResourceTransformer";
+const SHADE_MANIFEST_TRANSFORMER: &str = "org.apache.maven.plugins.shade.resource.ManifestResourceTransformer";
+
+/// `maven-shade-plugin`, present only when `[fat-jar]` is enabled.  Produces
+/// an attached `<artifactId>-<version>-fat.jar` (Curie's naming, via
+/// `<shadedClassifierName>fat</shadedClassifierName>`), merging
+/// `META-INF/services` providers and setting `Main-Class` in the shaded
+/// manifest, mirroring `fat_jar.rs::write_fat_jar`.
+fn build_shade_plugin(desc: &Descriptor, main_class: Option<&str>) -> Option<MavenPlugin> {
+    if !desc.fat_jar.enabled {
+        return None;
+    }
+
+    let mut configuration = vec![XmlNode::text("shadedClassifierName", "fat"), shade_transformers_node(main_class)];
+    configuration.extend(shade_artifact_set_node(desc));
+    configuration.extend(shade_relocations_node(desc));
+
+    Some(MavenPlugin {
+        artifact_id: "maven-shade-plugin".to_string(),
+        version: plugin_versions::SHADE.to_string(),
+        executions: vec![MavenExecution {
+            phase: Some("package".to_string()),
+            goals: vec!["shade".to_string()],
+            configuration,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+}
+
+/// `<transformers>`: always merges `META-INF/services` providers
+/// (`ServicesResourceTransformer`, mirroring `fat_jar.rs::merge_services`),
+/// and additionally sets `Main-Class` in the shaded manifest
+/// (`ManifestResourceTransformer`) when `main_class` is known.
+fn shade_transformers_node(main_class: Option<&str>) -> XmlNode {
+    let mut transformers = vec![XmlNode::element_with_attr("transformer", ("implementation", SHADE_SERVICES_TRANSFORMER), vec![])];
+    if let Some(main_class) = main_class {
+        transformers.push(XmlNode::element_with_attr(
+            "transformer",
+            ("implementation", SHADE_MANIFEST_TRANSFORMER),
+            vec![XmlNode::text("mainClass", main_class.to_string())],
+        ));
+    }
+    XmlNode::element("transformers", transformers)
+}
+
+/// `<artifactSet>` reflecting `[fat-jar].shadeAll` plus per-dependency
+/// `shade` overrides (`DependencyValue::should_shade`):
+///
+/// - `shadeAll = true` (default): `<excludes>` lists deps that opted out
+///   (`shade = false`) — everything else, including project classes, is
+///   shaded.
+/// - `shadeAll = false`: `<includes>` lists deps that opted in (`shade =
+///   true`, or a non-empty `relocations`); project classes are always
+///   included by Shade regardless.
+fn shade_artifact_set_node(desc: &Descriptor) -> Option<XmlNode> {
+    let shade_all = desc.fat_jar.shade_all;
+    let mut coords: Vec<String> =
+        desc.dependencies.iter().filter(|(_, dep)| dep.should_shade(shade_all) != shade_all).map(|(coord, _)| coord.clone()).collect();
+    if coords.is_empty() {
+        return None;
+    }
+    coords.sort();
+
+    let list = if shade_all { excludes_node(&coords) } else { includes_node(&coords) };
+    Some(XmlNode::element("artifactSet", vec![list]))
+}
+
+/// `<includes><include>...</include>...</includes>`, the `<excludes>`
+/// counterpart of [`excludes_node`].
+fn includes_node(patterns: &[String]) -> XmlNode {
+    XmlNode::element("includes", patterns.iter().map(|p| XmlNode::text("include", p.clone())).collect())
+}
+
+/// `<relocations>` for `[[fat-jar.relocations]]` (global) plus per-dependency
+/// `relocations` declared on every dep that will be shaded — mirrors
+/// `build.rs`'s `active_relocs`. Shade applies relocations to the whole
+/// shaded JAR, while Curie scopes per-dep rules to that dep's classes; the
+/// `fat_jar.rs::check_per_dep_relocation_overlap` safety check guarantees the
+/// `from` prefix appears in no other bundled JAR, so the global application
+/// is behaviourally identical.
+fn shade_relocations_node(desc: &Descriptor) -> Option<XmlNode> {
+    let shade_all = desc.fat_jar.shade_all;
+    let mut relocations: Vec<&Relocation> = desc.fat_jar.relocations.iter().collect();
+    for dep in desc.dependencies.values() {
+        if dep.should_shade(shade_all) {
+            relocations.extend(dep.relocations());
+        }
+    }
+    if relocations.is_empty() {
+        return None;
+    }
+    Some(XmlNode::element("relocations", relocations.into_iter().map(relocation_node).collect()))
+}
+
+/// `<relocation><pattern>from</pattern><shadedPattern>to</shadedPattern>
+/// [<excludes>...</excludes>]</relocation>`.
+fn relocation_node(reloc: &Relocation) -> XmlNode {
+    let mut children = vec![XmlNode::text("pattern", reloc.from.clone()), XmlNode::text("shadedPattern", reloc.to.clone())];
+    if !reloc.excludes.is_empty() {
+        children.push(excludes_node(&reloc.excludes));
+    }
+    XmlNode::element("relocation", children)
+}
+
+// ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
@@ -1283,6 +1403,20 @@ fn write_xml_node(w: &mut XmlWriter<'_>, node: &XmlNode) -> Result<()> {
                 write_xml_node(w, child)?;
             }
             w.write_event(Event::End(BytesEnd::new(name.as_str())))?;
+            Ok(())
+        }
+        XmlNode::ElementWithAttr(name, (attr_name, attr_value), children) => {
+            let mut start = BytesStart::new(name.as_str());
+            start.push_attribute((attr_name.as_str(), attr_value.as_str()));
+            if children.is_empty() {
+                w.write_event(Event::Empty(start))?;
+            } else {
+                w.write_event(Event::Start(start))?;
+                for child in children {
+                    write_xml_node(w, child)?;
+                }
+                w.write_event(Event::End(BytesEnd::new(name.as_str())))?;
+            }
             Ok(())
         }
     }
@@ -1918,6 +2052,91 @@ mod tests {
         assert_eq!(dep.group_id, "org.apache.groovy");
         assert_eq!(dep.version.as_deref(), Some(DEFAULT_GROOVY_VERSION));
         assert_eq!(dep.scope, None);
+    }
+
+    // -- fat jar (maven-shade-plugin) ----------------------------------------------
+
+    fn shaded_dependency(version: &str, shade: Option<bool>, relocations: Vec<Relocation>) -> DependencyValue {
+        DependencyValue::Detailed(DependencyDetailed {
+            version: version.to_string(),
+            repository: None,
+            java_agent: false,
+            exclusions: vec![],
+            shade,
+            relocations,
+        })
+    }
+
+    #[test]
+    fn fat_jar_maps_to_shade_with_relocations_and_excludes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.fat_jar = FatJar {
+            enabled: true,
+            shade_all: true,
+            relocations: vec![Relocation {
+                from: "com.google.common".to_string(),
+                to: "shaded.com.google.common".to_string(),
+                excludes: vec!["com.google.common.annotations.*".to_string()],
+            }],
+            section_present: true,
+        };
+        desc.dependencies.insert("org.slf4j:slf4j-api".to_string(), shaded_dependency("2.0.13", Some(false), vec![]));
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main")).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+
+        let shade_plugin = xml.split("<plugin>").find(|b| b.contains("maven-shade-plugin")).unwrap();
+        assert!(shade_plugin.contains(&format!("<version>{}</version>", plugin_versions::SHADE)));
+        assert!(shade_plugin.contains("<phase>package</phase>"));
+        assert!(shade_plugin.contains("<goal>shade</goal>"));
+        assert!(shade_plugin.contains("<shadedClassifierName>fat</shadedClassifierName>"));
+        assert!(shade_plugin.contains(&format!(r#"<transformer implementation="{SHADE_SERVICES_TRANSFORMER}"/>"#)));
+        assert!(shade_plugin.contains(&format!(r#"<transformer implementation="{SHADE_MANIFEST_TRANSFORMER}">"#)));
+        assert!(shade_plugin.contains("<mainClass>com.example.Main</mainClass>"));
+
+        // shadeAll = true + per-dep shade = false -> <artifactSet><excludes>
+        assert!(shade_plugin.contains("<artifactSet>"));
+        assert!(shade_plugin.contains("<excludes>"));
+        assert!(shade_plugin.contains("<exclude>org.slf4j:slf4j-api</exclude>"));
+
+        // global relocation
+        assert!(shade_plugin.contains("<relocations>"));
+        assert!(shade_plugin.contains("<pattern>com.google.common</pattern>"));
+        assert!(shade_plugin.contains("<shadedPattern>shaded.com.google.common</shadedPattern>"));
+        assert!(shade_plugin.contains("<exclude>com.google.common.annotations.*</exclude>"));
+    }
+
+    #[test]
+    fn shade_all_false_uses_includes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.fat_jar = FatJar { enabled: true, shade_all: false, relocations: vec![], section_present: true };
+        desc.dependencies.insert("com.google.guava:guava".to_string(), shaded_dependency("33.2.1-jre", Some(true), vec![]));
+        desc.dependencies.insert("org.slf4j:slf4j-api".to_string(), DependencyValue::Version("2.0.13".to_string()));
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+
+        let shade_plugin = xml.split("<plugin>").find(|b| b.contains("maven-shade-plugin")).unwrap();
+        assert!(shade_plugin.contains("<artifactSet>"));
+        assert!(shade_plugin.contains("<includes>"));
+        assert!(shade_plugin.contains("<include>com.google.guava:guava</include>"));
+        assert!(!shade_plugin.contains("slf4j"));
+        assert!(!shade_plugin.contains("<relocations>"));
+
+        // No main class -> no ManifestResourceTransformer, but services are still merged.
+        assert!(shade_plugin.contains(&format!(r#"<transformer implementation="{SHADE_SERVICES_TRANSFORMER}"/>"#)));
+        assert!(!shade_plugin.contains(SHADE_MANIFEST_TRANSFORMER));
+    }
+
+    #[test]
+    fn fat_jar_disabled_omits_shade_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let desc = minimal_app("my-app", Some("com.example"));
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main")).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(!xml.contains("maven-shade-plugin"));
     }
 
     // -- test execution (surefire / jacoco) --------------------------------------
