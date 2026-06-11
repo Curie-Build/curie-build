@@ -59,6 +59,16 @@ pub mod plugin_versions {
 const BUILD_HELPER_GROUP_ID: &str = "org.codehaus.mojo";
 const BUILD_HELPER_ARTIFACT_ID: &str = "build-helper-maven-plugin";
 
+const KOTLIN_GROUP_ID: &str = "org.jetbrains.kotlin";
+const KOTLIN_PLUGIN_ARTIFACT_ID: &str = "kotlin-maven-plugin";
+const KOTLIN_STDLIB_ARTIFACT_ID: &str = "kotlin-stdlib";
+
+const GMAVENPLUS_GROUP_ID: &str = "org.codehaus.gmavenplus";
+const GMAVENPLUS_ARTIFACT_ID: &str = "gmavenplus-plugin";
+
+const GROOVY_GROUP_ID: &str = "org.apache.groovy";
+const GROOVY_ARTIFACT_ID: &str = "groovy";
+
 // ---------------------------------------------------------------------------
 // Layout discovery
 // ---------------------------------------------------------------------------
@@ -206,6 +216,16 @@ fn colocated_test_exclude_patterns(project_root: &Path, src_roots: &[PathBuf]) -
     patterns
 }
 
+/// `true` if any file with extension `ext` (e.g. `"kt"`, `"groovy"`) exists
+/// under any of `layout`'s source/test roots, mirroring `compile.rs`'s
+/// `has_kotlin`/`has_groovy` source-presence checks.
+fn layout_has_extension(project_root: &Path, layout: &MavenLayout, ext: &str) -> bool {
+    layout.src_roots.iter().chain(&layout.test_roots).any(|root| {
+        walk_files(&project_root.join(root))
+            .any(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some(ext))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // POM model
 // ---------------------------------------------------------------------------
@@ -343,6 +363,8 @@ pub fn build_project(
     }
 
     let layout = discover_layout(project_root);
+    let has_kotlin = layout_has_extension(project_root, &layout, "kt");
+    let has_groovy = layout_has_extension(project_root, &layout, "groovy");
 
     let prod_ap = ap_coordinates(&desc.ap_pairs(), resolved_ap_versions)?;
     let test_ap = merge_ap_coordinates(&prod_ap, &desc.test_ap_pairs(), resolved_ap_versions)?;
@@ -350,11 +372,23 @@ pub fn build_project(
     let mut dependencies = build_dependencies(desc)?;
     dependencies.extend(provided_dependencies(desc, &prod_ap, &test_ap)?);
     dependencies.extend(junit_standalone_dependency(desc));
+    if has_kotlin {
+        dependencies.push(kotlin_stdlib_dependency(desc));
+    }
+    if has_groovy {
+        dependencies.push(groovy_dependency(desc));
+    }
 
     let populate_libs = desc.application().is_some() && !desc.fat_jar.enabled && !desc.dependencies.is_empty();
 
     let mut plugins = Vec::new();
-    plugins.extend(build_compiler_plugin(desc, &layout, &prod_ap, &test_ap)?);
+    if has_kotlin {
+        plugins.push(build_kotlin_plugin(desc, &layout));
+    }
+    plugins.extend(build_compiler_plugin(desc, &layout, &prod_ap, &test_ap, has_kotlin)?);
+    if has_groovy {
+        plugins.push(build_gmavenplus_plugin());
+    }
     plugins.push(build_surefire_plugin(desc));
     if desc.test.coverage_enabled() {
         plugins.push(build_jacoco_plugin());
@@ -543,13 +577,15 @@ fn provided_dependencies(desc: &Descriptor, prod_ap: &[MavenCoordinate], test_ap
 
 /// Build the `maven-compiler-plugin` entry, if `desc`/`layout` need
 /// non-default configuration: `--enable-preview`, `-A` options,
-/// `<annotationProcessorPaths>`, or co-located-test `<excludes>`. Returns
-/// `None` when Maven's defaults are sufficient.
+/// `<annotationProcessorPaths>`, co-located-test `<excludes>`, or (when
+/// `has_kotlin`) the Java-interop rebinding (see [`compiler_executions`]).
+/// Returns `None` when Maven's defaults are sufficient.
 fn build_compiler_plugin(
     desc: &Descriptor,
     layout: &MavenLayout,
     prod_ap: &[MavenCoordinate],
     test_ap: &[MavenCoordinate],
+    has_kotlin: bool,
 ) -> Result<Option<MavenPlugin>> {
     let preview = desc.java.preview_enabled();
 
@@ -574,22 +610,7 @@ fn build_compiler_plugin(
         test_compile_config.push(compiler_args_node(&test_args));
     }
 
-    let mut executions = Vec::new();
-    if !compile_config.is_empty() {
-        executions.push(MavenExecution {
-            id: Some("default-compile".to_string()),
-            configuration: compile_config,
-            ..Default::default()
-        });
-    }
-    if !test_compile_config.is_empty() {
-        executions.push(MavenExecution {
-            id: Some("default-testCompile".to_string()),
-            configuration: test_compile_config,
-            ..Default::default()
-        });
-    }
-
+    let executions = compiler_executions(compile_config, test_compile_config, has_kotlin);
     if executions.is_empty() {
         return Ok(None);
     }
@@ -599,6 +620,62 @@ fn build_compiler_plugin(
         executions,
         ..Default::default()
     }))
+}
+
+/// `<execution>` entries for `maven-compiler-plugin`.
+///
+/// Without Kotlin, `default-compile`/`default-testCompile` are overridden
+/// by `id` only when there's configuration to add (Maven merges this with
+/// the implicit default bindings).
+///
+/// With Kotlin, `kotlin-maven-plugin` (see [`build_kotlin_plugin`]) compiles
+/// `.kt` + `.java` together earlier in the lifecycle (`process-sources`/
+/// `process-test-sources`). `default-compile`/`default-testCompile` are
+/// rebound to `phase=none` (disabled), and new `java-compile`/
+/// `java-test-compile` executions — bound to `compile`/`test-compile` and
+/// carrying the same configuration — re-run javac on just the `.java`
+/// sources so they can see the Kotlin-compiled classes. This is the
+/// standard Kotlin/Maven "Java interop" idiom.
+fn compiler_executions(
+    compile_config: Vec<XmlNode>,
+    test_compile_config: Vec<XmlNode>,
+    has_kotlin: bool,
+) -> Vec<MavenExecution> {
+    if !has_kotlin {
+        let mut executions = Vec::new();
+        if !compile_config.is_empty() {
+            executions.push(MavenExecution {
+                id: Some("default-compile".to_string()),
+                configuration: compile_config,
+                ..Default::default()
+            });
+        }
+        if !test_compile_config.is_empty() {
+            executions.push(MavenExecution {
+                id: Some("default-testCompile".to_string()),
+                configuration: test_compile_config,
+                ..Default::default()
+            });
+        }
+        return executions;
+    }
+
+    vec![
+        MavenExecution { id: Some("default-compile".to_string()), phase: Some("none".to_string()), ..Default::default() },
+        MavenExecution { id: Some("default-testCompile".to_string()), phase: Some("none".to_string()), ..Default::default() },
+        MavenExecution {
+            id: Some("java-compile".to_string()),
+            phase: Some("compile".to_string()),
+            goals: vec!["compile".to_string()],
+            configuration: compile_config,
+        },
+        MavenExecution {
+            id: Some("java-test-compile".to_string()),
+            phase: Some("test-compile".to_string()),
+            goals: vec!["testCompile".to_string()],
+            configuration: test_compile_config,
+        },
+    ]
 }
 
 /// `--enable-preview` (if `preview`) followed by `-A{prefix}.{key}={value}`
@@ -642,6 +719,98 @@ fn annotation_processor_paths_node(coords: &[MavenCoordinate]) -> XmlNode {
 /// `<compilerArgs><arg>...</arg>...</compilerArgs>`.
 fn compiler_args_node(args: &[String]) -> XmlNode {
     XmlNode::element("compilerArgs", args.iter().map(|a| XmlNode::text("arg", a.clone())).collect())
+}
+
+// ---------------------------------------------------------------------------
+// Kotlin / Groovy
+// ---------------------------------------------------------------------------
+
+/// `kotlin-maven-plugin` for projects with `.kt` sources, configured with
+/// the standard Kotlin/Maven "Java interop" `compile`/`test-compile`
+/// executions: each compiles the *combined* `.kt` + `.java` source roots
+/// (via `<sourceDirs>`), running before `maven-compiler-plugin`'s rebound
+/// `java-compile`/`java-test-compile` (see [`compiler_executions`]).
+fn build_kotlin_plugin(desc: &Descriptor, layout: &MavenLayout) -> MavenPlugin {
+    MavenPlugin {
+        group_id: Some(KOTLIN_GROUP_ID.to_string()),
+        artifact_id: KOTLIN_PLUGIN_ARTIFACT_ID.to_string(),
+        version: desc.kotlin.version().to_string(),
+        executions: vec![
+            MavenExecution {
+                id: Some("compile".to_string()),
+                goals: vec!["compile".to_string()],
+                configuration: vec![source_dirs_node(&layout.src_roots)],
+                ..Default::default()
+            },
+            MavenExecution {
+                id: Some("test-compile".to_string()),
+                goals: vec!["test-compile".to_string()],
+                configuration: vec![source_dirs_node(&layout.test_roots)],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+/// `<sourceDirs><sourceDir>...</sourceDir>...</sourceDirs>`.
+fn source_dirs_node(roots: &[PathBuf]) -> XmlNode {
+    XmlNode::element("sourceDirs", roots.iter().map(|r| XmlNode::text("sourceDir", path_to_maven(r))).collect())
+}
+
+/// `org.jetbrains.kotlin:kotlin-stdlib` at `[kotlin].version()`, a `compile`
+/// dependency — Curie puts the stdlib on the runtime classpath/`libs/`
+/// (`build.rs`'s `kotlin_stdlib_jars`).
+fn kotlin_stdlib_dependency(desc: &Descriptor) -> MavenDependency {
+    MavenDependency {
+        group_id: KOTLIN_GROUP_ID.to_string(),
+        artifact_id: KOTLIN_STDLIB_ARTIFACT_ID.to_string(),
+        version: Some(desc.kotlin.version().to_string()),
+        scope: None,
+        exclusions: vec![],
+    }
+}
+
+/// `gmavenplus-plugin` for projects with `.groovy` sources, configured for
+/// joint Java/Groovy compilation: stub generation, compile, and stub
+/// removal for both production and test sources, all bound to their
+/// standard default-lifecycle phases.
+fn build_gmavenplus_plugin() -> MavenPlugin {
+    MavenPlugin {
+        group_id: Some(GMAVENPLUS_GROUP_ID.to_string()),
+        artifact_id: GMAVENPLUS_ARTIFACT_ID.to_string(),
+        version: plugin_versions::GMAVENPLUS.to_string(),
+        executions: vec![MavenExecution {
+            goals: [
+                "addSources",
+                "addTestSources",
+                "generateStubs",
+                "compile",
+                "generateTestStubs",
+                "compileTests",
+                "removeStubs",
+                "removeTestStubs",
+            ]
+            .iter()
+            .map(|g| g.to_string())
+            .collect(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+/// `org.apache.groovy:groovy` at `[groovy].version()`, a `compile`
+/// dependency — Curie bundles the Groovy stdlib into `libs/`
+/// (`build.rs`'s `effective_dep_jars`).
+fn groovy_dependency(desc: &Descriptor) -> MavenDependency {
+    MavenDependency {
+        group_id: GROOVY_GROUP_ID.to_string(),
+        artifact_id: GROOVY_ARTIFACT_ID.to_string(),
+        version: Some(desc.groovy.version().to_string()),
+        scope: None,
+        exclusions: vec![],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1666,6 +1835,89 @@ mod tests {
         let test_compile = xml.split("<execution>").find(|b| b.contains("default-testCompile")).unwrap();
         assert!(test_compile.contains("<artifactId>dagger-compiler</artifactId>"));
         assert!(test_compile.contains("<artifactId>mockito-core</artifactId>"));
+    }
+
+    // -- Kotlin / Groovy / Spock --------------------------------------------------
+
+    #[test]
+    fn kotlin_sources_get_kotlin_plugin_and_stdlib_dependency() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main/kotlin/com/example/Hello.kt", "package com.example\nclass Hello");
+        write_file(dir.path(), "src/test/kotlin/com/example/HelloTest.kt", "package com.example\nclass HelloTest");
+
+        let desc = minimal_app("my-app", Some("com.example"));
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+
+        let kotlin_plugin = xml.split("<plugin>").find(|b| b.contains("kotlin-maven-plugin")).unwrap();
+        assert!(kotlin_plugin.contains("<groupId>org.jetbrains.kotlin</groupId>"));
+        assert!(kotlin_plugin.contains(&format!("<version>{DEFAULT_KOTLIN_VERSION}</version>")));
+        assert!(kotlin_plugin.contains("<sourceDir>src/main/kotlin</sourceDir>"));
+        assert!(kotlin_plugin.contains("<sourceDir>src/test/kotlin</sourceDir>"));
+
+        let dep = project.dependencies.iter().find(|d| d.artifact_id == "kotlin-stdlib").unwrap();
+        assert_eq!(dep.group_id, "org.jetbrains.kotlin");
+        assert_eq!(dep.version.as_deref(), Some(DEFAULT_KOTLIN_VERSION));
+        assert_eq!(dep.scope, None);
+    }
+
+    #[test]
+    fn kotlin_sources_rebind_default_compile_executions() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main/kotlin/com/example/Hello.kt", "package com.example\nclass Hello");
+        write_file(dir.path(), "src/test/kotlin/com/example/HelloTest.kt", "package com.example\nclass HelloTest");
+
+        let desc = minimal_app("my-app", Some("com.example"));
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+
+        let compiler_plugin = xml.split("<plugin>").find(|b| b.contains("maven-compiler-plugin")).unwrap();
+
+        let default_compile = compiler_plugin.split("<execution>").find(|b| b.contains("default-compile")).unwrap();
+        assert!(default_compile.contains("<phase>none</phase>"));
+
+        let default_test_compile = compiler_plugin.split("<execution>").find(|b| b.contains("default-testCompile")).unwrap();
+        assert!(default_test_compile.contains("<phase>none</phase>"));
+
+        let java_compile = compiler_plugin.split("<execution>").find(|b| b.contains("java-compile")).unwrap();
+        assert!(java_compile.contains("<phase>compile</phase>"));
+        assert!(java_compile.contains("<goal>compile</goal>"));
+
+        let java_test_compile = compiler_plugin.split("<execution>").find(|b| b.contains("java-test-compile")).unwrap();
+        assert!(java_test_compile.contains("<phase>test-compile</phase>"));
+        assert!(java_test_compile.contains("<goal>testCompile</goal>"));
+    }
+
+    #[test]
+    fn groovy_sources_get_gmavenplus_plugin_and_dependency() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main/groovy/com/example/Hello.groovy", "package com.example\nclass Hello {}");
+        write_file(dir.path(), "src/test/groovy/com/example/HelloTest.groovy", "package com.example\nclass HelloTest {}");
+
+        let desc = minimal_app("my-app", Some("com.example"));
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+
+        let gmavenplus = xml.split("<plugin>").find(|b| b.contains("gmavenplus-plugin")).unwrap();
+        assert!(gmavenplus.contains("<groupId>org.codehaus.gmavenplus</groupId>"));
+        assert!(gmavenplus.contains(&format!("<version>{}</version>", plugin_versions::GMAVENPLUS)));
+        for goal in [
+            "addSources",
+            "addTestSources",
+            "generateStubs",
+            "compile",
+            "generateTestStubs",
+            "compileTests",
+            "removeStubs",
+            "removeTestStubs",
+        ] {
+            assert!(gmavenplus.contains(&format!("<goal>{goal}</goal>")), "missing goal {goal}");
+        }
+
+        let dep = project.dependencies.iter().find(|d| d.artifact_id == "groovy").unwrap();
+        assert_eq!(dep.group_id, "org.apache.groovy");
+        assert_eq!(dep.version.as_deref(), Some(DEFAULT_GROOVY_VERSION));
+        assert_eq!(dep.scope, None);
     }
 
     // -- test execution (surefire / jacoco) --------------------------------------
