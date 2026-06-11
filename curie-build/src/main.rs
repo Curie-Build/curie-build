@@ -23,6 +23,9 @@ mod jar;
 mod java_agent;
 mod kt_stale;
 mod main_class;
+// Wired into the CLI by `curie maven sync` (added in a later step).
+#[allow(dead_code)]
+mod maven;
 mod native;
 mod new;
 mod parallel;
