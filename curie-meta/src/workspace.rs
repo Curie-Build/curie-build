@@ -315,6 +315,12 @@ fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
     if member.groovy.version.is_none() {
         member.groovy.version = ws.groovy.version.clone();
     }
+    if member.maven.sync.is_none() {
+        member.maven.sync = ws.maven.sync;
+    }
+    if member.maven.pin_transitive.is_none() {
+        member.maven.pin_transitive = ws.maven.pin_transitive;
+    }
     let member_speaks = member.spock.enabled.is_some() || member.spock.section_present;
     if !member_speaks {
         member.spock.enabled = Some(ws.spock.enabled());
@@ -1254,6 +1260,44 @@ mod tests {
         .unwrap();
         let ws = crate::workspace::load(ws_path).unwrap();
         assert_eq!(ws.members[0].descriptor.groovy.version(), "4.0.20");
+    }
+
+    #[test]
+    fn member_inherits_maven_config_from_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws_path = dir.path();
+        std::fs::write(
+            ws_path.join("Curie.toml"),
+            "[workspace]\nmembers = [\"m\", \"silent\"]\n\n\
+             [maven]\nsync = true\npinTransitive = true\n",
+        )
+        .unwrap();
+        std::fs::create_dir(ws_path.join("m")).unwrap();
+        std::fs::write(
+            ws_path.join("m").join("Curie.toml"),
+            "[application]\nname = \"m\"\nversion = \"0.0.0\"\nmainClass = \"M\"\n\n\
+             [maven]\nsync = false\n",
+        )
+        .unwrap();
+        std::fs::create_dir(ws_path.join("silent")).unwrap();
+        std::fs::write(
+            ws_path.join("silent").join("Curie.toml"),
+            "[application]\nname = \"silent\"\nversion = \"0.0.0\"\nmainClass = \"S\"\n",
+        )
+        .unwrap();
+
+        let ws = crate::workspace::load(ws_path).unwrap();
+
+        // `m` declares its own `sync = false`, which must win over the
+        // workspace default; `pinTransitive` is left absent and inherits.
+        let m = &ws.members.iter().find(|x| x.declared == "m").unwrap().descriptor;
+        assert!(!m.maven.sync_enabled());
+        assert!(m.maven.pin_transitive_enabled());
+
+        // `silent` declares no [maven] section at all and inherits both.
+        let silent = &ws.members.iter().find(|x| x.declared == "silent").unwrap().descriptor;
+        assert!(silent.maven.sync_enabled());
+        assert!(silent.maven.pin_transitive_enabled());
     }
 
     fn make_nested_workspace() -> tempfile::TempDir {

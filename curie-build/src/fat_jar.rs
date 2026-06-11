@@ -1559,6 +1559,7 @@ mod tests {
             inherited_test_annotation_processor_options: BTreeMap::new(),
             publish: PublishConfig::default(),
             plugins: BTreeMap::new(),
+            maven: MavenConfig::default(),
         };
 
         let all_jars = vec![

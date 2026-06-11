@@ -44,6 +44,7 @@ pub(crate) fn fake_bom_desc(
         inherited_test_annotation_processor_options: std::collections::BTreeMap::new(),
         publish,
         plugins: std::collections::BTreeMap::new(),
+        maven: MavenConfig::default(),
     }
 }
 
@@ -87,5 +88,6 @@ pub(crate) fn fake_library_desc(
         inherited_test_annotation_processor_options: std::collections::BTreeMap::new(),
         publish,
         plugins: std::collections::BTreeMap::new(),
+        maven: MavenConfig::default(),
     }
 }

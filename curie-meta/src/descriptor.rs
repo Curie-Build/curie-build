@@ -85,6 +85,9 @@ pub struct Descriptor {
     /// named `curie-<key>` on PATH.  The value is the raw TOML tree for
     /// that plugin, passed verbatim as JSON to the plugin on stdin.
     pub plugins: BTreeMap<String, toml::Value>,
+    /// Populated from `[maven]`.  Controls `curie maven sync` /
+    /// `curie build`'s automatic Maven configuration sync.
+    pub maven: MavenConfig,
 }
 
 /// One entry in `[annotation-processors]` or `[test-annotation-processors]`.
@@ -204,6 +207,8 @@ struct RawDescriptor {
     publish: PublishConfig,
     #[serde(default, rename = "plugin")]
     plugin: BTreeMap<String, toml::Value>,
+    #[serde(default)]
+    maven: MavenConfig,
 }
 
 /// One entry in `[workspace-dependencies]`.
@@ -673,6 +678,46 @@ fn default_build_info_enabled() -> bool {
 impl Default for BuildInfo {
     fn default() -> Self {
         BuildInfo { enabled: true }
+    }
+}
+
+/// Configuration for the `[maven]` table — controls `curie maven sync`'s
+/// behaviour and `curie build`'s automatic Maven configuration sync.
+///
+/// ```toml
+/// [maven]
+/// # Regenerate pom.xml automatically at the start of every `curie build`.
+/// sync = true
+///
+/// # Escape hatch: pin the fully-resolved transitive dependency closure into
+/// # <dependencyManagement> so Maven's version mediation cannot diverge from
+/// # Curie's resolver. Default: false — Curie's resolver is intended to
+/// # match Maven's algorithm exactly.
+/// pinTransitive = false
+/// ```
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct MavenConfig {
+    /// `true` — `curie build` regenerates `pom.xml` (and, in a workspace,
+    /// the aggregator POM) before compiling.  `None`/absent means disabled;
+    /// workspace-inheritable like `[test]`/`[kotlin]`.
+    #[serde(default)]
+    pub sync: Option<bool>,
+    /// `true` — emit the fully-resolved transitive dependency closure into
+    /// `<dependencyManagement>` so Maven's mediation cannot diverge from
+    /// Curie's resolver.  `None`/absent behaves as `false`.
+    #[serde(rename = "pinTransitive", default)]
+    pub pin_transitive: Option<bool>,
+}
+
+impl MavenConfig {
+    /// Resolved `sync` flag (default `false`).
+    pub fn sync_enabled(&self) -> bool {
+        self.sync.unwrap_or(false)
+    }
+
+    /// Resolved `pinTransitive` flag (default `false`).
+    pub fn pin_transitive_enabled(&self) -> bool {
+        self.pin_transitive.unwrap_or(false)
     }
 }
 
@@ -1302,6 +1347,7 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         inherited_test_annotation_processor_options: BTreeMap::new(),
         publish: parsed.publish,
         plugins: parsed.plugin,
+        maven: parsed.maven,
     };
 
     // Workspace-only restrictions: they describe member layout, not
@@ -2803,5 +2849,54 @@ shadeAll = false
         assert!(d.dependencies.get("com.example:by-shade").unwrap().should_shade(false));
         assert!(d.dependencies.get("com.example:by-reloc").unwrap().should_shade(false));
         assert!(!d.dependencies.get("com.example:not-shaded").unwrap().should_shade(false));
+    }
+
+    #[test]
+    fn maven_section_absent_disables_sync_and_pin_transitive() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(!d.maven.sync_enabled(), "absent [maven] must leave sync = false");
+        assert!(
+            !d.maven.pin_transitive_enabled(),
+            "absent [maven] must leave pinTransitive = false"
+        );
+    }
+
+    #[test]
+    fn maven_sync_can_be_enabled() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[maven]
+sync = true
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.maven.sync_enabled());
+        assert!(!d.maven.pin_transitive_enabled());
+    }
+
+    #[test]
+    fn maven_pin_transitive_can_be_enabled() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[maven]
+sync = true
+pinTransitive = true
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.maven.sync_enabled());
+        assert!(d.maven.pin_transitive_enabled());
     }
 }
