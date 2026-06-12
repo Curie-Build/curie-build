@@ -12,7 +12,7 @@
 #      is most likely a Curie resolver bug (see _design/MAVEN-SYNC.md,
 #      "Known divergences" #1).
 #
-#      Two expected, by-design differences are filtered out before
+#      Four expected, by-design differences are filtered out before
 #      comparing:
 #        - `org.junit.platform:junit-platform-console-standalone` (+ its
 #          transitive closure): materialized into the generated pom.xml only
@@ -22,6 +22,25 @@
 #          `string-utils`): materialized as a real Maven `<dependency>` in
 #          the generated pom.xml, but `curie deps` only lists external Maven
 #          coordinates.
+#        - `org.projectlombok:lombok`: an `on-compile-classpath = true`
+#          annotation processor (lombok-greeter) is additionally emitted as a
+#          `<scope>provided</scope>` dependency so javac's `-cp` sees it (see
+#          MAVEN-SYNC.md "Annotation processors"), but `curie deps` lists
+#          resolved [dependencies]/[test-dependencies], not annotation
+#          processors.
+#        - `org.apache.groovy:groovy`, `org.jetbrains.kotlin:kotlin-stdlib`
+#          (+ its `org.jetbrains:annotations:13.0` dep), and
+#          `org.spockframework:spock-core`'s transitive closure (pinned by
+#          `[spock].version()` = 2.4-groovy-5.0): Groovy/Kotlin stdlib are
+#          always part of Curie's internal `effective_dep_jars`/`target/libs`
+#          (build.rs) and spock-core is resolved internally for `[spock]`
+#          (test.rs's `spock_jars`) — none of these appear in `curie deps`,
+#          but the generated pom.xml declares them as real `<dependency>`
+#          entries so `mvn` can compile/run. Filtered symmetrically from both
+#          sides (BY_DESIGN_GAV_PATTERNS below), so modules that *do*
+#          declare one of these explicitly (e.g. spring-boot-demo's
+#          `org.spockframework:spock-spring` test dependency) still compare
+#          their other GAVs normally.
 #
 #   2. Build-output parity:
 #        - JAR entry name set + per-entry SHA-256 (`META-INF/MANIFEST.MF` is
@@ -122,13 +141,39 @@ diff_sets() {
     ok "$label"
   else
     fail "$label differ"
-    diff <(echo "$curie_set") <(echo "$maven_set") | sed 's/^/    /'
+    diff <(echo "$curie_set") <(echo "$maven_set") | sed 's/^/    /' || true
   fi
 }
 
 # ---------------------------------------------------------------------------
 # Resolution parity: `curie deps` vs `mvn dependency:tree`
 # ---------------------------------------------------------------------------
+
+# By-design GAVs (or group:artifact prefixes) filtered from BOTH
+# curie_gavs() and mvn_gavs() output before comparing — see file header,
+# 4th bullet. Each pattern is matched as a substring (grep -F), so entries
+# ending in `:` match any version while exact `group:artifact:version`
+# entries (the spock-core 2.4-groovy-5.0 closure) only match that pinned
+# version. Filtering both sides symmetrically is a no-op where the GAV
+# legitimately appears on both (e.g. spring-boot-demo's explicit
+# `org.spockframework:spock-spring` test dependency pulls in the same
+# spock-core closure).
+BY_DESIGN_GAV_PATTERNS=(
+  'org.apache.groovy:groovy:'
+  'org.jetbrains.kotlin:kotlin-stdlib:'
+  'org.jetbrains:annotations:13.0'
+  'org.spockframework:spock-core:2.4-groovy-5.0'
+  'org.junit.platform:junit-platform-engine:1.14.1'
+  'org.junit.platform:junit-platform-commons:1.14.1'
+  'org.opentest4j:opentest4j:1.3.0'
+  'org.apiguardian:apiguardian-api:1.1.2'
+  'org.hamcrest:hamcrest:3.0'
+  'io.leangen.geantyref:geantyref:1.3.16'
+)
+
+filter_by_design_gavs() {
+  grep -vFf <(printf '%s\n' "${BY_DESIGN_GAV_PATTERNS[@]}")
+}
 
 # Normalize a `curie deps` / `curie deps --tests` tree to sorted
 # "group:artifact:version" lines.
@@ -140,11 +185,12 @@ curie_gavs() {
     if [[ "$include_tests" == "1" ]]; then
       "$CURIE_BIN" deps --tests --offline 2>/dev/null
     fi
-  ) | sed -E 's/^[^a-zA-Z0-9]+//' | grep -E '^[^:]+:[^:]+:[^:]+$' | sort -u
+  ) | sed -E 's/^[^a-zA-Z0-9]+//' | grep -E '^[^:]+:[^:]+:[^:]+$' | sort -u | filter_by_design_gavs
 }
 
 # Normalize an `mvn dependency:tree` output to sorted "group:artifact:version"
-# lines. junit-platform-console-standalone's subtree and intra-workspace
+# lines. junit-platform-console-standalone's subtree, the lombok
+# on-compile-classpath `provided` dependency, and intra-workspace
 # dependencies are pruned (see file header).
 mvn_gavs() {
   local dir=$1 scope=$2
@@ -152,14 +198,14 @@ mvn_gavs() {
   (
     cd "$dir"
     mvn -q dependency:tree -Dscope="$scope" \
-      -Dexcludes=org.junit.platform:junit-platform-console-standalone \
+      -Dexcludes=org.junit.platform:junit-platform-console-standalone,org.projectlombok:lombok \
       -DoutputFile="$out" >/dev/null
   )
   tail -n +2 "$out" \
     | sed -E 's/^[^a-zA-Z0-9]+//' \
     | awk -F: '{ if (NF==5) print $1":"$2":"$4; else if (NF==6) print $1":"$2":"$5 }' \
     | grep -vFf <(echo "$WORKSPACE_MEMBER_GAS" | sed -E '/^$/d; s/$/:/') \
-    | sort -u
+    | sort -u | filter_by_design_gavs
 }
 
 check_resolution_parity() {
@@ -203,7 +249,7 @@ jar_entry_sets_match() {
 
   if [[ "$curie_entries" != "$maven_entries" ]]; then
     fail "$label: jar entry sets differ"
-    diff <(echo "$curie_entries") <(echo "$maven_entries") | sed 's/^/    /'
+    diff <(echo "$curie_entries") <(echo "$maven_entries") | sed 's/^/    /' || true
     return 1
   fi
 }
@@ -258,7 +304,7 @@ compare_manifest() {
     fail "$label: Main-Class differs ('$curie_main' vs '$maven_main')"
   elif [[ "$curie_cp" != "$maven_cp" ]]; then
     fail "$label: Class-Path entries differ"
-    diff <(echo "$curie_cp") <(echo "$maven_cp") | sed 's/^/    /'
+    diff <(echo "$curie_cp") <(echo "$maven_cp") | sed 's/^/    /' || true
   else
     ok "$label: Main-Class/Class-Path match"
   fi
@@ -283,14 +329,17 @@ check_jar_parity() {
     return
   fi
 
-  compare_jar_entries "$label: jar" "$curie_jar" "$maven_jar"
+  # `compare_jar_entries`/`compare_jar_entry_names` return non-zero when the
+  # entry sets differ (after already reporting FAIL + a diff); `|| true`
+  # keeps that from tripping `set -e` and aborting the whole script.
+  compare_jar_entries "$label: jar" "$curie_jar" "$maven_jar" || true
   compare_manifest "$label: jar" "$curie_jar" "$maven_jar"
 
   local curie_fat="$curie_dir/target/$artifact-$version-fat.jar"
   local maven_fat="$maven_dir/target/$artifact-$version-fat.jar"
   if [[ -f "$curie_fat" ]]; then
     if [[ -f "$maven_fat" ]]; then
-      compare_jar_entry_names "$label: fat jar" "$curie_fat" "$maven_fat"
+      compare_jar_entry_names "$label: fat jar" "$curie_fat" "$maven_fat" || true
     else
       fail "$label: fat jar missing from maven output"
     fi
@@ -344,7 +393,7 @@ check_test_parity() {
 
   if [[ "$curie_classes" != "$maven_classes" ]]; then
     fail "$label: test classes differ"
-    diff <(echo "$curie_classes") <(echo "$maven_classes") | sed 's/^/    /'
+    diff <(echo "$curie_classes") <(echo "$maven_classes") | sed 's/^/    /' || true
   elif [[ "$curie_total" != "$maven_total" || "$curie_failed" != "$maven_failed" ]]; then
     fail "$label: test counts differ (curie: $curie_total total/$curie_failed failed, mvn: $maven_total total/$maven_failed failed)"
   else
