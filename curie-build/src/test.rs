@@ -470,6 +470,7 @@ pub fn run_tests(
             };
 
             let mut groovyc = Command::new("java");
+            groovyc.arg(crate::compile::groovy_target_bytecode_arg(desc));
             groovyc.arg("-cp").arg(classpath_string(&groovyc_process_cp));
             groovyc.arg("org.codehaus.groovy.tools.FileSystemCompiler");
             groovyc.arg("-d").arg(&test_classes_dir);

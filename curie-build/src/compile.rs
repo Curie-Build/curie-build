@@ -137,6 +137,20 @@ fn kotlin_module_name(desc: &descriptor::Descriptor) -> &str {
     desc.buildable_name()
 }
 
+/// JVM system-property argument that pins the bytecode level emitted by
+/// `groovyc` (`FileSystemCompiler`) to the project's effective Java release.
+///
+/// `FileSystemCompiler` has no `-target`/`--release` CLI flag; left alone it
+/// targets the running JVM (e.g. class major 69 on JDK 25), which diverges
+/// from `mvn`'s `gmavenplus-plugin` output where `<targetBytecode>` is pinned
+/// to `${maven.compiler.release}`.  Groovy's `CompilerConfiguration` reads the
+/// `groovy.target.bytecode` system property, so setting it makes Curie's
+/// Groovy classes match `mvn`'s for the same `sourceCompatibility`.  Must be
+/// placed before the main-class name (it is a JVM option, not a program arg).
+pub(crate) fn groovy_target_bytecode_arg(desc: &descriptor::Descriptor) -> String {
+    format!("-Dgroovy.target.bytecode={}", desc.java.effective())
+}
+
 /// Phase 1: resolve production deps and compile production sources.
 /// Does NOT run tests or package a JAR.
 ///
@@ -646,6 +660,7 @@ pub fn compile(
             // step is needed in that case.
             // ------------------------------------------------------------------
             let mut groovyc = Command::new("java");
+            groovyc.arg(groovy_target_bytecode_arg(desc));
             groovyc.arg("-cp").arg(classpath_string(&groovy_jars));
             groovyc.arg("org.codehaus.groovy.tools.FileSystemCompiler");
             groovyc.arg("-d").arg(&classes_dir);
@@ -893,6 +908,34 @@ mod tests {
         let desc = descriptor::load(dir.path()).unwrap();
 
         assert_eq!(kotlin_module_name(&desc), "hello-kotlin");
+    }
+
+    #[test]
+    fn groovy_target_bytecode_uses_effective_release() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"g\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
+             [java]\nsourceCompatibility = \"21\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+
+        assert_eq!(groovy_target_bytecode_arg(&desc), "-Dgroovy.target.bytecode=21");
+    }
+
+    #[test]
+    fn groovy_target_bytecode_defaults_to_default_release() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"g\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+
+        // No [java] section → effective() default (currently 25).
+        assert_eq!(groovy_target_bytecode_arg(&desc), "-Dgroovy.target.bytecode=25");
     }
 
     // --- Groovy source detection helpers ------------------------------------

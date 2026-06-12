@@ -117,6 +117,7 @@ pub fn resolve_pinned_dependencies(desc: &descriptor::Descriptor, offline: bool)
             progress: false,
             bom_imports: desc.test_bom_gavs()?,
             offline,
+            skip_version_ranges: false,
         },
     )
     .context("pinTransitive: failed to resolve the transitive dependency closure")?;
@@ -166,6 +167,7 @@ pub fn resolve_ap_versions_for_sync(desc: &descriptor::Descriptor, offline: bool
             progress: false,
             bom_imports: desc.test_bom_gavs()?,
             offline,
+            skip_version_ranges: false,
         },
     )
     .context("failed to resolve BOM-managed annotation processor versions")?;
