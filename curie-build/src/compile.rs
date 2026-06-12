@@ -128,6 +128,15 @@ pub fn pkg_prefix_for_src_root(src_root: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Module name passed to `kotlinc -module-name` for production
+/// compilation, matching kotlin-maven-plugin's default `moduleName`
+/// (`${project.artifactId}`) so the emitted `META-INF/<name>.kotlin_module`
+/// matches `mvn`'s output (`maven.rs::build_project` sets `artifactId` to
+/// the same value).
+fn kotlin_module_name(desc: &descriptor::Descriptor) -> &str {
+    desc.buildable_name()
+}
+
 /// Phase 1: resolve production deps and compile production sources.
 /// Does NOT run tests or package a JAR.
 ///
@@ -586,6 +595,8 @@ pub fn compile(
             kotlinc.arg("-no-stdlib");
             kotlinc.arg("-no-reflect");
 
+            kotlinc.arg("-module-name").arg(kotlin_module_name(desc));
+
             // Output directory.
             kotlinc.arg("-d").arg(&classes_dir);
 
@@ -868,6 +879,20 @@ mod tests {
         // Basic sanity: must look like a semver triple.
         let parts: Vec<&str> = KOTLIN_VERSION.split('.').collect();
         assert!(parts.len() >= 2, "KOTLIN_VERSION should be at least major.minor");
+    }
+
+    #[test]
+    fn kotlin_module_name_matches_buildable_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"hello-kotlin\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
+             [java]\nsourceCompatibility = \"21\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+
+        assert_eq!(kotlin_module_name(&desc), "hello-kotlin");
     }
 
     // --- Groovy source detection helpers ------------------------------------

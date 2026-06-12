@@ -338,6 +338,7 @@ pub fn run_tests(
             kotlinc.arg("-cp").arg(classpath_string(&test_kotlin_compiler_jars));
             kotlinc.arg("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler");
             kotlinc.arg("-no-stdlib").arg("-no-reflect");
+            kotlinc.arg("-module-name").arg(kotlin_test_module_name(desc));
             kotlinc.arg("-d").arg(&test_classes_dir);
 
             if !shared_cp.is_empty() {
@@ -924,5 +925,33 @@ fn needs_test_run(
         .add_dir_opt(resources_dir)
         .add_dir_opt(test_resources_dir);
     !Stamp::of(stamp_path).covers(&inputs)
+}
+
+/// Module name passed to `kotlinc -module-name` for test compilation,
+/// matching kotlin-maven-plugin's default `testModuleName`
+/// (`${project.artifactId}-test`) so the emitted
+/// `META-INF/<name>-test.kotlin_module` matches `mvn`'s output
+/// (`maven.rs::build_project` sets `artifactId` to `desc.buildable_name()`).
+fn kotlin_test_module_name(desc: &descriptor::Descriptor) -> String {
+    format!("{}-test", desc.buildable_name())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kotlin_test_module_name_appends_test_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"hello-kotlin\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
+             [java]\nsourceCompatibility = \"21\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+
+        assert_eq!(kotlin_test_module_name(&desc), "hello-kotlin-test");
+    }
 }
 
