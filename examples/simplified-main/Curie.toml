@@ -20,3 +20,6 @@ version = "0.1.0"
 # Unnamed classes and instance main methods were finalized in Java 25 (JEP 512).
 # No enablePreview needed.  On Java 21–24, add: enablePreview = true
 sourceCompatibility = "25"
+
+[maven]
+sync = true

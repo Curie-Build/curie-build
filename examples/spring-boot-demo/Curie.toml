@@ -49,3 +49,6 @@ baseImage = "eclipse-temurin:21-jre-alpine"
 [test]
 # Spring Boot 4 / Spock 2.4 both target JUnit Platform 1.x.
 junitPlatformVersion = "1.14.4"
+
+[maven]
+sync = true

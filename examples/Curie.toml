@@ -50,3 +50,8 @@ junitPlatformVersion = "6.0.3"
 
 [kotlin]
 version = "2.1.21"
+
+# Keep each member's pom.xml in sync with Curie.toml, so `mvn` can build the
+# same project (see _design/MAVEN-SYNC.md).
+[maven]
+sync = true

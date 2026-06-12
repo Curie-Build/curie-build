@@ -11,3 +11,6 @@ version = "21"
 [plugin.protobuf]
 version   = "3.25.0"
 sourceDir = "proto"
+
+[maven]
+sync = true

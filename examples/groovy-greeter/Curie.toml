@@ -11,3 +11,6 @@ mainClass = "com.example.GroovyGreeter"
 
 [groovy]
 version = "5.0.6"
+
+[maven]
+sync = true

@@ -28,3 +28,6 @@ mainClass = "com.example.VersionRangeDemo"
 [dependencies]
 "com.github.stefanbirkner:system-rules" = "1.18.0"
 "junit:junit-dep"                        = "4.10"   # pins the transitive range dep
+
+[maven]
+sync = true

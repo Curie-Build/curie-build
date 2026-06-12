@@ -21,3 +21,6 @@ mainClass = "com.example.ExclusionDemo"
 "org.apache.commons:commons-compress" = { version = "1.27.1", exclusions = [
     "commons-codec:*",
 ] }
+
+[maven]
+sync = true
