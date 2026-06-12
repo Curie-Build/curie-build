@@ -64,6 +64,7 @@
       <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
       <li><a href="/docs/scaffold.html">Scaffolding</a></li>
       <li><a href="/docs/inspect.html">Build Inspect</a></li>
+      <li><a href="/docs/maven.html">Maven sync</a></li>
     </ul>
   </aside>
 
@@ -192,6 +193,11 @@
         <span class="badge">20</span>
         <h3>Build Inspect</h3>
         <p>Terminal UI for browsing build logs across an entire workspace. Drill into per-test output, grep log content with live highlights, filter by member name, and reload without restarting.</p>
+      </a>
+      <a class="feature-card" href="/docs/maven.html" style="text-decoration: none; color: inherit;">
+        <span class="badge">21</span>
+        <h3>Maven sync</h3>
+        <p><code>curie maven sync</code> generates a <code>pom.xml</code> from <code>Curie.toml</code> so <code>mvn verify</code> matches <code>curie build</code> — for IDEs, CI, and incremental migration. <code>[maven] sync = true</code> keeps it regenerated automatically.</p>
       </a>
     </div>
 

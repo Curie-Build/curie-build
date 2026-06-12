@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Maven sync · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/installation.html">Installation</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/plugins.html">Plugins</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
+      <li><a href="/docs/maven.html">Maven sync</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · maven</span>
+    <h1>Maven sync</h1>
+    <p class="lede"><code>curie maven sync</code> generates a <code>pom.xml</code> from <code>Curie.toml</code> so that <code>mvn verify</code> produces the same compiled classes, tests, and packaged artifacts as <code>curie build</code>. Use it to keep IDEs and CI tooling that only understand Maven working alongside Curie, or to migrate a project to Curie one step at a time without losing the existing Maven build.</p>
+
+    <h2>Generating a pom.xml</h2>
+    <p>Run <code>curie maven sync</code> in any project or workspace root. In a workspace it writes one <code>pom.xml</code> per member plus an aggregator <code>pom.xml</code> at the root, listing members in <code>&lt;modules&gt;</code>:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie maven sync</span>
+      </header>
+<pre>  Maven           pom.xml written</pre>
+    </div>
+
+    <p>Running it again with nothing changed does no work — generation is skipped as soon as the fingerprint in the existing file matches:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie maven sync</span>
+      </header>
+<pre>  Maven           pom.xml up to date</pre>
+    </div>
+
+    <p>Add <code>--check</code> for a CI guard: nothing is written, and the command exits non-zero if any <code>pom.xml</code> is missing or stale — the same shape as <code>curie fmt --check</code>:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie maven sync --check</span>
+      </header>
+<pre>  Maven           pom.xml up to date</pre>
+    </div>
+
+    <h3>Pre-existing pom.xml</h3>
+    <p>If a <code>pom.xml</code> already exists and was <strong>not</strong> generated by Curie, <code>curie maven sync</code> refuses to touch it and leaves the file untouched:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie maven sync</span>
+      </header>
+<pre><span class="em">error: pom.xml was not generated by curie maven sync</span>
+  pom.xml does not carry the curie-maven-fingerprint marker.
+
+  To proceed, either:
+    - delete pom.xml and re-run curie maven sync, or
+    - run curie maven sync --force to overwrite it, or
+    - remove [maven] sync from Curie.toml if this file is hand-written</pre>
+    </div>
+
+    <p><code>curie maven sync --force</code> overwrites the file once. The same check runs at the start of <code>curie build</code> when <code>[maven] sync = true</code> — a hand-written <code>pom.xml</code> fails the build with this error rather than being silently kept stale or silently destroyed.</p>
+
+    <h2>Keeping it in sync automatically</h2>
+    <p>Set <code>sync = true</code> under <code>[maven]</code> to regenerate the POM(s) at the start of every <code>curie build</code>, before compilation:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[maven]</span>
+<span class="kw">sync</span> = <span class="str">true</span></pre>
+    </div>
+
+    <p><code>[maven]</code> is workspace-inheritable exactly like <code>[test]</code> and <code>[kotlin]</code> — set it once in the workspace root's <code>Curie.toml</code> and every member picks it up, unless a member overrides it.</p>
+
+    <h2>What gets generated</h2>
+
+    <h3>Coordinates and properties</h3>
+    <p>The project's <code>name</code> becomes <code>&lt;artifactId&gt;</code>, <code>version</code> becomes <code>&lt;version&gt;</code>, and an optional <code>groupId</code> becomes <code>&lt;groupId&gt;</code> — when omitted (as is common in Curie projects), the generator falls back to the constant <code>curie.generated</code>. Every generated POM also gets:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>pom.xml</span>
+      </header>
+<pre>&lt;<span class="kw">properties</span>&gt;
+  &lt;<span class="kw">maven.compiler.release</span>&gt;21&lt;/<span class="kw">maven.compiler.release</span>&gt;
+  &lt;<span class="kw">project.build.sourceEncoding</span>&gt;UTF-8&lt;/<span class="kw">project.build.sourceEncoding</span>&gt;
+  <span class="com">&lt;!-- matches jar.rs's reproducible-build epoch --&gt;</span>
+  &lt;<span class="kw">project.build.outputTimestamp</span>&gt;2024-01-01T00:00:00Z&lt;/<span class="kw">project.build.outputTimestamp</span>&gt;
+&lt;/<span class="kw">properties</span>&gt;</pre>
+    </div>
+
+    <p><code>maven.compiler.release</code> comes from <code>[java].sourceCompatibility</code> (or the effective default). If <code>[java].enablePreview = true</code>, the compiler plugin gets <code>--enable-preview</code> and Surefire's <code>&lt;argLine&gt;</code> gets it too.</p>
+
+    <h3>Source layout</h3>
+    <p>Source roots are discovered with the same logic <code>curie build</code> uses: Maven-style <code>src/main/{java,kotlin,groovy}</code>, flat-package directories under <code>src/</code>, or a bare <code>src/</code>. The first production root becomes <code>&lt;sourceDirectory&gt;</code>; any additional roots are added with <code>build-helper-maven-plugin</code>'s <code>add-source</code>. Test roots work the same way via <code>&lt;testSourceDirectory&gt;</code> and <code>add-test-source</code>.</p>
+    <p>Classes co-located with production sources but named <code>*Test</code>, <code>*Tests</code>, or <code>*Spec</code> are excluded from the main compile and added as test sources too — mirroring how <code>curie build</code> compiles them into <code>target/test-classes</code> only. <code>src/main/resources</code> / <code>resources/</code> and <code>src/test/resources</code> / <code>test-resources/</code> become <code>&lt;resources&gt;</code> and <code>&lt;testResources&gt;</code>.</p>
+
+    <h3>Dependencies, scopes and BOM imports</h3>
+    <table>
+      <thead><tr><th>Curie.toml</th><th>pom.xml</th></tr></thead>
+      <tbody>
+        <tr><td><code>[dependencies]</code></td><td><code>&lt;dependency&gt;</code>, scope <code>compile</code></td></tr>
+        <tr><td><code>[test-dependencies]</code></td><td><code>&lt;dependency&gt;</code>, scope <code>test</code></td></tr>
+        <tr><td><code>exclusions = [...]</code></td><td><code>&lt;exclusions&gt;</code></td></tr>
+        <tr><td><code>classifier</code></td><td><code>&lt;classifier&gt;</code></td></tr>
+        <tr><td><code>{ javaAgent = true }</code> (test dep)</td><td><code>maven-dependency-plugin:properties</code> + Surefire <code>&lt;argLine&gt;-javaagent:${...}&lt;/argLine&gt;</code></td></tr>
+        <tr><td>version <code>""</code> (BOM-supplied)</td><td><code>&lt;dependency&gt;</code> without <code>&lt;version&gt;</code> — resolved via <code>&lt;dependencyManagement&gt;</code></td></tr>
+        <tr><td><code>[workspace-dependencies]</code></td><td><code>&lt;dependency&gt;</code> on the member's own GAV (resolved by the reactor or local repo)</td></tr>
+      </tbody>
+    </table>
+
+    <p><code>[bom-imports]</code> and <code>[test-bom-imports]</code> become <code>&lt;dependencyManagement&gt;</code> imports with <code>&lt;type&gt;pom&lt;/type&gt;&lt;scope&gt;import&lt;/scope&gt;</code>. Curie resolves "later wins" for inherited BOM imports, but Maven resolves "first wins" — so the generator emits a member's own <code>[bom-imports]</code> first, then workspace-inherited ones, preserving the same effective precedence.</p>
+
+    <h3>Kotlin, Groovy &amp; Spock</h3>
+    <p>If Kotlin sources are present, the generator adds <code>kotlin-maven-plugin</code> at <code>[kotlin].version()</code>, wired so its compile executions run before <code>maven-compiler-plugin</code>'s default Java compile, plus <code>kotlin-stdlib</code> as a <code>compile</code> dependency. If Groovy sources are present (production or test), it adds <code>gmavenplus-plugin</code> for joint compilation and <code>org.apache.groovy:groovy</code> at <code>[groovy].version()</code> — as a <code>test</code>-scoped dependency when Groovy is only used in tests. Enabling <code>[spock]</code> additionally broadens the Surefire include patterns to match <code>*Spec</code> classes.</p>
+
+    <h3>Tests</h3>
+    <p><code>curie build</code> runs every test — co-located and <code>tests/</code> — in one pass before packaging, so the generated POM configures <strong>Surefire only</strong>, bound to the normal <code>test</code> phase. The include patterns mirror the runner exactly:</p>
+    <table>
+      <thead><tr><th>Configuration</th><th>Surefire <code>&lt;includes&gt;</code></th></tr></thead>
+      <tbody>
+        <tr><td>default</td><td><code>%regex[.*Tests?$|^Test.*|.*TestCase$]</code></td></tr>
+        <tr><td><code>[spock]</code> enabled</td><td>above, plus <code>%regex[.*Spec$]</code></td></tr>
+      </tbody>
+    </table>
+    <p>Curie's bundled console runner includes the JUnit Jupiter engine for free; the generator only adds <code>org.junit.platform:junit-platform-console-standalone</code> (at <code>[test].junitPlatformVersion()</code>, scope <code>test</code>) when no test engine is otherwise on the classpath, so the Surefire classpath matches Curie's. <code>[test].coverage = true</code> adds <code>jacoco-maven-plugin</code>'s <code>prepare-agent</code> and <code>report</code> goals.</p>
+
+    <h3>Packaging</h3>
+    <p><code>maven-jar-plugin</code> is configured with <code>&lt;addMavenDescriptor&gt;false&lt;/addMavenDescriptor&gt;</code> (no <code>META-INF/maven/**</code>, matching Curie's JARs), <code>&lt;mainClass&gt;</code> set to the declared or auto-detected main class, and <code>&lt;addClasspath&gt;true&lt;/addClasspath&gt;</code> with <code>&lt;classpathPrefix&gt;libs/&lt;/classpathPrefix&gt;</code> — the same <code>Class-Path: libs/&lt;dep&gt;.jar</code> manifest entries <code>jar.rs</code> writes. <code>maven-dependency-plugin:copy-dependencies</code> copies runtime-scope JARs into <code>target/libs/</code> during the <code>package</code> phase.</p>
+
+    <p>If <code>[fat-jar]</code> is configured, <code>copy-dependencies</code> is skipped (Curie skips <code>libs/</code> too) and <code>maven-shade-plugin</code> produces the fat JAR with classifier <code>fat</code> (<code>name-version-fat.jar</code>), a <code>ServicesResourceTransformer</code> for merged <code>META-INF/services</code>, and a <code>ManifestResourceTransformer</code> for <code>Main-Class</code>. <code>shadeAll</code> and per-dependency <code>shade</code> become shade's <code>&lt;includes&gt;</code>/<code>&lt;excludes&gt;</code>, and <code>from</code>/<code>to</code> relocations become <code>&lt;relocations&gt;</code> entries.</p>
+
+    <h2>Workspaces</h2>
+    <p>The workspace root gets an aggregator <code>pom.xml</code>: <code>&lt;packaging&gt;pom&lt;/packaging&gt;</code> with <code>&lt;modules&gt;</code> listing every member in declaration order. Nested workspaces get their own aggregator the same way.</p>
+    <p>Member POMs do <strong>not</strong> use <code>&lt;parent&gt;</code>. Everything a member inherits from the workspace — <code>[java]</code>, <code>[test]</code>, <code>[kotlin]</code>, BOM imports, annotation processors — is materialized directly into that member's <code>pom.xml</code>, the same fully-resolved view Curie itself builds with. Each member's POM is therefore self-contained: <code>mvn verify</code> works the same whether run from the workspace root (reactor build) or from inside the member directory.</p>
+
+    <h2>Determinism and incrementality</h2>
+    <p>Identical inputs produce a byte-identical <code>pom.xml</code>: dependency tables are emitted in sorted order, source roots use the same ordering as the compiler, and every Maven plugin version comes from one pinned table:</p>
+    <table>
+      <thead><tr><th>Plugin</th><th>Version</th></tr></thead>
+      <tbody>
+        <tr><td>maven-compiler-plugin</td><td>3.15.0</td></tr>
+        <tr><td>maven-surefire-plugin</td><td>3.5.6</td></tr>
+        <tr><td>maven-jar-plugin</td><td>3.5.0</td></tr>
+        <tr><td>maven-shade-plugin</td><td>3.6.2</td></tr>
+        <tr><td>maven-dependency-plugin</td><td>3.11.0</td></tr>
+        <tr><td>build-helper-maven-plugin</td><td>3.6.0</td></tr>
+        <tr><td>gmavenplus-plugin</td><td>4.2.0</td></tr>
+        <tr><td>jacoco-maven-plugin</td><td>0.8.13</td></tr>
+      </tbody>
+    </table>
+    <p><code>kotlin-maven-plugin</code>'s version always matches <code>[kotlin].version()</code>. No wall-clock time, hostname, username, or absolute paths appear in the output.</p>
+    <p>Every generated file starts with a header comment recording a fingerprint:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>pom.xml</span>
+      </header>
+<pre><span class="com">&lt;!-- Generated by curie maven sync from Curie.toml — DO NOT EDIT.
+     curie-maven-fingerprint: 7a1c4e... --&gt;</span></pre>
+    </div>
+
+    <p>The fingerprint covers the generator's schema version, the project's (and workspace's) <code>Curie.toml</code> bytes, and the sorted list of source/test/resource roots — so adding a new package directory or editing <code>Curie.toml</code> triggers regeneration, while an unrelated rebuild does not. If the fingerprint still matches, <code>curie maven sync</code> skips the file entirely and reports <code>up to date</code>.</p>
+
+    <h2>Pinning the transitive closure</h2>
+    <p>Curie's resolver implements Maven's own mediation rules (nearest-wins, BOM precedence, exclusions) and is intended to resolve every dependency to the <em>same</em> version Maven would. If you hit a case where it doesn't, set <code>pinTransitive = true</code> as a temporary unblocking measure — it writes Curie's fully-resolved <code>group:artifact → version</code> closure into <code>&lt;dependencyManagement&gt;</code>, forcing Maven to match Curie's versions exactly:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[maven]</span>
+<span class="kw">sync</span> = <span class="str">true</span>
+<span class="kw">pinTransitive</span> = <span class="str">true</span></pre>
+    </div>
+
+    <p>This defaults to <code>false</code>. A resolution mismatch is treated as a Curie resolver bug worth fixing, not something to paper over permanently.</p>
+
+    <h2>Parity contract</h2>
+    <p><code>mvn verify</code> and <code>curie build</code> are considered equivalent for a module when:</p>
+    <table>
+      <thead><tr><th>Aspect</th><th>Definition of equal</th></tr></thead>
+      <tbody>
+        <tr><td>Compiled classes</td><td>Same <code>.class</code> entries in the JAR, byte-identical per entry</td></tr>
+        <tr><td>Resources</td><td>Same resource entries, byte-identical</td></tr>
+        <tr><td>Tests</td><td>Same test classes discovered and run; same pass/fail outcome and counts</td></tr>
+        <tr><td>JAR manifest</td><td>Same <code>Main-Class</code> and <code>Class-Path</code> (<code>libs/&lt;dep&gt;.jar</code>); other attributes (e.g. <code>Created-By</code>) may differ</td></tr>
+        <tr><td>JAR reproducibility</td><td>Both timestamped to 2024-01-01T00:00:00Z, entries sorted</td></tr>
+        <tr><td>Fat JAR</td><td>Same merged entry set, same relocations applied, <code>META-INF/services</code> merged the same way</td></tr>
+        <tr><td><code>target/libs/</code></td><td>Same set of dependency JARs as <code>dependency:copy-dependencies</code></td></tr>
+        <tr><td>BOM modules</td><td>Same <code>&lt;dependencyManagement&gt;</code> content</td></tr>
+      </tbody>
+    </table>
+    <p>Docker images, GraalVM native binaries, coverage report layout, <code>META-INF/build-info.properties</code>, and sources generated by <code>[plugin.*]</code> are outside this contract for now.</p>
+
+    <h2>Known divergences</h2>
+    <ul>
+      <li><strong>Resolver mediation differences</strong> are treated as Curie bugs, not accepted divergences — <code>pinTransitive</code> is only a temporary workaround while one is being fixed.</li>
+      <li><strong>Surefire vs. the console-standalone runner</strong> are different launchers around the same JUnit Platform; discovery matches but per-test execution order can differ (both are unordered by spec).</li>
+      <li><strong>Manifest extras</strong> — Maven Archiver adds attributes like <code>Created-By</code> that Curie doesn't; only <code>Main-Class</code> and <code>Class-Path</code> are compared.</li>
+      <li><strong>Per-dependency <code>repository = "id"</code></strong> has no per-dependency equivalent in Maven — all <code>[[repositories]]</code> become global <code>&lt;repositories&gt;</code> in the POM. The same artifacts are resolved either way.</li>
+      <li><strong>Docker and GraalVM native-image</strong> are not represented in the generated POM yet (phase 2: opt-in Maven profiles).</li>
+      <li><strong><code>[plugin.*]</code> source generators</strong> (e.g. protobuf, OpenAPI) aren't representable in Maven; <code>curie maven sync</code> emits a warning and skips them.</li>
+      <li><strong>Fat JAR class bytes</strong> — both tools apply the same relocations to the same classes, but Curie rewrites constant-pool entries in place while <code>maven-shade-plugin</code> re-serializes the whole class via ASM. The entry <em>names</em> match; the relocated <code>.class</code> bytes don't need to.</li>
+    </ul>
+
+    <div class="pager">
+      <a href="/docs/inspect.html">
+        <span>← Previous</span>
+        <strong>Build Inspect</strong>
+      </a>
+      <a href="/docs/" style="text-align: right; align-items: flex-end;">
+        <span>↑ Back to</span>
+        <strong>Overview</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>
