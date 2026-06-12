@@ -32,6 +32,7 @@ const ICON_AUDIT:    &str = "⊙";   // curie audit — security scan / SBOM
 const ICON_FORMAT:   &str = "≡";   // curie fmt — code formatting
 const ICON_PUBLISH:  &str = "↑";   // curie publish — upload
 const ICON_CLEAN:    &str = "⌫";   // curie clean — erase / delete
+const ICON_WARN:     &str = "⚠";   // non-fatal caveat (e.g. unrepresentable config)
 
 // ── Formatting helpers (internal) ───────────────────────────────────────────
 
@@ -110,6 +111,12 @@ pub fn up_to_date_detail(label: &str, value: &str) -> String {
 /// Something was removed or is stale.  Yellow `✗`.
 pub fn stale(label: &str, value: &str) -> String {
     line(YELLOW, ICON_STALE, label, value)
+}
+
+/// Non-fatal caveat about the generated output (e.g. a config section that
+/// has no Maven equivalent).  Yellow `⚠`.
+pub fn warn(label: &str, value: &str) -> String {
+    line(YELLOW, ICON_WARN, label, value)
 }
 
 /// Neutral informational step (detected, libs, dockerfile, etc.).  Dim `→`.
@@ -298,6 +305,21 @@ mod tests {
         let s = colored_line(YELLOW, ICON_STALE, "Stale", "removed 2 files");
         assert!(s.contains(YELLOW));
         assert!(s.contains(ICON_STALE));
+    }
+
+    // ── warn ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn plain_warn_format() {
+        let s = plain_line("Maven", "plugin.protobuf sources not represented in pom.xml");
+        assert_eq!(s, "  Maven           plugin.protobuf sources not represented in pom.xml");
+    }
+
+    #[test]
+    fn colored_warn_contains_yellow_and_warning_icon() {
+        let s = colored_line(YELLOW, ICON_WARN, "Maven", "plugin.protobuf sources not represented in pom.xml");
+        assert!(s.contains(YELLOW));
+        assert!(s.contains(ICON_WARN));
     }
 
     // ── run_step ──────────────────────────────────────────────────────────

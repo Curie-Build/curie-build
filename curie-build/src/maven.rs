@@ -1826,7 +1826,30 @@ fn sync_member_pom(
             workspace_member_gavs, force, check,
         )?
     };
+    print_plugin_source_warning(desc);
     Ok((pom_path, outcome))
+}
+
+/// `[plugin.<name>]` sections (`[plugin.protobuf]`, `[plugin.openapi]`, ...)
+/// whose generated sources have no representation in the synced `pom.xml` —
+/// see `_design/MAVEN-SYNC.md`, "Known divergences" #7.
+fn unrepresented_plugin_names(desc: &Descriptor) -> Vec<&str> {
+    desc.plugins.keys().map(String::as_str).collect()
+}
+
+/// Warn that `desc`'s `[plugin.*]` sections (if any) generate sources that
+/// `mvn` will not produce: the synced `pom.xml` has no equivalent step.
+fn print_plugin_source_warning(desc: &Descriptor) {
+    let names = unrepresented_plugin_names(desc);
+    if names.is_empty() {
+        return;
+    }
+    let plugins = names.iter().map(|name| format!("plugin.{name}")).collect::<Vec<_>>().join(", ");
+    let plural = if names.len() == 1 { "" } else { "s" };
+    crate::parallel::emit(&crate::style::warn(
+        "Maven",
+        &format!("{plugins} generated source{plural} not represented in pom.xml"),
+    ));
 }
 
 /// Sync one workspace member's `pom.xml`, reading the immediately-enclosing
@@ -3301,5 +3324,55 @@ mod tests {
         let root_pom = std::fs::read_to_string(dir.path().join("pom.xml")).unwrap();
         assert!(root_pom.contains("<module>lib</module>"));
         assert!(root_pom.contains("<module>app</module>"));
+    }
+
+    // -- `[plugin.*]` generated-source warning --------------------------------
+
+    #[test]
+    fn unrepresented_plugin_names_empty_without_plugin_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"my-app\"\nversion = \"1.0.0\"\nmainClass = \"com.example.Main\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+
+        assert!(unrepresented_plugin_names(&desc).is_empty());
+    }
+
+    #[test]
+    fn unrepresented_plugin_names_lists_plugin_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"my-app\"\nversion = \"1.0.0\"\nmainClass = \"com.example.Main\"\n\
+             [plugin.protobuf]\nversion = \"3.25.0\"\nsourceDir = \"proto\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+
+        assert_eq!(unrepresented_plugin_names(&desc), vec!["protobuf"]);
+    }
+
+    #[test]
+    fn sync_member_pom_emits_plugin_warning_without_failing() {
+        // The warning is best-effort output (via `parallel::emit`); the
+        // important behavioral contract is that `[plugin.*]` does not make
+        // sync fail or change the generated POM's content.
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"my-app\"\nversion = \"1.0.0\"\ngroupId = \"com.example\"\nmainClass = \"com.example.Main\"\n\
+             [plugin.protobuf]\nversion = \"3.25.0\"\nsourceDir = \"proto\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+
+        let (pom_path, outcome) = sync_member_pom(dir.path(), &desc, None, &BTreeMap::new(), false, false, true).unwrap();
+        assert_eq!(outcome, SyncOutcome::Written);
+        let pom = std::fs::read_to_string(pom_path).unwrap();
+        assert!(pom.contains("curie-maven-fingerprint"));
     }
 }
