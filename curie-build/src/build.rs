@@ -221,17 +221,13 @@ pub fn do_build(
         };
 
         crate::parallel::emit(&crate::style::active("Package", &compiled.jar_name));
-        // Effective runtime deps = user deps + Groovy stdlib (when Groovy sources present).
-        // Kotlin stdlib is NOT included because simple Kotlin programs compile to bytecode
-        // that doesn't reference stdlib classes — Groovy always does.
-        let mut effective_dep_jars = compiled.dep_jars.clone();
-        effective_dep_jars.extend_from_slice(&compiled.groovy_jars);
+        let manifest_dep_jars = manifest_dep_jars(desc, &compiled.dep_jars, &compiled.groovy_jars);
         write_deterministic_jar(
             &compiled.jar_path,
             &compiled.classes_dir,
             resources_dir,
             main_class.as_deref(),
-            &effective_dep_jars,
+            &manifest_dep_jars,
             build_info_content.as_deref(),
         )
         .context("failed to write JAR")?;
@@ -339,6 +335,31 @@ pub fn do_build(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Dependency JARs to list in the main JAR's `Class-Path` manifest header.
+///
+/// Effective runtime deps = user deps + Groovy stdlib (when Groovy sources
+/// present). Kotlin stdlib is NOT included because simple Kotlin programs
+/// compile to bytecode that doesn't reference stdlib classes — Groovy always
+/// does.
+///
+/// When `[fat-jar]` is enabled, the main JAR gets no Class-Path: deps are
+/// bundled into the fat JAR instead, `target/libs/` is not populated, and the
+/// generated pom.xml's maven-jar-plugin correspondingly omits
+/// `<addClasspath>`/`<classpathPrefix>` (`maven.rs::build_jar_plugin`).
+fn manifest_dep_jars(
+    desc: &descriptor::Descriptor,
+    dep_jars: &[PathBuf],
+    groovy_jars: &[PathBuf],
+) -> Vec<PathBuf> {
+    if descriptor::fat_jar_enabled(desc) {
+        Vec::new()
+    } else {
+        let mut deps = dep_jars.to_vec();
+        deps.extend_from_slice(groovy_jars);
+        deps
+    }
+}
+
 /// Read the `Main-Class` attribute from an existing JAR's manifest.
 /// Returns `None` if the JAR doesn't exist, has no manifest, or has no
 /// `Main-Class` entry.
@@ -418,5 +439,53 @@ mod clean_tests {
 
         // No target/ directory — should succeed without error.
         clean(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod manifest_dep_jars_tests {
+    use super::*;
+
+    fn load_desc(dir: &Path, toml: &str) -> descriptor::Descriptor {
+        std::fs::write(dir.join("Curie.toml"), toml).unwrap();
+        descriptor::load(dir).unwrap()
+    }
+
+    #[test]
+    fn includes_deps_and_groovy_jars_when_no_fat_jar() {
+        let dir = tempfile::tempdir().unwrap();
+        let desc = load_desc(
+            dir.path(),
+            "[application]\nname = \"test\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
+             [java]\nsourceCompatibility = \"21\"\n",
+        );
+
+        let dep_jars = vec![PathBuf::from("/m2/dep-1.0.jar")];
+        let groovy_jars = vec![PathBuf::from("/m2/groovy-5.0.6.jar")];
+
+        let result = manifest_dep_jars(&desc, &dep_jars, &groovy_jars);
+
+        assert_eq!(result, vec![
+            PathBuf::from("/m2/dep-1.0.jar"),
+            PathBuf::from("/m2/groovy-5.0.6.jar"),
+        ]);
+    }
+
+    #[test]
+    fn empty_when_fat_jar_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let desc = load_desc(
+            dir.path(),
+            "[application]\nname = \"test\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
+             [java]\nsourceCompatibility = \"21\"\n\
+             [fat-jar]\nenabled = true\n",
+        );
+
+        let dep_jars = vec![PathBuf::from("/m2/dep-1.0.jar")];
+        let groovy_jars = vec![PathBuf::from("/m2/groovy-5.0.6.jar")];
+
+        let result = manifest_dep_jars(&desc, &dep_jars, &groovy_jars);
+
+        assert!(result.is_empty(), "fat JAR's main JAR must have no Class-Path deps");
     }
 }
