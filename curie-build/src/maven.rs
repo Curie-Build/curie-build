@@ -1884,7 +1884,7 @@ fn print_sync_outcome(pom_path: &Path, outcome: SyncOutcome) {
     let rel = path_to_maven(&display_path(pom_path));
     match outcome {
         SyncOutcome::Written => crate::parallel::emit(&crate::style::active("Maven", &format!("{rel} written"))),
-        SyncOutcome::UpToDate => crate::parallel::emit(&crate::style::up_to_date(&format!("Maven {rel}"))),
+        SyncOutcome::UpToDate => crate::parallel::emit(&crate::style::up_to_date_detail("Maven", &rel)),
     }
 }
 

@@ -100,6 +100,13 @@ pub fn up_to_date(label: &str) -> String {
     line_all_dimmed(ICON_SKIP, label, "up to date")
 }
 
+/// Like [`up_to_date`] but with an explicit value (e.g. a path) shown before
+/// "up to date" — for steps whose detail doesn't fit the label column.
+/// Entire row is dim grey.
+pub fn up_to_date_detail(label: &str, value: &str) -> String {
+    line_all_dimmed(ICON_SKIP, label, &format!("{value} up to date"))
+}
+
 /// Something was removed or is stale.  Yellow `✗`.
 pub fn stale(label: &str, value: &str) -> String {
     line(YELLOW, ICON_STALE, label, value)
@@ -267,6 +274,15 @@ mod tests {
             detail_pos < reset_pos,
             "\"up to date\" must appear before RESET so it is rendered grey"
         );
+    }
+
+    #[test]
+    fn up_to_date_detail_places_value_before_suffix() {
+        // A long value (e.g. a path) must not be squashed against "up to
+        // date" the way a bare `up_to_date(long_label)` would be.
+        let s = up_to_date_detail("Maven", "examples/nested-workspace-demo/services/apps/hello-app/pom.xml");
+        let stripped = strip_ansi(&s);
+        assert!(stripped.contains("hello-app/pom.xml up to date"));
     }
 
     // ── stale ─────────────────────────────────────────────────────────────
