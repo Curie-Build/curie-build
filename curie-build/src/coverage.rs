@@ -47,6 +47,7 @@ pub fn resolve_agent_jar(
             progress: false,
             bom_imports: vec![],
             offline,
+            skip_version_ranges: false,
         },
     )
     .context("failed to resolve JaCoCo agent")?;
@@ -105,6 +106,7 @@ pub fn resolve_cli_jar(
             progress: false,
             bom_imports: vec![],
             offline,
+            skip_version_ranges: false,
         },
     )
     .context("failed to resolve JaCoCo CLI")?;

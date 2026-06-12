@@ -61,9 +61,10 @@ enum ArtifactType {
     Pom,
 }
 
-/// Parse a coordinate with an optional type suffix:
-/// `"group:artifact:version"` (→ [`ArtifactType::Jar`]) or
-/// `"group:artifact:version:type"` where type is `jar` or `pom`.
+/// Parse a coordinate with an optional type and classifier suffix:
+/// - `"group:artifact:version"` → [`ArtifactType::Jar`], no classifier
+/// - `"group:artifact:version:type"` → type is `jar` or `pom`
+/// - `"group:artifact:version:type:classifier"` → JAR with classifier (e.g. `jar:runtime`)
 fn parse_artifact_coord(arg: &str) -> Result<(Gav, ArtifactType)> {
     let parts: Vec<&str> = arg.split(':').collect();
     match parts.len() {
@@ -84,9 +85,22 @@ fn parse_artifact_coord(arg: &str) -> Result<(Gav, ArtifactType)> {
             let gav = Gav::from_key_version(&format!("{}:{}", parts[0], parts[1]), parts[2])?;
             Ok((gav, artifact_type))
         }
+        5 => {
+            let artifact_type = match parts[3] {
+                "jar" => ArtifactType::Jar,
+                other => bail!(
+                    "unsupported artifact type {:?} in {:?}; classifiers are only supported for \"jar\"",
+                    other,
+                    arg
+                ),
+            };
+            let mut gav = Gav::from_key_version(&format!("{}:{}", parts[0], parts[1]), parts[2])?;
+            gav.classifier = Some(parts[4].to_string());
+            Ok((gav, artifact_type))
+        }
         _ => bail!(
-            "invalid coordinate {:?}: expected \"group:artifact:version\" or \
-             \"group:artifact:version:type\"",
+            "invalid coordinate {:?}: expected \"group:artifact:version\", \
+             \"group:artifact:version:type\", or \"group:artifact:version:type:classifier\"",
             arg
         ),
     }
@@ -130,6 +144,7 @@ fn fetch_coordinate(desc: &descriptor::Descriptor, coord: &str, no_transitive: b
         progress: true,
         bom_imports: desc.prod_bom_gavs()?,
         offline,
+        skip_version_ranges: false,
     };
     let jars = curie_deps::resolve(&entries, &opts)?;
     crate::parallel::emit(&crate::style::done(&format!(
@@ -190,6 +205,7 @@ fn fetch_dep_section(desc: &descriptor::Descriptor, tests: bool, offline: bool) 
         progress: true,
         bom_imports: bom_gavs,
         offline,
+        skip_version_ranges: false,
     };
     let jars = curie_deps::resolve(&entries, &opts)?;
     let label = if tests { "Test deps" } else { "Dependencies" };
@@ -294,21 +310,27 @@ fn fetch_jar_coords_flat(gavs: &[&Gav], repos: &[curie_deps::repo::Repository], 
 }
 
 fn fetch_jar_coords_transitive(gavs: &[&Gav], repos: &[curie_deps::repo::Repository], offline: bool) -> Result<usize> {
-    let keys: Vec<String> = gavs.iter().map(|g| format!("{}:{}", g.group, g.artifact)).collect();
-    let entries: Vec<DepEntry> = gavs
-        .iter()
-        .zip(keys.iter())
-        .map(|(gav, key)| DepEntry { key, version: &gav.version, repo_id: None, exclusions: vec![], classifier: None })
-        .collect();
-    let opts = ResolveOptions {
-        default_repos: repos.to_vec(),
-        named_repos: vec![],
-        progress: true,
-        bom_imports: vec![],
-        offline,
-    };
-    let jars = curie_deps::resolve(&entries, &opts)?;
-    Ok(jars.len())
+    // Resolve each coordinate individually so that multiple versions of the
+    // same group:artifact (e.g. maven-compiler-plugin:3.13.0 and :3.15.0)
+    // are both fetched.  The resolver deduplicates by group:artifact key within
+    // a single batch, which would silently drop the second version.
+    let mut total = 0;
+    for gav in gavs {
+        let key = format!("{}:{}", gav.group, gav.artifact);
+        let classifier = gav.classifier.as_deref();
+        let entry = DepEntry { key: &key, version: &gav.version, repo_id: None, exclusions: vec![], classifier };
+        let opts = ResolveOptions {
+            default_repos: repos.to_vec(),
+            named_repos: vec![],
+            progress: true,
+            bom_imports: vec![],
+            offline,
+            skip_version_ranges: true,
+        };
+        let jars = curie_deps::resolve(&[entry], &opts)?;
+        total += jars.len();
+    }
+    Ok(total)
 }
 
 // ---------------------------------------------------------------------------

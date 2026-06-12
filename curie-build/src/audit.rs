@@ -193,6 +193,7 @@ fn resolve_components(
         progress: false,
         bom_imports: desc.prod_bom_gavs()?,
         offline: opts.offline,
+        skip_version_ranges: false,
     };
 
     let prod_entries: Vec<DepEntry> = desc
@@ -227,6 +228,7 @@ fn resolve_components(
             progress: false,
             bom_imports: desc.test_bom_gavs()?,
             offline: opts.offline,
+            skip_version_ranges: false,
         };
         let test_entries: Vec<DepEntry> = desc
             .test_dependencies

@@ -109,6 +109,7 @@ pub fn run_tests(
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: test_bom_gavs.clone(),
                 offline,
+                skip_version_ranges: false,
             },
         )
         .context("test dependency resolution failed")?
@@ -143,6 +144,7 @@ pub fn run_tests(
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: spock_bom_imports,
                 offline,
+                skip_version_ranges: false,
             },
         )
         .context("Spock resolution failed")?;
@@ -170,6 +172,7 @@ pub fn run_tests(
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: test_bom_gavs.clone(),
                 offline,
+                skip_version_ranges: false,
             },
         )
         .context("Kotlin compiler/stdlib resolution failed (test phase)")?;
@@ -200,6 +203,7 @@ pub fn run_tests(
                 progress: false,
                 bom_imports: test_bom_gavs.clone(),
                 offline,
+                skip_version_ranges: false,
             },
         )
         .context("Kotlin compiler resolution failed (test phase)")?;
@@ -233,6 +237,7 @@ pub fn run_tests(
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: test_bom_gavs.clone(),
                 offline,
+                skip_version_ranges: false,
             },
         )
         .context("test annotation-processor resolution failed")?;
@@ -255,6 +260,7 @@ pub fn run_tests(
                     progress: false,
                     bom_imports: test_bom_gavs.clone(),
                     offline,
+                    skip_version_ranges: false,
                 },
             )
             .with_context(|| {
@@ -439,6 +445,7 @@ pub fn run_tests(
                             progress: crate::parallel::try_get_sink().is_none(),
                             bom_imports: test_bom_gavs.clone(),
                             offline,
+                            skip_version_ranges: false,
                         },
                     )
                     .context("Groovy test compiler resolution failed")?
@@ -860,6 +867,7 @@ fn resolve_standalone(
             progress: false,
             bom_imports: vec![],
             offline,
+            skip_version_ranges: false,
         },
     )
     .with_context(|| format!("failed to resolve {}", coord))?;

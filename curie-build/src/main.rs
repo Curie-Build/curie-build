@@ -324,8 +324,9 @@ enum Cmd {
 fn main() {
     let cli = Cli::parse();
 
-    // `curie new`, `curie init`, and `curie setup` don't operate on an
-    // existing project.  Skip workspace discovery entirely for them.
+    // `curie new`, `curie init`, `curie setup`, and `curie fetch --file`
+    // don't require an existing Curie.toml project.  Skip workspace
+    // discovery entirely for them.
     let early_result = match &cli.command {
         Cmd::New { kind, name, package } => {
             Some(new::run_new(*kind, name.clone(), package.clone()))
@@ -335,6 +336,9 @@ fn main() {
         }
         Cmd::Setup { shell } => {
             Some(setup::run_setup(shell.clone()))
+        }
+        Cmd::Fetch { file: Some(path), no_transitive, offline, .. } => {
+            Some(fetch::run_fetch_file(&cli.project, path, *no_transitive, *offline))
         }
         _ => None,
     };

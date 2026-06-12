@@ -64,6 +64,7 @@ pub fn run_deps_with_desc(
         progress: false,
         bom_imports: bom_gavs,
         offline,
+        skip_version_ranges: false,
     };
 
     let tree = curie_deps::resolve_tree(&entries, &opts)?;

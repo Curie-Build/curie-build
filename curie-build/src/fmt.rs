@@ -70,6 +70,7 @@ pub fn resolve_pjf(offline: bool) -> Result<Vec<PathBuf>> {
             progress: false,
             bom_imports: vec![],
             offline,
+            skip_version_ranges: false,
         },
     )
     .context("failed to resolve palantir-java-format from Maven Central")
@@ -88,6 +89,7 @@ pub fn resolve_ktfmt(offline: bool) -> Result<Vec<PathBuf>> {
             progress: false,
             bom_imports: vec![],
             offline,
+            skip_version_ranges: false,
         },
     )
     .context("failed to resolve ktfmt from Maven Central")

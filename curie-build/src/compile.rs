@@ -254,6 +254,7 @@ pub fn compile(
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: bom_gavs.clone(),
                 offline,
+                skip_version_ranges: false,
             },
         )
         .context("dependency resolution failed")?;
@@ -282,6 +283,7 @@ pub fn compile(
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: bom_gavs.clone(),
                 offline,
+                skip_version_ranges: false,
             },
         )
         .context("annotation-processor resolution failed")?;
@@ -316,6 +318,7 @@ pub fn compile(
                     progress: false,
                     bom_imports: bom_gavs.clone(),
                     offline,
+                    skip_version_ranges: false,
                 },
             )
             .with_context(|| format!("annotation-processor classpath resolution failed for {}", coord))?;
@@ -432,6 +435,7 @@ pub fn compile(
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: bom_gavs.clone(),
                 offline,
+                skip_version_ranges: false,
             },
         )
         .context("Kotlin compiler/stdlib resolution failed")?;
@@ -468,6 +472,7 @@ pub fn compile(
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: bom_gavs.clone(),
                 offline,
+                skip_version_ranges: false,
             },
         )
         .context("Groovy compiler/runtime resolution failed")?;

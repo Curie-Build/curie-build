@@ -70,6 +70,11 @@ pub struct ResolveOptions {
     /// When `true`, skip all network calls.  Any artifact that is not already
     /// present in the local `~/.m2/repository` cache causes an immediate error.
     pub offline: bool,
+    /// When `true`, transitive dependencies whose declared version is a Maven
+    /// version range (e.g. `[4.9,)`) are silently skipped instead of causing
+    /// a hard error.  Intended for `curie fetch --file` where such deps should
+    /// be listed explicitly in the coordinate file.
+    pub skip_version_ranges: bool,
 }
 
 impl Default for ResolveOptions {
@@ -80,6 +85,7 @@ impl Default for ResolveOptions {
             progress: true,
             bom_imports: vec![],
             offline: false,
+            skip_version_ranges: false,
         }
     }
 }
@@ -882,11 +888,13 @@ pub fn resolve(
                     };
 
                     if is_version_range(&raw_version) {
-                        range_violations.push(RangeViolation {
-                            dep_key: ga_key,
-                            range: raw_version,
-                            declared_in: work.gav.clone(),
-                        });
+                        if !opts.skip_version_ranges {
+                            range_violations.push(RangeViolation {
+                                dep_key: ga_key,
+                                range: raw_version,
+                                declared_in: work.gav.clone(),
+                            });
+                        }
                         continue;
                     }
 
@@ -1905,6 +1913,7 @@ mod tests {
             progress: false,
             bom_imports,
             offline: true,
+            skip_version_ranges: false,
         };
         let result = resolve(&entries, &opts);
 
@@ -2192,6 +2201,7 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true,
+            skip_version_ranges: false,
         };
         let result = resolve(&entries, &opts).unwrap();
 
@@ -2236,6 +2246,7 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true,
+            skip_version_ranges: false,
         };
         let result = resolve(&entries, &opts).unwrap();
 
@@ -2277,6 +2288,7 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true,
+            skip_version_ranges: false,
         };
         let result = resolve(&entries, &opts).unwrap();
 
@@ -2624,6 +2636,7 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true,
+            skip_version_ranges: false,
         };
         let result = resolve(&entries, &opts);
 
@@ -2667,6 +2680,7 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true, // cache-hit path; no network call made
+            skip_version_ranges: false,
         };
         let entries = [DepEntry { key: "foo:bar", version: "1.0", repo_id: None, exclusions: vec![], classifier: None }];
         let result = resolve(&entries, &opts).unwrap();
@@ -2764,6 +2778,7 @@ mod tests {
             progress: false,
             bom_imports,
             offline: true,
+            skip_version_ranges: false,
         };
         let result = resolve_tree(&entries, &opts);
 
@@ -2975,6 +2990,7 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true,
+            skip_version_ranges: false,
         };
         let result = resolve(&entries, &opts).unwrap();
 
