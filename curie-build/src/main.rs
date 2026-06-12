@@ -183,6 +183,12 @@ enum Cmd {
         /// and annotation processors.
         coord: Option<String>,
 
+        /// Read coordinates from a file (one "group:artifact:version" per line;
+        /// blank lines and lines starting with '#' are ignored). Mutually
+        /// exclusive with the positional coordinate.
+        #[arg(long, conflicts_with = "coord")]
+        file: Option<std::path::PathBuf>,
+
         /// With a coordinate, download only that artifact — skip its
         /// transitive dependencies. Requires `coord`.
         #[arg(long)]
@@ -494,19 +500,25 @@ fn main() {
                 deps::run_deps(project, why.as_deref(), tests, offline)
             }
         },
-        Cmd::Fetch { coord, no_transitive, offline } => match &ctx {
-            workspace::WorkspaceContext::WorkspaceRoot(_)
-            | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
-                "`curie fetch` cannot run on a workspace root; \
-                 target a member with --project"
-            )),
-            workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
-                fetch::run_fetch_workspace_member(
-                    workspace_root, *member_index, coord.as_deref(), no_transitive, offline,
-                )
-            }
-            workspace::WorkspaceContext::Standalone(project) => {
-                fetch::run_fetch(project, coord.as_deref(), no_transitive, offline)
+        Cmd::Fetch { coord, file, no_transitive, offline } => {
+            if let Some(path) = file {
+                fetch::run_fetch_file(&cli.project, &path, no_transitive, offline)
+            } else {
+                match &ctx {
+                    workspace::WorkspaceContext::WorkspaceRoot(_)
+                    | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
+                        "`curie fetch` cannot run on a workspace root; \
+                         target a member with --project"
+                    )),
+                    workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+                        fetch::run_fetch_workspace_member(
+                            workspace_root, *member_index, coord.as_deref(), no_transitive, offline,
+                        )
+                    }
+                    workspace::WorkspaceContext::Standalone(project) => {
+                        fetch::run_fetch(project, coord.as_deref(), no_transitive, offline)
+                    }
+                }
             }
         },
         Cmd::Publish { repo, no_sign, no_javadoc, dry_run } => {

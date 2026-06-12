@@ -1146,6 +1146,13 @@ pub fn fetch_artifact(gav: &Gav, repos: &[Repository], offline: bool) -> Result<
     ensure_artifact(gav, repos, &client, ArtifactKind::Jar, offline, None, None)
 }
 
+/// Download only the POM for an artifact — no JAR.  Used for BOM and
+/// parent-POM pre-fetching where no JAR exists.  Returns the cached POM path.
+pub fn fetch_pom_only(gav: &Gav, repos: &[Repository], offline: bool) -> Result<PathBuf> {
+    let client = build_http_client()?;
+    ensure_artifact(gav, repos, &client, ArtifactKind::Pom, offline, None, None)
+}
+
 /// Return the local path for an artifact, downloading it if necessary.
 ///
 /// When `offline` is `true`, any cache miss is an immediate error — no HTTP

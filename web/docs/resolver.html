@@ -145,6 +145,37 @@ $ curie build --offline   <span class="dim"># succeeds entirely from the local c
 <pre>  Done            <span class="em">~/.m2/repository/org/apache/commons/commons-compress/1.27.1/commons-compress-1.27.1.jar</span></pre>
     </div>
 
+    <h3>Bulk pre-fetch from a file</h3>
+    <p>Pass <code>--file &lt;path&gt;</code> to read a list of coordinates from a file — one <code>group:artifact:version</code> per line. Blank lines and lines starting with <code>#</code> are ignored. All listed artifacts are resolved together in a single pass (shared transitive closure, parallel JAR downloads), making this much faster than fetching them one by one.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>offline-deps.txt</span>
+      </header>
+<pre><span class="com"># JUnit</span>
+org.junit.platform:junit-platform-console-standalone:6.1.0
+org.junit.jupiter:junit-jupiter:6.0.3
+
+<span class="com"># Jackson</span>
+com.fasterxml.jackson.core:jackson-databind:2.17.2
+
+<span class="com"># Plugins</span>
+org.apache.maven.plugins:maven-surefire-plugin:3.5.6</pre>
+    </div>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie fetch --file offline-deps.txt</span>
+      </header>
+<pre>  Done            <span class="em">47 JAR(s) cached</span>
+
+$ mvn clean verify   <span class="dim"># now works without internet access</span></pre>
+    </div>
+
+    <p>This is the recommended way to warm the Maven local cache for air-gapped builds. The project's <code>[[repositories]]</code> entries are automatically included when the command is run inside a project directory, so artifacts from custom repositories resolve correctly too.</p>
+
     <h2>Per-dependency repository selection</h2>
     <p>By default every artifact is fetched from Maven Central. To pull a specific artifact from a different repository, declare the repository with a unique <code>id</code> and reference it from the dependency:</p>
 
