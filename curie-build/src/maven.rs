@@ -37,7 +37,12 @@ pub const OUTPUT_TIMESTAMP: &str = "2024-01-01T00:00:00Z";
 
 /// Bump to force every generated `pom.xml` to be regenerated even when
 /// none of the other fingerprint inputs changed.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// History:
+/// - 1: initial generator.
+/// - 2: emit `protobuf-maven-plugin` / `openapi-generator-maven-plugin` for
+///   `[plugin.protobuf]` / `[plugin.openapi]` sections.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Human-readable line written into every generated POM, immediately above
 /// the `curie-maven-fingerprint:` line.
@@ -60,6 +65,9 @@ pub mod plugin_versions {
     pub const BUILD_HELPER: &str = "3.6.0";
     pub const GMAVENPLUS: &str = "4.2.0";
     pub const JACOCO: &str = "0.8.13";
+    /// The ascopes protobuf-maven-plugin wrapper version (not the protoc
+    /// version, which comes from `[plugin.protobuf].version` in Curie.toml).
+    pub const PROTOBUF_MAVEN: &str = "5.1.2";
 }
 
 const BUILD_HELPER_GROUP_ID: &str = "org.codehaus.mojo";
@@ -71,6 +79,12 @@ const KOTLIN_STDLIB_ARTIFACT_ID: &str = "kotlin-stdlib";
 
 const GMAVENPLUS_GROUP_ID: &str = "org.codehaus.gmavenplus";
 const GMAVENPLUS_ARTIFACT_ID: &str = "gmavenplus-plugin";
+
+const PROTOBUF_MAVEN_GROUP_ID: &str = "io.github.ascopes";
+const PROTOBUF_MAVEN_ARTIFACT_ID: &str = "protobuf-maven-plugin";
+
+const OPENAPI_GENERATOR_GROUP_ID: &str = "org.openapitools";
+const OPENAPI_GENERATOR_ARTIFACT_ID: &str = "openapi-generator-maven-plugin";
 
 const GROOVY_GROUP_ID: &str = "org.apache.groovy";
 const GROOVY_ARTIFACT_ID: &str = "groovy";
@@ -451,6 +465,7 @@ pub fn build_project(
     if let Some(shade_plugin) = build_shade_plugin(desc, main_class) {
         plugins.push(shade_plugin);
     }
+    plugins.extend(build_source_generator_plugins(desc)?);
     plugins.extend(build_helper_plugins(&layout));
 
     Ok(MavenProject {
@@ -1006,6 +1021,172 @@ fn groovy_filesets(project_root: &Path, roots: &[PathBuf], excludes: &[String]) 
             XmlNode::element("fileset", children)
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Source-generator plugins ([plugin.protobuf] / [plugin.openapi])
+// ---------------------------------------------------------------------------
+
+/// Subset of `[plugin.protobuf]` config fields used by Maven sync.
+/// Mirrors `plugins/curie-protobuf/src/config.rs` but lives here to keep
+/// maven.rs free of a dependency on the plugin crates.
+#[derive(serde::Deserialize, Debug)]
+struct ProtobufSyncConfig {
+    version: String,
+    #[serde(rename = "sourceDir", default = "default_proto_source_dir")]
+    source_dir: String,
+    #[serde(default)]
+    grpc: bool,
+    #[serde(rename = "grpcVersion")]
+    grpc_version: Option<String>,
+}
+
+fn default_proto_source_dir() -> String {
+    "proto".to_string()
+}
+
+/// Subset of `[plugin.openapi]` config fields used by Maven sync.
+/// Mirrors `plugins/curie-openapi/src/config.rs`.
+#[derive(serde::Deserialize, Debug)]
+struct OpenApiSyncConfig {
+    version: String,
+    #[serde(rename = "specFile")]
+    spec_file: String,
+    #[serde(rename = "generatorName")]
+    generator_name: String,
+    #[serde(rename = "apiPackage")]
+    api_package: Option<String>,
+    #[serde(rename = "modelPackage")]
+    model_package: Option<String>,
+    #[serde(rename = "invokerPackage")]
+    invoker_package: Option<String>,
+    #[serde(rename = "outputDir", default = "default_openapi_output_dir")]
+    output_dir: String,
+    #[serde(rename = "globalProperties", default)]
+    global_properties: BTreeMap<String, String>,
+    #[serde(rename = "additionalProperties", default)]
+    additional_properties: BTreeMap<String, String>,
+}
+
+fn default_openapi_output_dir() -> String {
+    "target/generated-sources/openapi".to_string()
+}
+
+/// Render a `BTreeMap<String,String>` as `<tag><k1>v1</k1><k2>v2</k2>...</tag>`.
+/// BTreeMap iteration is sorted, so output is deterministic.
+fn string_map_node(tag: &str, map: &BTreeMap<String, String>) -> XmlNode {
+    XmlNode::element(tag, map.iter().map(|(k, v)| XmlNode::text(k.clone(), v.clone())).collect())
+}
+
+/// `io.github.ascopes:protobuf-maven-plugin` for `[plugin.protobuf]`.
+///
+/// Runs `protoc` (downloaded as a Maven artifact) in the `generate-sources`
+/// phase, writing Java stubs to `target/generated-sources/protobuf` and
+/// auto-registering that directory as a compile source root — matching
+/// Curie's own `curie-protobuf` plugin behavior.
+fn build_protobuf_plugin(cfg: &ProtobufSyncConfig) -> MavenPlugin {
+    let mut configuration = vec![
+        XmlNode::text("protoc", cfg.version.clone()),
+        XmlNode::element(
+            "sourceDirectories",
+            vec![XmlNode::text("sourceDirectory", cfg.source_dir.clone())],
+        ),
+    ];
+
+    if cfg.grpc {
+        let grpc_version = cfg.grpc_version.as_deref().unwrap_or("1.60.0");
+        configuration.push(XmlNode::element(
+            "binaryMavenPlugins",
+            vec![XmlNode::element(
+                "binaryMavenPlugin",
+                vec![
+                    XmlNode::text("groupId", "io.grpc"),
+                    XmlNode::text("artifactId", "protoc-gen-grpc-java"),
+                    XmlNode::text("version", grpc_version),
+                ],
+            )],
+        ));
+    }
+
+    MavenPlugin {
+        group_id: Some(PROTOBUF_MAVEN_GROUP_ID.to_string()),
+        artifact_id: PROTOBUF_MAVEN_ARTIFACT_ID.to_string(),
+        version: plugin_versions::PROTOBUF_MAVEN.to_string(),
+        executions: vec![MavenExecution {
+            goals: vec!["generate".to_string()],
+            configuration,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+/// `org.openapitools:openapi-generator-maven-plugin` for `[plugin.openapi]`.
+///
+/// Wraps the same `openapi-generator-cli` JAR that Curie's `curie-openapi`
+/// plugin invokes, producing byte-equivalent output in
+/// `target/generated-sources/openapi/src/main/java`.
+fn build_openapi_plugin(cfg: &OpenApiSyncConfig) -> MavenPlugin {
+    let mut exe_config = vec![
+        XmlNode::text("inputSpec", format!("${{project.basedir}}/{}", cfg.spec_file)),
+        XmlNode::text("generatorName", cfg.generator_name.clone()),
+        XmlNode::text("output", cfg.output_dir.clone()),
+    ];
+    if let Some(pkg) = &cfg.api_package {
+        exe_config.push(XmlNode::text("apiPackage", pkg.clone()));
+    }
+    if let Some(pkg) = &cfg.model_package {
+        exe_config.push(XmlNode::text("modelPackage", pkg.clone()));
+    }
+    if let Some(pkg) = &cfg.invoker_package {
+        exe_config.push(XmlNode::text("invokerPackage", pkg.clone()));
+    }
+    if !cfg.additional_properties.is_empty() {
+        // CLI `--additional-properties` / `-p` options map to `<configOptions>`
+        // in the Maven plugin.
+        exe_config.push(string_map_node("configOptions", &cfg.additional_properties));
+    }
+    if !cfg.global_properties.is_empty() {
+        exe_config.push(string_map_node("globalProperties", &cfg.global_properties));
+    }
+
+    MavenPlugin {
+        group_id: Some(OPENAPI_GENERATOR_GROUP_ID.to_string()),
+        artifact_id: OPENAPI_GENERATOR_ARTIFACT_ID.to_string(),
+        version: cfg.version.clone(),
+        executions: vec![MavenExecution {
+            goals: vec!["generate".to_string()],
+            configuration: exe_config,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+/// Build Maven plugins for every recognized `[plugin.*]` section in `desc`.
+/// Currently handles `protobuf` and `openapi`; other plugin names are
+/// silently passed through so the warning in [`unrepresented_plugin_names`]
+/// can report them.
+fn build_source_generator_plugins(desc: &Descriptor) -> Result<Vec<MavenPlugin>> {
+    let mut plugins = Vec::new();
+    for (name, raw) in &desc.plugins {
+        match name.as_str() {
+            "protobuf" => {
+                let cfg: ProtobufSyncConfig = raw.clone().try_into().with_context(|| {
+                    format!("[plugin.protobuf]: invalid configuration — {raw}")
+                })?;
+                plugins.push(build_protobuf_plugin(&cfg));
+            }
+            "openapi" => {
+                let cfg: OpenApiSyncConfig = raw.clone().try_into().with_context(|| {
+                    format!("[plugin.openapi]: invalid configuration — {raw}")
+                })?;
+                plugins.push(build_openapi_plugin(&cfg));
+            }
+            _ => {}
+        }
+    }
+    Ok(plugins)
 }
 
 /// `org.apache.groovy:groovy` at `[groovy].version()`, a `compile`
@@ -1984,15 +2165,21 @@ fn sync_member_pom(
     Ok((pom_path, outcome))
 }
 
-/// `[plugin.<name>]` sections (`[plugin.protobuf]`, `[plugin.openapi]`, ...)
-/// whose generated sources have no representation in the synced `pom.xml` —
-/// see `_design/MAVEN-SYNC.md`, "Known divergences" #7.
+/// `[plugin.<name>]` sections whose generated sources have no representation in
+/// the synced `pom.xml`.  `protobuf` and `openapi` are handled by
+/// [`build_source_generator_plugins`]; only other (unknown) plugin names are
+/// returned and trigger a warning.
 fn unrepresented_plugin_names(desc: &Descriptor) -> Vec<&str> {
-    desc.plugins.keys().map(String::as_str).collect()
+    const REPRESENTED: &[&str] = &["openapi", "protobuf"];
+    desc.plugins
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !REPRESENTED.contains(name))
+        .collect()
 }
 
-/// Warn that `desc`'s `[plugin.*]` sections (if any) generate sources that
-/// `mvn` will not produce: the synced `pom.xml` has no equivalent step.
+/// Warn that `desc`'s unknown `[plugin.*]` sections (if any) generate sources
+/// that `mvn` will not produce: the synced `pom.xml` has no equivalent step.
 fn print_plugin_source_warning(desc: &Descriptor) {
     let names = unrepresented_plugin_names(desc);
     if names.is_empty() {
@@ -3603,30 +3790,43 @@ mod tests {
     }
 
     #[test]
-    fn unrepresented_plugin_names_lists_plugin_sections() {
+    fn unrepresented_plugin_names_excludes_represented_plugins() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("Curie.toml"),
             "[application]\nname = \"my-app\"\nversion = \"1.0.0\"\nmainClass = \"com.example.Main\"\n\
-             [plugin.protobuf]\nversion = \"3.25.0\"\nsourceDir = \"proto\"\n",
+             [plugin.protobuf]\nversion = \"3.25.0\"\n\
+             [plugin.openapi]\nversion = \"7.2.0\"\nspecFile = \"api/spec.yaml\"\ngeneratorName = \"java\"\n",
         )
         .unwrap();
         let desc = descriptor::load(dir.path()).unwrap();
-
-        assert_eq!(unrepresented_plugin_names(&desc), vec!["protobuf"]);
+        // protobuf and openapi are now represented — warning list is empty.
+        assert!(unrepresented_plugin_names(&desc).is_empty());
     }
 
     #[test]
-    fn sync_member_pom_emits_plugin_warning_without_failing() {
-        // The warning is best-effort output (via `parallel::emit`); the
-        // important behavioral contract is that `[plugin.*]` does not make
-        // sync fail or change the generated POM's content.
+    fn unrepresented_plugin_names_lists_unknown_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"my-app\"\nversion = \"1.0.0\"\nmainClass = \"com.example.Main\"\n\
+             [plugin.custom-codegen]\nversion = \"1.0\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+        assert_eq!(unrepresented_plugin_names(&desc), vec!["custom-codegen"]);
+    }
+
+    #[test]
+    fn sync_member_pom_emits_plugin_warning_for_unknown_plugin() {
+        // A [plugin.X] the generator does not know triggers a warning,
+        // but sync still succeeds and writes a valid fingerprinted POM.
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
         std::fs::write(
             dir.path().join("Curie.toml"),
             "[application]\nname = \"my-app\"\nversion = \"1.0.0\"\ngroupId = \"com.example\"\nmainClass = \"com.example.Main\"\n\
-             [plugin.protobuf]\nversion = \"3.25.0\"\nsourceDir = \"proto\"\n",
+             [plugin.custom-codegen]\nversion = \"1.0\"\n",
         )
         .unwrap();
         let desc = descriptor::load(dir.path()).unwrap();
@@ -3635,5 +3835,102 @@ mod tests {
         assert_eq!(outcome, SyncOutcome::Written);
         let pom = std::fs::read_to_string(pom_path).unwrap();
         assert!(pom.contains("curie-maven-fingerprint"));
+    }
+
+    // -- source-generator plugins ([plugin.protobuf] / [plugin.openapi]) ------
+
+    fn protobuf_only_desc(dir: &Path, extra_toml: &str) -> Descriptor {
+        std::fs::write(
+            dir.join("Curie.toml"),
+            format!(
+                "[application]\nname = \"proto-app\"\nversion = \"0.1.0\"\nmainClass = \"com.example.Main\"\n\
+                 [plugin.protobuf]\nversion = \"3.25.0\"\n{extra_toml}"
+            ),
+        )
+        .unwrap();
+        descriptor::load(dir).unwrap()
+    }
+
+    #[test]
+    fn protobuf_plugin_emitted_in_pom() {
+        let dir = tempfile::tempdir().unwrap();
+        let desc = protobuf_only_desc(dir.path(), "");
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+
+        let proto_block = xml.split("<plugin>").find(|b| b.contains("protobuf-maven-plugin")).expect("protobuf-maven-plugin not found");
+        assert!(proto_block.contains("<groupId>io.github.ascopes</groupId>"));
+        assert!(proto_block.contains(&format!("<version>{}</version>", plugin_versions::PROTOBUF_MAVEN)));
+        assert!(proto_block.contains("<protoc>3.25.0</protoc>"));
+        assert!(proto_block.contains("<sourceDirectory>proto</sourceDirectory>"));
+        assert!(proto_block.contains("<goal>generate</goal>"));
+        assert!(!proto_block.contains("grpc"), "no gRPC when grpc=false");
+    }
+
+    #[test]
+    fn protobuf_plugin_custom_source_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let desc = protobuf_only_desc(dir.path(), r#"sourceDir = "src/main/proto""#);
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(xml.contains("<sourceDirectory>src/main/proto</sourceDirectory>"));
+    }
+
+    #[test]
+    fn protobuf_grpc_adds_binary_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let desc = protobuf_only_desc(dir.path(), "grpc = true\ngrpcVersion = \"1.60.0\"\n");
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        let proto_block = xml.split("<plugin>").find(|b| b.contains("protobuf-maven-plugin")).unwrap();
+        assert!(proto_block.contains("binaryMavenPlugin"));
+        assert!(proto_block.contains("<artifactId>protoc-gen-grpc-java</artifactId>"));
+        assert!(proto_block.contains("<version>1.60.0</version>"));
+    }
+
+    #[test]
+    fn openapi_plugin_emitted_in_pom() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"openapi-app\"\nversion = \"0.1.0\"\nmainClass = \"com.example.Main\"\n\
+             [plugin.openapi]\nversion = \"7.2.0\"\nspecFile = \"api/greeter.yaml\"\ngeneratorName = \"java\"\n\
+             modelPackage = \"com.example.model\"\n\
+             [plugin.openapi.additionalProperties]\nlibrary = \"native\"\nhideGenerationTimestamp = \"true\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+
+        let oa_block = xml.split("<plugin>").find(|b| b.contains("openapi-generator-maven-plugin")).expect("openapi-generator-maven-plugin not found");
+        assert!(oa_block.contains("<groupId>org.openapitools</groupId>"));
+        assert!(oa_block.contains("<version>7.2.0</version>"));
+        assert!(oa_block.contains("<goal>generate</goal>"));
+        assert!(oa_block.contains("api/greeter.yaml"));
+        assert!(oa_block.contains("<generatorName>java</generatorName>"));
+        assert!(oa_block.contains("<modelPackage>com.example.model</modelPackage>"));
+        assert!(oa_block.contains("<configOptions>"));
+        assert!(oa_block.contains("<library>native</library>"));
+        assert!(oa_block.contains("<hideGenerationTimestamp>true</hideGenerationTimestamp>"));
+    }
+
+    #[test]
+    fn openapi_global_properties_mapped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"openapi-app\"\nversion = \"0.1.0\"\nmainClass = \"com.example.Main\"\n\
+             [plugin.openapi]\nversion = \"7.2.0\"\nspecFile = \"api/spec.yaml\"\ngeneratorName = \"java\"\n\
+             [plugin.openapi.globalProperties]\nmodels = \"\"\napis = \"\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        let oa_block = xml.split("<plugin>").find(|b| b.contains("openapi-generator-maven-plugin")).unwrap();
+        assert!(oa_block.contains("<globalProperties>"));
+        assert!(oa_block.contains("<apis></apis>"));
+        assert!(oa_block.contains("<models></models>"));
     }
 }

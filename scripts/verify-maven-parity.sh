@@ -75,19 +75,7 @@ CURIE_BIN="$ROOT_DIR/target/debug/curie"
 #
 # STANDALONE_MODULES each get their own scratch copy + `mvn verify`.
 #
-# Excluded entirely from parity (no pom.xml equivalent / divergent by design):
-#   - proto-greeter, openapi-greeter: [plugin.*]-generated sources have no
-#     pom.xml equivalent (see maven::print_plugin_source_warning and
-#     _design/MAVEN-SYNC.md divergence #7).
-# Both are workspace members (so `curie build` covers them) but are deselected
-# from the reactor `mvn install` below via REACTOR_MVN_EXCLUDES, and appear in
-# neither check list.
 # ---------------------------------------------------------------------------
-
-# Modules deselected from the reactor `mvn install` (see note above). Passed to
-# `mvn -pl` as `!<module>` so the reactor skips them while still building the
-# rest of the workspace.
-REACTOR_MVN_EXCLUDES="!proto-greeter,!openapi-greeter"
 
 REACTOR_MODULES=(
   hello-world
@@ -105,6 +93,8 @@ REACTOR_MODULES=(
   fat-jar-demo
   fat-jar-selective-demo
   test-ap-demo
+  proto-greeter
+  openapi-greeter
   nested-workspace-demo/core-lib
   nested-workspace-demo/services/greeter-lib
   nested-workspace-demo/services/apps/hello-app
@@ -437,7 +427,7 @@ main() {
   # `install` (not just `verify`) so intra-workspace dependencies
   # (e.g. string-utils-cli -> string-utils) are in the local repo for the
   # per-module `dependency:tree` calls below.
-  if ! (cd "$mvn_examples" && mvn -q install -pl "$REACTOR_MVN_EXCLUDES" > "$SCRATCH/mvn-examples.log" 2>&1); then
+  if ! (cd "$mvn_examples" && mvn -q install > "$SCRATCH/mvn-examples.log" 2>&1); then
     fail "examples workspace: mvn install failed (see $SCRATCH/mvn-examples.log)"
     tail -40 "$SCRATCH/mvn-examples.log"
   fi
