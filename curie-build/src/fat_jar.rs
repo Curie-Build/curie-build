@@ -8,7 +8,7 @@
 //!   - Incremental: only rebuild if any input (classes, resources, deps, Curie.toml) changed
 
 use anyhow::{Context, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
@@ -143,6 +143,19 @@ fn jar_contains_prefix(jar_path: &Path, internal_prefix: &str) -> bool {
         }
     }
     false
+}
+
+/// All ancestor directory paths of a ZIP entry path, each ending in `/`.
+///
+/// E.g. `"com/example/App.class"` -> `["com/", "com/example/"]`.
+fn path_ancestors(path: &str) -> Vec<String> {
+    let mut ancestors = Vec::new();
+    let mut end = 0;
+    while let Some(slash) = path[end..].find('/') {
+        end += slash + 1;
+        ancestors.push(path[..end].to_string());
+    }
+    ancestors
 }
 
 /// Apply relocations to a ZIP entry path (resource path relocation).
@@ -459,6 +472,10 @@ fn relocate_service_name(name: &str, relocations: &[Relocation]) -> String {
 ///   - META-INF/services files from all deps merged
 ///   - Package relocations applied to class bytecode and resource paths
 ///   - Duplicate entries resolved: project's own classes win over deps
+///   - Directory entries are derived from the ancestor paths of real files
+///     (mirroring maven-shade-plugin), not copied from source dirs/JARs —
+///     this avoids "empty" placeholder directories such as multi-release
+///     module-info package stubs
 pub fn write_fat_jar(
     jar_path: &Path,
     classes_dir: &Path,
@@ -523,24 +540,15 @@ pub fn write_fat_jar(
         for entry in walkdir::WalkDir::new(root)
             .into_iter()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file() || e.file_type().is_dir())
+            .filter(|e| e.file_type().is_file())
         {
-            let rel = entry
+            let zip_path = entry
                 .path()
                 .strip_prefix(root)
                 .ok()
                 .map(|r| r.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
-            if rel.is_empty() {
-                continue;
-            }
-            let zip_path = if entry.file_type().is_dir() {
-                format!("{}/", rel)
-            } else {
-                rel
-            };
-
-            if zip_path == "META-INF/" || zip_path == "META-INF/MANIFEST.MF" {
+            if zip_path.is_empty() || zip_path == "META-INF/MANIFEST.MF" {
                 continue;
             }
             if build_info.is_some() && zip_path == "META-INF/build-info.properties" {
@@ -548,7 +556,7 @@ pub fn write_fat_jar(
             }
 
             // Handle project's own META-INF/services — collect for merging
-            if zip_path.starts_with("META-INF/services/") && entry.file_type().is_file() {
+            if zip_path.starts_with("META-INF/services/") {
                 let service_name = &zip_path["META-INF/services/".len()..];
                 let content = std::fs::read_to_string(entry.path())
                     .unwrap_or_default();
@@ -575,11 +583,7 @@ pub fn write_fat_jar(
             }
 
             let relocated_path = relocate_path(&zip_path, relocations);
-            if entry.file_type().is_dir() {
-                entries.insert(relocated_path, EntrySource::Dir);
-            } else {
-                entries.insert(relocated_path, EntrySource::File(entry.into_path()));
-            }
+            entries.insert(relocated_path, EntrySource::File(entry.into_path()));
         }
     }
 
@@ -597,10 +601,13 @@ pub fn write_fat_jar(
                 Ok(e) => e,
                 Err(_) => continue,
             };
+            if entry.is_dir() {
+                continue;
+            }
             let name = entry.name().to_string();
 
             // Skip META-INF that we handle ourselves
-            if name == "META-INF/" || name == "META-INF/MANIFEST.MF" {
+            if name == "META-INF/MANIFEST.MF" {
                 continue;
             }
             // Skip META-INF/services — handled via merge_services above
@@ -616,8 +623,11 @@ pub fn write_fat_jar(
             {
                 continue;
             }
-            // Skip module-info.class from deps — can conflict
-            if name == "module-info.class" || name.ends_with("/module-info.class") {
+            // Skip a top-level module-info.class from deps: it describes that
+            // dependency's own module, not the shaded application. Nested
+            // multi-release entries (META-INF/versions/*/module-info.class)
+            // are kept, matching maven-shade-plugin's default behaviour.
+            if name == "module-info.class" {
                 continue;
             }
             if build_info.is_some() && name == "META-INF/build-info.properties" {
@@ -630,20 +640,16 @@ pub fn write_fat_jar(
                 continue;
             }
 
-            if entry.is_dir() {
-                entries.insert(relocated_name, EntrySource::Dir);
-            } else {
-                let mut data = Vec::new();
-                let _ = entry.read_to_end(&mut data);
+            let mut data = Vec::new();
+            let _ = entry.read_to_end(&mut data);
 
-                // Apply relocations to class files
-                let data = if relocated_name.ends_with(".class") {
-                    relocate_class_bytes(&data, relocations)
-                } else {
-                    data
-                };
-                entries.insert(relocated_name, EntrySource::Bytes(data));
-            }
+            // Apply relocations to class files
+            let data = if relocated_name.ends_with(".class") {
+                relocate_class_bytes(&data, relocations)
+            } else {
+                data
+            };
+            entries.insert(relocated_name, EntrySource::Bytes(data));
         }
     }
 
@@ -675,17 +681,19 @@ pub fn write_fat_jar(
         }
     }
 
-    // Add merged services as entries
-    if !all_services.is_empty() {
-        // Ensure META-INF/services/ directory entry exists
-        let services_dir_key = "META-INF/services/".to_string();
-        if !entries.contains_key(&services_dir_key) {
-            entries.insert(services_dir_key, EntrySource::Dir);
-        }
-        for (service_name, content) in &all_services {
-            let key = format!("META-INF/services/{}", service_name);
-            entries.insert(key, EntrySource::Bytes(content.as_bytes().to_vec()));
-        }
+    // Add merged services as entries (their META-INF/services/ ancestor
+    // directory is derived below along with every other entry's ancestors).
+    for (service_name, content) in &all_services {
+        let key = format!("META-INF/services/{}", service_name);
+        entries.insert(key, EntrySource::Bytes(content.as_bytes().to_vec()));
+    }
+
+    // --- Derive directory entries from file ancestor paths ------------------
+    // `META-INF/` is excluded since it was already written above.
+    let dir_entries: BTreeSet<String> =
+        entries.keys().flat_map(|path| path_ancestors(path)).filter(|dir| dir != "META-INF/").collect();
+    for dir in dir_entries {
+        entries.entry(dir).or_insert(EntrySource::Dir);
     }
 
     // --- Write all entries sorted lexicographically -------------------------

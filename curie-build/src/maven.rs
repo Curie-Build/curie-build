@@ -1200,15 +1200,21 @@ const SHADE_MANIFEST_TRANSFORMER: &str = "org.apache.maven.plugins.shade.resourc
 
 /// `maven-shade-plugin`, present only when `[fat-jar]` is enabled.  Produces
 /// an attached `<artifactId>-<version>-fat.jar` (Curie's naming, via
-/// `<shadedClassifierName>fat</shadedClassifierName>`), merging
-/// `META-INF/services` providers and setting `Main-Class` in the shaded
-/// manifest, mirroring `fat_jar.rs::write_fat_jar`.
+/// `<shadedClassifierName>fat</shadedClassifierName>` plus
+/// `<shadedArtifactAttached>true</shadedArtifactAttached>` — without the
+/// latter, Shade instead replaces the main jar with the shaded content),
+/// merging `META-INF/services` providers and setting `Main-Class` in the
+/// shaded manifest, mirroring `fat_jar.rs::write_fat_jar`.
 fn build_shade_plugin(desc: &Descriptor, main_class: Option<&str>) -> Option<MavenPlugin> {
     if !desc.fat_jar.enabled {
         return None;
     }
 
-    let mut configuration = vec![XmlNode::text("shadedClassifierName", "fat"), shade_transformers_node(main_class)];
+    let mut configuration = vec![
+        XmlNode::text("shadedClassifierName", "fat"),
+        XmlNode::text("shadedArtifactAttached", "true"),
+        shade_transformers_node(main_class),
+    ];
     configuration.extend(shade_artifact_set_node(desc));
     configuration.extend(shade_relocations_node(desc));
 
@@ -2719,6 +2725,7 @@ mod tests {
         assert!(shade_plugin.contains("<phase>package</phase>"));
         assert!(shade_plugin.contains("<goal>shade</goal>"));
         assert!(shade_plugin.contains("<shadedClassifierName>fat</shadedClassifierName>"));
+        assert!(shade_plugin.contains("<shadedArtifactAttached>true</shadedArtifactAttached>"));
         assert!(shade_plugin.contains(&format!(r#"<transformer implementation="{SHADE_SERVICES_TRANSFORMER}"/>"#)));
         assert!(shade_plugin.contains(&format!(r#"<transformer implementation="{SHADE_MANIFEST_TRANSFORMER}">"#)));
         assert!(shade_plugin.contains("<mainClass>com.example.Main</mainClass>"));
