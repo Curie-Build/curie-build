@@ -937,11 +937,31 @@ fn groovy_dependency(desc: &Descriptor) -> MavenDependency {
 // Test execution (Surefire / JaCoCo)
 // ---------------------------------------------------------------------------
 
-/// Class-name include patterns for `maven-surefire-plugin`, mirroring
-/// `test.rs::run_tests`'s `effective_filter` (default vs. Spock-broadened).
-pub mod surefire_patterns {
-    pub const DEFAULT: &str = ".*Tests?$|^Test.*|.*TestCase$";
-    pub const SPOCK: &str = ".*Tests?$|^Test.*|.*TestCase$|.*Spec$";
+/// `<include>` glob patterns for `maven-surefire-plugin`'s `<includes>`,
+/// mirroring `test.rs::run_tests`'s `effective_filter` (default vs.
+/// Spock-broadened).
+///
+/// When Spock is disabled, `effective_filter` is `None` and Curie's runner
+/// falls back to JUnit Platform's own default class-name filter
+/// (`Test*`/`*Test`/`*Tests`/`*TestCase`) — which is also Surefire's
+/// built-in default `<includes>`, so the generated POM omits `<includes>`
+/// entirely (see [`build_surefire_plugin`]).
+///
+/// When Spock is enabled, the runner broadens the filter to also match
+/// `*Spec`. Since declaring `<includes>` *replaces* (rather than extends)
+/// Surefire's defaults, the broadened POM must repeat [`DEFAULT`]
+/// explicitly alongside [`SPOCK_EXTRA`].
+///
+/// Note: these are Surefire's own ant-style globs, matched against
+/// `.class` files under `target/test-classes` with package-path prefixes —
+/// *not* the FQCN-anchored regex (`%regex[.*Tests?$|...]`) that an earlier
+/// version of this generator emitted. That regex never matched any class
+/// (`Pattern.matches()` against e.g. `com/example/FooTest.class` can't
+/// satisfy a `$`-anchored pattern ending in `Test`), so Surefire silently
+/// ran zero tests.
+pub mod surefire_includes {
+    pub const DEFAULT: &[&str] = &["**/Test*.java", "**/*Test.java", "**/*Tests.java", "**/*TestCase.java"];
+    pub const SPOCK_EXTRA: &str = "**/*Spec.java";
 }
 
 /// `<argLine>` for `maven-surefire-plugin`: `--enable-preview` and
@@ -969,11 +989,19 @@ fn surefire_arg_line(desc: &Descriptor) -> Option<String> {
 }
 
 /// `maven-surefire-plugin` with class-name includes mirroring the runner's
-/// default/Spock-broadened filters, plus `<argLine>` (see [`surefire_arg_line`]).
+/// default/Spock-broadened filters (see [`surefire_includes`]), plus
+/// `<argLine>` (see [`surefire_arg_line`]).
 fn build_surefire_plugin(desc: &Descriptor) -> MavenPlugin {
-    let pattern = if desc.spock.enabled() { surefire_patterns::SPOCK } else { surefire_patterns::DEFAULT };
-    let mut configuration =
-        vec![XmlNode::element("includes", vec![XmlNode::text("include", format!("%regex[{pattern}]"))])];
+    let mut configuration = Vec::new();
+    if desc.spock.enabled() {
+        let includes = surefire_includes::DEFAULT
+            .iter()
+            .copied()
+            .chain(std::iter::once(surefire_includes::SPOCK_EXTRA))
+            .map(|pattern| XmlNode::text("include", pattern))
+            .collect();
+        configuration.push(XmlNode::element("includes", includes));
+    }
     if let Some(arg_line) = surefire_arg_line(desc) {
         configuration.push(XmlNode::text("argLine", arg_line));
     }
@@ -2742,46 +2770,32 @@ mod tests {
     // -- test execution (surefire / jacoco) --------------------------------------
 
     #[test]
-    fn surefire_includes_match_runner_default() {
-        let re = regex::Regex::new(surefire_patterns::DEFAULT).unwrap();
-        for name in ["FooTest", "TestFoo", "FooTests", "FooTestCase"] {
-            assert!(re.is_match(name), "{name} should match");
-        }
-        for name in ["Foo", "FooSpec"] {
-            assert!(!re.is_match(name), "{name} should not match");
-        }
+    fn surefire_plugin_omits_includes_without_spock() {
+        // No Spock, no argLine: Surefire's own defaults
+        // (Test*/*Test/*Tests/*TestCase) already match the runner's
+        // unfiltered (`effective_filter = None`) behavior, and Curie pins
+        // only the plugin `<version>` — no `<configuration>` at all.
+        let dir = tempfile::tempdir().unwrap();
+        let desc = minimal_app("my-app", Some("com.example"));
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(!xml.contains("<includes>"));
+        assert!(!xml.contains("<argLine>"));
     }
 
     #[test]
-    fn surefire_includes_match_runner_spock_broadened() {
-        assert_eq!(surefire_patterns::SPOCK, ".*Tests?$|^Test.*|.*TestCase$|.*Spec$");
-        let re = regex::Regex::new(surefire_patterns::SPOCK).unwrap();
-        for name in ["FooTest", "TestFoo", "FooTests", "FooTestCase", "FooSpec"] {
-            assert!(re.is_match(name), "{name} should match");
-        }
-        assert!(!re.is_match("Foo"));
-    }
-
-    #[test]
-    fn surefire_plugin_uses_spock_broadened_pattern_when_enabled() {
+    fn surefire_plugin_uses_spock_broadened_globs_when_enabled() {
         let dir = tempfile::tempdir().unwrap();
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.spock.enabled = Some(true);
 
         let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
-        assert!(xml.contains(&format!("<include>%regex[{}]</include>", surefire_patterns::SPOCK)));
-    }
-
-    #[test]
-    fn surefire_plugin_uses_default_pattern_without_argline_by_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let desc = minimal_app("my-app", Some("com.example"));
-
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
-        let xml = render(&project, "deadbeef").unwrap();
-        assert!(xml.contains(&format!("<include>%regex[{}]</include>", surefire_patterns::DEFAULT)));
-        assert!(!xml.contains("<argLine>"));
+        for pattern in surefire_includes::DEFAULT {
+            assert!(xml.contains(&format!("<include>{pattern}</include>")), "missing {pattern}");
+        }
+        assert!(xml.contains(&format!("<include>{}</include>", surefire_includes::SPOCK_EXTRA)));
     }
 
     #[test]
