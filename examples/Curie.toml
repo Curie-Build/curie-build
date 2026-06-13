@@ -30,6 +30,20 @@ members = [
     "verbose-test-demo",
     "my-platform-bom",
     "fat-jar-demo",
+    "fat-jar-selective-demo",
+    "test-ap-demo",
+    "exclusion-demo",
+    "version-range-demo",
+    "groovy-greeter",
+    "spock-demo",
+    "simplified-main",
+    "add-remove-demo",
+    "google-mirror-demo",
+    "shibboleth-demo",
+    "publish-demo",
+    "spring-boot-demo",
+    "proto-greeter",
+    "openapi-greeter",
 ]
 
 [java]

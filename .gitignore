@@ -7,3 +7,4 @@ _design
 .project
 .factorypath
 examples/**/pom.xml
+examples/**/dependency-reduced-pom.xml

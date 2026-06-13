@@ -13,10 +13,8 @@
 # `curie build` runs the test processor (see test.rs: test compile merges
 # ap_pairs() + test_ap_pairs()) and the tests pass.
 #
-# KNOWN GAP (`curie maven sync`): the generated pom.xml writes only PRODUCTION
-# annotation processors into maven-compiler-plugin's <annotationProcessorPaths>.
-# The [test-annotation-processors] entry is dropped, so `mvn test-compile` fails
-# with "cannot find symbol: class AutoValue_Money".
+# `curie maven sync` emits the processor in a separate `default-testCompile`
+# execution of maven-compiler-plugin, so `mvn verify` passes too.
 
 [library]
 name    = "test-ap-demo"
