@@ -285,6 +285,18 @@ pub struct MavenManagedDependency {
     pub is_import: bool,
 }
 
+/// A `<repositories><repository>` entry, from a `[[repositories]]` table in
+/// `Curie.toml`. Maven repositories are global to the POM, so every
+/// `[[repositories]]` entry becomes a `<repository>` regardless of which
+/// dependencies select it via `repository = "id"` (divergence #5 in
+/// `_design/MAVEN-SYNC.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MavenRepository {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+}
+
 /// A generic XML element used to render plugin `<configuration>` blocks
 /// without a dedicated Rust type per plugin.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,6 +356,7 @@ pub struct MavenProject {
     pub layout: MavenLayout,
     pub dependencies: Vec<MavenDependency>,
     pub managed_dependencies: Vec<MavenManagedDependency>,
+    pub repositories: Vec<MavenRepository>,
     pub plugins: Vec<MavenPlugin>,
     /// `<modules>` entries for a `[workspace]` aggregator POM; empty for
     /// `[application]`/`[library]`/`[bom]` projects.
@@ -448,10 +461,26 @@ pub fn build_project(
         properties: default_properties(desc),
         dependencies,
         managed_dependencies: build_managed_dependencies(desc, pinned)?,
+        repositories: build_repositories(desc),
         layout,
         plugins,
         modules: Vec::new(),
     })
+}
+
+/// `[[repositories]]` entries become `<repositories>` entries (divergence #5
+/// in `_design/MAVEN-SYNC.md`): Maven repositories are global to the POM, so
+/// every declared repository is listed regardless of which dependencies (if
+/// any) select it via `repository = "id"`.
+fn build_repositories(desc: &Descriptor) -> Vec<MavenRepository> {
+    desc.repositories
+        .iter()
+        .map(|repo| MavenRepository {
+            id: repo.id.clone(),
+            name: repo.display_name().to_string(),
+            url: repo.url.clone(),
+        })
+        .collect()
 }
 
 /// Build the [`MavenProject`] model for a `[bom]` descriptor:
@@ -1417,6 +1446,7 @@ pub fn render(project: &MavenProject, fingerprint_hex: &str) -> Result<String> {
     write_properties(&mut w, &project.properties)?;
     write_dependency_management(&mut w, &project.managed_dependencies)?;
     write_dependencies(&mut w, &project.dependencies)?;
+    write_repositories(&mut w, &project.repositories)?;
     write_build(&mut w, project)?;
 
     w.write_event(Event::End(BytesEnd::new("project")))?;
@@ -1505,6 +1535,22 @@ fn write_dependencies(w: &mut XmlWriter<'_>, deps: &[MavenDependency]) -> Result
         w.write_event(Event::End(BytesEnd::new("dependency")))?;
     }
     w.write_event(Event::End(BytesEnd::new("dependencies")))?;
+    Ok(())
+}
+
+fn write_repositories(w: &mut XmlWriter<'_>, repos: &[MavenRepository]) -> Result<()> {
+    if repos.is_empty() {
+        return Ok(());
+    }
+    w.write_event(Event::Start(BytesStart::new("repositories")))?;
+    for repo in repos {
+        w.write_event(Event::Start(BytesStart::new("repository")))?;
+        text_elem(w, "id", &repo.id)?;
+        text_elem(w, "name", &repo.name)?;
+        text_elem(w, "url", &repo.url)?;
+        w.write_event(Event::End(BytesEnd::new("repository")))?;
+    }
+    w.write_event(Event::End(BytesEnd::new("repositories")))?;
     Ok(())
 }
 
@@ -2269,6 +2315,54 @@ mod tests {
         assert!(xml.contains("<scope>test</scope>"));
         assert!(xml.contains("<exclusions>"));
         assert!(xml.contains("<artifactId>jackson-annotations</artifactId>"));
+    }
+
+    #[test]
+    fn repositories_entries_become_pom_repositories() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.repositories.push(RepositoryEntry {
+            id: "shibboleth".to_string(),
+            name: Some("Shibboleth Releases".to_string()),
+            url: "https://build.shibboleth.net/nexus/content/repositories/releases/".to_string(),
+        });
+        desc.repositories.push(RepositoryEntry {
+            id: "unnamed".to_string(),
+            name: None,
+            url: "https://example.com/repo".to_string(),
+        });
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+
+        assert_eq!(project.repositories.len(), 2);
+        assert_eq!(project.repositories[1].name, "unnamed", "name defaults to id when absent");
+
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(xml.contains("<repositories>"));
+        assert!(xml.contains("<id>shibboleth</id>"));
+        assert!(xml.contains("<name>Shibboleth Releases</name>"));
+        assert!(xml.contains("<url>https://build.shibboleth.net/nexus/content/repositories/releases/</url>"));
+        assert!(xml.contains("<id>unnamed</id>"));
+        assert!(xml.contains("<name>unnamed</name>"));
+
+        // <repositories> must come after <dependencies> and before <build>.
+        let deps_pos = xml.find("<dependencies>");
+        let repos_pos = xml.find("<repositories>").unwrap();
+        let build_pos = xml.find("<build>").unwrap();
+        if let Some(deps_pos) = deps_pos {
+            assert!(deps_pos < repos_pos);
+        }
+        assert!(repos_pos < build_pos);
+    }
+
+    #[test]
+    fn no_repositories_entries_omits_repositories_element() {
+        let dir = tempfile::tempdir().unwrap();
+        let desc = minimal_app("my-app", Some("com.example"));
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+
+        assert!(project.repositories.is_empty());
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(!xml.contains("<repositories>"));
     }
 
     #[test]
