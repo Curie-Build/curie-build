@@ -88,9 +88,6 @@ REACTOR_MODULES=(
   string-utils-cli
   auto-value-demo
   lombok-greeter
-  maven-hello-world
-  maven-jackson-bom-greeter
-  maven-json-greeter
   maven-string-utils
   hello-kotlin
   hello-mixed

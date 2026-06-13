@@ -9,8 +9,9 @@
 #   - [bom-imports] / [test-bom-imports] are merged with each member's
 #     own BOM imports; member entries take precedence on a name collision.
 #
-# The pairs `<name>` / `maven-<name>` demonstrate the two source layouts
-# (flat-package vs Maven src/main/java/) side by side.
+# Most members use the flat-package layout; `maven-string-utils` is the
+# representative for the classic Maven `src/main/java/` + `src/test/java/`
+# layout (incl. tests co-located in src/main/java).
 
 [workspace]
 members = [
@@ -21,9 +22,6 @@ members = [
     "string-utils-cli",
     "auto-value-demo",
     "lombok-greeter",
-    "maven-hello-world",
-    "maven-jackson-bom-greeter",
-    "maven-json-greeter",
     "maven-string-utils",
     "hello-kotlin",
     "hello-mixed",

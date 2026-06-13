@@ -3,7 +3,11 @@
 # Demonstrates fat/uber JAR packaging with Curie:
 #
 #   - All (or selected) dependencies are bundled into a single self-contained JAR
-#   - META-INF/services files are merged across all JARs
+#   - META-INF/services files are merged across all JARs: the two Jackson
+#     datatype modules below each ship a
+#     META-INF/services/com.fasterxml.jackson.databind.Module entry, and Curie
+#     concatenates them so ServiceLoader discovers BOTH (FatJarApp prints them
+#     under "discoveredServices")
 #   - Global default via [fat-jar].shadeAll; per-dep `shade = true/false` (legacy `fatJar` also accepted for now)
 #   - Package relocations (`from` / `to`) at global or per-dep level; per-dep relocations force shading and are safety-checked for overlaps
 #
@@ -21,6 +25,11 @@ sourceCompatibility = "21"
 [dependencies]
 # Jackson for JSON processing — included in fat JAR (default because shadeAll = true)
 "com.fasterxml.jackson.core:jackson-databind" = "2.17.2"
+
+# Two Jackson datatype modules — each registers a databind Module via
+# META-INF/services, so bundling both exercises service-file merging.
+"com.fasterxml.jackson.datatype:jackson-datatype-jsr310" = "2.17.2"
+"com.fasterxml.jackson.datatype:jackson-datatype-jdk8"   = "2.17.2"
 
 # Guava for collections — included and relocated (global relocation rules)
 "com.google.guava:guava" = "33.2.1-jre"

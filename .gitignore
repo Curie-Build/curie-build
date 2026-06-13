@@ -1,3 +1,9 @@
 target/
 TODO.md
 _design
+.settings
+.idea
+.classpath
+.project
+.factorypath
+examples/**/pom.xml

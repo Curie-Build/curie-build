@@ -1,0 +1,36 @@
+# fat-jar-selective-demo
+#
+# Demonstrates per-dependency fat-JAR selection with [fat-jar].shadeAll = false.
+#
+# With shadeAll = false, Curie bundles ONLY dependencies explicitly marked
+# `shade = true`.  Here Guava is bundled; commons-lang3 is NOT (it is expected
+# to be provided on the runtime classpath).
+#
+#   curie build  -> target/fat-jar-selective-demo-0.1.0-fat.jar contains Guava
+#                   classes but NOT commons-lang3 classes
+#                   (see fat_jar.rs: filter_fat_jar_deps drops deps where
+#                    should_shade(shade_all) is false).
+#
+# KNOWN GAP (`curie maven sync`): the generated maven-shade-plugin config has no
+# <artifactSet>/<excludes>, so `mvn package` bundles BOTH Guava and commons-lang3.
+# The Maven uber-JAR therefore diverges from Curie's — it is larger and contains
+# commons-lang3 classes that Curie deliberately left out.
+
+[application]
+name = "fat-jar-selective-demo"
+version = "0.1.0"
+mainClass = "com.example.selective.Main"
+
+[java]
+sourceCompatibility = "21"
+
+[dependencies]
+# Bundled into the fat JAR (explicit opt-in).
+"com.google.guava:guava" = { version = "33.2.1-jre", shade = true }
+# NOT bundled by Curie (shadeAll = false and no per-dep shade) — but `mvn
+# package` bundles it anyway because the generated shade config has no excludes.
+"org.apache.commons:commons-lang3" = "3.14.0"
+
+[fat-jar]
+enabled = true
+shadeAll = false

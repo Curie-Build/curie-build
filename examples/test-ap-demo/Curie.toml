@@ -1,0 +1,30 @@
+# test-ap-demo
+#
+# Demonstrates a TEST-ONLY annotation processor via [test-annotation-processors].
+#
+# Production code uses no processors.  The *tests* use Google AutoValue to
+# generate an immutable value class (AutoValue_Money) that the test asserts on,
+# so AutoValue only needs to run during *test* compilation:
+#
+#   src/com.example.testap/Calculator.java   — trivial production code
+#   tests/com.example.testap/Money.java      — @AutoValue value type (test-only)
+#   tests/com.example.testap/MoneyTest.java  — asserts on AutoValue_Money
+#
+# `curie build` runs the test processor (see test.rs: test compile merges
+# ap_pairs() + test_ap_pairs()) and the tests pass.
+#
+# KNOWN GAP (`curie maven sync`): the generated pom.xml writes only PRODUCTION
+# annotation processors into maven-compiler-plugin's <annotationProcessorPaths>.
+# The [test-annotation-processors] entry is dropped, so `mvn test-compile` fails
+# with "cannot find symbol: class AutoValue_Money".
+
+[library]
+name    = "test-ap-demo"
+version = "0.1.0"
+
+[test-dependencies]
+"org.junit.jupiter:junit-jupiter"              = "5.11.0"
+"com.google.auto.value:auto-value-annotations" = "1.11.0"
+
+[test-annotation-processors]
+"com.google.auto.value:auto-value" = "1.11.0"
