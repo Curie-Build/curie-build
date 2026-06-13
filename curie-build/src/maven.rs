@@ -75,6 +75,9 @@ const GMAVENPLUS_ARTIFACT_ID: &str = "gmavenplus-plugin";
 const GROOVY_GROUP_ID: &str = "org.apache.groovy";
 const GROOVY_ARTIFACT_ID: &str = "groovy";
 
+const SPOCK_GROUP_ID: &str = "org.spockframework";
+const SPOCK_CORE_ARTIFACT_ID: &str = "spock-core";
+
 // ---------------------------------------------------------------------------
 // Layout discovery
 // ---------------------------------------------------------------------------
@@ -226,10 +229,13 @@ fn colocated_test_exclude_patterns(project_root: &Path, src_roots: &[PathBuf]) -
 /// under any of `layout`'s source/test roots, mirroring `compile.rs`'s
 /// `has_kotlin`/`has_groovy` source-presence checks.
 fn layout_has_extension(project_root: &Path, layout: &MavenLayout, ext: &str) -> bool {
-    layout.src_roots.iter().chain(&layout.test_roots).any(|root| {
-        walk_files(&project_root.join(root))
-            .any(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some(ext))
-    })
+    layout.src_roots.iter().chain(&layout.test_roots).any(|root| dir_has_extension(project_root, root, ext))
+}
+
+/// `true` if `project_root.join(root)` contains a file with extension `ext`
+/// (e.g. `"groovy"`).
+fn dir_has_extension(project_root: &Path, root: &Path, ext: &str) -> bool {
+    walk_files(&project_root.join(root)).any(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some(ext))
 }
 
 // ---------------------------------------------------------------------------
@@ -402,8 +408,16 @@ pub fn build_project(
     if has_groovy {
         dependencies.push(groovy_dependency(desc));
     }
+    if desc.spock.enabled() {
+        dependencies.push(spock_core_dependency(desc));
+    }
 
-    let populate_libs = desc.application().is_some() && !desc.fat_jar.enabled && !desc.dependencies.is_empty();
+    // Groovy stdlib is always part of Curie's effective_dep_jars/target/libs/
+    // (build.rs), even for projects with no [dependencies] — so the generated
+    // pom.xml must populate libs/ for groovy projects too.
+    let populate_libs = desc.application().is_some()
+        && !desc.fat_jar.enabled
+        && (!desc.dependencies.is_empty() || has_groovy);
 
     let mut plugins = Vec::new();
     if has_kotlin {
@@ -411,7 +425,7 @@ pub fn build_project(
     }
     plugins.extend(build_compiler_plugin(desc, &layout, &prod_ap, &test_ap, has_kotlin)?);
     if has_groovy {
-        plugins.push(build_gmavenplus_plugin());
+        plugins.push(build_gmavenplus_plugin(project_root, &layout));
     }
     plugins.push(build_surefire_plugin(desc));
     if desc.test.coverage_enabled() {
@@ -895,11 +909,33 @@ fn kotlin_stdlib_dependency(desc: &Descriptor) -> MavenDependency {
 /// joint Java/Groovy compilation: stub generation, compile, and stub
 /// removal for both production and test sources, all bound to their
 /// standard default-lifecycle phases.
-fn build_gmavenplus_plugin() -> MavenPlugin {
+///
+/// `<sources>`/`<testSources>` are set explicitly to `layout`'s
+/// groovy-containing source/test roots, since gmavenplus-plugin's own
+/// defaults (`src/main/groovy`/`src/test/groovy`) don't see Curie's
+/// flat-package layout (`src/com.example/`, `tests/com.example/`).
+/// `<targetBytecode>` is pinned to `${maven.compiler.release}` because
+/// gmavenplus-plugin's own default ("1.8") is rejected by Groovy 5+.
+fn build_gmavenplus_plugin(project_root: &Path, layout: &MavenLayout) -> MavenPlugin {
+    let mut configuration = vec![XmlNode::text("targetBytecode", "${maven.compiler.release}")];
+
+    // Production sources exclude co-located *Spec/*Test files, mirroring
+    // maven-compiler-plugin's <excludes> for the same `colocated_test_excludes`
+    // (compile.rs/test.rs treat these as test sources, not production ones).
+    let source_filesets = groovy_filesets(project_root, &layout.src_roots, &layout.colocated_test_excludes);
+    if !source_filesets.is_empty() {
+        configuration.push(XmlNode::element("sources", source_filesets));
+    }
+    let test_filesets = groovy_filesets(project_root, &layout.test_roots, &[]);
+    if !test_filesets.is_empty() {
+        configuration.push(XmlNode::element("testSources", test_filesets));
+    }
+
     MavenPlugin {
         group_id: Some(GMAVENPLUS_GROUP_ID.to_string()),
         artifact_id: GMAVENPLUS_ARTIFACT_ID.to_string(),
         version: plugin_versions::GMAVENPLUS.to_string(),
+        configuration,
         executions: vec![MavenExecution {
             goals: [
                 "addSources",
@@ -920,6 +956,29 @@ fn build_gmavenplus_plugin() -> MavenPlugin {
     }
 }
 
+/// `<fileset><directory>root</directory><includes><include>**/*.groovy</include></includes>
+/// [<excludes>...]</fileset>` for each of `roots` that contains a `.groovy`
+/// file, for gmavenplus-plugin's `sources`/`testSources` `FileSet[]`
+/// parameters. `excludes` (e.g. `colocated_test_excludes`) is added to each
+/// fileset verbatim when non-empty; patterns for extensions other than
+/// `.groovy` simply never match.
+fn groovy_filesets(project_root: &Path, roots: &[PathBuf], excludes: &[String]) -> Vec<XmlNode> {
+    roots
+        .iter()
+        .filter(|root| dir_has_extension(project_root, root, "groovy"))
+        .map(|root| {
+            let mut children = vec![
+                XmlNode::text("directory", path_to_maven(root)),
+                XmlNode::element("includes", vec![XmlNode::text("include", "**/*.groovy")]),
+            ];
+            if !excludes.is_empty() {
+                children.push(excludes_node(excludes));
+            }
+            XmlNode::element("fileset", children)
+        })
+        .collect()
+}
+
 /// `org.apache.groovy:groovy` at `[groovy].version()`, a `compile`
 /// dependency — Curie bundles the Groovy stdlib into `libs/`
 /// (`build.rs`'s `effective_dep_jars`).
@@ -929,6 +988,21 @@ fn groovy_dependency(desc: &Descriptor) -> MavenDependency {
         artifact_id: GROOVY_ARTIFACT_ID.to_string(),
         version: Some(desc.groovy.version().to_string()),
         scope: None,
+        exclusions: vec![],
+    }
+}
+
+/// `org.spockframework:spock-core` at `[spock].version()`, a `test`
+/// dependency — Curie resolves spock-core onto the test classpath
+/// internally (`test.rs`'s `spock_jars`) without it ever appearing in
+/// `[test-dependencies]`, but `mvn test` needs it declared to compile and
+/// run the generated `*Spec` stubs (gmavenplus's `generateTestStubs`).
+fn spock_core_dependency(desc: &Descriptor) -> MavenDependency {
+    MavenDependency {
+        group_id: SPOCK_GROUP_ID.to_string(),
+        artifact_id: SPOCK_CORE_ARTIFACT_ID.to_string(),
+        version: Some(desc.spock.version().to_string()),
+        scope: Some("test".to_string()),
         exclusions: vec![],
     }
 }
@@ -2682,10 +2756,69 @@ mod tests {
             assert!(gmavenplus.contains(&format!("<goal>{goal}</goal>")), "missing goal {goal}");
         }
 
+        // Groovy 5+ rejects gmavenplus-plugin's own "1.8" default.
+        assert!(gmavenplus.contains("<targetBytecode>${maven.compiler.release}</targetBytecode>"));
+
+        // Maven-standard layout: <sources>/<testSources> filesets point at
+        // src/main/groovy and src/test/groovy.
+        assert!(gmavenplus.contains("<directory>src/main/groovy</directory>"));
+        assert!(gmavenplus.contains("<directory>src/test/groovy</directory>"));
+        assert!(gmavenplus.contains("<include>**/*.groovy</include>"));
+
         let dep = project.dependencies.iter().find(|d| d.artifact_id == "groovy").unwrap();
         assert_eq!(dep.group_id, "org.apache.groovy");
         assert_eq!(dep.version.as_deref(), Some(DEFAULT_GROOVY_VERSION));
         assert_eq!(dep.scope, None);
+    }
+
+    #[test]
+    fn groovy_flat_package_layout_gets_gmavenplus_source_filesets() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/com.example/Hello.groovy", "package com.example\nclass Hello {}");
+        write_file(dir.path(), "tests/com.example/HelloSpec.groovy", "package com.example\nclass HelloSpec {}");
+
+        let desc = minimal_app("my-app", Some("com.example"));
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+
+        let gmavenplus = xml.split("<plugin>").find(|b| b.contains("gmavenplus-plugin")).unwrap();
+        assert!(gmavenplus.contains("<directory>src/com.example</directory>"));
+        assert!(gmavenplus.contains("<directory>tests/com.example</directory>"));
+    }
+
+    #[test]
+    fn groovy_colocated_spec_excluded_from_production_sources_fileset() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/com.example/Calculator.groovy", "package com.example\nclass Calculator {}");
+        write_file(dir.path(), "src/com.example/CalculatorSpec.groovy", "package com.example\nclass CalculatorSpec {}");
+
+        let desc = minimal_app("my-app", Some("com.example"));
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+
+        let gmavenplus = xml.split("<plugin>").find(|b| b.contains("gmavenplus-plugin")).unwrap();
+        let sources = gmavenplus.split("<sources>").nth(1).unwrap().split("</sources>").next().unwrap();
+        assert!(sources.contains("<exclude>**/*Spec.groovy</exclude>"));
+
+        // <testSources> compiles everything in the shared root, unfiltered.
+        let test_sources = gmavenplus.split("<testSources>").nth(1).unwrap().split("</testSources>").next().unwrap();
+        assert!(!test_sources.contains("<excludes>"));
+    }
+
+    #[test]
+    fn application_with_groovy_and_no_dependencies_populates_libs() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main/groovy/com/example/Hello.groovy", "package com.example\nclass Hello {}");
+
+        let desc = minimal_app("my-app", Some("com.example"));
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main"), &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+
+        // Curie always bundles the Groovy stdlib into target/libs/, so the
+        // generated pom.xml must populate libs/ even with no [dependencies].
+        assert!(xml.contains("<addClasspath>true</addClasspath>"));
+        assert!(xml.contains("<classpathPrefix>libs/</classpathPrefix>"));
+        assert!(xml.contains("copy-dependencies"));
     }
 
     // -- fat jar (maven-shade-plugin) ----------------------------------------------
@@ -2909,6 +3042,19 @@ mod tests {
             .dependencies
             .iter()
             .any(|d| d.artifact_id == JUNIT_STANDALONE_ARTIFACT_ID));
+    }
+
+    #[test]
+    fn spock_enabled_adds_spock_core_test_dependency() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.spock.enabled = Some(true);
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let dep = project.dependencies.iter().find(|d| d.artifact_id == "spock-core").unwrap();
+        assert_eq!(dep.group_id, "org.spockframework");
+        assert_eq!(dep.version.as_deref(), Some(DEFAULT_SPOCK_VERSION));
+        assert_eq!(dep.scope.as_deref(), Some("test"));
     }
 
     // -- packaging (maven-jar-plugin / copy-dependencies) -------------------------
