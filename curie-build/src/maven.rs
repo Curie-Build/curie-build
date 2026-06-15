@@ -42,7 +42,10 @@ pub const OUTPUT_TIMESTAMP: &str = "2024-01-01T00:00:00Z";
 /// - 1: initial generator.
 /// - 2: emit `protobuf-maven-plugin` / `openapi-generator-maven-plugin` for
 ///   `[plugin.protobuf]` / `[plugin.openapi]` sections.
-pub const SCHEMA_VERSION: u32 = 2;
+/// - 3: `<maven.compiler.release>` is omitted when `sourceCompatibility` is
+///   not set (was previously hardcoded to "25"); Maven then targets the
+///   running JDK version, consistent with curie's omission of `--release`.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Human-readable line written into every generated POM, immediately above
 /// the `curie-maven-fingerprint:` line.
@@ -568,11 +571,14 @@ pub fn build_workspace_project(desc: &Descriptor, project_root: &Path) -> Result
 }
 
 fn default_properties(desc: &Descriptor) -> Vec<(String, String)> {
-    vec![
-        ("maven.compiler.release".to_string(), desc.java.effective().to_string()),
+    let mut props = vec![
         ("project.build.sourceEncoding".to_string(), "UTF-8".to_string()),
         ("project.build.outputTimestamp".to_string(), OUTPUT_TIMESTAMP.to_string()),
-    ]
+    ];
+    if let Some(release) = desc.java.effective() {
+        props.insert(0, ("maven.compiler.release".to_string(), release.to_string()));
+    }
+    props
 }
 
 fn build_dependencies(desc: &Descriptor) -> Result<Vec<MavenDependency>> {
@@ -3607,9 +3613,10 @@ mod tests {
         }
         let layout = discover_layout(dir.path());
 
-        let err = resolve_main_class_for_sync(&desc, dir.path(), &layout).unwrap_err().to_string();
-        assert!(err.contains("no main method found"), "got: {err}");
-        assert!(err.contains("mainClass"), "got: {err}");
+        let err = resolve_main_class_for_sync(&desc, dir.path(), &layout).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(chain.contains("no main method found"), "got: {chain}");
+        assert!(chain.contains("mainClass"), "got: {chain}");
     }
 
     /// Write a two-member workspace (`lib`, depended on by `app`) under

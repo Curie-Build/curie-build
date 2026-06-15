@@ -1000,7 +1000,7 @@ mod tests {
             "[workspace]\nmembers = [\"a\"]\n[java]\nsourceCompatibility = \"17\"\n",
             &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
         ).unwrap();
-        assert_eq!(ws.members[0].descriptor.java.effective(), "17");
+        assert_eq!(ws.members[0].descriptor.java.effective(), Some("17"));
     }
 
     #[test]
@@ -1009,7 +1009,7 @@ mod tests {
             "[workspace]\nmembers = [\"a\"]\n[java]\nsourceCompatibility = \"17\"\n",
             &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n[java]\nsourceCompatibility = \"21\"\n")],
         ).unwrap();
-        assert_eq!(ws.members[0].descriptor.java.effective(), "21");
+        assert_eq!(ws.members[0].descriptor.java.effective(), Some("21"));
     }
 
     #[test]
@@ -1018,7 +1018,7 @@ mod tests {
             "[workspace]\nmembers = [\"a\"]\n",
             &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
         ).unwrap();
-        assert_eq!(ws.members[0].descriptor.java.effective(), "21");
+        assert_eq!(ws.members[0].descriptor.java.effective(), None);
     }
 
     #[test]
@@ -1364,7 +1364,7 @@ mod tests {
         let ws = load(dir.path()).unwrap();
 
         let leaf = ws.members.iter().find(|m| m.declared.contains("leaf-app")).unwrap();
-        assert_eq!(leaf.descriptor.java.effective(), "17");
+        assert_eq!(leaf.descriptor.java.effective(), Some("17"));
 
         assert_eq!(
             leaf.descriptor.inherited_bom_imports.get("ws:bom").map(String::as_str),
@@ -1377,7 +1377,7 @@ mod tests {
         );
 
         let mid = ws.members.iter().find(|m| m.declared.contains("mid-lib")).unwrap();
-        assert_eq!(mid.descriptor.java.effective(), "17");
+        assert_eq!(mid.descriptor.java.effective(), Some("17"));
     }
 
     #[test]
@@ -1497,7 +1497,7 @@ mod tests {
 
         let ws = load(r).unwrap();
         let leaf = &ws.members[0].descriptor;
-        assert_eq!(leaf.java.effective(), "17");
+        assert_eq!(leaf.java.effective(), Some("17"));
         assert_eq!(leaf.inherited_bom_imports.get("outer:bom").map(String::as_str), Some("1.0"));
         assert_eq!(leaf.inherited_bom_imports.get("inner:bom").map(String::as_str), Some("2.0"));
     }

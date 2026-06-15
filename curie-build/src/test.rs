@@ -1,5 +1,6 @@
 use crate::compile::{
-    flat_package_src_dirs, flat_package_test_dirs, KOTLIN_COMPILER_COORD, KOTLIN_STDLIB_COORD,
+    flat_package_src_dirs, flat_package_test_dirs, javac_release_arg, KOTLIN_COMPILER_COORD,
+    KOTLIN_STDLIB_COORD,
 };
 use crate::incremental::{
     javac_version, needs_recompile, walk_files, write_javac_version_stamp, Inputs, Stamp,
@@ -366,9 +367,9 @@ pub fn run_tests(
             let mut javac = Command::new("java");
             javac.arg("-jar").arg(&wrapper_jar);
             javac.arg("--curie-manifest-out").arg(&test_manifest_path);
-            javac
-                .arg("--release")
-                .arg(desc.java.effective());
+            if let Some(release) = javac_release_arg(desc)? {
+                javac.arg("--release").arg(release);
+            }
             if desc.java.preview_enabled() {
                 javac.arg("--enable-preview");
             }
@@ -470,7 +471,9 @@ pub fn run_tests(
             };
 
             let mut groovyc = Command::new("java");
-            groovyc.arg(crate::compile::groovy_target_bytecode_arg(desc));
+            if let Some(arg) = crate::compile::groovy_target_bytecode_arg(desc) {
+                groovyc.arg(arg);
+            }
             groovyc.arg("-cp").arg(classpath_string(&groovyc_process_cp));
             groovyc.arg("org.codehaus.groovy.tools.FileSystemCompiler");
             groovyc.arg("-d").arg(&test_classes_dir);

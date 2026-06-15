@@ -274,10 +274,10 @@ pub struct Bom {
 #[derive(Debug, Deserialize, Default)]
 pub struct Java {
     /// `[java].sourceCompatibility` as the user wrote it, or `None` when
-    /// the key was absent.  Use [`Self::effective`] to get the
-    /// resolved value (default `"21"`) — never read this field directly
-    /// from compile/test paths, because `None` is meaningful: it signals
-    /// "inherit from the workspace if any, else use the default".
+    /// the key was absent.  Use [`Self::effective`] to get the resolved
+    /// value — never read this field directly from compile/test paths,
+    /// because `None` is meaningful: "inherit from the workspace if any,
+    /// else omit `--release` and target the running JDK".
     #[serde(rename = "sourceCompatibility")]
     pub source_compatibility: Option<String>,
     /// When `true`, passes `--enable-preview` to javac and to the java
@@ -300,12 +300,16 @@ pub struct Java {
 }
 
 impl Java {
-    /// Resolved `--release` argument for `javac`.  Workspace inheritance
-    /// happens upstream of this call (in `workspace::load`), so by the
-    /// time the build pipeline reads it the member's `source_compatibility`
-    /// has already been populated with the workspace value if applicable.
-    pub fn effective(&self) -> &str {
-        self.source_compatibility.as_deref().unwrap_or("21")
+    /// Resolved `--release` argument for `javac`, or `None` when
+    /// `sourceCompatibility` was not set (at this level or any enclosing
+    /// workspace).  When `None`, callers must omit `--release` so javac
+    /// targets the running JDK's own version.
+    ///
+    /// Workspace inheritance has already been applied by the time the build
+    /// pipeline reads this: if a workspace root sets `sourceCompatibility =
+    /// "21"` and a member omits it, the member will have `Some("21")` here.
+    pub fn effective(&self) -> Option<&str> {
+        self.source_compatibility.as_deref()
     }
 
     /// Resolved `--enable-preview` flag (default `false`).  Like
@@ -1678,7 +1682,7 @@ id = "nexus"
 url = "https://example.com/m2"
 "#;
         let d = load_str(toml).unwrap();
-        assert_eq!(d.java.effective(), "17");
+        assert_eq!(d.java.effective(), Some("17"));
         assert_eq!(d.repositories.len(), 1);
         assert_eq!(d.repositories[0].id, "nexus");
     }
@@ -2373,7 +2377,7 @@ enablePreview = true
 "#;
         let d = load_str(toml).unwrap();
         assert!(d.java.preview_enabled());
-        assert_eq!(d.java.effective(), "21");
+        assert_eq!(d.java.effective(), Some("21"));
     }
 
     #[test]

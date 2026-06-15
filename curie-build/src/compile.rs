@@ -137,6 +137,34 @@ fn kotlin_module_name(desc: &descriptor::Descriptor) -> &str {
     desc.buildable_name()
 }
 
+/// Parses the major version number from `javac -version` output.
+/// e.g. "javac 25.0.1" → "25"
+fn running_jdk_major_version() -> Result<String> {
+    let version_str = javac_version()?;
+    version_str
+        .split_whitespace()
+        .nth(1)
+        .and_then(|v| v.split('.').next())
+        .map(str::to_string)
+        .with_context(|| format!("cannot parse JDK major version from '{version_str}'"))
+}
+
+/// Returns the `--release` value to pass to javac, if any.
+///
+/// When `sourceCompatibility` is set, uses it.  When it is absent but
+/// `enablePreview = true`, falls back to the running JDK's major version
+/// (javac requires `--release` whenever `--enable-preview` is used).
+/// When neither applies, returns `None` (javac targets the running JDK).
+pub(crate) fn javac_release_arg(desc: &descriptor::Descriptor) -> Result<Option<String>> {
+    if let Some(release) = desc.java.effective() {
+        return Ok(Some(release.to_string()));
+    }
+    if desc.java.preview_enabled() {
+        return Ok(Some(running_jdk_major_version()?));
+    }
+    Ok(None)
+}
+
 /// JVM system-property argument that pins the bytecode level emitted by
 /// `groovyc` (`FileSystemCompiler`) to the project's effective Java release.
 ///
@@ -147,8 +175,11 @@ fn kotlin_module_name(desc: &descriptor::Descriptor) -> &str {
 /// `groovy.target.bytecode` system property, so setting it makes Curie's
 /// Groovy classes match `mvn`'s for the same `sourceCompatibility`.  Must be
 /// placed before the main-class name (it is a JVM option, not a program arg).
-pub(crate) fn groovy_target_bytecode_arg(desc: &descriptor::Descriptor) -> String {
-    format!("-Dgroovy.target.bytecode={}", desc.java.effective())
+/// Returns `None` when `sourceCompatibility` is unset (groovyc will target
+/// the running JDK's own version, matching the behaviour of omitting `--release`
+/// from javac in the same build).
+pub(crate) fn groovy_target_bytecode_arg(desc: &descriptor::Descriptor) -> Option<String> {
+    desc.java.effective().map(|v| format!("-Dgroovy.target.bytecode={v}"))
 }
 
 /// Phase 1: resolve production deps and compile production sources.
@@ -660,7 +691,9 @@ pub fn compile(
             // step is needed in that case.
             // ------------------------------------------------------------------
             let mut groovyc = Command::new("java");
-            groovyc.arg(groovy_target_bytecode_arg(desc));
+            if let Some(arg) = groovy_target_bytecode_arg(desc) {
+                groovyc.arg(arg);
+            }
             groovyc.arg("-cp").arg(classpath_string(&groovy_jars));
             groovyc.arg("org.codehaus.groovy.tools.FileSystemCompiler");
             groovyc.arg("-d").arg(&classes_dir);
@@ -695,9 +728,9 @@ pub fn compile(
             let mut javac = Command::new("java");
             javac.arg("-jar").arg(&wrapper_jar);
             javac.arg("--curie-manifest-out").arg(&manifest_path);
-            javac
-                .arg("--release")
-                .arg(desc.java.effective());
+            if let Some(release) = javac_release_arg(desc)? {
+                javac.arg("--release").arg(release);
+            }
             if desc.java.preview_enabled() {
                 javac.arg("--enable-preview");
             }
@@ -921,11 +954,11 @@ mod tests {
         .unwrap();
         let desc = descriptor::load(dir.path()).unwrap();
 
-        assert_eq!(groovy_target_bytecode_arg(&desc), "-Dgroovy.target.bytecode=21");
+        assert_eq!(groovy_target_bytecode_arg(&desc), Some("-Dgroovy.target.bytecode=21".to_string()));
     }
 
     #[test]
-    fn groovy_target_bytecode_defaults_to_default_release() {
+    fn groovy_target_bytecode_absent_when_no_source_compatibility() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("Curie.toml"),
@@ -934,8 +967,51 @@ mod tests {
         .unwrap();
         let desc = descriptor::load(dir.path()).unwrap();
 
-        // No [java] section → effective() default (currently 25).
-        assert_eq!(groovy_target_bytecode_arg(&desc), "-Dgroovy.target.bytecode=25");
+        // No [java] section → effective() is None → no bytecode arg (groovyc targets running JDK).
+        assert_eq!(groovy_target_bytecode_arg(&desc), None);
+    }
+
+    // --- javac_release_arg --------------------------------------------------
+
+    #[test]
+    fn javac_release_arg_uses_source_compatibility_when_set() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
+             [java]\nsourceCompatibility = \"21\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+        assert_eq!(javac_release_arg(&desc).unwrap(), Some("21".to_string()));
+    }
+
+    #[test]
+    fn javac_release_arg_absent_without_preview_or_source_compatibility() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+        assert_eq!(javac_release_arg(&desc).unwrap(), None);
+    }
+
+    #[test]
+    fn javac_release_arg_falls_back_to_running_jdk_when_preview_and_no_source_compatibility() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
+             [java]\nenablePreview = true\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+        let release = javac_release_arg(&desc).unwrap().expect("should return running JDK version");
+        // Must be a non-empty numeric major version string.
+        assert!(!release.is_empty(), "release should not be empty");
+        assert!(release.parse::<u32>().is_ok(), "release should be a number, got: {release}");
     }
 
     // --- Groovy source detection helpers ------------------------------------

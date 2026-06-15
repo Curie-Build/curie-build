@@ -4,10 +4,11 @@
 # library) with its own Curie.toml.
 #
 # Workspace-level config (below) is inherited by every member:
-#   - [java] sourceCompatibility is the default for members that don't
-#     declare their own.
 #   - [bom-imports] / [test-bom-imports] are merged with each member's
 #     own BOM imports; member entries take precedence on a name collision.
+#
+# No workspace-level [java] sourceCompatibility is set, so each member
+# compiles against the running JDK's own version by default.
 #
 # Most members use the flat-package layout; `maven-string-utils` is the
 # representative for the classic Maven `src/main/java/` + `src/test/java/`
@@ -45,9 +46,6 @@ members = [
     "proto-greeter",
     "openapi-greeter",
 ]
-
-[java]
-sourceCompatibility = "21"
 
 [bom-imports]
 "com.fasterxml.jackson:jackson-bom" = "2.17.2"

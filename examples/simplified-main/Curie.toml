@@ -17,6 +17,7 @@ version = "0.1.0"
 # mainClass omitted — auto-detected from the unnamed class file
 
 [java]
-# Unnamed classes and instance main methods were finalized in Java 25 (JEP 512).
-# No enablePreview needed.  On Java 21–24, add: enablePreview = true
+# enablePreview compiles void main() / unnamed classes (JEP 512) on Java 21-24
+# where the feature was in preview; on Java 25+ it is standard and the flag is a no-op.
+# No sourceCompatibility pin — targets the running JDK automatically.
 enablePreview = true
