@@ -83,7 +83,7 @@
     <p>Both layouts are discovered by scanning for <code>*.java</code> files. You can migrate from Maven layout to flat-package layout gradually — Curie will compile whichever files it finds.</p>
 
     <h2>Java version</h2>
-    <p>The <code>[java]</code> section sets the language version passed to <code>javac --release</code>. The default is <code>21</code>:</p>
+    <p>The <code>[java]</code> section controls the language version. When <code>sourceCompatibility</code> is set, curie passes <code>--release</code> to <code>javac</code>, fixing the source language, bytecode major version, and available APIs simultaneously:</p>
 
     <div class="code">
       <header>
@@ -91,11 +91,11 @@
         <span>Curie.toml</span>
       </header>
 <pre><span class="kw">[java]</span>
-<span class="kw">sourceCompatibility</span> = <span class="str">"21"</span>  <span class="com"># default</span>
+<span class="kw">sourceCompatibility</span> = <span class="str">"21"</span>  <span class="com"># pin to Java 21 language + APIs</span>
 </pre>
     </div>
 
-    <p>Change this to target an older JVM, or bump it to enable newer language features. The value is passed verbatim to <code>javac --release</code>, so any version your installed JDK supports is accepted.</p>
+    <p>When <code>sourceCompatibility</code> is absent (the default), curie omits <code>--release</code> entirely and <code>javac</code> targets the running JDK's own version automatically. Curie rebuilds the project whenever the JDK version changes, so builds stay correct even without an explicit pin.</p>
 
     <h2>Main class auto-detection</h2>
     <p>For <code>[application]</code> projects, Curie scans compiled <code>.class</code> files looking for a <code>public static void main(String[])</code> method. If exactly one is found it is used automatically; if zero or more than one are found, the build fails with a message listing the candidates — set <code>mainClass</code> explicitly to resolve the ambiguity:</p>
@@ -112,8 +112,21 @@
 </pre>
     </div>
 
+    <h2>Preview features</h2>
+    <p>To enable Java preview features, set <code>enablePreview = true</code>. Curie passes <code>--enable-preview</code> to <code>javac</code> and to the JVM at test-run time. When no <code>sourceCompatibility</code> is set, curie automatically supplies <code>--release</code> with the running JDK's version (required by <code>javac</code> when <code>--enable-preview</code> is used):</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[java]</span>
+<span class="kw">enablePreview</span> = <span class="val">true</span>  <span class="com"># targets running JDK, enables its preview features</span>
+</pre>
+    </div>
+
     <h2>Instance main methods (Java 21+)</h2>
-    <p>Curie also detects "simplified" entry points introduced in Java 21 preview — a class with a <code>void main()</code> instance method and no class declaration boilerplate:</p>
+    <p>Curie also detects "simplified" entry points — a class with a <code>void main()</code> instance method and no class declaration boilerplate (finalized in Java 25, JEP 512; preview in Java 21–24):</p>
 
     <div class="code">
       <header>
@@ -127,7 +140,7 @@
 </pre>
     </div>
 
-    <p>See <a href="https://github.com/atteo/curie-build/tree/master/examples/simplified-main" target="_blank" rel="noopener">examples/simplified-main</a> for a working example. Requires <code>sourceCompatibility = "21"</code> or higher and a JDK that supports the preview feature.</p>
+    <p>On Java 25+ this works with no additional configuration. On Java 21–24 add <code>enablePreview = true</code> to <code>[java]</code>. See <a href="https://github.com/atteo/curie-build/tree/master/examples/simplified-main" target="_blank" rel="noopener">examples/simplified-main</a> for a complete working example.</p>
 
     <h2>Annotation processors</h2>
     <p>Processors (Lombok, AutoValue, MapStruct, …) run during compilation when declared under <code>[annotation-processors]</code>. They are placed on the <em>annotation processor path</em>, not the regular classpath:</p>
