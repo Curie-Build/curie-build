@@ -295,9 +295,21 @@ fn scan_main_candidates(src_roots: &[PathBuf], sources: &[PathBuf]) -> Vec<(Stri
 
 /// Error returned when [`scan_main_candidates`] finds nothing — shared by
 /// [`detect_main_class`] and [`detect_main_class_from_source`].
-fn no_main_candidates_error() -> anyhow::Error {
+fn no_main_candidates_error(sources: &[PathBuf]) -> anyhow::Error {
+    let file_list = if sources.is_empty() {
+        "  (no source files found)".to_owned()
+    } else {
+        sources
+            .iter()
+            .map(|p| format!("  {}", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     anyhow::anyhow!(
         "no main method found in any production source file\n\
+         \n\
+         Scanned files:\n\
+         {file_list}\n\
          \n\
          Add a main method to one of your classes, or declare it explicitly:\n\
          \n\
@@ -315,7 +327,7 @@ fn no_main_candidates_error() -> anyhow::Error {
 pub fn detect_main_class_from_source(src_roots: &[PathBuf], sources: &[PathBuf]) -> Result<String> {
     let candidates = scan_main_candidates(src_roots, sources);
     match candidates.len() {
-        0 => Err(no_main_candidates_error()),
+        0 => Err(no_main_candidates_error(sources)),
         1 => Ok(candidates.into_iter().next().unwrap().0),
         _ => anyhow::bail!(
             "multiple source files contain a main method — curie maven sync cannot pick \
@@ -349,7 +361,7 @@ pub fn detect_main_class(
     let source_candidates = scan_main_candidates(src_roots, sources);
 
     if source_candidates.is_empty() {
-        return Err(no_main_candidates_error());
+        return Err(no_main_candidates_error(sources));
     }
 
     // Phase 2: bytecode validation.
@@ -539,9 +551,10 @@ mod tests {
             "package com.example;\npublic class Lib { public void run() {} }",
         );
 
-        let err = detect_main_class_from_source(&[src_root], &[source]).unwrap_err().to_string();
+        let err = detect_main_class_from_source(&[src_root], &[source.clone()]).unwrap_err().to_string();
         assert!(err.contains("no main method found"), "got: {err}");
         assert!(err.contains("mainClass"), "got: {err}");
+        assert!(err.contains(source.to_str().unwrap()), "scanned file missing from error: {err}");
     }
 
     #[test]

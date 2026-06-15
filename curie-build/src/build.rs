@@ -210,7 +210,8 @@ pub fn do_build(
                         &compiled.sources,
                         &compiled.classes_dir,
                         &compiled.dep_jars,
-                    )?;
+                    )
+                    .with_context(|| format!("in project {}", project_root.display()))?;
                     crate::parallel::emit(&crate::style::info("Detected", &format!("mainClass = {}", detected)));
                     detected
                 }

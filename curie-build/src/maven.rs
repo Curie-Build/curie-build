@@ -2083,7 +2083,9 @@ fn resolve_main_class_for_sync(desc: &Descriptor, project_root: &Path, layout: &
     }
     let src_roots: Vec<PathBuf> = layout.src_roots.iter().map(|r| project_root.join(r)).collect();
     let sources = production_sources(&src_roots);
-    crate::main_class::detect_main_class_from_source(&src_roots, &sources).map(Some)
+    crate::main_class::detect_main_class_from_source(&src_roots, &sources)
+        .with_context(|| format!("in project {}", project_root.display()))
+        .map(Some)
 }
 
 /// Production `.java`/`.kt` sources under `src_roots`, excluding co-located
