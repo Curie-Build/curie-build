@@ -47,6 +47,3 @@ junitPlatformVersion = "6.0.3"
 
 [kotlin]
 version = "2.1.21"
-
-[maven]
-sync = true

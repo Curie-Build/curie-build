@@ -41,6 +41,3 @@ developers = [
     { id = "alice", name = "Alice Example", email = "alice@example.com" },
 ]
 scm = { url = "https://github.com/example/publish-demo", connection = "scm:git:git@github.com:example/publish-demo.git" }
-
-[maven]
-sync = true

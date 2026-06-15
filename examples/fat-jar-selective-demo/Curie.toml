@@ -19,7 +19,6 @@
 [application]
 name = "fat-jar-selective-demo"
 version = "0.1.0"
-mainClass = "com.example.selective.Main"
 
 [java]
 sourceCompatibility = "21"

@@ -21,6 +21,3 @@ modelPackage  = "com.example.model"
 library                 = "native"
 openApiNullable         = "false"
 hideGenerationTimestamp = "true"
-
-[maven]
-sync = true

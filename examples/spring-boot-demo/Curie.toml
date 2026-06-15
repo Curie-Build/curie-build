@@ -18,7 +18,6 @@
 [application]
 name      = "spring-boot-demo"
 version   = "0.1.0"
-mainClass = "com.example.springdemo.SpringBootDemoApplication"
 
 [java]
 sourceCompatibility = "21"
@@ -49,6 +48,3 @@ baseImage = "eclipse-temurin:21-jre-alpine"
 [test]
 # Spring Boot 4 / Spock 2.4 both target JUnit Platform 1.x.
 junitPlatformVersion = "1.14.4"
-
-[maven]
-sync = true

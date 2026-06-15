@@ -29,7 +29,3 @@
 [application]
 name = "add-remove-demo"
 version = "0.1.0"
-mainClass = "com.example.Demo"
-
-[maven]
-sync = true
