@@ -37,6 +37,12 @@ pub struct BuildOutput {
     /// self-contained JAR used by downstream stages (run, docker, native)
     /// instead of the regular JAR + libs/.
     pub fat_jar: Option<PathBuf>,
+    /// Whether the project has a `module-info.java` (JPMS explicit module).
+    pub is_modular: bool,
+    /// The JPMS module name from `module-info.java`, if the project is modular.
+    pub module_name: Option<String>,
+    /// Dependency JARs placed on `--module-path` (modular projects only).
+    pub module_path_jars: Vec<PathBuf>,
 }
 
 /// Single-module entry point used by `curie build` outside a workspace.
@@ -152,6 +158,9 @@ fn build_bom(project_root: &Path, desc: &descriptor::Descriptor) -> Result<Build
         main_class: None,
         resources_dir: None,
         fat_jar: None,
+        is_modular: false,
+        module_name: None,
+        module_path_jars: vec![],
     })
 }
 
@@ -223,6 +232,11 @@ pub fn do_build(
 
         crate::parallel::emit(&crate::style::active("Package", &compiled.jar_name));
         let manifest_dep_jars = manifest_dep_jars(desc, &compiled.dep_jars, &compiled.groovy_jars);
+        let automatic_module_name = if let crate::descriptor::DescriptorKind::Library(lib) = &desc.kind {
+            lib.automatic_module_name.as_deref()
+        } else {
+            None
+        };
         write_deterministic_jar(
             &compiled.jar_path,
             &compiled.classes_dir,
@@ -230,6 +244,7 @@ pub fn do_build(
             main_class.as_deref(),
             &manifest_dep_jars,
             build_info_content.as_deref(),
+            automatic_module_name,
         )
         .context("failed to write JAR")?;
 
@@ -329,6 +344,9 @@ pub fn do_build(
         main_class: resolved_main_class,
         resources_dir: compiled.resources_dir,
         fat_jar: fat_jar_path,
+        is_modular: compiled.is_modular,
+        module_name: compiled.module_name,
+        module_path_jars: compiled.module_path_jars,
     })
 }
 

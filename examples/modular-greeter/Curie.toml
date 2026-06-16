@@ -1,0 +1,11 @@
+[application]
+name = "modular-greeter"
+version = "0.1.0"
+groupId = "com.example"
+mainClass = "com.example.greeter.Main"
+
+[java]
+releaseVersion = "21"
+
+[dependencies]
+"com.fasterxml.jackson.core:jackson-databind" = "2.15.2"

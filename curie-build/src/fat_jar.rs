@@ -554,6 +554,10 @@ pub fn write_fat_jar(
             if build_info.is_some() && zip_path == "META-INF/build-info.properties" {
                 continue;
             }
+            // Fat JARs run as the unnamed module; module-info.class would describe a broken module.
+            if zip_path == "module-info.class" {
+                continue;
+            }
 
             // Handle project's own META-INF/services — collect for merging
             if zip_path.starts_with("META-INF/services/") {
@@ -1568,6 +1572,7 @@ mod tests {
             publish: PublishConfig::default(),
             plugins: BTreeMap::new(),
             maven: MavenConfig::default(),
+            modules: crate::descriptor::ModulesConfig::default(),
         };
 
         let all_jars = vec![

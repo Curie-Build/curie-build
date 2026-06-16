@@ -45,6 +45,7 @@ pub(crate) fn fake_bom_desc(
         publish,
         plugins: std::collections::BTreeMap::new(),
         maven: MavenConfig::default(),
+        modules: ModulesConfig::default(),
     }
 }
 
@@ -60,6 +61,7 @@ pub(crate) fn fake_library_desc(
             name: name.to_string(),
             version: version.to_string(),
             group_id: group_id.map(String::from),
+            automatic_module_name: None,
         }),
         java: Java::default(),
         test: Test::default(),
@@ -89,5 +91,6 @@ pub(crate) fn fake_library_desc(
         publish,
         plugins: std::collections::BTreeMap::new(),
         maven: MavenConfig::default(),
+        modules: ModulesConfig::default(),
     }
 }

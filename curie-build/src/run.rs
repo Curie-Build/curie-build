@@ -63,26 +63,58 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
             java.arg(format!("-javaagent:{}", agent.display()));
         }
 
-        // When running with deps (can't use -jar), build a full classpath.
-        // Also include src/main/resources so resource loading via getResourceAsStream works.
-        // Fat JARs are self-contained — run directly with -jar.
-        let resources_dir = output.resources_dir.as_deref();
-        let has_deps = !effective_deps.is_empty();
-        let has_resources = resources_dir.map(|p| p.exists()).unwrap_or(false);
+        // Modular launch: use --module-path + --module instead of -cp/-jar.
+        if output.is_modular && output.fat_jar.is_none() {
+            let module_name = output.module_name.as_deref().expect(
+                "is_modular implies module_name is Some after a successful build"
+            );
+            let resources_dir = output.resources_dir.as_deref();
 
-        if has_deps || (has_resources && output.fat_jar.is_none()) {
-            let mut cp_entries = Vec::new();
-            cp_entries.push(effective_jar.clone());
+            // Build the module path: module-path JARs + the project's own JAR.
+            let mut mp_entries: Vec<std::path::PathBuf> = Vec::new();
+            mp_entries.extend_from_slice(&output.module_path_jars);
+            mp_entries.push(effective_jar.clone());
+            java.arg("--module-path").arg(classpath_string(&mp_entries));
+
+            // Remaining deps (not on module-path) go on -cp.
+            let mut cp_entries: Vec<std::path::PathBuf> = Vec::new();
+            for dep in &effective_deps {
+                if !output.module_path_jars.contains(dep) {
+                    cp_entries.push(dep.clone());
+                }
+            }
             if let Some(rd) = resources_dir {
                 if rd.exists() {
                     cp_entries.push(rd.to_path_buf());
                 }
             }
-            cp_entries.extend_from_slice(&effective_deps);
-            java.arg("-cp").arg(classpath_string(&cp_entries));
-            java.arg(main_class);
+            if !cp_entries.is_empty() {
+                java.arg("-cp").arg(classpath_string(&cp_entries));
+            }
+
+            java.arg("--module").arg(format!("{}/{}", module_name, main_class));
         } else {
-            java.arg("-jar").arg(effective_jar);
+            // When running with deps (can't use -jar), build a full classpath.
+            // Also include src/main/resources so resource loading via getResourceAsStream works.
+            // Fat JARs are self-contained — run directly with -jar.
+            let resources_dir = output.resources_dir.as_deref();
+            let has_deps = !effective_deps.is_empty();
+            let has_resources = resources_dir.map(|p| p.exists()).unwrap_or(false);
+
+            if has_deps || (has_resources && output.fat_jar.is_none()) {
+                let mut cp_entries = Vec::new();
+                cp_entries.push(effective_jar.clone());
+                if let Some(rd) = resources_dir {
+                    if rd.exists() {
+                        cp_entries.push(rd.to_path_buf());
+                    }
+                }
+                cp_entries.extend_from_slice(&effective_deps);
+                java.arg("-cp").arg(classpath_string(&cp_entries));
+                java.arg(main_class);
+            } else {
+                java.arg("-jar").arg(effective_jar);
+            }
         }
 
         for arg in extra_args {

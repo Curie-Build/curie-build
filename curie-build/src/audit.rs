@@ -904,6 +904,7 @@ mod tests {
                 name: name.into(),
                 version: version.into(),
                 group_id: group_id.map(String::from),
+                automatic_module_name: None,
             }),
             java: Java::default(),
             test: Test::default(),
@@ -933,6 +934,7 @@ mod tests {
             publish: PublishConfig::default(),
             plugins: BTreeMap::new(),
             maven: MavenConfig::default(),
+            modules: ModulesConfig::default(),
         }
     }
 }

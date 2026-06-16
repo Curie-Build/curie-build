@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Java Modules · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/installation.html">Installation</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+      <li><a href="/docs/modules.html" class="active">Java Modules (JPMS)</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/plugins.html">Plugins</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
+      <li><a href="/docs/maven.html">Maven sync</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Language support · java modules</span>
+    <h1>Java Platform Module System (JPMS)</h1>
+    <p class="lede">Curie supports the Java Platform Module System (JPMS, Java 9+) with zero configuration.
+    Adding a <code>module-info.java</code> to your project source root activates modular mode automatically.</p>
+
+    <h2>Activation</h2>
+    <p>A project becomes modular when <code>module-info.java</code> exists at the root of a production
+    Java source directory:</p>
+    <ul>
+      <li>Maven-style layout: <code>src/main/java/module-info.java</code></li>
+      <li>Flat-package layout: <code>src/module-info.java</code></li>
+    </ul>
+    <p>No <code>Curie.toml</code> flag is needed. Deleting <code>module-info.java</code> reverts the project
+    to classpath mode — matching Maven and Gradle behaviour.</p>
+
+    <h3>Example <code>module-info.java</code></h3>
+    <pre><code>module com.example.greeter {
+    requires com.fasterxml.jackson.databind;
+    exports com.example.greeter;
+}</code></pre>
+
+    <h2>How the module/classpath split works</h2>
+    <p>Curie inspects each resolved dependency JAR to determine its <em>module identity</em>:</p>
+    <ol>
+      <li><strong>Explicit module</strong> — JAR contains <code>module-info.class</code> at its root.
+          The module name comes from the binary class file.</li>
+      <li><strong>Automatic module (manifest)</strong> — JAR has <code>Automatic-Module-Name</code>
+          in <code>META-INF/MANIFEST.MF</code>. Stable name provided by the library author.</li>
+      <li><strong>Automatic module (filename)</strong> — module name derived from the JAR filename using
+          the JDK algorithm (strip version suffix, replace non-alphanumerics with dots). Less stable;
+          prefer libraries that declare <code>Automatic-Module-Name</code>.</li>
+    </ol>
+    <p>A JAR goes on <code>--module-path</code> when its module name appears in your
+    <code>module-info.java</code>'s <code>requires</code> directives (directly or transitively).
+    All other JARs stay on <code>-cp</code> (the unnamed module). This mirrors how
+    <code>maven-compiler-plugin</code> behaves, ensuring <a href="/docs/maven.html">Maven parity</a>.</p>
+
+    <h2>Compilation</h2>
+    <p>When modular mode is active, Curie passes these extra flags to <code>javac</code>:</p>
+    <pre><code>javac --module-path &lt;required dep jars&gt;
+      -cp &lt;remaining dep jars&gt;
+      ... (other flags unchanged)
+      src/main/java/module-info.java src/.../*.java</code></pre>
+
+    <h3>Kotlin projects</h3>
+    <p>Kotlin sources are compiled in Phase 1 with <code>kotlinc</code> (on the classpath, as Kotlin does
+    not enforce JPMS at compile time). Phase 2 compiles <code>module-info.java</code> with
+    <code>javac --patch-module &lt;name&gt;=target/classes</code> so exports of Kotlin-only packages
+    are seen by the module system.</p>
+
+    <h3>Groovy projects</h3>
+    <p>Groovy production sources in a modular project are a <strong>hard error</strong>. Groovy's runtime
+    metaprogramming is incompatible with strong encapsulation. Spock <em>tests</em> are not affected
+    because tests run on the classpath (see <a href="#testing">Testing</a> below).</p>
+
+    <h2 id="testing">Testing</h2>
+    <p>By default, tests run in <strong>classpath mode</strong> regardless of whether the project is
+    modular. Production classes (including <code>module-info.class</code>) are placed on the test
+    classpath where they are treated as the unnamed module. This means:</p>
+    <ul>
+      <li>All existing test tooling works unchanged (JUnit, Mockito, JaCoCo, Spock).</li>
+      <li>Whitebox tests that access package-private members work without extra flags.</li>
+      <li>The module graph is <em>not</em> validated at test time.</li>
+    </ul>
+    <p>Maven parity: the generated <code>pom.xml</code> sets
+    <code>&lt;useModulePath&gt;false&lt;/useModulePath&gt;</code> in
+    <code>maven-surefire-plugin</code> to match this behaviour.</p>
+
+    <h2>Running</h2>
+    <p>For modular applications without a fat JAR, <code>curie run</code> uses the modular launch form:</p>
+    <pre><code>java --module-path target/myapp-1.0.jar:&lt;module-path deps&gt;
+     [-cp &lt;classpath deps&gt;:src/main/resources]
+     --module com.example.greeter/com.example.greeter.Main</code></pre>
+    <p>Fat-JAR projects continue to use <code>java -jar</code>; <code>module-info.class</code>
+    is stripped from fat JARs because a shaded artifact cannot have a valid module descriptor.</p>
+
+    <h2>Library authors: <code>Automatic-Module-Name</code></h2>
+    <p>Non-modular libraries can declare a stable module name so downstream modular projects
+    can depend on them predictably. Add to <code>Curie.toml</code>:</p>
+    <pre><code>[library]
+name = "my-utils"
+version = "1.0.0"
+automaticModuleName = "com.example.myutils"</code></pre>
+    <p>This writes <code>Automatic-Module-Name: com.example.myutils</code> into the JAR's
+    <code>MANIFEST.MF</code>. Do not set this when the project also has a <code>module-info.java</code>
+    — the module descriptor is authoritative.</p>
+
+    <h2>Optional configuration</h2>
+    <p>Most modular projects need no additional configuration. For escape hatches that cannot be inferred:</p>
+    <pre><code>[modules]
+# Extra root modules (mirrors javac/java --add-modules)
+add-modules = ["jdk.incubator.vector"]
+
+# Applied to compile, test, and run
+add-opens   = ["my.module/com.example.internal=ALL-UNNAMED"]
+add-exports = []
+add-reads   = []
+
+# Test mode: "classpath" (default) or "module-path" (phase 2)
+test-mode = "classpath"</code></pre>
+    <p>The <code>[modules]</code> section is entirely optional. These settings are workspace-inheritable:
+    declare them in the workspace root <code>Curie.toml</code> to apply them to all members.</p>
+
+    <h2>Workspaces</h2>
+    <p>In a workspace, each member is compiled independently. A modular member's JAR is treated
+    like any other dependency JAR by consumers: it is an explicit module (if it has
+    <code>module-info.class</code>) or an automatic module (if it declares
+    <code>automaticModuleName</code>). The topological build order guarantees a member's JAR
+    exists before its consumers compile.</p>
+
+    <h2>Maven parity</h2>
+    <p>The module/classpath split algorithm mirrors <code>plexus-languages</code> (used internally
+    by <code>maven-compiler-plugin</code> 3.13+), which also auto-detects <code>module-info.java</code>
+    and performs the same split. The synced <code>pom.xml</code> therefore builds identically
+    to <code>curie build</code> without any extra configuration.</p>
+
+    <p>For the test phase, the generated POM pins Surefire to
+    <code>&lt;useModulePath&gt;false&lt;/useModulePath&gt;</code> to match Curie's classpath
+    test mode (phase 1). Phase 2 (module-path testing) will update this automatically.</p>
+  </main>
+</div>
+
+</body>
+</html>

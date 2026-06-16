@@ -88,6 +88,10 @@ pub struct Descriptor {
     /// Populated from `[maven]`.  Controls `curie maven sync` /
     /// `curie build`'s automatic Maven configuration sync.
     pub maven: MavenConfig,
+    /// Populated from `[modules]`.  Controls JPMS flags (`--add-modules`,
+    /// `--add-opens`, `--add-exports`, `--add-reads`) and the test launch
+    /// strategy (`test-mode`).
+    pub modules: ModulesConfig,
 }
 
 /// One entry in `[annotation-processors]` or `[test-annotation-processors]`.
@@ -209,6 +213,8 @@ struct RawDescriptor {
     plugin: BTreeMap<String, toml::Value>,
     #[serde(default)]
     maven: MavenConfig,
+    #[serde(default)]
+    modules: ModulesConfig,
 }
 
 /// One entry in `[workspace-dependencies]`.
@@ -249,6 +255,8 @@ pub struct Library {
     /// Maven `groupId` — required only when publishing.  See [`Application::group_id`].
     #[serde(rename = "groupId", default)]
     pub group_id: Option<String>,
+    #[serde(rename = "automaticModuleName", default)]
+    pub automatic_module_name: Option<String>,
 }
 
 /// Workspace descriptor section: lists member directories whose own `Curie.toml`
@@ -722,6 +730,38 @@ impl MavenConfig {
     /// Resolved `pinTransitive` flag (default `false`).
     pub fn pin_transitive_enabled(&self) -> bool {
         self.pin_transitive.unwrap_or(false)
+    }
+}
+
+/// Configuration for the `[modules]` table — controls JPMS (Java Platform
+/// Module System) settings for compile and test runs.
+///
+/// ```toml
+/// [modules]
+/// add-modules = ["java.sql", "jdk.incubator.vector"]
+/// add-opens   = ["java.base/java.lang=ALL-UNNAMED"]
+/// add-exports = ["java.base/sun.nio.ch=ALL-UNNAMED"]
+/// add-reads   = ["my.module=ALL-UNNAMED"]
+/// test-mode   = "classpath"   # or "module"
+/// ```
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct ModulesConfig {
+    #[serde(rename = "add-modules", default)]
+    pub add_modules: Vec<String>,
+    #[serde(rename = "add-opens", default)]
+    pub add_opens: Vec<String>,
+    #[serde(rename = "add-exports", default)]
+    pub add_exports: Vec<String>,
+    #[serde(rename = "add-reads", default)]
+    pub add_reads: Vec<String>,
+    #[serde(rename = "test-mode", default)]
+    pub test_mode: Option<String>,
+}
+
+impl ModulesConfig {
+    /// Resolved test mode (default `"classpath"`).
+    pub fn test_mode(&self) -> &str {
+        self.test_mode.as_deref().unwrap_or("classpath")
     }
 }
 
@@ -1352,6 +1392,7 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         publish: parsed.publish,
         plugins: parsed.plugin,
         maven: parsed.maven,
+        modules: parsed.modules,
     };
 
     // Workspace-only restrictions: they describe member layout, not
@@ -2902,5 +2943,112 @@ pinTransitive = true
         let d = load_str(toml).unwrap();
         assert!(d.maven.sync_enabled());
         assert!(d.maven.pin_transitive_enabled());
+    }
+
+    // ── modules / JPMS ────────────────────────────────────────────────────
+
+    #[test]
+    fn modules_absent_gives_empty_defaults() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.modules.add_modules.is_empty());
+        assert!(d.modules.add_opens.is_empty());
+        assert!(d.modules.add_exports.is_empty());
+        assert!(d.modules.add_reads.is_empty());
+        assert_eq!(d.modules.test_mode(), "classpath");
+        assert!(d.modules.test_mode.is_none(), "absent key must stay None");
+    }
+
+    #[test]
+    fn modules_section_parsed_fully() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[modules]
+add-modules = ["java.sql", "jdk.incubator.vector"]
+add-opens   = ["java.base/java.lang=ALL-UNNAMED"]
+add-exports = ["java.base/sun.nio.ch=ALL-UNNAMED"]
+add-reads   = ["my.module=ALL-UNNAMED"]
+test-mode   = "module"
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.modules.add_modules, vec!["java.sql", "jdk.incubator.vector"]);
+        assert_eq!(d.modules.add_opens, vec!["java.base/java.lang=ALL-UNNAMED"]);
+        assert_eq!(d.modules.add_exports, vec!["java.base/sun.nio.ch=ALL-UNNAMED"]);
+        assert_eq!(d.modules.add_reads, vec!["my.module=ALL-UNNAMED"]);
+        assert_eq!(d.modules.test_mode(), "module");
+        assert_eq!(d.modules.test_mode, Some("module".to_string()));
+    }
+
+    #[test]
+    fn modules_test_mode_defaults_to_classpath() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[modules]
+add-modules = ["java.sql"]
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.modules.test_mode(), "classpath");
+    }
+
+    #[test]
+    fn modules_partial_section_leaves_missing_vecs_empty() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[modules]
+add-opens = ["java.base/java.nio=ALL-UNNAMED"]
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.modules.add_modules.is_empty());
+        assert_eq!(d.modules.add_opens, vec!["java.base/java.nio=ALL-UNNAMED"]);
+        assert!(d.modules.add_exports.is_empty());
+        assert!(d.modules.add_reads.is_empty());
+    }
+
+    #[test]
+    fn library_automatic_module_name_absent_is_none() {
+        let toml = r#"
+[library]
+name = "mylib"
+version = "1.0"
+"#;
+        let d = load_str(toml).unwrap();
+        if let DescriptorKind::Library(lib) = &d.kind {
+            assert!(lib.automatic_module_name.is_none());
+        } else {
+            panic!("expected Library kind");
+        }
+    }
+
+    #[test]
+    fn library_automatic_module_name_can_be_set() {
+        let toml = r#"
+[library]
+name = "mylib"
+version = "1.0"
+automaticModuleName = "com.example.mylib"
+"#;
+        let d = load_str(toml).unwrap();
+        if let DescriptorKind::Library(lib) = &d.kind {
+            assert_eq!(lib.automatic_module_name.as_deref(), Some("com.example.mylib"));
+        } else {
+            panic!("expected Library kind");
+        }
     }
 }

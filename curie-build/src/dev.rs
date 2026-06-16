@@ -368,6 +368,9 @@ mod tests {
             groovy_jars,
             resources_dir,
             test_resources_dir: None,
+            is_modular: false,
+            module_name: None,
+            module_path_jars: vec![],
         }
     }
 

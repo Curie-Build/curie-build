@@ -424,6 +424,14 @@ pub fn build_project(
     let layout = discover_layout(project_root);
     let has_kotlin = layout_has_extension(project_root, &layout, "kt");
     let has_groovy = layout_has_extension(project_root, &layout, "groovy");
+    let is_modular = layout.src_roots.iter().any(|root| root.join("module-info.java").exists())
+        || layout.src_roots.iter().any(|root| {
+            std::fs::read_dir(root).ok().map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .any(|e| e.file_name() == "module-info.java")
+            }).unwrap_or(false)
+        });
 
     let prod_ap = ap_coordinates(&desc.ap_pairs(), resolved_ap_versions)?;
     let test_ap = merge_ap_coordinates(&prod_ap, &desc.test_ap_pairs(), resolved_ap_versions)?;
@@ -457,7 +465,7 @@ pub fn build_project(
     if has_groovy {
         plugins.push(build_gmavenplus_plugin(project_root, &layout));
     }
-    plugins.push(build_surefire_plugin(desc));
+    plugins.push(build_surefire_plugin(desc, is_modular));
     if desc.test.coverage_enabled() {
         plugins.push(build_jacoco_plugin());
     }
@@ -1281,7 +1289,12 @@ fn surefire_arg_line(desc: &Descriptor) -> Option<String> {
 /// `maven-surefire-plugin` with class-name includes mirroring the runner's
 /// default/Spock-broadened filters (see [`surefire_includes`]), plus
 /// `<argLine>` (see [`surefire_arg_line`]).
-fn build_surefire_plugin(desc: &Descriptor) -> MavenPlugin {
+///
+/// When `is_modular` is true and the test engine is resolved via the classpath
+/// (the default Curie mode), `<useModulePath>false</useModulePath>` is emitted
+/// so that Surefire runs tests on the unnamed module rather than trying to
+/// resolve them as JPMS modules.
+fn build_surefire_plugin(desc: &Descriptor, is_modular: bool) -> MavenPlugin {
     let mut configuration = Vec::new();
     if desc.spock.enabled() {
         let includes = surefire_includes::DEFAULT
@@ -1294,6 +1307,9 @@ fn build_surefire_plugin(desc: &Descriptor) -> MavenPlugin {
     }
     if let Some(arg_line) = surefire_arg_line(desc) {
         configuration.push(XmlNode::text("argLine", arg_line));
+    }
+    if is_modular {
+        configuration.push(XmlNode::text("useModulePath", "false".to_string()));
     }
     MavenPlugin {
         artifact_id: "maven-surefire-plugin".to_string(),
@@ -2411,6 +2427,7 @@ mod tests {
             publish: PublishConfig::default(),
             plugins: BTreeMap::new(),
             maven: MavenConfig::default(),
+            modules: ModulesConfig::default(),
         }
     }
 
@@ -2420,6 +2437,7 @@ mod tests {
             name: name.to_string(),
             version: "1.0.0".to_string(),
             group_id: group_id.map(String::from),
+            automatic_module_name: None,
         });
         desc
     }

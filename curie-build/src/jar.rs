@@ -132,6 +132,8 @@ pub(crate) fn populate_libs_dir(libs_dir: &Path, dep_jars: &[PathBuf]) -> Result
 ///   • no extra tool-specific metadata that embeds build time
 ///   • when `build_info` is `Some`, writes `META-INF/build-info.properties`
 ///     right after the manifest
+///   • when `automatic_module_name` is `Some`, writes `Automatic-Module-Name`
+///     in the manifest (for library JARs that are not yet JPMS modules)
 pub(crate) fn write_deterministic_jar(
     jar_path: &Path,
     classes_dir: &Path,
@@ -139,6 +141,7 @@ pub(crate) fn write_deterministic_jar(
     main_class: Option<&str>,
     dep_jars: &[PathBuf],
     build_info: Option<&str>,
+    automatic_module_name: Option<&str>,
 ) -> Result<()> {
     let file = std::fs::File::create(jar_path)
         .with_context(|| format!("cannot create {}", jar_path.display()))?;
@@ -167,6 +170,9 @@ pub(crate) fn write_deterministic_jar(
         // manifest_class_path() returns the fully-folded header block
         // (including the trailing \r\n) per the JAR spec 72-byte line limit.
         manifest.push_str(&manifest_class_path(dep_jars));
+    }
+    if let Some(amn) = automatic_module_name {
+        manifest.push_str(&format!("Automatic-Module-Name: {}\r\n", amn));
     }
     manifest.push_str("\r\n");
 
@@ -319,6 +325,7 @@ mod tests {
             None,
             &[],
             build_info,
+            None,
         )
         .unwrap();
 
@@ -370,6 +377,7 @@ mod tests {
             None,
             &[],
             build_info,
+            None,
         )
         .unwrap();
 

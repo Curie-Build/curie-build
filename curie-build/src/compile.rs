@@ -31,6 +31,7 @@ use crate::incremental::{
     javac_version, needs_recompile, walk_files, write_javac_version_stamp, CompileStatus,
 };
 use crate::jar::classpath_string;
+use crate::jpms;
 use crate::kt_stale;
 use anyhow::{bail, Context, Result};
 use curie_deps::resolver::{resolve, DepEntry, ResolveOptions};
@@ -73,6 +74,12 @@ pub struct CompileOutput {
     pub resources_dir: Option<PathBuf>,
     /// Test resources directory (`src/test/resources` or top-level `test-resources/`), if it exists.
     pub test_resources_dir: Option<PathBuf>,
+    /// Whether the project has a `module-info.java` (JPMS explicit module).
+    pub is_modular: bool,
+    /// The JPMS module name from `module-info.java`, if the project is modular.
+    pub module_name: Option<String>,
+    /// Dependency JARs placed on `--module-path` (modular projects only).
+    pub module_path_jars: Vec<PathBuf>,
 }
 
 /// Returns all immediate subdirectories of `<project_root>/src/` whose names
@@ -558,6 +565,54 @@ pub fn compile(
         groovy_jars = Vec::new();
     }
 
+    // --- JPMS detection and validation ----------------------------------------
+    let module_info_path = jpms::find_module_info_java(&src_roots);
+    let is_modular = module_info_path.is_some();
+
+    if is_modular && has_groovy {
+        bail!(
+            "JPMS modules (module-info.java) are not supported with Groovy sources; \
+             use separate modules for each language"
+        );
+    }
+
+    if is_modular {
+        if let Some(release) = desc.java.effective() {
+            let release_num: u32 = release.parse().unwrap_or(0);
+            if release_num < 9 {
+                bail!(
+                    "JPMS modules (module-info.java) require Java 9 or later; \
+                     project specifies releaseVersion = \"{release}\""
+                );
+            }
+        }
+    }
+
+    if is_modular {
+        if let crate::descriptor::DescriptorKind::Library(lib) = &desc.kind {
+            if lib.automatic_module_name.is_some() {
+                bail!(
+                    "a project with module-info.java must not also declare \
+                     automaticModuleName; remove one or the other"
+                );
+            }
+        }
+    }
+
+    let module_split: Option<(jpms::ParsedModuleInfo, jpms::ModuleSplit)> =
+        if let Some(ref mi_path) = module_info_path {
+            let content = std::fs::read_to_string(mi_path)
+                .with_context(|| format!("failed to read {}", mi_path.display()))?;
+            let parsed = jpms::parse_module_info_java(&content)
+                .with_context(|| format!("failed to parse {}", mi_path.display()))?;
+            let target_dir = project_root.join("target");
+            let split = jpms::compute_module_path_split(&parsed, &dep_jars, &target_dir)
+                .context("failed to compute module-path split")?;
+            Some((parsed, split))
+        } else {
+            None
+        };
+
     // --- compile (incremental) -----------------------------------------------
     let toml_path = project_root.join("Curie.toml");
     let manifest_path = output_dir.join(".classes.toml");
@@ -761,15 +816,46 @@ pub fn compile(
                 .arg("-d")
                 .arg(&classes_dir);
 
-            // Classpath: target/classes (Kotlin bytecode) + shared entries.
-            let mut cp_entries: Vec<PathBuf> = Vec::new();
-            if has_kotlin {
-                // Java must see the Kotlin .class files from Phase 1.
-                cp_entries.push(classes_dir.clone());
-            }
-            cp_entries.extend_from_slice(&shared_cp);
-            if !cp_entries.is_empty() {
-                javac.arg("-cp").arg(classpath_string(&cp_entries));
+            if let Some((parsed_mi, split)) = &module_split {
+                // Modular javac invocation: use --module-path + --patch-module.
+                if !split.module_path.is_empty() {
+                    javac.arg("--module-path").arg(classpath_string(&split.module_path));
+                }
+
+                // When Kotlin sources were compiled in phase 1, patch the module
+                // so javac can see the Kotlin .class files alongside our sources.
+                if has_kotlin {
+                    let patch_arg = format!(
+                        "{}={}",
+                        parsed_mi.module_name,
+                        classes_dir.display()
+                    );
+                    javac.arg("--patch-module").arg(patch_arg);
+                }
+
+                // Remaining deps that are not on module-path go on -cp.
+                let mut cp_entries: Vec<PathBuf> = Vec::new();
+                cp_entries.extend_from_slice(&split.classpath);
+                // shared_cp entries not already in split.module_path.
+                for entry in &shared_cp {
+                    if !split.module_path.contains(entry) && !cp_entries.contains(entry) {
+                        cp_entries.push(entry.clone());
+                    }
+                }
+                if !cp_entries.is_empty() {
+                    javac.arg("-cp").arg(classpath_string(&cp_entries));
+                }
+            } else {
+                // Non-modular: original -cp behaviour.
+                let mut cp_entries: Vec<PathBuf> = Vec::new();
+                if has_kotlin {
+                    // Java must see the Kotlin .class files from Phase 1.
+                    cp_entries.push(classes_dir.clone());
+                }
+                cp_entries.extend_from_slice(&shared_cp);
+                if !cp_entries.is_empty() {
+                    javac.arg("-cp").arg(classpath_string(&cp_entries));
+                }
             }
 
             // Annotation-processor classpath + generated-sources directory.
@@ -850,10 +936,18 @@ pub fn compile(
     );
     let jar_path = output_dir.join(&jar_name);
 
+    let (module_name, module_path_jars) = match module_split {
+        Some((parsed_mi, split)) => (Some(parsed_mi.module_name), split.module_path),
+        None => (None, Vec::new()),
+    };
+
     Ok(CompileOutput {
         jar_path, jar_name, classes_dir, src_roots, sources, dep_jars,
         kotlin_stdlib_jars, groovy_jars,
         resources_dir, test_resources_dir,
+        is_modular,
+        module_name,
+        module_path_jars,
     })
 }
 fn summarise_plugin_inputs(manifest: &crate::plugin::PluginManifest, project_root: &Path) -> String {

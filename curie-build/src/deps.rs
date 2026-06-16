@@ -388,6 +388,7 @@ mod tests {
             publish: PublishConfig::default(),
             plugins: BTreeMap::new(),
             maven: MavenConfig::default(),
+            modules: ModulesConfig::default(),
         }
     }
 
