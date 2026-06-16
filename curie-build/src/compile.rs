@@ -137,16 +137,38 @@ fn kotlin_module_name(desc: &descriptor::Descriptor) -> &str {
     desc.buildable_name()
 }
 
-/// Parses the major version number from `javac -version` output.
-/// e.g. "javac 25.0.1" → "25"
+/// Extracts the JDK major version from the raw output of `javac -version`.
+///
+/// Scans for the line that starts with "javac " to skip any preamble lines
+/// emitted when JAVA_TOOL_OPTIONS is set ("Picked up JAVA_TOOL_OPTIONS: ...").
+fn parse_jdk_major_version(version_output: &str) -> Option<String> {
+    for line in version_output.lines() {
+        if let Some(rest) = line.trim().strip_prefix("javac ") {
+            if let Some(major) = rest.trim().split('.').next() {
+                if !major.is_empty() && major.chars().all(|c| c.is_ascii_digit()) {
+                    return Some(major.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn running_jdk_major_version() -> Result<String> {
-    let version_str = javac_version()?;
-    version_str
-        .split_whitespace()
-        .nth(1)
-        .and_then(|v| v.split('.').next())
-        .map(str::to_string)
-        .with_context(|| format!("cannot parse JDK major version from '{version_str}'"))
+    let out = Command::new("javac")
+        .arg("-version")
+        .output()
+        .context("failed to invoke javac — is a JDK installed?")?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Try stderr first (the usual location), then stdout. When JAVA_TOOL_OPTIONS
+    // is set some JDKs write the preamble to stderr and the actual version line
+    // to stdout, so we must check both.
+    parse_jdk_major_version(&stderr)
+        .or_else(|| parse_jdk_major_version(&stdout))
+        .with_context(|| {
+            format!("cannot parse JDK major version from javac -version output\nstderr: {stderr}\nstdout: {stdout}")
+        })
 }
 
 /// Returns the `--release` value to pass to javac, if any.
@@ -969,6 +991,35 @@ mod tests {
 
         // No [java] section → effective() is None → no bytecode arg (groovyc targets running JDK).
         assert_eq!(groovy_target_bytecode_arg(&desc), None);
+    }
+
+    // --- parse_jdk_major_version --------------------------------------------
+
+    #[test]
+    fn parse_jdk_major_version_plain_output() {
+        assert_eq!(parse_jdk_major_version("javac 21.0.3\n"), Some("21".to_string()));
+        assert_eq!(parse_jdk_major_version("javac 25.0.1"), Some("25".to_string()));
+        assert_eq!(parse_jdk_major_version("javac 11"), Some("11".to_string()));
+    }
+
+    #[test]
+    fn parse_jdk_major_version_with_java_tool_options_preamble() {
+        let output = "Picked up JAVA_TOOL_OPTIONS: -Dhttp.proxyHost=172.16.0.4 -Dhttp.proxyPort=2080\njavac 21.0.3\n";
+        assert_eq!(parse_jdk_major_version(output), Some("21".to_string()));
+    }
+
+    #[test]
+    fn parse_jdk_major_version_preamble_only_returns_none() {
+        // Version line absent — only the JAVA_TOOL_OPTIONS preamble on stderr;
+        // version line was written to stdout instead (caller should try stdout).
+        let stderr = "Picked up JAVA_TOOL_OPTIONS: -Dhttp.proxyHost=172.16.0.4 -Dhttp.proxyPort=2080";
+        assert_eq!(parse_jdk_major_version(stderr), None);
+    }
+
+    #[test]
+    fn parse_jdk_major_version_unrecognised_output_returns_none() {
+        assert_eq!(parse_jdk_major_version(""), None);
+        assert_eq!(parse_jdk_major_version("Picked up JAVA_TOOL_OPTIONS: something"), None);
     }
 
     // --- javac_release_arg --------------------------------------------------
