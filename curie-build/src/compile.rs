@@ -606,7 +606,14 @@ pub fn compile(
             let parsed = jpms::parse_module_info_java(&content)
                 .with_context(|| format!("failed to parse {}", mi_path.display()))?;
             let target_dir = project_root.join("target");
-            let split = jpms::compute_module_path_split(&parsed, &dep_jars, &target_dir)
+            // Include kotlin stdlib jars in the split so they can appear on
+            // --module-path when module-info.java declares `requires kotlin.stdlib`.
+            let split_jars: Vec<PathBuf> = {
+                let mut v = dep_jars.clone();
+                v.extend_from_slice(&kotlin_stdlib_jars);
+                v
+            };
+            let split = jpms::compute_module_path_split(&parsed, &split_jars, &target_dir)
                 .context("failed to compute module-path split")?;
             Some((parsed, split))
         } else {
@@ -728,10 +735,18 @@ pub fn compile(
             }
 
             // Source files: all .kt and all .java together.
+            // In modular projects, exclude module-info.java from kotlinc — it is
+            // compiled by javac in phase 2 (with --patch-module) so the module
+            // descriptor covers both Java and Kotlin classes.  Passing it to
+            // kotlinc would require kotlin.stdlib on the module path at compile
+            // time, which is an unnecessary complexity for kotlinc's classpath phase.
             for src in &kotlin_sources {
                 kotlinc.arg(src);
             }
             for src in &java_sources {
+                if is_modular && src.file_name() == Some(std::ffi::OsStr::new("module-info.java")) {
+                    continue;
+                }
                 kotlinc.arg(src);
             }
 

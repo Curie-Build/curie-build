@@ -267,10 +267,14 @@ pub fn do_build(
     // Always done for application projects so that `java -jar` works.
     // target/libs/ is wiped and repopulated on every build to stay in sync
     // with the current dep set (handles version bumps cleanly).
-    // Merge Groovy stdlib into effective_dep_jars for libs/ and run-time classpath.
+    // Merge language runtime JARs into effective_dep_jars for libs/ and run-time classpath.
+    // Kotlin stdlib is included so that Kotlin code in named modules can access
+    // kotlin.stdlib (which it must `requires` when used in a JPMS module).
+    // Groovy runtime is always needed for any project with Groovy sources.
     let effective_dep_jars: Vec<std::path::PathBuf> = {
         let mut v = compiled.dep_jars;
         v.extend(compiled.groovy_jars);
+        v.extend(compiled.kotlin_stdlib_jars);
         v
     };
     if !effective_dep_jars.is_empty() && desc.application().is_some()
@@ -356,10 +360,10 @@ pub fn do_build(
 
 /// Dependency JARs to list in the main JAR's `Class-Path` manifest header.
 ///
-/// Effective runtime deps = user deps + Groovy stdlib (when Groovy sources
-/// present). Kotlin stdlib is NOT included because simple Kotlin programs
-/// compile to bytecode that doesn't reference stdlib classes — Groovy always
-/// does.
+/// Includes user deps and Groovy stdlib (when Groovy sources are present).
+/// Kotlin stdlib is intentionally omitted from the manifest header because
+/// `curie run` constructs the full classpath itself; the manifest Class-Path
+/// is only a fallback for `java -jar` invocations.
 ///
 /// When `[fat-jar]` is enabled, the main JAR gets no Class-Path: deps are
 /// bundled into the fat JAR instead, `target/libs/` is not populated, and the

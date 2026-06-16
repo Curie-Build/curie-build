@@ -114,10 +114,21 @@
       src/main/java/module-info.java src/.../*.java</code></pre>
 
     <h3>Kotlin projects</h3>
-    <p>Kotlin sources are compiled in Phase 1 with <code>kotlinc</code> (on the classpath, as Kotlin does
-    not enforce JPMS at compile time). Phase 2 compiles <code>module-info.java</code> with
-    <code>javac --patch-module &lt;name&gt;=target/classes</code> so exports of Kotlin-only packages
-    are seen by the module system.</p>
+    <p>Kotlin sources are compiled in Phase 1 with <code>kotlinc</code> (on the classpath, as Kotlin
+    does not enforce JPMS at compile time). <code>module-info.java</code> is intentionally excluded
+    from the kotlinc invocation — Phase 2 re-compiles it with
+    <code>javac --patch-module &lt;name&gt;=target/classes</code> so the module descriptor covers
+    the Kotlin-compiled classes.</p>
+    <p>Because Kotlin bytecode references <code>kotlin.stdlib</code> at runtime, a modular project
+    that mixes Kotlin sources must declare the dependency in <code>module-info.java</code> and open
+    any packages that reflection-based libraries (e.g. Jackson) need to access:</p>
+    <pre><code>module com.example.greeter {
+    requires com.fasterxml.jackson.databind;
+    requires kotlin.stdlib;
+    opens com.example.greeter to com.fasterxml.jackson.databind;
+}</code></pre>
+    <p>Curie automatically places <code>kotlin-stdlib</code> on <code>--module-path</code> when it
+    appears in the module graph (BFS expansion), so no manual classpath wiring is needed.</p>
 
     <h3>Groovy projects</h3>
     <p>Groovy production sources in a modular project are a <strong>hard error</strong>. Groovy's runtime
