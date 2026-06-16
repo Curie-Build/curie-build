@@ -20,7 +20,7 @@ name      = "spring-boot-demo"
 version   = "0.1.0"
 
 [java]
-sourceCompatibility = "21"
+releaseVersion = "21"
 
 [groovy]
 version = "5.0.6"

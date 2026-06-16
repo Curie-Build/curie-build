@@ -83,7 +83,7 @@
     <p>Both layouts are discovered by scanning for <code>*.java</code> files. You can migrate from Maven layout to flat-package layout gradually — Curie will compile whichever files it finds.</p>
 
     <h2>Java version</h2>
-    <p>The <code>[java]</code> section controls the language version. When <code>sourceCompatibility</code> is set, curie passes <code>--release</code> to <code>javac</code>, fixing the source language, bytecode major version, and available APIs simultaneously:</p>
+    <p>The <code>[java]</code> section controls the language version. When <code>releaseVersion</code> is set, curie passes <code>--release</code> to <code>javac</code>, fixing the source language, bytecode major version, and available APIs simultaneously:</p>
 
     <div class="code">
       <header>
@@ -91,11 +91,11 @@
         <span>Curie.toml</span>
       </header>
 <pre><span class="kw">[java]</span>
-<span class="kw">sourceCompatibility</span> = <span class="str">"21"</span>  <span class="com"># pin to Java 21 language + APIs</span>
+<span class="kw">releaseVersion</span> = <span class="str">"21"</span>  <span class="com"># pin to Java 21 language + APIs</span>
 </pre>
     </div>
 
-    <p>When <code>sourceCompatibility</code> is absent (the default), curie omits <code>--release</code> entirely and <code>javac</code> targets the running JDK's own version automatically. Curie rebuilds the project whenever the JDK version changes, so builds stay correct even without an explicit pin.</p>
+    <p>When <code>releaseVersion</code> is absent (the default), curie omits <code>--release</code> entirely and <code>javac</code> targets the running JDK's own version automatically. Curie rebuilds the project whenever the JDK version changes, so builds stay correct even without an explicit pin.</p>
 
     <h2>Main class auto-detection</h2>
     <p>For <code>[application]</code> projects, Curie scans compiled <code>.class</code> files looking for a <code>public static void main(String[])</code> method. If exactly one is found it is used automatically; if zero or more than one are found, the build fails with a message listing the candidates — set <code>mainClass</code> explicitly to resolve the ambiguity:</p>
@@ -113,7 +113,7 @@
     </div>
 
     <h2>Preview features</h2>
-    <p>To enable Java preview features, set <code>enablePreview = true</code>. Curie passes <code>--enable-preview</code> to <code>javac</code> and to the JVM at test-run time. When no <code>sourceCompatibility</code> is set, curie automatically supplies <code>--release</code> with the running JDK's version (required by <code>javac</code> when <code>--enable-preview</code> is used):</p>
+    <p>To enable Java preview features, set <code>enablePreview = true</code>. Curie passes <code>--enable-preview</code> to <code>javac</code> and to the JVM at test-run time. When no <code>releaseVersion</code> is set, curie automatically supplies <code>--release</code> with the running JDK's version (required by <code>javac</code> when <code>--enable-preview</code> is used):</p>
 
     <div class="code">
       <header>

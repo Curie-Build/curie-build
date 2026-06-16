@@ -950,7 +950,7 @@ mod tests {
         std::fs::write(
             dir.path().join("Curie.toml"),
             "[application]\nname = \"hello-kotlin\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
-             [java]\nsourceCompatibility = \"21\"\n",
+             [java]\nreleaseVersion = \"21\"\n",
         )
         .unwrap();
         let desc = descriptor::load(dir.path()).unwrap();

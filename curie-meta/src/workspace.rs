@@ -297,8 +297,8 @@ fn expand_members(
 
 /// Merge workspace-level inheritable config into a member descriptor.
 fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
-    if member.java.source_compatibility.is_none() {
-        member.java.source_compatibility = ws.java.source_compatibility.clone();
+    if member.java.release_version.is_none() {
+        member.java.release_version = ws.java.release_version.clone();
     }
     if member.java.enable_preview.is_none() {
         member.java.enable_preview = ws.java.enable_preview;
@@ -997,7 +997,7 @@ mod tests {
     #[test]
     fn java_inherits_from_workspace_when_member_silent() {
         let ws = load_ws_with_content(
-            "[workspace]\nmembers = [\"a\"]\n[java]\nsourceCompatibility = \"17\"\n",
+            "[workspace]\nmembers = [\"a\"]\n[java]\nreleaseVersion = \"17\"\n",
             &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
         ).unwrap();
         assert_eq!(ws.members[0].descriptor.java.effective(), Some("17"));
@@ -1006,8 +1006,8 @@ mod tests {
     #[test]
     fn java_member_value_overrides_workspace() {
         let ws = load_ws_with_content(
-            "[workspace]\nmembers = [\"a\"]\n[java]\nsourceCompatibility = \"17\"\n",
-            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n[java]\nsourceCompatibility = \"21\"\n")],
+            "[workspace]\nmembers = [\"a\"]\n[java]\nreleaseVersion = \"17\"\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n[java]\nreleaseVersion = \"21\"\n")],
         ).unwrap();
         assert_eq!(ws.members[0].descriptor.java.effective(), Some("21"));
     }
@@ -1307,7 +1307,7 @@ mod tests {
         std::fs::write(
             r.join("Curie.toml"),
             "[workspace]\nmembers = [\"core-lib\", \"services\"]\n\
-             [java]\nsourceCompatibility = \"17\"\n\
+             [java]\nreleaseVersion = \"17\"\n\
              [bom-imports]\n\"ws:bom\" = \"1.0\"\n",
         ).unwrap();
 
@@ -1480,7 +1480,7 @@ mod tests {
         std::fs::write(
             r.join("Curie.toml"),
             "[workspace]\nmembers = [\"inner\"]\n\
-             [java]\nsourceCompatibility = \"17\"\n\
+             [java]\nreleaseVersion = \"17\"\n\
              [bom-imports]\n\"outer:bom\" = \"1.0\"\n",
         ).unwrap();
         std::fs::create_dir_all(r.join("inner")).unwrap();

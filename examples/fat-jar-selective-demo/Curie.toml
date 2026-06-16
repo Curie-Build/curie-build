@@ -21,7 +21,7 @@ name = "fat-jar-selective-demo"
 version = "0.1.0"
 
 [java]
-sourceCompatibility = "21"
+releaseVersion = "21"
 
 [dependencies]
 # Bundled into the fat JAR (explicit opt-in).

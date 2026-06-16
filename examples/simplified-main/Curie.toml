@@ -19,5 +19,5 @@ version = "0.1.0"
 [java]
 # enablePreview compiles void main() / unnamed classes (JEP 512) on Java 21-24
 # where the feature was in preview; on Java 25+ it is standard and the flag is a no-op.
-# No sourceCompatibility pin — targets the running JDK automatically.
+# No releaseVersion pin — targets the running JDK automatically.
 enablePreview = true

@@ -154,7 +154,7 @@
 &lt;/<span class="kw">properties</span>&gt;</pre>
     </div>
 
-    <p><code>maven.compiler.release</code> comes from <code>[java].sourceCompatibility</code> (or the effective default). If <code>[java].enablePreview = true</code>, the compiler plugin gets <code>--enable-preview</code> and Surefire's <code>&lt;argLine&gt;</code> gets it too.</p>
+    <p><code>maven.compiler.release</code> comes from <code>[java].releaseVersion</code> (or the effective default). If <code>[java].enablePreview = true</code>, the compiler plugin gets <code>--enable-preview</code> and Surefire's <code>&lt;argLine&gt;</code> gets it too.</p>
 
     <h3>Source layout</h3>
     <p>Source roots are discovered with the same logic <code>curie build</code> uses: Maven-style <code>src/main/{java,kotlin,groovy}</code>, flat-package directories under <code>src/</code>, or a bare <code>src/</code>. The first production root becomes <code>&lt;sourceDirectory&gt;</code>; any additional roots are added with <code>build-helper-maven-plugin</code>'s <code>add-source</code>. Test roots work the same way via <code>&lt;testSourceDirectory&gt;</code> and <code>add-test-source</code>.</p>

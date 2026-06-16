@@ -5,7 +5,7 @@
 # levels.
 #
 # Inherits configuration from all three workspace levels:
-#   - sourceCompatibility = "25" from level 0
+#   - releaseVersion = "25" from level 0
 #   - guava-bom from level 1
 #   - jackson-bom, junit-bom, test config from level 0
 

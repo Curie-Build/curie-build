@@ -273,13 +273,13 @@ pub struct Bom {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct Java {
-    /// `[java].sourceCompatibility` as the user wrote it, or `None` when
+    /// `[java].releaseVersion` as the user wrote it, or `None` when
     /// the key was absent.  Use [`Self::effective`] to get the resolved
     /// value — never read this field directly from compile/test paths,
     /// because `None` is meaningful: "inherit from the workspace if any,
     /// else omit `--release` and target the running JDK".
-    #[serde(rename = "sourceCompatibility")]
-    pub source_compatibility: Option<String>,
+    #[serde(rename = "releaseVersion")]
+    pub release_version: Option<String>,
     /// When `true`, passes `--enable-preview` to javac and to the java
     /// runtime.  Required for preview features on Java 21–22 (e.g. unnamed
     /// classes and instance main methods).  Not needed on Java 23+ where
@@ -287,7 +287,7 @@ pub struct Java {
     ///
     /// ```toml
     /// [java]
-    /// sourceCompatibility = "21"
+    /// releaseVersion = "21"
     /// enablePreview = true
     /// ```
     /// `None` when `enablePreview` was absent — meaningful, so it can be
@@ -301,15 +301,15 @@ pub struct Java {
 
 impl Java {
     /// Resolved `--release` argument for `javac`, or `None` when
-    /// `sourceCompatibility` was not set (at this level or any enclosing
+    /// `releaseVersion` was not set (at this level or any enclosing
     /// workspace).  When `None`, callers must omit `--release` so javac
     /// targets the running JDK's own version.
     ///
     /// Workspace inheritance has already been applied by the time the build
-    /// pipeline reads this: if a workspace root sets `sourceCompatibility =
+    /// pipeline reads this: if a workspace root sets `releaseVersion =
     /// "21"` and a member omits it, the member will have `Some("21")` here.
     pub fn effective(&self) -> Option<&str> {
-        self.source_compatibility.as_deref()
+        self.release_version.as_deref()
     }
 
     /// Resolved `--enable-preview` flag (default `false`).  Like
@@ -345,7 +345,7 @@ pub const DEFAULT_KOTLIN_VERSION: &str = "2.1.21";
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct Test {
     /// `junitPlatformVersion` — matches the camelCase style of
-    /// `sourceCompatibility`, `mainClass`, `baseImage`, etc.
+    /// `releaseVersion`, `mainClass`, `baseImage`, etc.
     #[serde(rename = "junitPlatformVersion", default)]
     pub junit_platform_version: Option<String>,
     /// When `true`, test runs collect code coverage via JaCoCo and produce
@@ -1676,7 +1676,7 @@ members = ["a"]
 [workspace]
 members = ["a"]
 [java]
-sourceCompatibility = "17"
+releaseVersion = "17"
 [[repositories]]
 id = "nexus"
 url = "https://example.com/m2"
@@ -2372,7 +2372,7 @@ version = "0.1"
 mainClass = "X"
 
 [java]
-sourceCompatibility = "21"
+releaseVersion = "21"
 enablePreview = true
 "#;
         let d = load_str(toml).unwrap();

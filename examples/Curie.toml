@@ -7,7 +7,7 @@
 #   - [bom-imports] / [test-bom-imports] are merged with each member's
 #     own BOM imports; member entries take precedence on a name collision.
 #
-# No workspace-level [java] sourceCompatibility is set, so each member
+# No workspace-level [java] releaseVersion is set, so each member
 # compiles against the running JDK's own version by default.
 #
 # Most members use the flat-package layout; `maven-string-utils` is the

@@ -42,7 +42,7 @@ pub const OUTPUT_TIMESTAMP: &str = "2024-01-01T00:00:00Z";
 /// - 1: initial generator.
 /// - 2: emit `protobuf-maven-plugin` / `openapi-generator-maven-plugin` for
 ///   `[plugin.protobuf]` / `[plugin.openapi]` sections.
-/// - 3: `<maven.compiler.release>` is omitted when `sourceCompatibility` is
+/// - 3: `<maven.compiler.release>` is omitted when `releaseVersion` is
 ///   not set (was previously hardcoded to "25"); Maven then targets the
 ///   running JDK version, consistent with curie's omission of `--release`.
 pub const SCHEMA_VERSION: u32 = 3;
@@ -2467,7 +2467,7 @@ mod tests {
     fn properties_include_release_encoding_and_output_timestamp() {
         let dir = tempfile::tempdir().unwrap();
         let mut desc = minimal_app("my-app", Some("com.example"));
-        desc.java.source_compatibility = Some("17".to_string());
+        desc.java.release_version = Some("17".to_string());
         let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<maven.compiler.release>17</maven.compiler.release>"));

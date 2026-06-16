@@ -151,7 +151,7 @@ fn running_jdk_major_version() -> Result<String> {
 
 /// Returns the `--release` value to pass to javac, if any.
 ///
-/// When `sourceCompatibility` is set, uses it.  When it is absent but
+/// When `releaseVersion` is set, uses it.  When it is absent but
 /// `enablePreview = true`, falls back to the running JDK's major version
 /// (javac requires `--release` whenever `--enable-preview` is used).
 /// When neither applies, returns `None` (javac targets the running JDK).
@@ -173,9 +173,9 @@ pub(crate) fn javac_release_arg(desc: &descriptor::Descriptor) -> Result<Option<
 /// from `mvn`'s `gmavenplus-plugin` output where `<targetBytecode>` is pinned
 /// to `${maven.compiler.release}`.  Groovy's `CompilerConfiguration` reads the
 /// `groovy.target.bytecode` system property, so setting it makes Curie's
-/// Groovy classes match `mvn`'s for the same `sourceCompatibility`.  Must be
+/// Groovy classes match `mvn`'s for the same `releaseVersion`.  Must be
 /// placed before the main-class name (it is a JVM option, not a program arg).
-/// Returns `None` when `sourceCompatibility` is unset (groovyc will target
+/// Returns `None` when `releaseVersion` is unset (groovyc will target
 /// the running JDK's own version, matching the behaviour of omitting `--release`
 /// from javac in the same build).
 pub(crate) fn groovy_target_bytecode_arg(desc: &descriptor::Descriptor) -> Option<String> {
@@ -935,7 +935,7 @@ mod tests {
         std::fs::write(
             dir.path().join("Curie.toml"),
             "[application]\nname = \"hello-kotlin\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
-             [java]\nsourceCompatibility = \"21\"\n",
+             [java]\nreleaseVersion = \"21\"\n",
         )
         .unwrap();
         let desc = descriptor::load(dir.path()).unwrap();
@@ -949,7 +949,7 @@ mod tests {
         std::fs::write(
             dir.path().join("Curie.toml"),
             "[application]\nname = \"g\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
-             [java]\nsourceCompatibility = \"21\"\n",
+             [java]\nreleaseVersion = \"21\"\n",
         )
         .unwrap();
         let desc = descriptor::load(dir.path()).unwrap();
@@ -958,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn groovy_target_bytecode_absent_when_no_source_compatibility() {
+    fn groovy_target_bytecode_absent_when_no_release_version() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("Curie.toml"),
@@ -974,12 +974,12 @@ mod tests {
     // --- javac_release_arg --------------------------------------------------
 
     #[test]
-    fn javac_release_arg_uses_source_compatibility_when_set() {
+    fn javac_release_arg_uses_release_version_when_set() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("Curie.toml"),
             "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
-             [java]\nsourceCompatibility = \"21\"\n",
+             [java]\nreleaseVersion = \"21\"\n",
         )
         .unwrap();
         let desc = descriptor::load(dir.path()).unwrap();
@@ -987,7 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn javac_release_arg_absent_without_preview_or_source_compatibility() {
+    fn javac_release_arg_absent_without_preview_or_release_version() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("Curie.toml"),
@@ -999,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn javac_release_arg_falls_back_to_running_jdk_when_preview_and_no_source_compatibility() {
+    fn javac_release_arg_falls_back_to_running_jdk_when_preview_and_no_release_version() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("Curie.toml"),

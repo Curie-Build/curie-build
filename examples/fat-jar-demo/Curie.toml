@@ -20,7 +20,7 @@ version = "0.1.0"
 mainClass = "com.example.fatjar.FatJarApp"
 
 [java]
-sourceCompatibility = "21"
+releaseVersion = "21"
 
 [dependencies]
 # Jackson for JSON processing — included in fat JAR (default because shadeAll = true)

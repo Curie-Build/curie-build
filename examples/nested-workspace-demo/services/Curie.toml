@@ -2,7 +2,7 @@
 #
 # Demonstrates configuration layering: this workspace adds its own
 # [bom-imports] entry.  Members inherit both this workspace's config
-# and the root workspace's config (sourceCompatibility, etc.).
+# and the root workspace's config (releaseVersion, etc.).
 
 [workspace]
 members = ["greeter-lib", "apps"]

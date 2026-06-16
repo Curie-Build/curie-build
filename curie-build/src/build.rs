@@ -412,7 +412,7 @@ mod clean_tests {
     /// `descriptor::load` without duplicating the literal in each test body.
     fn minimal_app_toml() -> &'static str {
         "[application]\nname = \"test\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
-         [java]\nsourceCompatibility = \"21\"\n"
+         [java]\nreleaseVersion = \"21\"\n"
     }
 
     #[test]
@@ -458,7 +458,7 @@ mod manifest_dep_jars_tests {
         let desc = load_desc(
             dir.path(),
             "[application]\nname = \"test\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
-             [java]\nsourceCompatibility = \"21\"\n",
+             [java]\nreleaseVersion = \"21\"\n",
         );
 
         let dep_jars = vec![PathBuf::from("/m2/dep-1.0.jar")];
@@ -478,7 +478,7 @@ mod manifest_dep_jars_tests {
         let desc = load_desc(
             dir.path(),
             "[application]\nname = \"test\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
-             [java]\nsourceCompatibility = \"21\"\n\
+             [java]\nreleaseVersion = \"21\"\n\
              [fat-jar]\nenabled = true\n",
         );
 
