@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Plugin authoring · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/installation.html">Installation</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/plugins.html">Plugins</a></li>
+      <li><a href="/docs/plugin-authoring.html">Plugin authoring</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
+      <li><a href="/docs/maven.html">Maven sync</a></li>
+
+      <li><span class="nav-group">Reference</span></li>
+      <li><a href="/docs/reference.html">TOML reference</a></li>
+      <li><a href="/docs/troubleshooting.html">Troubleshooting</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Build &amp; test · plugin authoring</span>
+    <h1>Plugin authoring</h1>
+    <p class="lede">A Curie plugin is any executable named <code>curie-&lt;name&gt;</code> that implements two subcommands over stdin/stdout JSON. Curie owns the network, the cache, and the stamp file — the plugin owns only the generation logic.</p>
+
+    <p>For how users activate and configure plugins, see <a href="/docs/plugins.html">Plugins</a>. This page is the implementer's reference.</p>
+
+    <h2 id="overview">How it works</h2>
+    <p>Every build, Curie calls <code>manifest</code> on every active plugin. The plugin returns a JSON document declaring what it watches, what it needs from Maven, and where it writes output. Curie uses the manifest to:</p>
+    <ol>
+      <li>Check the stamp file — if no watched input has changed since the last successful run, skip the plugin entirely.</li>
+      <li>Download any declared Maven artifacts that are not already cached.</li>
+      <li>Call <code>generate-sources</code>, passing the local paths to the downloaded artifacts.</li>
+      <li>Write the stamp on success and add the plugin's output directories to <code>javac</code>'s source roots.</li>
+    </ol>
+    <p>The plugin binary is never resident between builds. Curie spawns it fresh for each invocation. This makes plugins simple, stateless, and safe to update without restarting anything.</p>
+
+    <h2 id="naming">Naming and discovery</h2>
+    <p>Name your binary <code>curie-&lt;name&gt;</code> where <code>&lt;name&gt;</code> matches the key in the user's <code>[plugin.&lt;name&gt;]</code> table. Curie looks for the binary on <code>PATH</code>. There is no registry — installation is <code>cargo install</code> or any other mechanism that puts the binary on the path.</p>
+
+    <p>By convention, Curie plugins are published to crates.io so users can install them with a single <code>cargo install curie-&lt;name&gt;</code> command. Rust is the natural language because it produces fast, self-contained binaries with no JVM dependency, but any language works — the protocol is stdin/stdout JSON.</p>
+
+    <h2 id="manifest">Subcommand 1: manifest</h2>
+    <p>Called on every build, even when the output is up to date. Must be fast — read stdin, print to stdout, exit. No network, no disk writes.</p>
+
+    <h3>Invocation</h3>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>shell</span>
+      </header>
+<pre>curie-&lt;name&gt; manifest --project &lt;absolute-path-to-project-root&gt;</pre>
+    </div>
+
+    <h3>Stdin</h3>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>stdin (manifest)</span>
+      </header>
+<pre>{
+  <span class="str">"curie_version"</span>: <span class="str">"0.6.0"</span>,
+  <span class="str">"config"</span>: { <span class="com">/* the [plugin.name] TOML table, converted to JSON */</span> }
+}</pre>
+    </div>
+
+    <p><code>config</code> is the user's entire <code>[plugin.&lt;name&gt;]</code> block, including nested subtables, converted to JSON with TOML-to-JSON rules (inline tables and dotted keys both become objects). Ignore unknown top-level envelope fields for forward-compatibility.</p>
+
+    <h3>Stdout</h3>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>stdout (manifest response)</span>
+      </header>
+<pre>{
+  <span class="str">"name"</span>:        <span class="str">"myplugin"</span>,
+  <span class="str">"description"</span>: <span class="str">"one-line description shown in curie build output"</span>,
+  <span class="str">"version"</span>:     <span class="str">"0.1.0"</span>,
+  <span class="str">"types"</span>:       [<span class="str">"source-generator"</span>],
+
+  <span class="str">"inputs"</span>: {
+    <span class="str">"dirs"</span>:       [<span class="str">"proto"</span>],
+    <span class="str">"file_regex"</span>: <span class="str">"\\.proto$"</span>,
+    <span class="str">"files"</span>:      []
+  },
+
+  <span class="str">"outputs"</span>: {
+    <span class="str">"source_dirs"</span>: [<span class="str">"target/generated-sources/myplugin"</span>]
+  },
+
+  <span class="str">"artifacts"</span>: [
+    {
+      <span class="str">"id"</span>:         <span class="str">"mytool"</span>,
+      <span class="str">"group"</span>:     <span class="str">"com.example"</span>,
+      <span class="str">"artifact"</span>:  <span class="str">"mytool"</span>,
+      <span class="str">"version"</span>:   <span class="str">"1.0.0"</span>,
+      <span class="str">"classifier"</span>:<span class="str">"linux-x86_64"</span>,
+      <span class="str">"extension"</span>: <span class="str">"exe"</span>,
+      <span class="str">"executable"</span>:<span class="kw">true</span>
+    }
+  ]
+}</pre>
+    </div>
+
+    <h3>Manifest field reference</h3>
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>name</code></td><td>string</td><td>Yes</td><td>Plugin name, shown in build output</td></tr>
+        <tr><td><code>description</code></td><td>string</td><td>Yes</td><td>One-line description; shown in <code>curie build</code> progress</td></tr>
+        <tr><td><code>version</code></td><td>string</td><td>Yes</td><td>Plugin binary version; informational only</td></tr>
+        <tr><td><code>types</code></td><td>string[]</td><td>Yes</td><td>Capability list. Only <code>"source-generator"</code> is acted on today; include future roles here as the protocol evolves</td></tr>
+        <tr><td><code>inputs.dirs</code></td><td>string[]</td><td>No</td><td>Directories Curie watches. Paths are relative to the project root. The stamp is invalidated when any file under any of these dirs is added, removed, or modified</td></tr>
+        <tr><td><code>inputs.file_regex</code></td><td>string</td><td>No</td><td>Regex filter applied to files inside <code>inputs.dirs</code>. Only matching files contribute to the stamp. Omit to watch all files in the directories</td></tr>
+        <tr><td><code>inputs.files</code></td><td>string[]</td><td>No</td><td>Explicit file list, relative to project root. Watched in addition to <code>dirs</code>. Useful for a single spec file like <code>"api/spec.yaml"</code></td></tr>
+        <tr><td><code>outputs.source_dirs</code></td><td>string[]</td><td>Yes</td><td>Directories added to <code>javac</code>'s source roots after generation. Must be relative to the project root. Create them in <code>generate-sources</code> even when empty</td></tr>
+        <tr><td><code>artifacts[].id</code></td><td>string</td><td>Yes</td><td>Logical key used in the <code>generate-sources</code> stdin's <code>artifacts</code> map</td></tr>
+        <tr><td><code>artifacts[].group</code></td><td>string</td><td>Yes</td><td>Maven group ID</td></tr>
+        <tr><td><code>artifacts[].artifact</code></td><td>string</td><td>Yes</td><td>Maven artifact ID</td></tr>
+        <tr><td><code>artifacts[].version</code></td><td>string</td><td>Yes</td><td>Concrete version — no ranges</td></tr>
+        <tr><td><code>artifacts[].classifier</code></td><td>string</td><td>No</td><td>Maven classifier; omit for JARs, use platform-specific values for native binaries</td></tr>
+        <tr><td><code>artifacts[].extension</code></td><td>string</td><td>No</td><td>File extension; defaults to <code>"jar"</code></td></tr>
+        <tr><td><code>artifacts[].executable</code></td><td>bool</td><td>No</td><td>When <code>true</code>, Curie <code>chmod +x</code>es the cached file before passing its path to <code>generate-sources</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="generate-sources">Subcommand 2: generate-sources</h2>
+    <p>Called only when the stamp is stale. All declared artifacts have been downloaded before this call. Write generated sources to disk; write progress to stderr; exit 0 on success.</p>
+
+    <h3>Invocation</h3>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>shell</span>
+      </header>
+<pre>curie-&lt;name&gt; generate-sources --project &lt;absolute-path&gt; [--offline]</pre>
+    </div>
+
+    <p><code>--offline</code> is present when the user ran <code>curie build --offline</code>. Curie has already skipped downloading for offline builds; pass the flag along to any network calls your plugin makes internally.</p>
+
+    <h3>Stdin</h3>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>stdin (generate-sources)</span>
+      </header>
+<pre>{
+  <span class="str">"curie_version"</span>: <span class="str">"0.6.0"</span>,
+  <span class="str">"config"</span>: { <span class="com">/* same as manifest */</span> },
+  <span class="str">"artifacts"</span>: {
+    <span class="str">"mytool"</span>: <span class="str">"/home/user/.m2/repository/com/example/mytool/1.0.0/mytool-1.0.0-linux-x86_64.exe"</span>
+  }
+}</pre>
+    </div>
+
+    <p>The <code>artifacts</code> map uses the same <code>id</code> strings declared in the manifest, resolved to the absolute local cache path. The file exists and (when <code>executable: true</code>) is already marked executable.</p>
+
+    <h3>Stdout and stderr</h3>
+    <p>Write user-visible progress to <strong>stderr</strong> — Curie displays it during the build. Stdout is ignored. Exit 0 on success; any non-zero exit code is treated as a build error and the stamp is not written.</p>
+
+    <h2 id="stamp">Stamp file</h2>
+    <p>Curie manages the stamp at <code>target/.curie-plugins/&lt;name&gt;.stamp</code>. The plugin never reads or writes it directly. Curie writes the stamp after a successful <code>generate-sources</code> exit, recording the mtimes (and hashes for small files) of every input file matched by <code>inputs.dirs</code> + <code>inputs.file_regex</code> + <code>inputs.files</code>. On subsequent builds Curie compares current state against the stamp; if nothing changed, <code>generate-sources</code> is not called.</p>
+
+    <p>The stamp also records the <code>curie_version</code> and the plugin's own <code>version</code> field from the manifest. Upgrading either Curie or the plugin binary automatically invalidates the stamp so the next build regenerates cleanly.</p>
+
+    <h2 id="platform-detection">Platform detection</h2>
+    <p>When your plugin wraps a native tool distributed as platform-specific Maven artifacts (like <code>protoc</code>), detect the current OS and architecture in the <code>manifest</code> handler and emit the correct classifier. The plugin binary itself is native and has access to <code>std::env::consts</code> (Rust) or equivalent, so no external detection step is needed.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>src/main.rs — platform classifier</span>
+      </header>
+<pre><span class="kw">fn</span> platform_classifier() -> &amp;<span class="kw">'static str</span> {
+    <span class="kw">match</span> (std::env::consts::OS, std::env::consts::ARCH) {
+        (<span class="str">"linux"</span>,   <span class="str">"x86_64"</span>) => <span class="str">"linux-x86_64"</span>,
+        (<span class="str">"linux"</span>,   <span class="str">"aarch64"</span>) => <span class="str">"linux-aarch_64"</span>,
+        (<span class="str">"macos"</span>,   <span class="str">"x86_64"</span>) => <span class="str">"osx-x86_64"</span>,
+        (<span class="str">"macos"</span>,   <span class="str">"aarch64"</span>) => <span class="str">"osx-aarch_64"</span>,
+        (<span class="str">"windows"</span>, <span class="str">"x86_64"</span>) => <span class="str">"windows-x86_64"</span>,
+        _ => <span class="kw">panic!</span>(<span class="str">"unsupported platform"</span>),
+    }
+}</pre>
+    </div>
+
+    <p>For tools distributed as cross-platform JARs (like <code>openapi-generator-cli</code>), omit the classifier entirely — just set <code>"extension": "jar"</code>.</p>
+
+    <h2 id="minimal-example">Minimal Rust implementation</h2>
+    <p>A plugin needs very little code. Below is a complete skeleton — add your generation logic in <code>run_generate</code>.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>src/main.rs</span>
+      </header>
+<pre><span class="kw">use</span> serde::{Deserialize, Serialize};
+<span class="kw">use</span> serde_json::Value;
+<span class="kw">use</span> std::io::{self, Read};
+<span class="kw">use</span> std::path::PathBuf;
+
+<span class="com">// ── stdin envelope (same shape for both subcommands) ─────────────────────</span>
+<span class="kw">#[derive(Deserialize)]</span>
+<span class="kw">struct</span> Envelope {
+    <span class="kw">curie_version</span>: String,
+    <span class="kw">config</span>:        Value,
+    <span class="kw">#[serde(default)]</span>
+    <span class="kw">artifacts</span>:     std::collections::HashMap&lt;String, String&gt;,
+}
+
+<span class="com">// ── manifest response ─────────────────────────────────────────────────────</span>
+<span class="kw">#[derive(Serialize)]</span>
+<span class="kw">struct</span> Manifest {
+    <span class="kw">name</span>:        &amp;<span class="kw">'static str</span>,
+    <span class="kw">description</span>: &amp;<span class="kw">'static str</span>,
+    <span class="kw">version</span>:     &amp;<span class="kw">'static str</span>,
+    <span class="kw">types</span>:       Vec&lt;&amp;<span class="kw">'static str</span>&gt;,
+    <span class="kw">inputs</span>:      Inputs,
+    <span class="kw">outputs</span>:     Outputs,
+    <span class="kw">artifacts</span>:   Vec&lt;Artifact&gt;,
+}
+<span class="kw">#[derive(Serialize)]</span>
+<span class="kw">struct</span> Inputs { <span class="kw">dirs</span>: Vec&lt;String&gt;, <span class="kw">file_regex</span>: String }
+<span class="kw">#[derive(Serialize)]</span>
+<span class="kw">struct</span> Outputs { <span class="kw">source_dirs</span>: Vec&lt;String&gt; }
+<span class="kw">#[derive(Serialize)]</span>
+<span class="kw">struct</span> Artifact {
+    <span class="kw">id</span>: String, <span class="kw">group</span>: String, <span class="kw">artifact</span>: String,
+    <span class="kw">version</span>: String, <span class="kw">classifier</span>: String,
+    <span class="kw">extension</span>: String, <span class="kw">executable</span>: bool,
+}
+
+<span class="kw">fn</span> main() {
+    <span class="kw">let</span> args: Vec&lt;String&gt; = std::env::args().collect();
+    <span class="kw">let</span> subcommand = args.get(1).map(String::as_str).unwrap_or_default();
+    <span class="kw">let</span> project = project_root(&amp;args);
+
+    <span class="kw">let mut</span> stdin = String::new();
+    io::stdin().read_to_string(&amp;<span class="kw">mut</span> stdin).unwrap();
+    <span class="kw">let</span> env: Envelope = serde_json::from_str(&amp;stdin).unwrap();
+
+    <span class="kw">match</span> subcommand {
+        <span class="str">"manifest"</span>         => run_manifest(&amp;env, &amp;project),
+        <span class="str">"generate-sources"</span> => run_generate(&amp;env, &amp;project),
+        other => {
+            eprintln!(<span class="str">"unknown subcommand: {other}"</span>);
+            std::process::exit(1);
+        }
+    }
+}
+
+<span class="kw">fn</span> project_root(args: &amp;[String]) -> PathBuf {
+    args.windows(2)
+        .find(|w| w[0] == <span class="str">"--project"</span>)
+        .map(|w| PathBuf::from(&amp;w[1]))
+        .unwrap_or_else(|| std::env::current_dir().unwrap())
+}
+
+<span class="kw">fn</span> run_manifest(env: &amp;Envelope, project: &amp;PathBuf) {
+    <span class="kw">let</span> version = env.config[<span class="str">"version"</span>].as_str().unwrap_or(<span class="str">"1.0.0"</span>);
+    <span class="kw">let</span> source_dir = env.config[<span class="str">"sourceDir"</span>].as_str().unwrap_or(<span class="str">"input"</span>);
+    <span class="kw">let</span> out_dir = format!(<span class="str">"target/generated-sources/myplugin"</span>);
+
+    <span class="kw">let</span> manifest = Manifest {
+        name:        <span class="str">"myplugin"</span>,
+        description: <span class="str">"Generate sources with mytool"</span>,
+        version:     env!(<span class="str">"CARGO_PKG_VERSION"</span>),
+        types:       vec![<span class="str">"source-generator"</span>],
+        inputs:      Inputs {
+            dirs:       vec![source_dir.to_string()],
+            file_regex: <span class="str">"\\.myext$"</span>.to_string(),
+        },
+        outputs:     Outputs { source_dirs: vec![out_dir] },
+        artifacts:   vec![Artifact {
+            id:         <span class="str">"mytool"</span>.to_string(),
+            group:      <span class="str">"com.example"</span>.to_string(),
+            artifact:   <span class="str">"mytool"</span>.to_string(),
+            version:    version.to_string(),
+            classifier: platform_classifier().to_string(),
+            extension:  <span class="str">"exe"</span>.to_string(),
+            executable: <span class="kw">true</span>,
+        }],
+    };
+    println!(<span class="str">"{}"</span>, serde_json::to_string(&amp;manifest).unwrap());
+}
+
+<span class="kw">fn</span> run_generate(env: &amp;Envelope, project: &amp;PathBuf) {
+    <span class="kw">let</span> mytool = &amp;env.artifacts[<span class="str">"mytool"</span>];
+    <span class="kw">let</span> out = project.join(<span class="str">"target/generated-sources/myplugin"</span>);
+    std::fs::create_dir_all(&amp;out).unwrap();
+
+    <span class="com">// invoke the tool; write progress to stderr</span>
+    eprintln!(<span class="str">"Running mytool..."</span>);
+    <span class="kw">let</span> status = std::process::Command::new(mytool)
+        .arg(<span class="str">"--output"</span>)
+        .arg(&amp;out)
+        .status()
+        .expect(<span class="str">"failed to run mytool"</span>);
+    <span class="kw">if</span> !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
+<span class="kw">fn</span> platform_classifier() -> &amp;<span class="kw">'static str</span> {
+    <span class="kw">match</span> (std::env::consts::OS, std::env::consts::ARCH) {
+        (<span class="str">"linux"</span>,   <span class="str">"x86_64"</span>)  => <span class="str">"linux-x86_64"</span>,
+        (<span class="str">"linux"</span>,   <span class="str">"aarch64"</span>) => <span class="str">"linux-aarch_64"</span>,
+        (<span class="str">"macos"</span>,   <span class="str">"x86_64"</span>)  => <span class="str">"osx-x86_64"</span>,
+        (<span class="str">"macos"</span>,   <span class="str">"aarch64"</span>) => <span class="str">"osx-aarch_64"</span>,
+        (<span class="str">"windows"</span>, <span class="str">"x86_64"</span>)  => <span class="str">"windows-x86_64"</span>,
+        _ => <span class="kw">panic!</span>(<span class="str">"unsupported platform"</span>),
+    }
+}</pre>
+    </div>
+
+    <p>Add to <code>Cargo.toml</code>:</p>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Cargo.toml</span>
+      </header>
+<pre>[package]
+name    = <span class="str">"curie-myplugin"</span>
+version = <span class="str">"0.1.0"</span>
+edition = <span class="str">"2021"</span>
+
+[[bin]]
+name = <span class="str">"curie-myplugin"</span>
+path = <span class="str">"src/main.rs"</span>
+
+[dependencies]
+serde      = { version = <span class="str">"1"</span>, features = [<span class="str">"derive"</span>] }
+serde_json = <span class="str">"1"</span></pre>
+    </div>
+
+    <h2 id="testing">Testing the plugin locally</h2>
+    <p>Build and install your plugin into the local cargo bin directory, then point a test project at it:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>terminal</span>
+      </header>
+<pre><span class="dim"># in your plugin repo</span>
+cargo build
+export PATH="$PWD/target/debug:$PATH"
+
+<span class="dim"># in your test project</span>
+curie build   <span class="dim"># picks up curie-myplugin from PATH</span></pre>
+    </div>
+
+    <p>You can also test the subcommands directly by piping JSON on stdin:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>terminal</span>
+      </header>
+<pre>echo '{"curie_version":"0.6.0","config":{"version":"1.0.0","sourceDir":"input"}}' \
+  | curie-myplugin manifest --project /tmp/testproject
+
+echo '{"curie_version":"0.6.0","config":{"version":"1.0.0"},"artifacts":{"mytool":"/usr/local/bin/mytool"}}' \
+  | curie-myplugin generate-sources --project /tmp/testproject</pre>
+    </div>
+
+    <h2 id="output-dirs">Output directory conventions</h2>
+    <ul>
+      <li>Always create <code>outputs.source_dirs</code> in <code>generate-sources</code>, even when generation produces no files. Curie tries to add them to <code>javac</code>'s source path; a missing directory causes a compile error.</li>
+      <li>Use <code>target/generated-sources/&lt;plugin-name&gt;/</code> as the output root. This keeps generated sources out of version control (<code>target/</code> is always in <code>.gitignore</code>) and makes them easy to find.</li>
+      <li>Delete stale generated files before regenerating, or use a deterministic write (overwrite every file). Curie does not clean the output directory between runs.</li>
+    </ul>
+
+    <h2 id="error-handling">Error handling</h2>
+    <ul>
+      <li><strong>manifest errors</strong> — exit non-zero with a message on stderr. Curie treats this as a build error and stops.</li>
+      <li><strong>generate-sources errors</strong> — exit non-zero. Curie reports the error and does not write the stamp. The user will see the plugin's stderr output in the build log.</li>
+      <li><strong>Unknown config keys</strong> — ignore them silently. New Curie.toml keys added in future Curie versions should not break old plugins.</li>
+      <li><strong>Missing required config</strong> — exit non-zero from <code>manifest</code> with a helpful error. For example: <code>"error: [plugin.myplugin] 'version' is required"</code>.</li>
+    </ul>
+
+    <h2 id="publishing">Publishing</h2>
+    <p>Name your crate <code>curie-&lt;name&gt;</code> on crates.io. Users install it with:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>terminal</span>
+      </header>
+<pre>cargo install curie-myplugin</pre>
+    </div>
+
+    <p>In your <code>Cargo.toml</code> include a description, homepage, and repository so the crates.io listing is discoverable:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Cargo.toml</span>
+      </header>
+<pre>[package]
+name        = <span class="str">"curie-myplugin"</span>
+description = <span class="str">"Curie plugin: generate Java sources from .myext files"</span>
+repository  = <span class="str">"https://github.com/example/curie-myplugin"</span>
+homepage    = <span class="str">"https://github.com/example/curie-myplugin"</span>
+keywords    = [<span class="str">"curie"</span>, <span class="str">"build"</span>, <span class="str">"codegen"</span>]
+categories  = [<span class="str">"development-tools"</span>]</pre>
+    </div>
+
+    <h2 id="reference-impl">Reference implementation</h2>
+    <p><a href="https://github.com/atteo/curie-protobuf" target="_blank" rel="noopener"><code>curie-protobuf</code></a> is the canonical example. Read its source to see platform detection, gRPC conditional artifacts, and multi-flag <code>protoc</code> invocation in a real plugin.</p>
+
+    <div class="pager">
+      <a href="/docs/plugins.html">
+        <span>← Previous</span>
+        <strong>Plugins</strong>
+      </a>
+      <a href="/docs/docker.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Docker</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

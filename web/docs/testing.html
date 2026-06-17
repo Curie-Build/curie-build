@@ -51,6 +51,7 @@
       <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
       <li><a href="/docs/testing.html">Testing</a></li>
       <li><a href="/docs/plugins.html">Plugins</a></li>
+      <li><a href="/docs/plugin-authoring.html">Plugin authoring</a></li>
 
       <li><span class="nav-group">Deploy</span></li>
       <li><a href="/docs/docker.html">Docker</a></li>
@@ -192,8 +193,6 @@
 
     <h2>Incremental test runs</h2>
     <p>Curie stamps the test classes directory + the dep JARs + the test resources, and skips the JVM round-trip when none of those have changed since the last green run. A pure <code>curie test</code> on an unchanged tree exits in milliseconds with <code>Tests up to date</code>.</p>
-
-    <p>JVM startup is still the dominant cost on a real test run — a long-lived JVM daemon for sub-second TDD loops is on the roadmap.</p>
 
     <div class="pager">
       <a href="/docs/resolver.html">
