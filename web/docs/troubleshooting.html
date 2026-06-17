@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Troubleshooting · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/installation.html">Installation</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/plugins.html">Plugins</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
+      <li><a href="/docs/maven.html">Maven sync</a></li>
+
+      <li><span class="nav-group">Reference</span></li>
+      <li><a href="/docs/reference.html">TOML reference</a></li>
+      <li><a href="/docs/troubleshooting.html">Troubleshooting</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Reference · troubleshooting</span>
+    <h1>Troubleshooting</h1>
+    <p class="lede">Common errors and how to fix them.</p>
+
+    <h2 id="checksum-mismatch">Checksum mismatch</h2>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+      </header>
+<pre><span class="err">error</span>: checksum mismatch for com.example:foo:1.0.0
+       expected: a3f1b2c4...
+       actual:   deadbeef...</pre>
+    </div>
+
+    <p>The JAR on disk does not match the hash stored alongside it. This usually has one of three causes:</p>
+    <ul>
+      <li><strong>Partial download</strong> — the download was interrupted and a truncated file was cached. Delete the artifact from <code>~/.m2/repository</code> and re-run <code>curie build</code> (or <code>curie fetch</code>) to re-download it.</li>
+      <li><strong>Corrupted local cache</strong> — the file was edited or truncated by another tool. Same fix: delete and re-fetch.</li>
+      <li><strong>Repository published a different artifact at the same version</strong> — rare, but happens with snapshot repositories. Verify the artifact hash from a trusted source; if the repository deliberately changed a released artifact, treat it as a security incident.</li>
+    </ul>
+
+    <p>To delete a specific artifact:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+      </header>
+<pre>rm -rf ~/.m2/repository/com/example/foo/1.0.0/</pre>
+    </div>
+
+    <h2 id="missing-artifact">Missing artifact / artifact not found</h2>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+      </header>
+<pre><span class="err">error</span>: artifact not found: com.example:foo:1.0.0</pre>
+    </div>
+
+    <p>Curie could not find the artifact in any configured repository. Common causes:</p>
+    <ul>
+      <li><strong>Version typo</strong> — double-check the version string in <code>Curie.toml</code>.</li>
+      <li><strong>Private repository not declared</strong> — if the artifact is in a private Nexus or Artifactory instance, add a <code>[[repositories]]</code> entry pointing to it. See <a href="/docs/resolver.html">Resolver &amp; checksums</a>.</li>
+      <li><strong>Artifact only exists in a snapshot repository</strong> — snapshot repositories must be explicitly listed; Curie does not add them by default.</li>
+      <li><strong>BOM version mismatch</strong> — if you declared an empty version <code>""</code>, the BOM must include the artifact. Run <code>curie deps</code> to see what version the BOM resolves to.</li>
+    </ul>
+
+    <h2 id="offline-cache-miss">Offline build fails with cache miss</h2>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+      </header>
+<pre><span class="err">error</span>: offline mode is enabled but artifact is not cached:
+       com.example:foo:1.0.0</pre>
+    </div>
+
+    <p>You ran <code>curie build --offline</code> (or <code>mvn --offline</code>) but the artifact is not in <code>~/.m2/repository</code>. The fix is to pre-fetch the missing artifact while online:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+      </header>
+<pre>curie fetch com.example:foo:1.0.0</pre>
+    </div>
+
+    <p>For a full offline setup — for example in a CI environment without internet access — use <code>curie fetch --file</code> to pre-populate the entire cache from a coordinate list. See the <a href="/docs/resolver.html#bulk-pre-fetch-from-a-file">Bulk pre-fetch</a> section for the workflow.</p>
+
+    <h2 id="no-main-method">No main class found / multiple main classes</h2>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+      </header>
+<pre><span class="err">error</span>: no main class found in compiled output
+<span class="err">error</span>: multiple main classes found — set mainClass explicitly:
+       com.example.App
+       com.example.tools.DebugRunner</pre>
+    </div>
+
+    <p>Curie scans compiled <code>.class</code> files for a <code>public static void main(String[])</code> method (and for Java 21+ instance main methods). When it finds zero or more than one, the build fails.</p>
+
+    <ul>
+      <li><strong>Zero found</strong> — make sure the main class is in a source directory Curie can see (<code>src/</code>, <code>src/main/java/</code>, or flat-package layout). Check that it actually has a valid <code>main</code> signature.</li>
+      <li><strong>Multiple found</strong> — set <code>mainClass = "com.example.App"</code> in the <code>[application]</code> section to pick one explicitly.</li>
+    </ul>
+
+    <h2 id="stale-class-loop">Build keeps recompiling even when nothing changed</h2>
+
+    <p>Curie uses file modification timestamps and content hashes to detect changed inputs. If the build repeatedly recompiles despite no source changes, the most common causes are:</p>
+
+    <ul>
+      <li><strong>Annotation processor generating non-deterministic output</strong> — some processors embed timestamps or random IDs in generated files. Each build produces different output, which triggers the next build to recompile. Check your processor's documentation for a stable-output mode.</li>
+      <li><strong>JDK version changed</strong> — Curie rebuilds when the running JDK version changes (detected automatically). If you are switching JDKs frequently (e.g. via <code>JAVA_HOME</code>), this is expected behavior. Pin <code>releaseVersion</code> in <code>[java]</code> to suppress bytecode changes from JDK upgrades.</li>
+      <li><strong>File system clock skew</strong> — rare in local development, more common in Docker volumes or NFS mounts. If timestamps are unreliable, Curie falls back to content hashing, which is slower but correct.</li>
+      <li><strong>Corrupted incremental state</strong> — delete <code>target/</code> and run a clean build: <code>curie build</code> after removing <code>target/</code>.</li>
+    </ul>
+
+    <h2 id="version-range">Version range in dependency POM</h2>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+      </header>
+<pre><span class="err">error</span>: version range "[4.9,)" is not supported — declare an explicit version</pre>
+    </div>
+
+    <p>A transitive dependency POM declares a version range (e.g. <code>[4.9,)</code>) instead of a fixed version. Curie's resolver requires concrete versions for reproducibility. To fix it, add an explicit version for the affected artifact in <code>[dependencies]</code> (or <code>[bom-imports]</code>) so that Curie's nearest-wins rule selects your explicit version before the range-declaring transitive POM is reached:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[dependencies]</span>
+<span class="com"># pin the version that the range "[4.9,)" would normally resolve to</span>
+<span class="pkg">"junit:junit"</span> = <span class="str">"4.13.2"</span></pre>
+    </div>
+
+    <p>When using <code>curie fetch --file</code> for offline pre-fetching, version ranges are automatically skipped (they cannot be pre-fetched without a network request anyway). The coordinate file should list the concrete version you intend to use.</p>
+
+    <h2 id="workspace-build-order">Workspace member builds in wrong order</h2>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+      </header>
+<pre><span class="err">error</span>: could not resolve workspace dependency "core" — did you declare it in [workspace-dependencies]?</pre>
+    </div>
+
+    <p>Curie computes a topological build order from <code>[workspace-dependencies]</code> entries. If a member depends on another member but doesn't declare the <code>[workspace-dependencies]</code> entry, Curie won't know to build the upstream member first.</p>
+
+    <p>Check that every intra-workspace dependency is declared:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>app/Curie.toml</span>
+      </header>
+<pre><span class="kw">[workspace-dependencies]</span>
+<span class="kw">core</span> = { <span class="kw">path</span> = <span class="str">"../core"</span> }</pre>
+    </div>
+
+    <h2 id="missing-sidecar">Missing checksum sidecar</h2>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+      </header>
+<pre><span class="err">error</span>: no checksum sidecar found for com.example:foo:1.0.0
+       tried: .sha256, .sha1</pre>
+    </div>
+
+    <p>Curie requires a <code>.sha256</code> or <code>.sha1</code> sidecar from the same repository as the artifact. If a repository is missing sidecars it usually means:</p>
+    <ul>
+      <li>The repository is a raw file server, not a proper Maven repository — Maven-compatible repositories always publish checksums.</li>
+      <li>A corporate proxy is stripping sidecar files — contact your infrastructure team to allow <code>.sha256</code> and <code>.sha1</code> through.</li>
+      <li>The artifact was uploaded manually without checksums — regenerate them with <code>mvn deploy:deploy-file</code> or your repository manager's REST API.</li>
+    </ul>
+
+    <h2 id="getting-help">Still stuck?</h2>
+    <p>Open an issue on <a href="https://github.com/atteo/curie-build/issues" target="_blank" rel="noopener">GitHub</a>. Include the full error output and the relevant section of your <code>Curie.toml</code>.</p>
+
+    <div class="pager">
+      <a href="/docs/reference.html">
+        <span>← Previous</span>
+        <strong>TOML reference</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

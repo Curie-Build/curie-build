@@ -64,6 +64,10 @@
       <li><a href="/docs/scaffold.html">Scaffolding</a></li>
       <li><a href="/docs/inspect.html">Build Inspect</a></li>
       <li><a href="/docs/maven.html">Maven sync</a></li>
+
+      <li><span class="nav-group">Reference</span></li>
+      <li><a href="/docs/reference.html">TOML reference</a></li>
+      <li><a href="/docs/troubleshooting.html">Troubleshooting</a></li>
     </ul>
   </aside>
 
@@ -139,9 +143,9 @@ Hello from my-app.</pre>
 <span class="kw">mainClass</span> = <span class="str">"com.example.Main"</span>  <span class="com"># optional — auto-detected if omitted</span>
 <span class="kw">groupId</span>   = <span class="str">"com.example"</span>       <span class="com"># required for curie publish</span>
 
-<span class="com"># Java version passed to javac --release (default: 21)</span>
+<span class="com"># Java version for javac --release (optional — omit to target the running JDK)</span>
 <span class="kw">[java]</span>
-<span class="kw">releaseVersion</span> = <span class="str">"21"</span>
+<span class="kw">releaseVersion</span> = <span class="str">"25"</span>
 
 <span class="com"># JUnit Platform Console Standalone version (workspace-inheritable)</span>
 <span class="kw">[test]</span>

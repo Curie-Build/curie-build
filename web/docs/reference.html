@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TOML reference · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/installation.html">Installation</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/plugins.html">Plugins</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
+      <li><a href="/docs/maven.html">Maven sync</a></li>
+
+      <li><span class="nav-group">Reference</span></li>
+      <li><a href="/docs/reference.html">TOML reference</a></li>
+      <li><a href="/docs/troubleshooting.html">Troubleshooting</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Reference · Curie.toml</span>
+    <h1>TOML reference</h1>
+    <p class="lede">Every key accepted by <code>Curie.toml</code>, with its type, default value, and whether it can be declared in a workspace root and inherited by members.</p>
+
+    <p>Keys marked <strong>W</strong> in the Inherited column are workspace-inheritable: declare them in the root <code>Curie.toml</code> and every member picks them up. A member that declares the same key <em>overrides</em> the inherited value (for scalar fields) or <em>merges</em> with it (for maps — member entries take precedence on collision).</p>
+
+    <h2 id="project-type">[application] / [library] / [bom]</h2>
+    <p>Exactly one of these sections must appear in every non-workspace <code>Curie.toml</code>. A workspace root has <code>[workspace]</code> and none of these.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>name</code></td><td>string</td><td>Yes</td><td>—</td><td>Base name of the output JAR; Docker image name default</td></tr>
+        <tr><td><code>version</code></td><td>string</td><td>Yes</td><td>—</td><td>Embedded in the JAR filename and <code>MANIFEST.MF</code></td></tr>
+        <tr><td><code>mainClass</code></td><td>string</td><td>No</td><td>Auto-detected</td><td><code>[application]</code> only. Must be set when more than one main class exists</td></tr>
+        <tr><td><code>groupId</code></td><td>string</td><td>No</td><td>—</td><td>Required for <code>curie publish</code> and SBOM metadata</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="workspace">[workspace]</h2>
+    <p>Required in a workspace root; absent in member projects.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>members</code></td><td>string[]</td><td>Yes</td><td>—</td><td>Relative paths to member directories, each containing its own <code>Curie.toml</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="java">[java]</h2>
+    <p>Controls Java compilation. Workspace-inheritable — a root-level <code>[java]</code> block applies to every member that does not declare its own.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Inherited</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>releaseVersion</code></td><td>string</td><td>W</td><td>Running JDK</td><td>Passed to <code>javac --release</code>. Omit to target the running JDK's version automatically</td></tr>
+        <tr><td><code>enablePreview</code></td><td>bool</td><td>W</td><td><code>false</code></td><td>Adds <code>--enable-preview</code> to <code>javac</code> and the test JVM. When no <code>releaseVersion</code> is set, Curie supplies <code>--release &lt;running-jdk&gt;</code> as required by <code>javac</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="kotlin">[kotlin]</h2>
+    <p>Enables Kotlin compilation. Only needed when <code>.kt</code> source files are present. Workspace-inheritable.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Inherited</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>version</code></td><td>string</td><td>W</td><td>—</td><td>Kotlin compiler and stdlib version. Required when Kotlin sources are present</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="groovy">[groovy]</h2>
+    <p>Enables Groovy compilation. Workspace-inheritable.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Inherited</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>version</code></td><td>string</td><td>W</td><td>—</td><td>Groovy version used for compilation and the Spock framework</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="spock">[spock]</h2>
+    <p>Configures Spock Framework integration. Workspace-inheritable.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Inherited</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>enabled</code></td><td>bool</td><td>W</td><td><code>false</code></td><td>Add <code>org.spockframework:spock-core</code> to the test classpath. A member can set <code>false</code> to opt out of a workspace-inherited <code>true</code></td></tr>
+        <tr><td><code>version</code></td><td>string</td><td>W</td><td>—</td><td>Spock version; required when <code>enabled = true</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="test">[test]</h2>
+    <p>Controls test execution. Workspace-inheritable.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Inherited</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>junitPlatformVersion</code></td><td>string</td><td>W</td><td><code>6.0.3</code></td><td>Version of JUnit Platform Console Standalone used to run tests</td></tr>
+        <tr><td><code>coverage</code></td><td>bool</td><td>W</td><td><code>false</code></td><td>Enable JaCoCo coverage instrumentation. Produces <code>target/jacoco.exec</code> and an HTML report</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="dependencies">[dependencies] / [test-dependencies]</h2>
+    <p>Maps of <code>"group:artifact"</code> to a version string or inline table. Not workspace-inheritable — each member declares its own dependencies.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[dependencies]</span>
+<span class="pkg">"com.fasterxml.jackson.core:jackson-databind"</span> = <span class="str">"2.17.2"</span>
+<span class="pkg">"net.shibboleth.oidc:oidc-common"</span>             = { version = <span class="str">"3.3.0"</span>, repository = <span class="str">"shibboleth"</span> }
+<span class="pkg">"com.google.guava:guava"</span>                       = { version = <span class="str">""</span>, exclusions = [<span class="str">"com.google.guava:listenablefuture"</span>] }
+
+<span class="kw">[test-dependencies]</span>
+<span class="pkg">"org.assertj:assertj-core"</span> = <span class="str">"3.26.0"</span></pre>
+    </div>
+
+    <table>
+      <thead><tr><th>Inline key</th><th>Type</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>version</code></td><td>string</td><td>Empty string <code>""</code> defers to a BOM import</td></tr>
+        <tr><td><code>repository</code></td><td>string</td><td>ID of a <code>[[repositories]]</code> entry; routes this artifact to that repo</td></tr>
+        <tr><td><code>exclusions</code></td><td>string[]</td><td>Transitive artifacts to drop, as <code>"group:artifact"</code> coordinates</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="bom-imports">[bom-imports] / [test-bom-imports]</h2>
+    <p>BOM imports for version management. Workspace-inheritable — member entries are merged in and take precedence on collision.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[bom-imports]</span>
+<span class="pkg">"com.fasterxml.jackson:jackson-bom"</span> = <span class="str">"2.17.2"</span>
+
+<span class="kw">[test-bom-imports]</span>
+<span class="pkg">"org.junit:junit-bom"</span> = <span class="str">"5.11.0"</span></pre>
+    </div>
+
+    <h2 id="annotation-processors">[annotation-processors] / [test-annotation-processors]</h2>
+    <p>Processors placed on the annotation processor path during compilation. Workspace-inheritable — member entries are merged in and take precedence on collision.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[annotation-processors]</span>
+<span class="pkg">"org.projectlombok:lombok"</span> = <span class="str">"1.18.32"</span>
+<span class="pkg">"com.google.auto.value:auto-value"</span> = { version = <span class="str">"1.11.0"</span>, on-compile-classpath = <span class="kw">true</span> }
+
+<span class="kw">[test-annotation-processors]</span>
+<span class="pkg">"com.example:test-proc"</span> = <span class="str">"1.0.0"</span></pre>
+    </div>
+
+    <table>
+      <thead><tr><th>Inline key</th><th>Type</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>version</code></td><td>string</td><td>Empty string defers to a BOM import</td></tr>
+        <tr><td><code>on-compile-classpath</code></td><td>bool</td><td>Also place on the regular compile classpath — required by Lombok and some other processors whose annotations must be visible to <code>javac</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="repositories">[[repositories]]</h2>
+    <p>Additional Maven repositories. Array of tables; workspace-inheritable (member entries are appended). Maven Central is always included and does not need to be declared.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>id</code></td><td>string</td><td>Yes</td><td>Unique identifier; referenced by <code>repository = "id"</code> in dependency entries</td></tr>
+        <tr><td><code>url</code></td><td>string</td><td>Yes</td><td>Base URL of the repository</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="workspace-dependencies">[workspace-dependencies]</h2>
+    <p>Declares intra-workspace dependencies. Each key is a logical name; the value is an inline table with a <code>path</code> pointing to another workspace member.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>app/Curie.toml</span>
+      </header>
+<pre><span class="kw">[workspace-dependencies]</span>
+<span class="kw">core</span>  = { <span class="kw">path</span> = <span class="str">"../core"</span> }
+<span class="kw">utils</span> = { <span class="kw">path</span> = <span class="str">"../utils"</span> }</pre>
+    </div>
+
+    <h2 id="docker">[docker]</h2>
+    <p>Enables Docker image building. The section is activated by its presence or by a <code>Dockerfile</code> at the project root.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>baseImage</code></td><td>string</td><td><code>eclipse-temurin:21-jre-alpine</code></td><td>Base image for the generated <code>Dockerfile</code></td></tr>
+        <tr><td><code>imageName</code></td><td>string</td><td><code>application.name</code></td><td>Docker image name</td></tr>
+        <tr><td><code>imageTag</code></td><td>string</td><td><code>application.version</code></td><td>Docker image tag</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="native-image">[native-image]</h2>
+    <p>GraalVM native-image compilation.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>outputName</code></td><td>string</td><td><code>application.name</code></td><td>Name of the produced native binary</td></tr>
+        <tr><td><code>configDir</code></td><td>string</td><td>—</td><td>Directory containing native-image configuration files (<code>reflect-config.json</code>, etc.)</td></tr>
+        <tr><td><code>extraArgs</code></td><td>string[]</td><td><code>[]</code></td><td>Extra flags passed to <code>native-image</code>, e.g. <code>["--no-fallback"]</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="fat-jar">[fat-jar]</h2>
+    <p>Enables fat JAR (uber JAR) packaging — all dependency classes merged into a single JAR.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>enabled</code></td><td>bool</td><td><code>false</code></td><td>When <code>true</code>, extracts dependency JARs and merges them into the output JAR. The <code>Class-Path</code> manifest entry is omitted</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="build-info">[build-info]</h2>
+    <p>Controls embedding of git metadata in the JAR.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>enabled</code></td><td>bool</td><td><code>true</code></td><td>When <code>true</code> and the project is inside a git repo, embeds <code>META-INF/build-info.properties</code> containing <code>git.commit.id</code>. Suffixed with <code>-dirty</code> if there are uncommitted changes</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="publish">[publish]</h2>
+    <p>Controls <code>curie publish</code> — publishing artifacts to a Maven repository.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>repository</code></td><td>string</td><td>Yes</td><td>ID of a <code>[[repositories]]</code> entry to publish to</td></tr>
+        <tr><td><code>sign</code></td><td>bool</td><td>No</td><td>Sign artifacts with GPG before publishing</td></tr>
+        <tr><td><code>description</code></td><td>string</td><td>No</td><td>Human-readable description embedded in the POM</td></tr>
+        <tr><td><code>homepage</code></td><td>string</td><td>No</td><td>Project URL embedded in the POM</td></tr>
+        <tr><td><code>licenses</code></td><td>string[]</td><td>No</td><td>SPDX license identifiers, e.g. <code>["Apache-2.0"]</code></td></tr>
+        <tr><td><code>developers</code></td><td>object[]</td><td>No</td><td>Each entry has <code>id</code>, <code>name</code>, and <code>email</code> string fields</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="maven">[maven]</h2>
+    <p>Controls <code>curie maven sync</code> — generating a <code>pom.xml</code> from <code>Curie.toml</code>. See <a href="/docs/maven.html">Maven sync</a> for full details.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>pinTransitive</code></td><td>bool</td><td><code>false</code></td><td>When <code>true</code>, resolves the full transitive closure and emits every version into <code>&lt;dependencyManagement&gt;</code> so Maven's version mediation cannot diverge from Curie's resolver</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="modules">[modules]</h2>
+    <p>Java Platform Module System (JPMS) configuration. See <a href="/docs/modules.html">JPMS</a> for full details.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>enabled</code></td><td>bool</td><td><code>false</code></td><td>Enables JPMS mode. Requires a <code>module-info.java</code> at the source root</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="plugins">[plugins.*]</h2>
+    <p>Declares Maven plugins for use with <code>curie maven sync</code>. Each sub-key is a <code>group:artifact</code> coordinate for a Maven plugin. See <a href="/docs/plugins.html">Plugins</a> and <a href="/docs/maven.html">Maven sync</a> for details.</p>
+
+    <div class="pager">
+      <a href="/docs/maven.html">
+        <span>← Previous</span>
+        <strong>Maven sync</strong>
+      </a>
+      <a href="/docs/troubleshooting.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Troubleshooting</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>
