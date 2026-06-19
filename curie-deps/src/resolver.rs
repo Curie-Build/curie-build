@@ -2,8 +2,10 @@
 //!
 //! # Algorithm
 //! 1. For each declared `Gav`, check `~/.m2/repository` for the JAR and POM.
-//! 2. On cache miss, try each configured repository in order; download to a
-//!    `.part` file, rename atomically on success.
+//! 2. On cache miss, try each configured repository in order; download using a
+//!    unique collocated staging file and atomic rename (with tolerant handling
+//!    when another writer wins). An in-process gate prevents concurrent writers
+//!    for the same final artifact inside one process.
 //! 3. Parse the POM to discover compile-scoped transitive dependencies.
 //! 4. Recurse (BFS) until the full closure is resolved.  Only POMs are
 //!    fetched during BFS — this is Phase 1.
@@ -48,9 +50,66 @@ use reqwest::blocking::Client;
 use anyhow::{bail, Context, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::Duration;
+
+// ---------------------------------------------------------------------------
+// In-process coordination for concurrent artifact downloads (bug #2 fix).
+// Keys are the final local repository path strings (unique per GAV+kind).
+// This is the analogue of Maven Resolver's named SyncContext acquire step.
+// ---------------------------------------------------------------------------
+
+/// Monotonic id for unique collocated staging files within this process.
+static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Map from final destination path -> Condvar used to wake waiters.
+/// Protected by OnceLock so we have a true process-global without lazy_static.
+static INFLIGHT: OnceLock<Mutex<HashMap<String, Arc<Condvar>>>> = OnceLock::new();
+
+fn get_inflight() -> &'static Mutex<HashMap<String, Arc<Condvar>>> {
+    INFLIGHT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Returns true if this caller became the "responsible" downloader for `key`.
+/// Returns false if another thread is already downloading it (caller should wait).
+fn claim_or_wait_for_download(key: &str) -> bool {
+    let mut map = get_inflight().lock().unwrap();
+    if map.contains_key(key) {
+        // Another thread is responsible; the caller will wait.
+        false
+    } else {
+        map.insert(key.to_string(), Arc::new(Condvar::new()));
+        true
+    }
+}
+
+/// Called by the responsible thread after it has finished (success or failure).
+/// Wakes any threads waiting for this key.
+fn release_download_slot(key: &str) {
+    let mut map = get_inflight().lock().unwrap();
+    if let Some(cvar) = map.remove(key) {
+        cvar.notify_all();
+    }
+}
+
+/// Wait (by polling existence + short sleeps) until the artifact at `dest`
+/// appears or a generous timeout elapses. Used by threads that lost the
+/// in-flight claim. Polling is simple and sufficient for download timescales.
+fn wait_for_artifact_to_appear(dest: &Path) {
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(300); // very generous; real downloads are much faster
+    while !dest.exists() {
+        if start.elapsed() > timeout {
+            // Give up waiting; the caller will hit the normal exists check
+            // (or a later error) and behave correctly.
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
 
 /// Options for the resolver.
 pub struct ResolveOptions {
@@ -1225,13 +1284,37 @@ fn ensure_artifact(
         );
     }
 
-    // Ensure parent directory exists.
+    // Ensure parent directory exists (before any download attempt).
     if let Some(parent) = local_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create cache dir {}", parent.display()))?;
     }
 
-    // Show which artifact is being fetched on this thread's spinner line.
+    // -------------------------------------------------------------------
+    // In-process coordination gate (Layer A).
+    // Only one thread in this process may perform the network+commit work
+    // for a given final artifact path at a time. Others wait for it to appear.
+    // This prevents the classic "two threads writing the same .part" race
+    // inside parallel_pom_fetch, Phase-2 JAR downloads, and run_jobs.
+    // -------------------------------------------------------------------
+    let local_key = local_path.to_string_lossy().to_string();
+    let responsible = claim_or_wait_for_download(&local_key);
+
+    if !responsible {
+        // Another thread is fetching this exact artifact (same POM or JAR).
+        // Wait for the file to materialise, then treat as a normal cache hit.
+        wait_for_artifact_to_appear(&local_path);
+        if local_path.exists() {
+            ensure_verified(&local_path, &relative, repos, client, offline)
+                .with_context(|| format!("checksum verification failed for cached {}", gav))?;
+            return Ok(local_path);
+        }
+        // Rare: timed out waiting. Fall through and try ourselves (we will
+        // still claim below on the next iteration of an outer loop if we add one,
+        // but for simplicity we proceed to attempt; the FS layer will still protect).
+    }
+
+    // We are responsible for this artifact (or the waiter gave up). Show progress.
     if let Some(sp) = thread_pb {
         sp.set_message(gav.notation());
         sp.enable_steady_tick(std::time::Duration::from_millis(80));
@@ -1246,6 +1329,9 @@ fn ensure_artifact(
                 if let Some(bar) = summary_pb {
                     bar.inc(1);
                 }
+                if responsible {
+                    release_download_slot(&local_key);
+                }
                 return Ok(local_path);
             }
             Err(e) => {
@@ -1254,11 +1340,68 @@ fn ensure_artifact(
         }
     }
 
+    // All repos failed (or we were a waiter that fell through).
+    // Only the responsible party should release.
+    if responsible {
+        release_download_slot(&local_key);
+    }
+
     bail!(
         "failed to download {} from all repositories: {}",
         gav,
         last_err.unwrap()
     );
+}
+
+/// Build a unique collocated staging path next to `dest`.
+/// The name preserves the original filename so that a POM and a JAR for the
+/// same `group:artifact:version` never collide on the staging file.
+fn compute_unique_staging_path(dest: &Path) -> PathBuf {
+    let pid = std::process::id();
+    let seq = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    let orig = dest
+        .file_name()
+        .expect("destination must have a filename component")
+        .to_string_lossy();
+    dest.with_file_name(format!("{}.part.{}.{}", orig, pid, seq))
+}
+
+/// Atomically stage `bytes` for `dest` using a unique temp file, then rename.
+/// The sidecar is written only after the content file is visible at `dest`.
+/// If the rename loses a race and `dest` now exists we treat it as success
+/// (another writer won) and clean up.
+fn stage_and_rename_atomically(
+    dest: &Path,
+    bytes: &[u8],
+    sidecar: &Path,
+    sidecar_bytes: &[u8],
+) -> Result<()> {
+    let part = compute_unique_staging_path(dest);
+    std::fs::write(&part, bytes)
+        .with_context(|| format!("failed to write {}", part.display()))?;
+
+    match std::fs::rename(&part, dest) {
+        Ok(()) => {
+            // Winner path: content is now visible; persist sidecar next to it.
+            std::fs::write(sidecar, sidecar_bytes)
+                .with_context(|| format!("failed to write sidecar {}", sidecar.display()))?;
+            Ok(())
+        }
+        Err(e) => {
+            if dest.exists() {
+                let _ = std::fs::remove_file(&part);
+                // Best-effort: ensure a sidecar exists (idempotent write).
+                if !sidecar.exists() {
+                    let _ = std::fs::write(sidecar, sidecar_bytes);
+                }
+                Ok(())
+            } else {
+                Err(e).with_context(|| {
+                    format!("failed to rename {} \u{2192} {}", part.display(), dest.display())
+                })
+            }
+        }
+    }
 }
 
 /// Download `url` to `dest`, verify its checksum against the published
@@ -1292,20 +1435,12 @@ fn download(
     verify_bytes(&bytes, &expected_hex, kind)
         .with_context(|| format!("downloaded artifact from {} failed checksum", url))?;
 
-    // Order: stage artifact in .part, write sidecar at final location, rename
-    // artifact to final.  If anything fails before the rename no artifact is
-    // committed; if the rename fails the orphan sidecar is overwritten on the
-    // next attempt.
-    let part = dest.with_extension("part");
-    std::fs::write(&part, &bytes)
-        .with_context(|| format!("failed to write {}", part.display()))?;
+    // Use a unique collocated staging file and atomic rename (with tolerant
+    // "already exists" success) so that concurrent writers (intra-process or
+    // across processes) cannot corrupt the final artifact or fail spuriously.
+    // The sidecar is installed only after the content is visible.
     let sidecar = sidecar_path(dest, kind);
-    std::fs::write(&sidecar, expected_hex.as_bytes())
-        .with_context(|| format!("failed to write sidecar {}", sidecar.display()))?;
-    std::fs::rename(&part, dest)
-        .with_context(|| format!("failed to rename {} → {}", part.display(), dest.display()))?;
-
-    Ok(())
+    stage_and_rename_atomically(dest, &bytes, &sidecar, expected_hex.as_bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -3167,5 +3302,63 @@ mod tests {
             "managed-version key left an unresolved placeholder: {:?}",
             result.keys().collect::<Vec<_>>(),
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Concurrent staging / bug #2 regression tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn concurrent_staging_is_safe_and_tolerant() {
+        // Two threads stage the exact same destination concurrently using the
+        // new helpers. Both must succeed, the final file must be one of the
+        // two clean payloads (never a mix), and a sidecar must be present.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("example-1.0.jar");
+
+        let payload_a = b"payload from thread A";
+        let side_a = b"sideA";
+        let payload_b = b"payload from thread B -- longer to detect corruption";
+        let side_b = b"sideB";
+
+        let results: Vec<Result<()>> = std::thread::scope(|s| {
+            let h1 = s.spawn(|| {
+                let sidecar = sidecar_path(&dest, DigestKind::Sha256);
+                stage_and_rename_atomically(&dest, payload_a, &sidecar, side_a)
+            });
+            let h2 = s.spawn(|| {
+                let sidecar = sidecar_path(&dest, DigestKind::Sha256);
+                stage_and_rename_atomically(&dest, payload_b, &sidecar, side_b)
+            });
+            vec![h1.join().unwrap(), h2.join().unwrap()]
+        });
+
+        assert!(results[0].is_ok(), "thread1 failed: {:?}", results[0]);
+        assert!(results[1].is_ok(), "thread2 failed: {:?}", results[1]);
+
+        let final_bytes = std::fs::read(&dest).unwrap();
+        let ok = final_bytes == payload_a || final_bytes == payload_b;
+        assert!(ok, "final file was corrupted or mixed: {:?}", final_bytes);
+
+        let sidecar = sidecar_path(&dest, DigestKind::Sha256);
+        assert!(sidecar.exists(), "sidecar should exist after concurrent staging");
+    }
+
+    #[test]
+    fn unique_staging_names_distinguish_pom_from_jar() {
+        // compute_unique_staging_path must never produce the same temp name
+        // for a .pom and a .jar of the same GAV (the original with_extension
+        // bug).
+        let pom_dest = Path::new("/tmp/cache/com/example/foo/1.0/foo-1.0.pom");
+        let jar_dest = Path::new("/tmp/cache/com/example/foo/1.0/foo-1.0.jar");
+
+        let p1 = compute_unique_staging_path(&pom_dest);
+        let p2 = compute_unique_staging_path(&jar_dest);
+
+        assert_ne!(p1, p2, "POM and JAR must get distinct staging paths");
+        let p1s = p1.to_string_lossy();
+        let p2s = p2.to_string_lossy();
+        assert!(p1s.contains("foo-1.0.pom.part."), "pom staging: {}", p1s);
+        assert!(p2s.contains("foo-1.0.jar.part."), "jar staging: {}", p2s);
     }
 }
