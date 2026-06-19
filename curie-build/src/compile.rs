@@ -275,16 +275,32 @@ pub fn compile(
 
     // --- plugins: source generators -----------------------------------------
     // Each [plugin.<name>] activates curie-<name> to produce extra source dirs.
-    // curie-build owns staleness tracking; the plugin only runs when inputs changed.
+    // curie-build owns staleness tracking; the plugin only runs when inputs changed
+    // or when a previously-generated output file is missing from disk.
     if !desc.plugins.is_empty() {
         for (plugin_name, plugin_config) in &desc.plugins {
             let envelope = build_plugin_envelope(plugin_config)?;
             let manifest = crate::plugin::fetch_manifest(plugin_name, &envelope, project_root)?;
-            let stamp_path = project_root
-                .join("target")
-                .join(".curie-plugins")
-                .join(format!("{plugin_name}.stamp"));
-            if !crate::plugin::is_up_to_date(&manifest, &stamp_path, project_root) {
+            let plugins_dir = project_root.join("target").join(".curie-plugins");
+            let stamp_path = plugins_dir.join(format!("{plugin_name}.stamp"));
+            let output_set_stamp =
+                crate::plugin::plugin_output_set_stamp_path(&plugins_dir, plugin_name);
+
+            // Load what the last successful run generated and what's on disk now.
+            let prev_output_set = incremental::load_source_set(&output_set_stamp);
+            let pre_run_output_set =
+                crate::plugin::current_plugin_output_set(&manifest, project_root);
+
+            // A previously-generated file that no longer exists on disk (e.g. manually
+            // deleted) forces a re-run so it gets regenerated.
+            let outputs_intact = prev_output_set
+                .as_ref()
+                .map(|prev| pre_run_output_set.is_superset(prev))
+                .unwrap_or(true); // no stamp yet → first build, rely on input check only
+
+            if !crate::plugin::is_up_to_date(&manifest, &stamp_path, project_root)
+                || !outputs_intact
+            {
                 let input_summary = summarise_plugin_inputs(&manifest, project_root);
                 crate::parallel::emit(&crate::style::active(
                     &format!("Plugin {plugin_name}"),
@@ -303,8 +319,30 @@ pub fn compile(
                     &plugin_repos,
                     offline,
                 )?;
-                crate::plugin::generate_sources(plugin_name, &envelope, &resolved, project_root, offline)?;
+                crate::plugin::generate_sources(
+                    plugin_name,
+                    &envelope,
+                    &resolved,
+                    project_root,
+                    offline,
+                )?;
                 crate::plugin::write_stamp(&manifest, &stamp_path, project_root)?;
+
+                // Orphan wipe: delete files from the previous run that the plugin no
+                // longer emits (e.g. a .proto source was removed).
+                let post_run_output_set =
+                    crate::plugin::current_plugin_output_set(&manifest, project_root);
+                if let Some(prev) = &prev_output_set {
+                    let wiped =
+                        crate::plugin::wipe_orphaned_plugin_outputs(prev, &post_run_output_set);
+                    if !wiped.is_empty() {
+                        crate::parallel::emit(&crate::style::info(
+                            &format!("Plugin {plugin_name}"),
+                            &format!("removed {} orphaned generated file(s)", wiped.len()),
+                        ));
+                    }
+                }
+                incremental::write_source_set(&output_set_stamp, &post_run_output_set)?;
             } else {
                 crate::parallel::emit(&crate::style::up_to_date(&format!("Plugin {plugin_name}")));
             }

@@ -14,7 +14,7 @@
 use anyhow::{Context, Result};
 use curie_deps::repo::Repository;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -258,6 +258,50 @@ pub fn write_stamp(
     let json = serde_json::to_string_pretty(&stamp).context("failed to serialize stamp")?;
     std::fs::write(stamp_path, json).context("failed to write stamp file")?;
     Ok(())
+}
+
+/// Path of the output-set stamp for `plugin_name` under `plugins_dir`
+/// (`target/.curie-plugins/<name>.output-set`).
+pub fn plugin_output_set_stamp_path(plugins_dir: &Path, plugin_name: &str) -> PathBuf {
+    plugins_dir.join(format!("{plugin_name}.output-set"))
+}
+
+/// Canonical set of every file currently present in the plugin's declared output
+/// directories.  Files that no longer exist on disk are dropped automatically
+/// (canonicalize fails for missing paths), so the result always reflects what is
+/// actually on disk at call time.
+pub fn current_plugin_output_set(
+    manifest: &PluginManifest,
+    project_root: &Path,
+) -> BTreeSet<String> {
+    let files: Vec<PathBuf> = manifest
+        .outputs
+        .source_dirs
+        .iter()
+        .flat_map(|d| {
+            let abs_dir = project_root.join(d);
+            crate::incremental::walk_files(&abs_dir)
+                .map(|e| e.into_path())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    crate::incremental::canonical_source_set(&files)
+}
+
+/// Delete every file that was generated on the previous plugin run (`prev`) but
+/// is absent from the current run's output (`current`).  Returns the paths that
+/// were successfully deleted, for progress logging.  Files that fail to remove
+/// (e.g. already gone) are silently skipped.
+pub fn wipe_orphaned_plugin_outputs(
+    prev: &BTreeSet<String>,
+    current: &BTreeSet<String>,
+) -> Vec<PathBuf> {
+    prev.difference(current)
+        .filter_map(|p| {
+            let path = PathBuf::from(p);
+            std::fs::remove_file(&path).ok().map(|_| path)
+        })
+        .collect()
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -684,5 +728,109 @@ mod tests {
         _m2_jar.assert();
         _m2_sha256.assert();
         _m2_sha1.assert();
+    }
+
+    // ── output-set tracking ──────────────────────────────────────────────────
+
+    fn manifest_with_output_dir(dir: &Path) -> PluginManifest {
+        serde_json::from_str(&format!(
+            r#"{{
+                "name": "test",
+                "description": "test plugin",
+                "version": "0.1.0",
+                "types": ["source-generator"],
+                "inputs": {{"dirs": [], "file_regex": null, "files": []}},
+                "outputs": {{"source_dirs": ["{}"]}},
+                "artifacts": []
+            }}"#,
+            dir.to_string_lossy().replace('\\', "/"),
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn plugin_output_set_captures_generated_files() {
+        let tmp = TempDir::new().unwrap();
+        let out_dir = tmp.path().join("gen");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("Foo.java"), b"class Foo {}").unwrap();
+        fs::write(out_dir.join("Bar.java"), b"class Bar {}").unwrap();
+
+        let manifest = manifest_with_output_dir(&out_dir);
+        let set = current_plugin_output_set(&manifest, tmp.path());
+
+        assert_eq!(set.len(), 2);
+        assert!(set.iter().any(|p| p.ends_with("Foo.java")));
+        assert!(set.iter().any(|p| p.ends_with("Bar.java")));
+    }
+
+    #[test]
+    fn outputs_intact_when_all_stamped_files_present() {
+        let tmp = TempDir::new().unwrap();
+        let out_dir = tmp.path().join("gen");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("Foo.java"), b"class Foo {}").unwrap();
+
+        let manifest = manifest_with_output_dir(&out_dir);
+        let stamped_set = current_plugin_output_set(&manifest, tmp.path());
+        let on_disk_set = current_plugin_output_set(&manifest, tmp.path());
+
+        assert!(on_disk_set.is_superset(&stamped_set));
+    }
+
+    #[test]
+    fn outputs_not_intact_when_file_deleted() {
+        let tmp = TempDir::new().unwrap();
+        let out_dir = tmp.path().join("gen");
+        fs::create_dir_all(&out_dir).unwrap();
+        let foo = out_dir.join("Foo.java");
+        fs::write(&foo, b"class Foo {}").unwrap();
+
+        let manifest = manifest_with_output_dir(&out_dir);
+        let stamped_set = current_plugin_output_set(&manifest, tmp.path());
+
+        // Simulate manual deletion.
+        fs::remove_file(&foo).unwrap();
+
+        let on_disk_set = current_plugin_output_set(&manifest, tmp.path());
+        assert!(!on_disk_set.is_superset(&stamped_set));
+    }
+
+    #[test]
+    fn wipe_orphaned_outputs_removes_stale_files() {
+        let tmp = TempDir::new().unwrap();
+        let foo = tmp.path().join("Foo.java");
+        let bar = tmp.path().join("Bar.java");
+        fs::write(&foo, b"class Foo {}").unwrap();
+        fs::write(&bar, b"class Bar {}").unwrap();
+
+        let prev: BTreeSet<String> = [
+            foo.canonicalize().unwrap().to_string_lossy().into_owned(),
+            bar.canonicalize().unwrap().to_string_lossy().into_owned(),
+        ]
+        .into();
+        // Current set no longer contains Foo — it's an orphan.
+        let current: BTreeSet<String> =
+            [bar.canonicalize().unwrap().to_string_lossy().into_owned()].into();
+
+        let wiped = wipe_orphaned_plugin_outputs(&prev, &current);
+        assert_eq!(wiped.len(), 1);
+        assert!(!foo.exists(), "orphan should have been deleted");
+        assert!(bar.exists(), "current file must be kept");
+    }
+
+    #[test]
+    fn wipe_orphaned_outputs_keeps_current_files() {
+        let tmp = TempDir::new().unwrap();
+        let foo = tmp.path().join("Foo.java");
+        fs::write(&foo, b"class Foo {}").unwrap();
+
+        let path = foo.canonicalize().unwrap().to_string_lossy().into_owned();
+        let set: BTreeSet<String> = [path].into();
+
+        // Same set in prev and current — nothing to wipe.
+        let wiped = wipe_orphaned_plugin_outputs(&set, &set);
+        assert!(wiped.is_empty());
+        assert!(foo.exists());
     }
 }

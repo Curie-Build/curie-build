@@ -139,6 +139,19 @@
     </ul>
     <p>Curie tracks this with a <code>target/.jar-resources</code> stamp that records the canonical set of every file under <code>src/main/resources</code> (or <code>resources/</code>). Any change between builds — addition or deletion — forces the JAR to be repackaged regardless of mtimes. Class files do not need this treatment: any class addition or removal flows through a recompile that writes fresh mtimes, which already triggers <code>needs_repackage</code>.</p>
 
+    <h2 id="plugin-outputs">Plugin output-set tracking</h2>
+    <p>Source-generator plugins (protobuf, openapi, …) write their generated files to <code>target/generated-sources/&lt;plugin-name&gt;/</code>. Two failure modes arise if the generated output is not tracked:</p>
+    <ul>
+      <li><strong>Orphaned generated file</strong> — a <code>.proto</code> source is deleted, the plugin reruns and no longer emits <code>FooService.java</code>, but the old file is still on disk and gets compiled into the JAR.</li>
+      <li><strong>Manually deleted generated file</strong> — a user deletes <code>target/generated-sources/protobuf/FooService.java</code>. The plugin's inputs are unchanged so it skips; the <code>.sources</code> stamp detects the missing file and forces a recompile, but the compiler fails because the file is gone.</li>
+    </ul>
+    <p>Curie records the canonical set of generated files to <code>target/.curie-plugins/&lt;name&gt;.output-set</code> after every successful plugin run. On the next build:</p>
+    <ul>
+      <li>If any file that was generated last time is now missing from disk, the plugin is forced to re-run to regenerate it (resolves the manual-deletion case).</li>
+      <li>After the plugin runs, any file present in the previous output set but absent from the new one is deleted — an orphan wipe analogous to the Kotlin class wipe (resolves the deleted-proto case).</li>
+    </ul>
+    <p>The same <code>incremental::{load_source_set,write_source_set}</code> primitives used for source and resource tracking are reused here, so all three tracking mechanisms share identical serialization and comparison logic.</p>
+
     <h2>Stamp files reference</h2>
     <table>
       <thead>
@@ -148,9 +161,11 @@
         <tr><td><code>target/.sources</code></td><td>successful production compile</td><td>source file added or removed (all languages)</td></tr>
         <tr><td><code>target/.test-sources</code></td><td>successful test compile</td><td>test source file added or removed (all languages)</td></tr>
         <tr><td><code>target/.jar-resources</code></td><td>successful JAR package</td><td>resource file added or removed</td></tr>
+        <tr><td><code>target/.curie-plugins/&lt;name&gt;.output-set</code></td><td>successful plugin run</td><td>generated output file added, removed, or manually deleted</td></tr>
         <tr><td><code>target/.javac-version</code></td><td>successful production compile</td><td>JDK version change</td></tr>
         <tr><td><code>target/.classes.toml</code></td><td>successful javac run</td><td>stale Java class files (pre- and post-compile)</td></tr>
         <tr><td><code>target/.test-classes.toml</code></td><td>successful test javac run</td><td>stale Java test class files</td></tr>
+        <tr><td><code>target/.curie-plugins/&lt;name&gt;.stamp</code></td><td>successful plugin run</td><td>plugin input file changed (mtime-based)</td></tr>
         <tr><td><code>target/.test-stamp</code></td><td>successful test run</td><td>whether tests need to re-run</td></tr>
       </tbody>
     </table>
