@@ -368,20 +368,19 @@ fn fetch_and_parse_pom(
     // with resolve_boms and overflow on BOM cycles).
     if !pom.bom_imports.is_empty() {
         for bom_ref in &pom.bom_imports {
-            let Some(version) = pom.try_resolve_value(&bom_ref.version) else { continue; };
-            let bom_gav = Gav {
-                group: bom_ref.group_id.clone(),
-                artifact: bom_ref.artifact_id.clone(),
-                version,
-                classifier: None,
-            };
+            // Resolve groupId, artifactId AND version against the importing
+            // POM's properties before building the coordinate.  Skipping when
+            // any placeholder remains keeps an unresolved `${...}` from ever
+            // reaching the filesystem (which previously created junk cache
+            // directories literally named e.g. `${idp.groupId}`).
+            let Some(bom_gav) = resolve_bom_ref_gav(bom_ref, &pom) else { continue; };
             // Fetch the BOM POM directly without further BOM-import expansion.
             if let Ok(path) = ensure_artifact(&bom_gav, repos, client, ArtifactKind::Pom, offline, None, None) {
                 if let Ok(xml) = std::fs::read_to_string(&path) {
                     if let Ok(bom_pom) = pom::parse(&xml) {
                         for (k, v) in &bom_pom.managed_versions {
                             pom.managed_versions
-                                .entry(k.clone())
+                                .entry(resolve_ga_key(&bom_pom, k))
                                 .or_insert_with(|| bom_pom.resolve_value(v));
                         }
                     }
@@ -493,7 +492,7 @@ pub fn resolve_boms(
                 let own_entries: HashMap<String, String> = pom
                     .managed_versions
                     .iter()
-                    .map(|(k, v)| (k.clone(), pom.resolve_value(v)))
+                    .map(|(k, v)| (resolve_ga_key(&pom, k), pom.resolve_value(v)))
                     .collect();
 
                 // Goal: process nested BOM imports first, then apply this
@@ -506,14 +505,7 @@ pub fn resolve_boms(
                 // each nested Fetch in reverse so nested_1 lands at the head.
                 queue.push_front(BomWork::Apply(own_entries));
                 for bom_ref in pom.bom_imports.iter().rev() {
-                    let version = resolve_bom_ref_version(bom_ref, &pom);
-                    if let Some(v) = version {
-                        let nested_gav = Gav {
-                            group: bom_ref.group_id.clone(),
-                            artifact: bom_ref.artifact_id.clone(),
-                            version: v,
-                            classifier: None,
-                        };
+                    if let Some(nested_gav) = resolve_bom_ref_gav(bom_ref, &pom) {
                         queue.push_front(BomWork::Fetch(nested_gav));
                     }
                 }
@@ -522,6 +514,25 @@ pub fn resolve_boms(
     }
 
     Ok(managed)
+}
+
+/// Resolve a BOM reference's full coordinate (groupId, artifactId, version)
+/// against the importing POM's properties.
+///
+/// Returns `None` if any component still contains an unresolved `${...}`
+/// placeholder — this guards against feeding a placeholder coordinate to
+/// [`ensure_artifact`], which would otherwise create a junk cache directory
+/// literally named e.g. `${idp.groupId}`.
+fn resolve_bom_ref_gav(bom_ref: &BomRef, importing_pom: &Pom) -> Option<Gav> {
+    let group = importing_pom.try_resolve_value(&bom_ref.group_id)?;
+    let artifact = importing_pom.try_resolve_value(&bom_ref.artifact_id)?;
+    let version = resolve_bom_ref_version(bom_ref, importing_pom)?;
+    Some(Gav {
+        group,
+        artifact,
+        version,
+        classifier: None,
+    })
 }
 
 /// Resolve the version of a nested BOM reference, using the importing POM's
@@ -535,6 +546,20 @@ fn resolve_bom_ref_version(bom_ref: &BomRef, importing_pom: &Pom) -> Option<Stri
             .get(&key)
             .and_then(|v| importing_pom.try_resolve_value(v))
     })
+}
+
+/// Resolve `${...}` placeholders in a `groupId:artifactId` managed-versions key
+/// against `pom`'s properties.  BOMs frequently express managed coordinates with
+/// `${project.groupId}` (e.g. Shibboleth's `idp-bom`); leaving the key literal
+/// means later `group:artifact` lookups silently miss.  Keys without a single
+/// `:` separator are returned unchanged.
+fn resolve_ga_key(pom: &Pom, key: &str) -> String {
+    match key.split_once(':') {
+        Some((group, artifact)) => {
+            format!("{}:{}", pom.resolve_value(group), pom.resolve_value(artifact))
+        }
+        None => key.to_string(),
+    }
 }
 
 /// Resolve the full transitive dependency tree and return rich metadata
@@ -3009,5 +3034,138 @@ mod tests {
             name
         );
         assert!(path.exists());
+    }
+
+    // --- regression: property placeholders in BOM-import coordinates ---------
+
+    /// Write a raw POM XML (with a `.sha256` sidecar) at the cache location for
+    /// `gav` under `home_dir`.  Unlike `write_fake_bom` this lets a test author
+    /// arbitrary content such as a `<properties>` block.
+    fn write_fake_pom_xml(home_dir: &std::path::Path, gav: &Gav, xml: &str) {
+        let rel = gav.relative_pom_path();
+        let path = home_dir.join(".m2").join("repository").join(&rel);
+        write_with_sidecar(&path, xml.as_bytes());
+    }
+
+    /// Recursively check whether any directory under `root` has a name that
+    /// begins with `${` — the symptom of an unresolved Maven property reaching
+    /// the filesystem.
+    fn has_unresolved_placeholder_dir(root: &std::path::Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(root) else { return false; };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with("${") {
+                return true;
+            }
+            if has_unresolved_placeholder_dir(&path) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn bom_import_with_property_groupid_is_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Importing BOM defines properties and imports another BOM using them —
+        // mirrors Shibboleth's oidc-common-parent importing idp-bom.
+        let importer = Gav {
+            group: "net.shibboleth.oidc".to_string(),
+            artifact: "oidc-common-parent".to_string(),
+            version: "3.3.0".to_string(),
+            classifier: None,
+        };
+        let importer_xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>net.shibboleth.oidc</groupId>
+  <artifactId>oidc-common-parent</artifactId>
+  <version>3.3.0</version>
+  <properties>
+    <idp.groupId>net.shibboleth.idp</idp.groupId>
+    <idp.version>5.0.0</idp.version>
+  </properties>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>${idp.groupId}</groupId>
+        <artifactId>idp-bom</artifactId>
+        <version>${idp.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>"#;
+        write_fake_pom_xml(dir.path(), &importer, importer_xml);
+
+        // The real target BOM at the *resolved* coordinate.
+        write_fake_bom(
+            dir.path(),
+            "net.shibboleth.idp", "idp-bom", "5.0.0",
+            &[("net.shibboleth.idp", "idp-core", "5.0.0")],
+            &[],
+        );
+
+        let result = run_resolve_boms(dir.path(), &[importer]).unwrap();
+
+        // The managed version from idp-bom is resolved through the property.
+        assert_eq!(
+            result.get("net.shibboleth.idp:idp-core").map(String::as_str),
+            Some("5.0.0"),
+        );
+        // And no junk `${...}` directory was ever created in the cache.
+        let repo = dir.path().join(".m2").join("repository");
+        assert!(
+            !has_unresolved_placeholder_dir(&repo),
+            "an unresolved `${{...}}` directory was created under {}",
+            repo.display(),
+        );
+    }
+
+    #[test]
+    fn managed_version_keys_with_project_groupid_are_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // A BOM whose managed deps use ${project.groupId} (like idp-bom itself).
+        let bom = Gav {
+            group: "net.shibboleth.idp".to_string(),
+            artifact: "idp-bom".to_string(),
+            version: "5.0.0".to_string(),
+            classifier: None,
+        };
+        let bom_xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>net.shibboleth.idp</groupId>
+  <artifactId>idp-bom</artifactId>
+  <version>5.0.0</version>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>${project.groupId}</groupId>
+        <artifactId>idp-core</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>"#;
+        write_fake_pom_xml(dir.path(), &bom, bom_xml);
+
+        let result = run_resolve_boms(dir.path(), &[bom]).unwrap();
+
+        // Key must be resolved to the concrete group:artifact, not left literal.
+        assert_eq!(
+            result.get("net.shibboleth.idp:idp-core").map(String::as_str),
+            Some("5.0.0"),
+        );
+        assert!(
+            !result.keys().any(|k| k.contains("${")),
+            "managed-version key left an unresolved placeholder: {:?}",
+            result.keys().collect::<Vec<_>>(),
+        );
     }
 }
