@@ -75,18 +75,37 @@
   <main class="prose">
     <span class="eyebrow">Subsystem · incremental</span>
     <h1>Incremental builds</h1>
-    <p class="lede">Curie's rebuild gate is precise — false negatives (a missed edit) would be worse than a stray rebuild, and the design is biased accordingly. Three signals decide whether to invoke the compiler at all.</p>
+    <p class="lede">Curie's rebuild gate is precise — a missed recompile (false negative) is always worse than a stray one (false positive), and the design is biased accordingly. Three independent checks work together; the compiler runs when any of them fires.</p>
 
-    <h2>The mtime check</h2>
-    <p>The compiler runs when any source file's mtime is greater than or equal to the oldest <code>.class</code> file's mtime in <code>target/classes</code>. The comparison is intentionally <code>≥</code>, not <code>&gt;</code> — on second-resolution filesystems (FAT, some NFS mounts, CI cache restores) a fast edit/test/edit loop can put an edit and a stamp in the same filesystem second, and silently masking the second edit would be a correctness bug.</p>
+    <h2>Decision flow</h2>
+    <p>For each build step the checks run in this order. The first one that fires determines the rebuild reason; subsequent ones are not consulted.</p>
 
-    <p>Non-class files in <code>target/classes</code> (annotation-processor resources like <code>BenchmarkList</code> or <code>CompilerHints</code>) are deliberately ignored — they can have older mtimes than your sources and would otherwise force a recompile on every build.</p>
+    <ol>
+      <li><strong>Stale-class pre-prune</strong> — deleted sources have their old class files removed before the compiler runs (<code>StaleClasses</code>).</li>
+      <li><strong>Source-set stamp</strong> — the saved set of source paths is compared to the current one. Any difference (addition <em>or</em> deletion) forces a recompile even when mtimes don't reflect it (<code>SourceSetChanged</code>).</li>
+      <li><strong>JDK fingerprint</strong> — the stored <code>javac -version</code> string is compared to the current one. A JDK upgrade forces a full recompile regardless of source mtimes (<code>JdkChanged</code>).</li>
+      <li><strong>mtime check</strong> — any source file or <code>Curie.toml</code> with a modification time ≥ the oldest <code>.class</code> file triggers a recompile (<code>SourceChanged</code> or <code>TomlChanged</code>).</li>
+    </ol>
 
-    <h2>The JDK fingerprint</h2>
-    <p>Curie writes the output of <code>javac -version</code> to <code>target/.javac-version</code> after every successful build. On the next build that string is compared to the current <code>javac -version</code>; any difference forces a full recompile regardless of source mtimes. Upgrading the JDK between builds is an unambiguous "everything is stale" signal.</p>
+    <p>If none of the above fires the step reports <code>up to date</code> and is skipped entirely. The exact reason is always printed in brackets so you can see which signal triggered the build.</p>
+
+    <h2>Source-set stamp</h2>
+    <p>mtime comparison cannot detect <em>set-membership</em> changes. A source added with a preserved old timestamp — via <code>mv</code>, <code>cp -p</code>, <code>rsync -a</code>, or unpacking a tarball — is not newer than any existing class file, so a pure-mtime check would report "up to date" and never compile it. A pure deletion is equally invisible because no surviving mtime changes.</p>
+
+    <p>Curie closes this gap by saving the canonical set of source paths to <code>target/.sources</code> after every successful compile. On the next build the current source set is compared against the saved one; any difference forces a recompile. This covers all three languages (Java, Kotlin, Groovy) with the same code path. The test compile uses a separate <code>target/.test-sources</code> stamp so production and test sets are tracked independently.</p>
+
+    <p>The stamp is missing on the very first build (after a fresh clone or <code>curie clean</code>). A missing stamp does <em>not</em> trigger the source-set check — the no-class-files path drives the initial compile instead, so a first build doesn't report a false "source set changed".</p>
+
+    <h2>mtime check</h2>
+    <p>When the source-set stamp reports no change, Curie falls back to mtime comparison. The compiler runs when any source file's mtime is greater than or equal to the oldest <code>.class</code> file's mtime in <code>target/classes</code>. The comparison is intentionally <code>≥</code>, not <code>&gt;</code> — on second-resolution filesystems (FAT, some NFS mounts, CI cache restores) a fast edit/test/edit loop can place an edit and a stamp within the same filesystem second, and silently masking the second edit would be a correctness bug.</p>
+
+    <p>Non-class files in <code>target/classes</code> (annotation-processor resources like <code>META-INF/BenchmarkList</code> or <code>CompilerHints</code>) are deliberately excluded from the baseline — they can have older mtimes than your sources and would otherwise force a recompile on every build.</p>
+
+    <h2>JDK fingerprint</h2>
+    <p>Curie records the output of <code>javac -version</code> in <code>target/.javac-version</code> after every successful build. The next build compares the stored string against the current one; any difference — even a patch-level JDK upgrade — forces a full recompile regardless of source mtimes.</p>
 
     <h2 id="stale">Stale-class detection</h2>
-    <p>The mtime check decides <em>whether</em> to recompile. Stale-class detection decides <em>what stays on disk</em>. The story differs by language because Java and Kotlin emit metadata differently.</p>
+    <p>The checks above decide <em>whether</em> to recompile. Stale-class detection decides <em>what stays on disk</em> before and after the compiler runs. The mechanism differs by language because Java and Kotlin emit metadata differently.</p>
 
     <h3>Java: source→class manifest</h3>
     <p>Curie ships a javac wrapper that registers a <code>TaskListener</code> on <code>JavacTask</code>. For every <code>TaskEvent.Kind.GENERATE</code> event the listener records the originating source path and the binary name of the emitted class. After a successful build the mapping is written atomically to <code>target/.classes.toml</code>:</p>
@@ -101,20 +120,40 @@
 <span class="str">"/abs/path/src/com/foo/Bar.java"</span> = [<span class="str">"com/foo/Bar.class"</span>, <span class="str">"com/foo/Bar$Inner.class"</span>]</pre>
     </div>
 
-    <p>On the next build:</p>
+    <p>The manifest is consulted at two points during every build:</p>
     <ul>
-      <li><strong>Pre-compile prune</strong> — any source in the previous manifest that no longer exists in the current source set has all of its old classes deleted before javac runs. Stops a deleted-but-still-on-disk class from being picked up via javac's classes-dir-on-classpath fall-through.</li>
-      <li><strong>Post-compile prune</strong> — for every source present in both old and new manifests, the set difference (classes in old, not in new) is pruned. Catches the case where a still-present source produces fewer classes than before (e.g. an inner / companion type was removed).</li>
+      <li><strong>Pre-compile prune</strong> — any source recorded in the previous manifest that no longer exists in the current source set has all of its old classes deleted before javac runs. Stops a deleted-but-still-on-disk class from being picked up via javac's classes-dir-on-classpath fall-through. Annotation-processor outputs (under <code>target/generated-sources</code>) are exempted — the post-prune handles "AP stopped producing this".</li>
+      <li><strong>Post-compile prune</strong> — for every source present in both old and new manifests, the class-file set difference (in old, not in new) is deleted. Catches the case where a still-present source produces fewer classes than before, for example when an inner or companion type is removed.</li>
     </ul>
 
-    <p>Annotation-processor outputs (under <code>target/generated-sources</code>) are exempted from pre-pruning so a no-change rebuild doesn't churn through every AP-generated class — the post-prune handles the "AP stopped producing this" case correctly.</p>
-
-    <h3>Kotlin: SourceFile attribute + source-set stamp</h3>
+    <h3>Kotlin: SourceFile attribute wipe</h3>
     <p>kotlinc offers no equivalent <code>TaskListener</code> hook, so Curie exploits a different invariant: <strong>every</strong> Kotlin source is passed to kotlinc on every recompile, so kotlinc re-emits every class the current source set still produces.</p>
 
-    <p>Before kotlinc runs, Curie parses each <code>.class</code> file's JVM <code>SourceFile</code> attribute and deletes any whose value ends with <code>.kt</code>. kotlinc then puts back exactly what's still live. Anything not re-emitted (a deleted source, a removed top-level declaration) is gone.</p>
+    <p>Before kotlinc runs, Curie parses each <code>.class</code> file's JVM <code>SourceFile</code> attribute and deletes any whose value ends with <code>.kt</code>. kotlinc then puts back exactly what's still live. Anything not re-emitted — a deleted source, a removed top-level declaration — is gone. This wipe also fires when a project transitions away from Kotlin entirely, ensuring no Kotlin-derived classes linger after the last <code>.kt</code> source is removed.</p>
 
-    <p>Pure deletions wouldn't bump any surviving mtime, so the source list is also stamped to <code>target/.kt-sources</code>. Any change between builds — additions, deletions, or renames — forces a recompile so the wipe gets a chance to run.</p>
+    <h2 id="resources">Resource-set tracking</h2>
+    <p>The JAR packaging step has the same set-membership blind spot: resources are copied, never recompiled, so neither direction of membership change bumps any mtime.</p>
+    <ul>
+      <li>A resource added with an old mtime leaves the newest-mtime unchanged → JAR not rebuilt → resource missing from the JAR.</li>
+      <li>A resource deleted changes no mtime → JAR not rebuilt → stale resource stays in the JAR.</li>
+    </ul>
+    <p>Curie tracks this with a <code>target/.jar-resources</code> stamp that records the canonical set of every file under <code>src/main/resources</code> (or <code>resources/</code>). Any change between builds — addition or deletion — forces the JAR to be repackaged regardless of mtimes. Class files do not need this treatment: any class addition or removal flows through a recompile that writes fresh mtimes, which already triggers <code>needs_repackage</code>.</p>
+
+    <h2>Stamp files reference</h2>
+    <table>
+      <thead>
+        <tr><th>File</th><th>Written after</th><th>Detects</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>target/.sources</code></td><td>successful production compile</td><td>source file added or removed (all languages)</td></tr>
+        <tr><td><code>target/.test-sources</code></td><td>successful test compile</td><td>test source file added or removed (all languages)</td></tr>
+        <tr><td><code>target/.jar-resources</code></td><td>successful JAR package</td><td>resource file added or removed</td></tr>
+        <tr><td><code>target/.javac-version</code></td><td>successful production compile</td><td>JDK version change</td></tr>
+        <tr><td><code>target/.classes.toml</code></td><td>successful javac run</td><td>stale Java class files (pre- and post-compile)</td></tr>
+        <tr><td><code>target/.test-classes.toml</code></td><td>successful test javac run</td><td>stale Java test class files</td></tr>
+        <tr><td><code>target/.test-stamp</code></td><td>successful test run</td><td>whether tests need to re-run</td></tr>
+      </tbody>
+    </table>
 
     <h2>What you'll see</h2>
 
@@ -132,16 +171,46 @@
     <div class="term">
       <header>
         <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-        <span>$ curie build  # after removing a companion class</span>
+        <span>$ curie build  # after editing a source file</span>
       </header>
-<pre>  Compile         2 source file(s)  <span class="dim">[source changed]</span>
+<pre>  Compile         3 source file(s)  <span class="dim">[source changed]</span>
+  Tests           <span class="ok">✔ 4 tests successful</span>
+  Done            <span class="em">target/hello-0.1.0.jar</span></pre>
+    </div>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build  # after adding a source with an old mtime (cp -p, rsync, untar)</span>
+      </header>
+<pre>  Compile         4 source file(s)  <span class="dim">[source set changed]</span>
+  Tests           <span class="ok">✔ 4 tests successful</span>
+  Done            <span class="em">target/hello-0.1.0.jar</span></pre>
+    </div>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build  # after removing a Kotlin companion class</span>
+      </header>
+<pre>  Compile         2 source file(s)  <span class="dim">[source set changed]</span>
   Stale (Kotlin)  removed 1 orphan class file
   Tests           <span class="ok">✔ 2 tests successful</span>
   Done            <span class="em">target/hello-0.1.0.jar</span></pre>
     </div>
 
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build  # after upgrading the JDK</span>
+      </header>
+<pre>  Compile         3 source file(s)  <span class="dim">[JDK version changed]</span>
+  Tests           <span class="ok">✔ 4 tests successful</span>
+  Done            <span class="em">target/hello-0.1.0.jar</span></pre>
+    </div>
+
     <h2>Forcing a clean rebuild</h2>
-    <p><code>curie clean</code> wipes the <code>target/</code> directory entirely. The next build starts from a cold cache — same as a fresh clone.</p>
+    <p><code>curie clean</code> wipes the <code>target/</code> directory entirely, removing all stamp files, class files, and the JAR. The next build starts from a cold cache — same as a fresh clone.</p>
 
     <div class="pager">
       <a href="/docs/bom.html">
