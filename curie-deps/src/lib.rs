@@ -14,6 +14,7 @@ pub mod resolver;
 pub use gav::Gav;
 pub use repo::Repository;
 pub use resolver::{
-    fetch_artifact, fetch_pom_only, resolve, resolve_boms, resolve_declared_gavs, resolve_tree,
-    DepEntry, DepTree, ResolvedDep, ResolveOptions, SkippedDep,
+    fetch_artifact, fetch_artifact_file, fetch_pom_only, resolve, resolve_boms,
+    resolve_declared_gavs, resolve_tree, DepEntry, DepTree, ResolvedDep, ResolveOptions,
+    SkippedDep,
 };

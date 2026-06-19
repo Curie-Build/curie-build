@@ -285,9 +285,17 @@ pub fn compile(
                     &format!("Plugin {plugin_name}"),
                     &input_summary,
                 ));
+                // Use both default (mirrored) repos and any project [[repositories]]
+                // so that plugin artifacts (e.g. generators, protoc) respect the same
+                // configuration surface as ordinary dependencies.
+                let plugin_repos: Vec<_> = {
+                    let mut r = crate::build::central_repos();
+                    r.extend(crate::build::extra_repos(desc));
+                    r
+                };
                 let resolved = crate::plugin::download_artifacts(
                     &manifest.artifacts,
-                    &crate::build::central_repos(),
+                    &plugin_repos,
                     offline,
                 )?;
                 crate::plugin::generate_sources(plugin_name, &envelope, &resolved, project_root, offline)?;

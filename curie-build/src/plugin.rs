@@ -11,7 +11,7 @@
 //!    stdout: (not parsed)
 //!    stderr: progress, visible to the user
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use curie_deps::repo::Repository;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -320,77 +320,37 @@ fn collect_input_files(manifest: &PluginManifest, project_root: &Path) -> Vec<Pa
 }
 
 fn download_artifact(art: &PluginArtifact, repos: &[Repository], offline: bool) -> Result<PathBuf> {
-    let cache_path = artifact_cache_path(art)?;
+    // Delegate to the hardened resolver path.  This gives us:
+    // - sidecar persistence + re-verification on cache hits
+    // - atomic writes via unique staging files
+    // - proper HTTP client (timeout + UA)
+    // - respect for mirrors and configured repositories
+    // - in-process deduplication (from the bug #2 gate)
+    let key = format!("{}:{}", art.group, art.artifact);
+    let mut gav = curie_deps::Gav::from_key_version_classifier(
+        &key,
+        &art.version,
+        art.classifier.as_deref(),
+    )?;
+    gav.extension = Some(art.extension.clone());
 
-    if cache_path.exists() {
-        return Ok(cache_path);
+    let path = curie_deps::fetch_artifact_file(
+        &art.group,
+        &art.artifact,
+        &art.version,
+        art.classifier.as_deref(),
+        &art.extension,
+        repos,
+        offline,
+    )?;
+
+    if art.executable {
+        set_executable(&path)?;
     }
-
-    if offline {
-        bail!(
-            "artifact {}:{} not cached at {} (offline mode)",
-            art.group,
-            art.artifact,
-            cache_path.display()
-        );
-    }
-
-    let rel = artifact_relative_path(art);
-    let mut last_err: Option<anyhow::Error> = None;
-
-    for repo in repos {
-        let url = repo.artifact_url(&rel);
-        let sha1_url = format!("{url}.sha1");
-        match try_download(&url, &sha1_url, &art.artifact) {
-            Ok(bytes) => {
-                if let Some(parent) = cache_path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("failed to create cache dir {}", parent.display()))?;
-                }
-                std::fs::write(&cache_path, &bytes)
-                    .with_context(|| format!("failed to write {}", cache_path.display()))?;
-                if art.executable {
-                    set_executable(&cache_path)?;
-                }
-                return Ok(cache_path);
-            }
-            Err(e) => {
-                last_err = Some(e);
-            }
-        }
-    }
-
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no repositories configured")))
-        .with_context(|| format!("could not download {}:{} from any configured repository", art.group, art.artifact))
+    Ok(path)
 }
 
-fn try_download(url: &str, sha1_url: &str, artifact_name: &str) -> Result<Vec<u8>> {
-    let bytes = reqwest::blocking::get(url)
-        .with_context(|| format!("GET {url}"))?
-        .error_for_status()
-        .with_context(|| format!("HTTP error for {url}"))?
-        .bytes()
-        .with_context(|| format!("failed to read body from {url}"))?
-        .to_vec();
-
-    let expected_sha1 = reqwest::blocking::get(sha1_url)
-        .with_context(|| format!("GET {sha1_url}"))?
-        .error_for_status()
-        .with_context(|| format!("HTTP error for {sha1_url}"))?
-        .text()
-        .with_context(|| format!("failed to read SHA-1 from {sha1_url}"))?;
-    let expected_sha1 = expected_sha1.trim().split_whitespace().next().unwrap_or("").to_lowercase();
-
-    use sha1::Digest as _;
-    let actual_sha1 = hex::encode(sha1::Sha1::digest(&bytes));
-    anyhow::ensure!(
-        actual_sha1 == expected_sha1,
-        "SHA-1 mismatch for {artifact_name}: expected {expected_sha1}, got {actual_sha1}",
-    );
-
-    Ok(bytes)
-}
-
+#[cfg(test)]
 fn artifact_cache_path(art: &PluginArtifact) -> Result<PathBuf> {
     let home = dirs::home_dir().context("cannot determine home directory")?;
     let group_path = art.group.replace('.', "/");
@@ -407,6 +367,7 @@ fn artifact_cache_path(art: &PluginArtifact) -> Result<PathBuf> {
         .join(filename))
 }
 
+#[cfg(test)]
 fn artifact_relative_path(art: &PluginArtifact) -> String {
     let group_path = art.group.replace('.', "/");
     let filename = match &art.classifier {
@@ -659,6 +620,11 @@ mod tests {
             .with_status(200)
             .with_body(body)
             .create();
+        // The hardened path prefers .sha256; return 404 so it falls back to .sha1.
+        let _m_sha256 = server
+            .mock("GET", format!("/{rel}.sha256").as_str())
+            .with_status(404)
+            .create();
         let _m_sha1 = server
             .mock("GET", format!("/{rel}.sha1").as_str())
             .with_status(200)
@@ -673,6 +639,7 @@ mod tests {
 
         // The mock was hit — meaning the repo URL was used, not Maven Central.
         _m_jar.assert();
+        _m_sha256.assert();
         _m_sha1.assert();
     }
 
@@ -697,6 +664,11 @@ mod tests {
             .with_status(200)
             .with_body(body)
             .create();
+        // Hardened path tries .sha256 first (404) then .sha1.
+        let _m2_sha256 = server2
+            .mock("GET", format!("/{rel}.sha256").as_str())
+            .with_status(404)
+            .create();
         let _m2_sha1 = server2
             .mock("GET", format!("/{rel}.sha1").as_str())
             .with_status(200)
@@ -710,6 +682,7 @@ mod tests {
         });
 
         _m2_jar.assert();
+        _m2_sha256.assert();
         _m2_sha1.assert();
     }
 }

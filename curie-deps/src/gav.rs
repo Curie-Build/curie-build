@@ -7,8 +7,11 @@ use std::path::PathBuf;
 /// A fully-specified Maven coordinate.
 ///
 /// Classifiers are supported for special artifacts (e.g. JaCoCo agent
-/// `runtime` classifier, or `sources` / `javadoc`). When present, the
-/// published filename becomes `artifact-version-classifier.jar`.
+/// `runtime` classifier, or `sources` / `javadoc`).
+///
+/// Extensions are supported for plugin artifacts and other non-JAR files
+/// (e.g. `protoc` with extension "exe", custom generators). When absent,
+/// "jar" is assumed for the primary artifact path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct Gav {
     pub group: String,
@@ -17,6 +20,11 @@ pub struct Gav {
     /// Classifier, if any (e.g. Some("runtime"), Some("sources")).
     /// Empty/None means the main artifact (no classifier in filename).
     pub classifier: Option<String>,
+    /// File extension without the leading dot (e.g. Some("jar"), Some("exe"),
+    /// Some("zip")). If None or empty, "jar" is used for `relative_path`.
+    /// This enables downloading non-JAR plugin artifacts via the hardened
+    /// resolver path.
+    pub extension: Option<String>,
 }
 
 impl Gav {
@@ -45,7 +53,7 @@ impl Gav {
             bail!("dependency key {:?} has empty group, artifact, or version", key);
         }
 
-        Ok(Gav { group, artifact, version, classifier: None })
+        Ok(Gav { group, artifact, version, classifier: None, extension: None })
     }
 
     /// Parse `"group:artifact"` key + `"version"` value and an optional
@@ -61,15 +69,36 @@ impl Gav {
         Ok(g)
     }
 
+    /// Parse `"group:artifact"` key + `"version"` value plus optional
+    /// classifier and extension.  Used for plugin artifacts and other
+    /// non-standard published files (e.g. `protoc` executables).
+    pub fn from_key_version_classifier_extension(
+        key: &str,
+        version: &str,
+        classifier: Option<&str>,
+        extension: &str,
+    ) -> Result<Self> {
+        let mut g = Self::from_key_version_classifier(key, version, classifier)?;
+        g.extension = if extension.is_empty() {
+            None
+        } else {
+            Some(extension.to_string())
+        };
+        Ok(g)
+    }
+
     /// The group path segment used in Maven repository layout:
     /// `com.example` → `com/example`.
     pub fn group_path(&self) -> String {
         self.group.replace('.', "/")
     }
 
-    /// Relative path within a Maven repository layout:
-    /// `com/example/foo/1.0/foo-1.0.jar`
-    /// With classifier: `com/example/foo/1.0/foo-1.0-runtime.jar`
+    /// Relative path within a Maven repository layout.
+    /// Respects classifier and extension (defaults to ".jar" when extension
+    /// is absent). Examples:
+    ///   foo-1.0.jar
+    ///   foo-1.0-runtime.jar
+    ///   protoc-3.25.0-linux-x86_64.exe   (plugin artifact)
     pub fn relative_path(&self) -> String {
         let base = format!(
             "{}/{}/{}/{}-{}",
@@ -79,12 +108,17 @@ impl Gav {
             self.artifact,
             self.version,
         );
+        let ext = self
+            .extension
+            .as_deref()
+            .filter(|e| !e.is_empty())
+            .unwrap_or("jar");
         if let Some(c) = &self.classifier {
             if !c.is_empty() {
-                return format!("{}-{}.jar", base, c);
+                return format!("{}-{}.{}", base, c, ext);
             }
         }
-        format!("{}.jar", base)
+        format!("{}.{}", base, ext)
     }
 
     /// Relative POM path within a Maven repository layout.
@@ -233,11 +267,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(g.classifier.as_deref(), Some("runtime"));
+        assert!(g.extension.is_none());
         assert!(
             g.relative_path().contains("-runtime.jar"),
             "expected classifier in path, got {}",
             g.relative_path()
         );
         assert_eq!(g.notation(), "org.jacoco:org.jacoco.agent:0.8.13:runtime");
+    }
+
+    #[test]
+    fn relative_path_with_extension() {
+        let g = Gav::from_key_version_classifier_extension(
+            "com.google.protobuf:protoc",
+            "3.25.0",
+            Some("linux-x86_64"),
+            "exe",
+        )
+        .unwrap();
+        assert_eq!(
+            g.relative_path(),
+            "com/google/protobuf/protoc/3.25.0/protoc-3.25.0-linux-x86_64.exe"
+        );
+        assert!(g.extension.as_deref() == Some("exe"));
+    }
+
+    #[test]
+    fn from_key_version_classifier_extension_defaults_jar() {
+        let g = Gav::from_key_version_classifier_extension(
+            "org.jacoco:org.jacoco.agent",
+            "0.8.13",
+            Some("runtime"),
+            "jar",
+        )
+        .unwrap();
+        assert!(g.relative_path().ends_with("-runtime.jar"));
     }
 }

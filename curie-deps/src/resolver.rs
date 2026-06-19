@@ -283,7 +283,13 @@ fn is_version_range(version: &str) -> bool {
 }
 
 fn curie_toml_gav() -> Gav {
-    Gav { group: String::new(), artifact: "Curie.toml".to_string(), version: String::new(), classifier: None }
+    Gav {
+        group: String::new(),
+        artifact: "Curie.toml".to_string(),
+        version: String::new(),
+        classifier: None,
+        extension: None,
+    }
 }
 
 fn format_range_error(violations: &[RangeViolation]) -> String {
@@ -338,6 +344,7 @@ fn merge_parent_chain(
             artifact: parent_ref.artifact_id.clone(),
             version: parent_ref.version.clone(),
             classifier: None,
+            extension: None,
         };
 
         let pom_path = match ensure_artifact(&parent_gav, repos, client, ArtifactKind::Pom, offline, None, None) {
@@ -591,6 +598,7 @@ fn resolve_bom_ref_gav(bom_ref: &BomRef, importing_pom: &Pom) -> Option<Gav> {
         artifact,
         version,
         classifier: None,
+        extension: None,
     })
 }
 
@@ -752,6 +760,7 @@ pub fn resolve_tree(
                         artifact,
                         version: raw_version,
                         classifier: dep.classifier.clone(),
+                        extension: None,
                     };
                     visited.insert(ga_key);
                     next_level.push(BfsWork {
@@ -988,6 +997,7 @@ pub fn resolve(
                         artifact,
                         version: raw_version,
                         classifier: dep.classifier.clone(),
+                        extension: None,
                     };
                     visited.insert(ga_key);
                     // Transitives inherit the parent's child_repos.
@@ -1245,6 +1255,41 @@ pub fn fetch_pom_only(gav: &Gav, repos: &[Repository], offline: bool) -> Result<
     ensure_artifact(gav, repos, &client, ArtifactKind::Pom, offline, None, None)
 }
 
+/// Download an arbitrary artifact file (any classifier and any file extension)
+/// into the local Maven cache.
+///
+/// This is the hardened path used by normal dependency resolution:
+/// - On cache hit the sidecar is used for fast verification (or fetched +
+///   persisted if missing).
+/// - Writes are performed atomically via a unique collocated staging file.
+/// - The provided `repos` (including mirrors from `~/.curie/config.toml` and
+///   project `[[repositories]]`) are respected.
+/// - A properly configured HTTP client (timeout + User-Agent) is used.
+///
+/// Intended for plugin artifacts (e.g. `protoc` executables, generator JARs
+/// with custom extensions or classifiers) so they benefit from the same
+/// safety guarantees as ordinary dependencies.
+pub fn fetch_artifact_file(
+    group: &str,
+    artifact: &str,
+    version: &str,
+    classifier: Option<&str>,
+    extension: &str,
+    repos: &[Repository],
+    offline: bool,
+) -> Result<PathBuf> {
+    let key = format!("{}:{}", group, artifact);
+    let mut gav = Gav::from_key_version_classifier(&key, version, classifier)?;
+    gav.extension = if extension.is_empty() {
+        None
+    } else {
+        Some(extension.to_string())
+    };
+
+    let client = build_http_client()?;
+    ensure_artifact(&gav, repos, &client, ArtifactKind::Jar, offline, None, None)
+}
+
 /// Return the local path for an artifact, downloading it if necessary.
 ///
 /// When `offline` is `true`, any cache miss is an immediate error — no HTTP
@@ -1346,10 +1391,13 @@ fn ensure_artifact(
         release_download_slot(&local_key);
     }
 
+    let err = last_err.unwrap_or_else(|| {
+        anyhow::anyhow!("no repositories configured")
+    });
     bail!(
         "failed to download {} from all repositories: {}",
         gav,
-        last_err.unwrap()
+        err
     );
 }
 
@@ -1377,6 +1425,10 @@ fn stage_and_rename_atomically(
     sidecar_bytes: &[u8],
 ) -> Result<()> {
     let part = compute_unique_staging_path(dest);
+    if let Some(parent) = part.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create staging dir {}", parent.display()))?;
+    }
     std::fs::write(&part, bytes)
         .with_context(|| format!("failed to write {}", part.display()))?;
 
@@ -1735,6 +1787,7 @@ mod tests {
             artifact: artifact.to_string(),
             version: version.to_string(),
             classifier: None,
+            extension: None,
         };
         let rel = gav.relative_pom_path();
         let path = home_dir.join(".m2").join("repository").join(&rel);
@@ -1843,7 +1896,7 @@ mod tests {
             &[("org.foo", "y", "2.0")],
             &[("com.example", "bom-a", "1.0.0")],
         );
-        let bom_a = Gav { group: "com.example".into(), artifact: "bom-a".into(), version: "1.0.0".into(), classifier: None };
+        let bom_a = Gav { group: "com.example".into(), artifact: "bom-a".into(), version: "1.0.0".into(), classifier: None, extension: None };
         let result = run_resolve_boms(dir.path(), &[bom_a]).unwrap();
         assert_eq!(result.get("org.foo:x").map(String::as_str), Some("1.0"));
         assert_eq!(result.get("org.foo:y").map(String::as_str), Some("2.0"));
@@ -1923,6 +1976,7 @@ mod tests {
             artifact: artifact.to_string(),
             version: version.to_string(),
             classifier: None,
+            extension: None,
         };
         let m2 = home_dir.join(".m2").join("repository");
 
@@ -1946,6 +2000,7 @@ mod tests {
             artifact: artifact.to_string(),
             version: version.to_string(),
             classifier: None,
+            extension: None,
         };
         let pom_path = home_dir.join(".m2").join("repository").join(gav.relative_pom_path());
         write_with_sidecar(&pom_path, pom_xml.as_bytes());
@@ -2033,6 +2088,7 @@ mod tests {
             artifact: artifact.to_string(),
             version: version.to_string(),
             classifier: None,
+            extension: None,
         };
         let pom_path = m2.join(pom_gav.relative_pom_path());
         let pom_xml = make_pom(group, artifact, version, deps);
@@ -2297,7 +2353,7 @@ mod tests {
 
         // grp:lib 1.0 depends on foo:bar 1.0 with an exclusion on foo:baz.
         // Build the POM manually to include <exclusions>.
-        let lib_gav = Gav { group: "grp".into(), artifact: "lib".into(), version: "1.0".into(), classifier: None };
+        let lib_gav = Gav { group: "grp".into(), artifact: "lib".into(), version: "1.0".into(), classifier: None, extension: None };
         let m2 = dir.path().join(".m2").join("repository");
         let pom_xml = r#"<?xml version="1.0"?>
 <project>
@@ -3214,6 +3270,7 @@ mod tests {
             artifact: "oidc-common-parent".to_string(),
             version: "3.3.0".to_string(),
             classifier: None,
+            extension: None,
         };
         let importer_xml = r#"<?xml version="1.0"?>
 <project>
@@ -3272,6 +3329,7 @@ mod tests {
             artifact: "idp-bom".to_string(),
             version: "5.0.0".to_string(),
             classifier: None,
+            extension: None,
         };
         let bom_xml = r#"<?xml version="1.0"?>
 <project>
