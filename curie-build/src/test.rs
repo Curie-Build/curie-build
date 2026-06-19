@@ -3,7 +3,7 @@ use crate::compile::{
     KOTLIN_STDLIB_COORD,
 };
 use crate::incremental::{
-    javac_version, needs_recompile, walk_files, write_javac_version_stamp, Inputs, Stamp,
+    self, javac_version, needs_recompile, walk_files, write_javac_version_stamp, Inputs, Stamp,
 };
 use crate::jar::classpath_string;
 use crate::{build, descriptor};
@@ -14,6 +14,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 const JUNIT_STANDALONE_COORD: &str =
     "org.junit.platform:junit-platform-console-standalone";
+
+/// Stamp file (under `target/`) recording the canonical test source set from
+/// the last successful test compile, used to detect added/removed test sources
+/// that mtime comparison can't see.
+const TEST_SOURCE_SET_STAMP: &str = ".test-sources";
 
 /// Compile test sources and run all tests via the JUnit Platform Console
 /// Standalone launcher.
@@ -305,11 +310,27 @@ pub fn run_tests(
         None => 0,
     };
 
+    // Source-set tracking (all languages): catches a test source added with a
+    // preserved-old mtime, or a deletion, which mtime comparison alone misses.
+    let test_source_set = incremental::canonical_source_set(&all_test_sources);
+    let test_source_set_prev = incremental::load_source_set(
+        &incremental::source_set_stamp_path(&project_root.join("target"), TEST_SOURCE_SET_STAMP),
+    );
+    let test_source_set_changed =
+        incremental::source_set_changed(test_source_set_prev.as_ref(), &test_source_set);
+
     let needs_recompile_tests = pre_pruned_tests > 0
+        || test_source_set_changed
         || needs_recompile(&all_test_sources, &test_classes_dir, &toml_path, &project_root.join("target")).needs_recompile();
 
     if needs_recompile_tests {
-        let reason = if pre_pruned_tests > 0 { "  [stale classes removed]" } else { "" };
+        let reason = if pre_pruned_tests > 0 {
+            "  [stale classes removed]"
+        } else if test_source_set_changed {
+            "  [source set changed]"
+        } else {
+            ""
+        };
         crate::parallel::emit(&crate::style::active(
             "Compile tests",
             &format!("{} source file(s){}", all_test_sources.len(), reason),
@@ -500,6 +521,13 @@ pub fn run_tests(
         if let Ok(version) = javac_version() {
             write_javac_version_stamp(&project_root.join("target"), &version)?;
         }
+
+        // Stamp the canonical test source set so the next build detects
+        // additions/deletions that leave no surviving mtime to compare against.
+        incremental::write_source_set(
+            &incremental::source_set_stamp_path(&project_root.join("target"), TEST_SOURCE_SET_STAMP),
+            &test_source_set,
+        )?;
     } else {
         crate::parallel::emit(&crate::style::up_to_date("Compile tests"));
     }

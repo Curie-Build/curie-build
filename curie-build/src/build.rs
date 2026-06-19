@@ -6,7 +6,7 @@ use crate::config;
 use crate::descriptor;
 use crate::docker;
 use crate::git;
-use crate::incremental::needs_repackage;
+use crate::incremental::{self, needs_repackage};
 use crate::jar::{populate_libs_dir, write_deterministic_jar};
 use crate::main_class::{detect_main_class, validate_main_class};
 use crate::maven;
@@ -14,7 +14,27 @@ use crate::native;
 use crate::test;
 use anyhow::{Context, Result};
 use curie_deps::repo::Repository;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+
+/// Stamp file (under `target/`) recording the set of resource files baked into
+/// the last packaged JAR, used to detect added/removed resources that mtime
+/// comparison can't see (resources are copied, never recompiled).
+const JAR_RESOURCES_STAMP: &str = ".jar-resources";
+
+/// Canonical set of every file under `resources_dir` (empty when there is no
+/// resources directory).  Used to detect resource additions/deletions across
+/// builds independently of mtimes.
+fn current_resource_set(resources_dir: Option<&Path>) -> BTreeSet<String> {
+    match resources_dir {
+        Some(dir) => {
+            let files: Vec<PathBuf> =
+                incremental::walk_files(dir).map(|e| e.path().to_path_buf()).collect();
+            incremental::canonical_source_set(&files)
+        }
+        None => BTreeSet::new(),
+    }
+}
 
 #[derive(Copy, Clone)]
 pub struct BuildOptions {
@@ -206,7 +226,20 @@ pub fn do_build(
         None
     };
 
-    let resolved_main_class: Option<String> = if needs_repackage(&compiled.jar_path, &compiled.classes_dir, resources_dir, &toml_path) {
+    // Resource-set tracking: resources are never recompiled, so a resource
+    // added with a preserved-old mtime (or any deletion) leaves the JAR's
+    // newest input mtime unchanged and `needs_repackage` alone would miss it.
+    // Compare the current resource file set against the last packaged one.
+    let target_dir = compiled.jar_path.parent().unwrap_or(project_root);
+    let resource_set = current_resource_set(resources_dir);
+    let resource_set_prev = incremental::load_source_set(
+        &incremental::source_set_stamp_path(target_dir, JAR_RESOURCES_STAMP),
+    );
+    let resources_changed =
+        incremental::source_set_changed(resource_set_prev.as_ref(), &resource_set);
+
+    let resolved_main_class: Option<String> = if resources_changed
+        || needs_repackage(&compiled.jar_path, &compiled.classes_dir, resources_dir, &toml_path) {
         let main_class = if let Some(app) = desc.application() {
             let mc = match &app.main_class {
                 Some(declared) => {
@@ -247,6 +280,13 @@ pub fn do_build(
             automatic_module_name,
         )
         .context("failed to write JAR")?;
+
+        // Stamp the packaged resource set so the next build detects an added or
+        // removed resource even when its mtime doesn't reflect the change.
+        incremental::write_source_set(
+            &incremental::source_set_stamp_path(target_dir, JAR_RESOURCES_STAMP),
+            &resource_set,
+        )?;
 
         main_class
     } else {
@@ -510,5 +550,49 @@ mod manifest_dep_jars_tests {
         let result = manifest_dep_jars(&desc, &dep_jars, &groovy_jars);
 
         assert!(result.is_empty(), "fat JAR's main JAR must have no Class-Path deps");
+    }
+}
+
+#[cfg(test)]
+mod resource_set_tests {
+    use super::*;
+    use crate::incremental::source_set_changed;
+
+    fn write(path: &Path, bytes: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn none_resources_dir_is_empty_set() {
+        assert!(current_resource_set(None).is_empty());
+    }
+
+    #[test]
+    fn collects_files_recursively() {
+        let dir = tempfile::tempdir().unwrap();
+        let res = dir.path().join("resources");
+        write(&res.join("a.txt"), b"a");
+        write(&res.join("sub/b.properties"), b"b");
+        let set = current_resource_set(Some(&res));
+        assert_eq!(set.len(), 2);
+    }
+
+    /// The bug this fixes: an added resource (with any mtime) changes the set,
+    /// and a deleted one does too — both must force a repackage.
+    #[test]
+    fn added_and_removed_resources_change_the_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let res = dir.path().join("resources");
+        write(&res.join("a.txt"), b"a");
+        let before = current_resource_set(Some(&res));
+
+        write(&res.join("b.txt"), b"b"); // add
+        let after_add = current_resource_set(Some(&res));
+        assert!(source_set_changed(Some(&before), &after_add), "addition must register");
+
+        std::fs::remove_file(res.join("a.txt")).unwrap(); // remove
+        let after_remove = current_resource_set(Some(&res));
+        assert!(source_set_changed(Some(&after_add), &after_remove), "deletion must register");
     }
 }

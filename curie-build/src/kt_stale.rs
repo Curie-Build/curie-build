@@ -30,7 +30,6 @@
 //! the wipe gets a chance to run.
 
 use anyhow::{Context, Result};
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::incremental::walk_files;
@@ -234,52 +233,9 @@ pub fn wipe_kotlin_derived_classes(classes_dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(removed)
 }
 
-/// Path of the stamp file recording the previous build's Kotlin source set.
-pub fn kt_sources_stamp_path(target_dir: &Path) -> PathBuf {
-    target_dir.join(".kt-sources")
-}
-
-/// Load the previous build's Kotlin source list, or `None` when the stamp
-/// is missing (first build after clean, or no Kotlin sources previously).
-pub fn load_kt_sources(target_dir: &Path) -> Option<BTreeSet<String>> {
-    let path = kt_sources_stamp_path(target_dir);
-    let text = std::fs::read_to_string(&path).ok()?;
-    Some(
-        text.lines()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .collect(),
-    )
-}
-
-/// Write the current Kotlin source list to the stamp file.  Pass the
-/// canonical (absolute, symlink-resolved) source paths so future builds
-/// compare apples-to-apples regardless of how the user invokes Curie.
-pub fn write_kt_sources(target_dir: &Path, sources: &BTreeSet<String>) -> Result<()> {
-    let path = kt_sources_stamp_path(target_dir);
-    let body = {
-        let mut s = String::with_capacity(sources.iter().map(|p| p.len() + 1).sum());
-        for p in sources {
-            s.push_str(p);
-            s.push('\n');
-        }
-        s
-    };
-    std::fs::write(&path, body)
-        .with_context(|| format!("failed to write {}", path.display()))
-}
-
-/// Canonicalise a slice of Kotlin source paths into the stamp's
-/// comparison set, dropping any that fail to canonicalise (which would only
-/// happen if the source vanished between source discovery and this call).
-pub fn canonical_kt_set(sources: &[PathBuf]) -> BTreeSet<String> {
-    sources
-        .iter()
-        .filter_map(|p| p.canonicalize().ok())
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect()
-}
+// Source-set tracking (added/removed sources) lives in `incremental.rs` now —
+// it is language-agnostic and shared by production, test, and resource paths.
+// This module keeps only the Kotlin-specific class cleanup below.
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -506,37 +462,6 @@ mod tests {
         assert!(res.exists());
     }
 
-    // -- source-set tracking -------------------------------------------------
-
-    #[test]
-    fn kt_sources_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut set = BTreeSet::new();
-        set.insert("/a/Foo.kt".to_string());
-        set.insert("/a/Bar.kt".to_string());
-        write_kt_sources(dir.path(), &set).unwrap();
-        let read = load_kt_sources(dir.path()).unwrap();
-        assert_eq!(read, set);
-    }
-
-    #[test]
-    fn kt_sources_load_missing_returns_none() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(load_kt_sources(dir.path()).is_none());
-    }
-
-    #[test]
-    fn kt_sources_ignores_blank_lines_and_whitespace() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            kt_sources_stamp_path(dir.path()),
-            "\n  /a/Foo.kt  \n\n/a/Bar.kt\n",
-        )
-        .unwrap();
-        let read = load_kt_sources(dir.path()).unwrap();
-        let mut expected = BTreeSet::new();
-        expected.insert("/a/Foo.kt".to_string());
-        expected.insert("/a/Bar.kt".to_string());
-        assert_eq!(read, expected);
-    }
+    // Source-set tracking tests moved to `incremental.rs` alongside the
+    // generic helpers they now exercise.
 }

@@ -23,6 +23,7 @@
 //! not.
 
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
@@ -172,6 +173,73 @@ pub(crate) fn newest_mtime(paths: &[PathBuf]) -> SystemTime {
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
+// ---------------------------------------------------------------------------
+// Source-set tracking
+// ---------------------------------------------------------------------------
+//
+// mtime comparison cannot see *set-membership* changes: a source added with a
+// preserved old timestamp (`mv`, `cp -p`, `rsync -a`, tar unpack) is not newer
+// than any existing class, so a pure-mtime check reports "up to date" and never
+// compiles it.  Symmetrically, a deletion leaves no newer mtime to notice.
+//
+// We close that gap by stamping the canonical source set after every successful
+// compile and comparing it on the next build.  Any difference (addition OR
+// deletion) forces a recompile.  The helpers are language-agnostic — the caller
+// chooses which sources to track and which stamp file to use, so the same
+// mechanism serves production sources, test sources, and packaged resources.
+
+/// Canonicalise a slice of paths into a comparison set, dropping any that fail
+/// to canonicalise (which only happens if the file vanished between discovery
+/// and this call).  Canonical form matches the paths recorded elsewhere (e.g.
+/// the class manifest), so sets compare consistently.
+pub(crate) fn canonical_source_set(sources: &[PathBuf]) -> BTreeSet<String> {
+    sources
+        .iter()
+        .filter_map(|p| p.canonicalize().ok())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Path of a source-set stamp named `file_name` under `target_dir`.
+pub(crate) fn source_set_stamp_path(target_dir: &Path, file_name: &str) -> PathBuf {
+    target_dir.join(file_name)
+}
+
+/// Load a previously stamped source set, or `None` when the stamp is missing
+/// (first build after clean, or this stamp was never written).
+pub(crate) fn load_source_set(path: &Path) -> Option<BTreeSet<String>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(
+        text.lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect(),
+    )
+}
+
+/// Write `set` (one canonical path per line) to the stamp at `path`.
+pub(crate) fn write_source_set(path: &Path, set: &BTreeSet<String>) -> Result<()> {
+    let mut body = String::with_capacity(set.iter().map(|p| p.len() + 1).sum());
+    for p in set {
+        body.push_str(p);
+        body.push('\n');
+    }
+    std::fs::write(path, body)
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+/// True when the current source set differs from the previously stamped one
+/// (a source was added or removed).  A missing previous stamp reports `false`:
+/// the very first build is driven by the no-class-files check instead, and we
+/// must not force a recompile just because the stamp doesn't exist yet.
+pub(crate) fn source_set_changed(
+    previous: Option<&BTreeSet<String>>,
+    current: &BTreeSet<String>,
+) -> bool {
+    previous.map(|p| p != current).unwrap_or(false)
+}
+
 /// Reason a recompile is required, or confirmation that it is not.
 #[derive(Debug, PartialEq)]
 pub(crate) enum CompileStatus {
@@ -179,6 +247,9 @@ pub(crate) enum CompileStatus {
     NoClassFiles,
     /// At least one source file is newer than the oldest `.class` file.
     SourceChanged,
+    /// The set of source files changed (a source was added or removed) since
+    /// the last compile — caught even when mtimes don't reflect it.
+    SourceSetChanged,
     /// `Curie.toml` is newer than the oldest `.class` file.
     TomlChanged,
     /// Stale `.class` files were found (sources deleted since last compile).
@@ -199,6 +270,7 @@ impl CompileStatus {
         match self {
             CompileStatus::NoClassFiles => "no class files",
             CompileStatus::SourceChanged => "source changed",
+            CompileStatus::SourceSetChanged => "source set changed",
             CompileStatus::TomlChanged => "Curie.toml changed",
             CompileStatus::StaleClasses => "stale classes removed",
             CompileStatus::JdkChanged => "JDK version changed",
@@ -744,5 +816,79 @@ mod tests {
         let mut inputs = Inputs::new();
         inputs.add_dir_opt(None);
         assert_eq!(inputs.newest(), None);
+    }
+
+    // -- source-set tracking -------------------------------------------------
+
+    fn set_of(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn source_set_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = source_set_stamp_path(dir.path(), ".sources");
+        let set = set_of(&["/a/Foo.java", "/a/Bar.kt"]);
+        write_source_set(&path, &set).unwrap();
+        assert_eq!(load_source_set(&path).unwrap(), set);
+    }
+
+    #[test]
+    fn source_set_load_missing_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_source_set(&source_set_stamp_path(dir.path(), ".sources")).is_none());
+    }
+
+    #[test]
+    fn source_set_load_ignores_blank_lines_and_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = source_set_stamp_path(dir.path(), ".sources");
+        std::fs::write(&path, "\n  /a/Foo.java  \n\n/a/Bar.java\n").unwrap();
+        assert_eq!(load_source_set(&path).unwrap(), set_of(&["/a/Foo.java", "/a/Bar.java"]));
+    }
+
+    #[test]
+    fn source_set_changed_detects_addition() {
+        let prev = set_of(&["/a/Foo.java"]);
+        let now = set_of(&["/a/Foo.java", "/a/Bar.java"]); // Bar added
+        assert!(source_set_changed(Some(&prev), &now));
+    }
+
+    #[test]
+    fn source_set_changed_detects_deletion() {
+        let prev = set_of(&["/a/Foo.java", "/a/Bar.java"]);
+        let now = set_of(&["/a/Foo.java"]); // Bar removed
+        assert!(source_set_changed(Some(&prev), &now));
+    }
+
+    #[test]
+    fn source_set_changed_false_when_equal() {
+        let set = set_of(&["/a/Foo.java", "/a/Bar.java"]);
+        assert!(!source_set_changed(Some(&set), &set.clone()));
+    }
+
+    #[test]
+    fn source_set_changed_false_when_no_previous_stamp() {
+        // First build has no stamp — must NOT force a recompile on that basis;
+        // the no-class-files path drives the initial compile instead.
+        let now = set_of(&["/a/Foo.java"]);
+        assert!(!source_set_changed(None, &now));
+    }
+
+    #[test]
+    fn canonical_source_set_drops_uncanonicalizable_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("Real.java");
+        write_file(&real, b"class Real {}");
+        let ghost = dir.path().join("Ghost.java"); // never created
+        let set = canonical_source_set(&[real.clone(), ghost]);
+        assert_eq!(set.len(), 1, "only the existing file canonicalizes");
+        assert!(set.iter().next().unwrap().ends_with("Real.java"));
+    }
+
+    #[test]
+    fn compile_status_source_set_changed_reason_and_needs_recompile() {
+        assert_eq!(CompileStatus::SourceSetChanged.reason(), "source set changed");
+        assert!(CompileStatus::SourceSetChanged.needs_recompile());
     }
 }

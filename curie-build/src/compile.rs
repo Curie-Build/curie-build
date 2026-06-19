@@ -28,7 +28,7 @@
 use crate::build::{central_repos, extra_repos};
 use crate::descriptor;
 use crate::incremental::{
-    javac_version, needs_recompile, walk_files, write_javac_version_stamp, CompileStatus,
+    self, javac_version, needs_recompile, walk_files, write_javac_version_stamp, CompileStatus,
 };
 use crate::jar::classpath_string;
 use crate::jpms;
@@ -52,6 +52,11 @@ pub const KOTLIN_COMPILER_COORD: &str = "org.jetbrains.kotlin:kotlin-compiler-em
 pub const KOTLIN_STDLIB_COORD: &str = "org.jetbrains.kotlin:kotlin-stdlib";
 /// Apache Groovy compiler + runtime (transitive deps provide ASM, Antlr, etc.).
 pub const GROOVY_COORD: &str = "org.apache.groovy:groovy";
+
+/// Stamp file (under `target/`) recording the canonical production source set
+/// from the last successful compile, used to detect added/removed sources that
+/// mtime comparison can't see.
+const SOURCE_SET_STAMP: &str = ".sources";
 
 /// Intermediate output from the compile phase.
 pub struct CompileOutput {
@@ -663,18 +668,23 @@ pub fn compile(
         None => 0,
     };
 
-    // Kotlin source-set tracking: compares this build's canonical .kt paths
-    // against the set we stamped on the last successful compile.  Pure
-    // deletions of .kt files don't bump any surviving mtime, so without this
-    // check `needs_recompile` would return UpToDate and orphan Kotlin classes
-    // would never get cleaned.  Empty `kt_set` with a non-empty previous set
-    // (last build had Kotlin, this build has none) is also a change.
-    let kt_set = kt_stale::canonical_kt_set(&kotlin_sources);
-    let kt_prev = kt_stale::load_kt_sources(&output_dir);
-    let kt_set_changed = kt_prev.as_ref().map(|p| p != &kt_set).unwrap_or(false);
+    // Source-set tracking (all languages): compares this build's canonical
+    // source paths against the set stamped on the last successful compile.  A
+    // source added with a preserved-old mtime (mv/cp -p/rsync/untar) or a pure
+    // deletion doesn't bump any surviving mtime, so without this check
+    // `needs_recompile` would wrongly return UpToDate.  An empty current set
+    // with a non-empty previous one (e.g. transitioned away from Kotlin) is
+    // also a change, which keeps the Kotlin orphan-wipe firing.
+    let source_set = incremental::canonical_source_set(&sources);
+    let source_set_prev =
+        incremental::load_source_set(&incremental::source_set_stamp_path(&output_dir, SOURCE_SET_STAMP));
+    let source_set_changed =
+        incremental::source_set_changed(source_set_prev.as_ref(), &source_set);
 
-    let compile_status = if pre_pruned > 0 || kt_set_changed {
+    let compile_status = if pre_pruned > 0 {
         CompileStatus::StaleClasses
+    } else if source_set_changed {
+        CompileStatus::SourceSetChanged
     } else {
         needs_recompile(&sources, &classes_dir, &toml_path, &output_dir)
     };
@@ -692,10 +702,10 @@ pub fn compile(
         // (deleted source, or removed declaration inside an edited source).
         // Wiping unconditionally before the compiler runs makes the second
         // case impossible — anything not re-emitted stays gone.  Also fires
-        // when the project just transitioned away from Kotlin (kt_set is
-        // empty but the previous build had .kt sources), in which case
+        // when the project just transitioned away from Kotlin (the source set
+        // changed and the previous build had .kt sources), in which case
         // kotlinc won't run and the wipe is the only cleanup.
-        let wiped_kotlin_classes: Vec<PathBuf> = if has_kotlin || kt_set_changed {
+        let wiped_kotlin_classes: Vec<PathBuf> = if has_kotlin || source_set_changed {
             kt_stale::wipe_kotlin_derived_classes(&classes_dir)?
         } else {
             Vec::new()
@@ -946,9 +956,12 @@ pub fn compile(
             write_javac_version_stamp(&output_dir, &version)?;
         }
 
-        // Stamp the canonical Kotlin source set so the next build can detect
-        // pure deletions (which leave no surviving mtime to compare against).
-        kt_stale::write_kt_sources(&output_dir, &kt_set)?;
+        // Stamp the canonical source set (all languages) so the next build can
+        // detect additions/deletions that leave no surviving mtime to compare.
+        incremental::write_source_set(
+            &incremental::source_set_stamp_path(&output_dir, SOURCE_SET_STAMP),
+            &source_set,
+        )?;
     } else {
         crate::parallel::emit(&crate::style::up_to_date("Compile"));
     }
