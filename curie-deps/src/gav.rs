@@ -27,6 +27,59 @@ pub struct Gav {
     pub extension: Option<String>,
 }
 
+/// Returns true if `s` contains only characters allowed in Maven coordinates
+/// per the fix for bug #21: [A-Za-z0-9._-]+
+fn is_valid_coord_part(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-'
+        })
+}
+
+/// Validates a coordinate part. Errors with a descriptive message if it
+/// contains invalid characters, is empty, or is "." / ".." (to prevent
+/// path traversal in local repository layout).
+fn validate_coord(name: &str, s: &str) -> Result<()> {
+    if !is_valid_coord_part(s) {
+        bail!(
+            "invalid {} {:?}: must match [A-Za-z0-9._-]+",
+            name, s
+        );
+    }
+    if s == "." || s == ".." {
+        bail!("invalid {} {:?}: must not be . or ..", name, s);
+    }
+    if name == "group" {
+        for seg in s.split('.') {
+            if seg.is_empty() || seg == "." || seg == ".." {
+                bail!("invalid group {:?}: contains invalid segment", s);
+            }
+        }
+    }
+    Ok(())
+}
+
+impl Gav {
+    /// Validates that all coordinate parts are safe for use in local
+    /// `~/.m2/repository` paths (rejects path traversal and invalid chars).
+    pub fn validate_for_path(&self) -> Result<()> {
+        validate_coord("group", &self.group)?;
+        validate_coord("artifact", &self.artifact)?;
+        validate_coord("version", &self.version)?;
+        if let Some(c) = &self.classifier {
+            if !c.is_empty() {
+                validate_coord("classifier", c)?;
+            }
+        }
+        if let Some(e) = &self.extension {
+            if !e.is_empty() {
+                validate_coord("extension", e)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Gav {
     /// Parse `"group:artifact"` key + `"version"` value (Curie TOML format).
     ///
@@ -53,7 +106,9 @@ impl Gav {
             bail!("dependency key {:?} has empty group, artifact, or version", key);
         }
 
-        Ok(Gav { group, artifact, version, classifier: None, extension: None })
+        let g = Gav { group, artifact, version, classifier: None, extension: None };
+        g.validate_for_path()?;
+        Ok(g)
     }
 
     /// Parse `"group:artifact"` key + `"version"` value and an optional
@@ -66,6 +121,7 @@ impl Gav {
     ) -> Result<Self> {
         let mut g = Self::from_key_version(key, version)?;
         g.classifier = classifier.map(|s| s.to_string());
+        g.validate_for_path()?;
         Ok(g)
     }
 
@@ -84,6 +140,7 @@ impl Gav {
         } else {
             Some(extension.to_string())
         };
+        g.validate_for_path()?;
         Ok(g)
     }
 
@@ -100,6 +157,8 @@ impl Gav {
     ///   foo-1.0-runtime.jar
     ///   protoc-3.25.0-linux-x86_64.exe   (plugin artifact)
     pub fn relative_path(&self) -> String {
+        self.validate_for_path()
+            .expect("GAV must be valid for path construction (see bug #21)");
         let base = format!(
             "{}/{}/{}/{}-{}",
             self.group_path(),
@@ -123,6 +182,8 @@ impl Gav {
 
     /// Relative POM path within a Maven repository layout.
     pub fn relative_pom_path(&self) -> String {
+        self.validate_for_path()
+            .expect("GAV must be valid for path construction (see bug #21)");
         format!(
             "{}/{}/{}/{}-{}.pom",
             self.group_path(),
@@ -135,12 +196,14 @@ impl Gav {
 
     /// Absolute path in the local `~/.m2/repository` cache.
     pub fn local_repository_path(&self) -> Result<PathBuf> {
+        self.validate_for_path()?;
         let home = home_dir()?;
         Ok(home.join(".m2").join("repository").join(self.relative_path()))
     }
 
     /// Absolute POM path in the local `~/.m2/repository` cache.
     pub fn pom_local_repository_path(&self) -> Result<PathBuf> {
+        self.validate_for_path()?;
         let home = home_dir()?;
         Ok(home.join(".m2").join("repository").join(self.relative_pom_path()))
     }
@@ -302,5 +365,51 @@ mod tests {
         )
         .unwrap();
         assert!(g.relative_path().ends_with("-runtime.jar"));
+    }
+
+    #[test]
+    fn rejects_path_traversal_in_version() {
+        assert!(Gav::from_key_version("g:a", "../evil").is_err());
+        assert!(Gav::from_key_version("g:a", "..").is_err());
+    }
+
+    #[test]
+    fn rejects_slash_or_backslash() {
+        assert!(Gav::from_key_version("g:a", "1/0").is_err());
+        assert!(Gav::from_key_version("g:a", "1\\0").is_err());
+        assert!(Gav::from_key_version("com/evil:foo", "1.0").is_err());
+    }
+
+    #[test]
+    fn rejects_other_invalid_chars() {
+        assert!(Gav::from_key_version("g:a", "1.0$").is_err());
+        assert!(Gav::from_key_version("g:a", "v with space").is_err());
+    }
+
+    #[test]
+    fn rejects_dot_or_empty_segments_in_group() {
+        assert!(Gav::from_key_version("com..evil:foo", "1.0").is_err());
+        assert!(Gav::from_key_version(".com:foo", "1.0").is_err());
+        assert!(Gav::from_key_version("com.:foo", "1.0").is_err());
+    }
+
+    #[test]
+    fn accepts_normal_coordinates() {
+        let g = Gav::from_key_version("com.example:foo-bar_baz", "1.2.3").unwrap();
+        assert_eq!(g.group, "com.example");
+        assert_eq!(g.artifact, "foo-bar_baz");
+        assert_eq!(g.version, "1.2.3");
+        let _ = g.relative_path();
+        let _ = g.local_repository_path();
+    }
+
+    #[test]
+    fn validate_for_path_on_direct_struct() {
+        let mut g = Gav::from_key_version("g:a", "1.0").unwrap();
+        g.version = "../bad".to_string();
+        assert!(g.validate_for_path().is_err());
+        // relative_path uses expect (panics on violation for invariant); test via Result fn
+        let p = g.local_repository_path();
+        assert!(p.is_err());
     }
 }

@@ -421,29 +421,31 @@ fn download_artifact(art: &PluginArtifact, repos: &[Repository], offline: bool) 
 
 #[cfg(test)]
 fn artifact_cache_path(art: &PluginArtifact) -> Result<PathBuf> {
-    let home = dirs::home_dir().context("cannot determine home directory")?;
-    let group_path = art.group.replace('.', "/");
-    let filename = match &art.classifier {
-        Some(c) => format!("{}-{}-{}.{}", art.artifact, art.version, c, art.extension),
-        None => format!("{}-{}.{}", art.artifact, art.version, art.extension),
-    };
-    Ok(home
-        .join(".m2")
-        .join("repository")
-        .join(&group_path)
-        .join(&art.artifact)
-        .join(&art.version)
-        .join(filename))
+    // Delegate to Gav so we get the common validation (bug #21) and single
+    // source of truth for local repository layout.
+    let key = format!("{}:{}", art.group, art.artifact);
+    let mut gav = curie_deps::Gav::from_key_version_classifier_extension(
+        &key,
+        &art.version,
+        art.classifier.as_deref(),
+        &art.extension,
+    )?;
+    // Note: extension may be set already by the from_ call.
+    Ok(gav.local_repository_path()?)
 }
 
 #[cfg(test)]
 fn artifact_relative_path(art: &PluginArtifact) -> String {
-    let group_path = art.group.replace('.', "/");
-    let filename = match &art.classifier {
-        Some(c) => format!("{}-{}-{}.{}", art.artifact, art.version, c, art.extension),
-        None => format!("{}-{}.{}", art.artifact, art.version, art.extension),
-    };
-    format!("{}/{}/{}/{}", group_path, art.artifact, art.version, filename)
+    // Delegate to Gav (gets validation for free).
+    let key = format!("{}:{}", art.group, art.artifact);
+    let mut gav = curie_deps::Gav::from_key_version_classifier_extension(
+        &key,
+        &art.version,
+        art.classifier.as_deref(),
+        &art.extension,
+    )
+    .expect("test artifact must be valid");
+    gav.relative_path()
 }
 
 #[cfg(unix)]
