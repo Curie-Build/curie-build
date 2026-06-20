@@ -1546,6 +1546,7 @@ mod tests {
                 exclusions: vec![],
                 shade: Some(false),
                 relocations: vec![],
+                allow_version_conflict: false,
             }),
         );
 

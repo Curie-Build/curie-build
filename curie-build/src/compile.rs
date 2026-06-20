@@ -382,7 +382,7 @@ pub fn compile(
         let pairs: Vec<DepEntry> = desc
             .dependencies
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None })
+            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
             .collect();
 
         let jars = resolve(
@@ -394,6 +394,9 @@ pub fn compile(
                 bom_imports: bom_gavs.clone(),
                 offline,
                 skip_version_ranges: false,
+                // User-declared [dependencies]: fail on a major-version conflict
+                // unless the coordinate sets allowVersionConflict (bug #13).
+                error_on_version_conflict: true,
             },
         )
         .context("dependency resolution failed")?;
@@ -412,7 +415,7 @@ pub fn compile(
     } else {
         let ap_entries: Vec<DepEntry> = ap_pairs
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None })
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false })
             .collect();
         let jars = resolve(
             &ap_entries,
@@ -422,7 +425,7 @@ pub fn compile(
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: bom_gavs.clone(),
                 offline,
-                skip_version_ranges: false,
+                skip_version_ranges: false, error_on_version_conflict: false,
             },
         )
         .context("annotation-processor resolution failed")?;
@@ -450,14 +453,14 @@ pub fn compile(
                 .expect("on-cp coord must be in ap_pairs");
             // Resolve the single coord again — second call hits ~/.m2.
             let single = resolve(
-                &[DepEntry { key: coord, version, repo_id: None, exclusions: vec![], classifier: None }],
+                &[DepEntry { key: coord, version, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }],
                 &ResolveOptions {
                     default_repos: central_repos(),
                     named_repos: extra_repos(desc),
                     progress: false,
                     bom_imports: bom_gavs.clone(),
                     offline,
-                    skip_version_ranges: false,
+                    skip_version_ranges: false, error_on_version_conflict: false,
                 },
             )
             .with_context(|| format!("annotation-processor classpath resolution failed for {}", coord))?;
@@ -582,8 +585,8 @@ pub fn compile(
         let kver = desc.kotlin.version();
         let kotlin_jars = resolve(
             &[
-                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None, exclusions: vec![], classifier: None },
-                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None, exclusions: vec![], classifier: None },
+                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false },
+                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false },
             ],
             &ResolveOptions {
                 default_repos: central_repos(),
@@ -591,7 +594,7 @@ pub fn compile(
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: bom_gavs.clone(),
                 offline,
-                skip_version_ranges: false,
+                skip_version_ranges: false, error_on_version_conflict: false,
             },
         )
         .context("Kotlin compiler/stdlib resolution failed")?;
@@ -621,14 +624,14 @@ pub fn compile(
     if has_groovy {
         let gver = desc.groovy.version();
         let jars = resolve(
-            &[DepEntry { key: GROOVY_COORD, version: gver, repo_id: None, exclusions: vec![], classifier: None }],
+            &[DepEntry { key: GROOVY_COORD, version: gver, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }],
             &ResolveOptions {
                 default_repos: central_repos(),
                 named_repos: extra_repos(desc),
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: bom_gavs.clone(),
                 offline,
-                skip_version_ranges: false,
+                skip_version_ranges: false, error_on_version_conflict: false,
             },
         )
         .context("Groovy compiler/runtime resolution failed")?;

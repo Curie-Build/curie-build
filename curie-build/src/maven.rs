@@ -2508,6 +2508,7 @@ mod tests {
                 exclusions: vec!["com.fasterxml.jackson.core:jackson-annotations".to_string()],
                 shade: None,
                 relocations: vec![],
+                allow_version_conflict: false,
             }),
         );
         desc.test_dependencies.insert(
@@ -3138,6 +3139,7 @@ mod tests {
             exclusions: vec![],
             shade,
             relocations,
+            allow_version_conflict: false,
         })
     }
 
@@ -3269,6 +3271,7 @@ mod tests {
                 exclusions: vec![],
                 shade: None,
                 relocations: vec![],
+                allow_version_conflict: false,
             }),
         );
 
@@ -3472,6 +3475,7 @@ mod tests {
                 exclusions: vec![],
                 shade: None,
                 relocations: vec![],
+                allow_version_conflict: false,
             }),
         );
 

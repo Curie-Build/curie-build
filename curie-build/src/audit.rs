@@ -193,13 +193,13 @@ fn resolve_components(
         progress: false,
         bom_imports: desc.prod_bom_gavs()?,
         offline: opts.offline,
-        skip_version_ranges: false,
+        skip_version_ranges: false, error_on_version_conflict: false,
     };
 
     let prod_entries: Vec<DepEntry> = desc
         .dependencies
         .iter()
-        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None })
+        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
         .collect();
 
     let mut components: Vec<Component> = Vec::new();
@@ -228,12 +228,12 @@ fn resolve_components(
             progress: false,
             bom_imports: desc.test_bom_gavs()?,
             offline: opts.offline,
-            skip_version_ranges: false,
+            skip_version_ranges: false, error_on_version_conflict: false,
         };
         let test_entries: Vec<DepEntry> = desc
             .test_dependencies
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None })
+            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
             .collect();
         if !test_entries.is_empty() {
             let tree = curie_deps::resolve_tree(&test_entries, &opts_test)

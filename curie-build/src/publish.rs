@@ -540,7 +540,7 @@ fn resolve_declared_dep_gavs(desc: &Descriptor) -> Result<Vec<Gav>> {
     let entries: Vec<DepEntry> = desc
         .dependencies
         .iter()
-        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None })
+        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
         .collect();
     let opts = ResolveOptions {
         default_repos: crate::build::central_repos(),
@@ -548,7 +548,7 @@ fn resolve_declared_dep_gavs(desc: &Descriptor) -> Result<Vec<Gav>> {
         progress: false,
         bom_imports: desc.prod_bom_gavs()?,
         offline: false,
-        skip_version_ranges: false,
+        skip_version_ranges: false, error_on_version_conflict: false,
     };
     curie_deps::resolve_declared_gavs(&entries, &opts)
 }

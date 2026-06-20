@@ -137,14 +137,14 @@ fn fetch_coordinate(desc: &descriptor::Descriptor, coord: &str, no_transitive: b
     }
 
     let key = format!("{}:{}", gav.group, gav.artifact);
-    let entries = [DepEntry { key: &key, version: &gav.version, repo_id: None, exclusions: vec![], classifier: None }];
+    let entries = [DepEntry { key: &key, version: &gav.version, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }];
     let opts = ResolveOptions {
         default_repos: central_repos(),
         named_repos: extra_repos(desc),
         progress: true,
         bom_imports: desc.prod_bom_gavs()?,
         offline,
-        skip_version_ranges: false,
+        skip_version_ranges: false, error_on_version_conflict: false,
     };
     let jars = curie_deps::resolve(&entries, &opts)?;
     crate::parallel::emit(&crate::style::done(&format!(
@@ -181,7 +181,7 @@ fn fetch_dep_section(desc: &descriptor::Descriptor, tests: bool, offline: bool) 
     let dep_map = if tests { &desc.test_dependencies } else { &desc.dependencies };
     let mut entries: Vec<DepEntry> = dep_map
         .iter()
-        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None })
+        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
         .collect();
 
     let mut ap_pairs = desc.ap_pairs();
@@ -191,7 +191,7 @@ fn fetch_dep_section(desc: &descriptor::Descriptor, tests: bool, offline: bool) 
     entries.extend(
         ap_pairs
             .into_iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None }),
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }),
     );
 
     if entries.is_empty() {
@@ -205,7 +205,7 @@ fn fetch_dep_section(desc: &descriptor::Descriptor, tests: bool, offline: bool) 
         progress: true,
         bom_imports: bom_gavs,
         offline,
-        skip_version_ranges: false,
+        skip_version_ranges: false, error_on_version_conflict: false,
     };
     let jars = curie_deps::resolve(&entries, &opts)?;
     let label = if tests { "Test deps" } else { "Dependencies" };
@@ -318,14 +318,14 @@ fn fetch_jar_coords_transitive(gavs: &[&Gav], repos: &[curie_deps::repo::Reposit
     for gav in gavs {
         let key = format!("{}:{}", gav.group, gav.artifact);
         let classifier = gav.classifier.as_deref();
-        let entry = DepEntry { key: &key, version: &gav.version, repo_id: None, exclusions: vec![], classifier };
+        let entry = DepEntry { key: &key, version: &gav.version, repo_id: None, exclusions: vec![], classifier, allow_version_conflict: false };
         let opts = ResolveOptions {
             default_repos: repos.to_vec(),
             named_repos: vec![],
             progress: true,
             bom_imports: vec![],
             offline,
-            skip_version_ranges: true,
+            skip_version_ranges: true, error_on_version_conflict: false,
         };
         let jars = curie_deps::resolve(&[entry], &opts)?;
         total += jars.len();

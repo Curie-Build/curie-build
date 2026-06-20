@@ -125,6 +125,44 @@
 
     <p>Curie also honours <code>&lt;exclusions&gt;</code> declared in upstream POM files. If a library's own POM excludes a transitive dependency, Curie respects that exclusion automatically — matching Maven's behaviour.</p>
 
+    <h2 id="version-conflicts">Major-version conflicts</h2>
+    <p>Curie resolves version conflicts with Maven's <strong>nearest-wins</strong> rule: when two paths in the dependency graph need different versions of the same <code>group:artifact</code>, the one declared closest to your project wins. That is usually what you want — but a <em>major</em>-version difference is dangerous: keeping <code>2.x</code> when a transitive dependency was compiled against <code>5.x</code> can fail at runtime with <code>NoSuchMethodError</code> or <code>NoClassDefFoundError</code>.</p>
+
+    <p>So when a discarded candidate's <strong>major</strong> version differs from the version Curie keeps, the build fails with an explanation:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>curie build</span>
+      </header>
+<pre>dependency version conflict (major-version mismatch)
+
+  com.google.guava:guava — keeping 33.0-jre, but org.example:lib:1.2 requires 25.1-jre
+
+A major-version difference can cause runtime errors (missing classes/methods).
+Fix the version, exclude the transitive dependency, or — if intentional —
+allow it in Curie.toml:
+  "com.google.guava:guava" = { version = "33.0-jre", allowVersionConflict = true }</pre>
+    </div>
+
+    <p>You have three ways to resolve it:</p>
+    <ul>
+      <li><strong>Upgrade</strong> your declared version (or the dependency that pulls the older one) so the majors agree.</li>
+      <li><strong>Exclude</strong> the transitive dependency that needs the other major (see <a href="#exclusions">exclusions</a>) if it is not actually required.</li>
+      <li><strong>Accept it</strong> — when you know the kept version is binary-compatible — by setting <code>allowVersionConflict = true</code> on that dependency:</li>
+    </ul>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[dependencies]</span>
+<span class="pkg">"com.google.guava:guava"</span> = { version = <span class="str">"33.0-jre"</span>, allowVersionConflict = <span class="kw">true</span> }</pre>
+    </div>
+
+    <p><code>allowVersionConflict</code> only silences the error for that one coordinate; resolution is unchanged (nearest-wins still keeps your version). Minor and patch differences never trigger this check — they are resolved silently, matching Maven. The same rule applies to <code>[test-dependencies]</code>.</p>
+
     <h2>curie add</h2>
     <p><code>curie add</code> queries Maven Central for the artifact, picks the latest version, and writes the entry into <code>Curie.toml</code>:</p>
 

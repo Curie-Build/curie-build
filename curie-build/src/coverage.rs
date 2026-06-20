@@ -40,6 +40,7 @@ pub fn resolve_agent_jar(
             repo_id: None,
             exclusions: vec![],
             classifier: Some("runtime"),
+            allow_version_conflict: false,
         }],
         &ResolveOptions {
             default_repos: default_repos.to_vec(),
@@ -47,7 +48,7 @@ pub fn resolve_agent_jar(
             progress: false,
             bom_imports: vec![],
             offline,
-            skip_version_ranges: false,
+            skip_version_ranges: false, error_on_version_conflict: false,
         },
     )
     .context("failed to resolve JaCoCo agent")?;
@@ -99,6 +100,7 @@ pub fn resolve_cli_jar(
             repo_id: None,
             exclusions: vec![],
             classifier: Some("nodeps"),
+            allow_version_conflict: false,
         }],
         &ResolveOptions {
             default_repos: default_repos.to_vec(),
@@ -106,7 +108,7 @@ pub fn resolve_cli_jar(
             progress: false,
             bom_imports: vec![],
             offline,
-            skip_version_ranges: false,
+            skip_version_ranges: false, error_on_version_conflict: false,
         },
     )
     .context("failed to resolve JaCoCo CLI")?;

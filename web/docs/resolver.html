@@ -85,6 +85,8 @@
       <li><strong>Top-level BOM beats transitive explicit</strong> — your <code>[bom-imports]</code> overrides any version a transitive POM hard-codes.</li>
     </ul>
 
+    <p>Nearest-wins is silent for minor and patch differences, but a <strong>major</strong>-version mismatch (a discarded candidate whose major differs from the kept version) fails the build rather than silently shipping a possibly-incompatible JAR. Resolve it by upgrading, excluding the offending transitive dependency, or accepting it with <code>allowVersionConflict = true</code> on the dependency — see <a href="/docs/dependencies.html#version-conflicts">Major-version conflicts</a>.</p>
+
     <p>POMs are fetched serially in phase 1 (small, fast). JARs are then downloaded in parallel in phase 2 — up to eight concurrent workers — and arrive in the local cache in a stable, topologically ordered classpath.</p>
 
     <h2 id="checksums">Checksum verification</h2>

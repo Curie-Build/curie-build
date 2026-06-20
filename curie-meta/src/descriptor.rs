@@ -908,6 +908,16 @@ pub struct DependencyDetailed {
     /// ```
     #[serde(default)]
     pub relocations: Vec<Relocation>,
+
+    /// When `true`, this dependency's version is intentional: the build will not
+    /// fail if a transitive dependency requires a different MAJOR version of the
+    /// same artifact (nearest-wins still keeps this version).
+    ///
+    /// ```toml
+    /// "com.example:foo" = { version = "2.0", allowVersionConflict = true }
+    /// ```
+    #[serde(default, rename = "allowVersionConflict")]
+    pub allow_version_conflict: bool,
 }
 
 impl DependencyValue {
@@ -968,6 +978,12 @@ impl DependencyValue {
             DependencyValue::Version(_) => &[],
             DependencyValue::Detailed(d) => &d.relocations,
         }
+    }
+
+    /// `true` when `allowVersionConflict = true` is set in the detailed form —
+    /// the user accepts a transitive major-version mismatch for this artifact.
+    pub fn allow_version_conflict(&self) -> bool {
+        matches!(self, DependencyValue::Detailed(d) if d.allow_version_conflict)
     }
 
     /// Whether this dependency should be shaded (included) into the fat JAR,
@@ -2831,6 +2847,26 @@ excludes = ["com.google.thirdparty.publicsuffix.*"]
         assert!(d.fat_jar.relocations[0].excludes.is_empty());
         assert_eq!(d.fat_jar.relocations[1].from, "com.google.thirdparty");
         assert_eq!(d.fat_jar.relocations[1].excludes.len(), 1);
+    }
+
+    #[test]
+    fn dependency_allow_version_conflict_parses_from_detailed_form() {
+        let toml = r#"
+[application]
+name = "x"
+version = "1.0"
+
+[dependencies]
+"com.example:foo" = { version = "2.0", allowVersionConflict = true }
+"com.example:bar" = { version = "1.0" }
+"com.example:baz" = "3.0"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.dependencies["com.example:foo"].allow_version_conflict());
+        // Detailed form without the flag defaults to false.
+        assert!(!d.dependencies["com.example:bar"].allow_version_conflict());
+        // Bare-string shorthand form is always false.
+        assert!(!d.dependencies["com.example:baz"].allow_version_conflict());
     }
 
     #[test]

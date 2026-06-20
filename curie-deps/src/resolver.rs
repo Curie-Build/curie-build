@@ -134,6 +134,13 @@ pub struct ResolveOptions {
     /// a hard error.  Intended for `curie fetch --file` where such deps should
     /// be listed explicitly in the coordinate file.
     pub skip_version_ranges: bool,
+    /// When `true`, a major-version conflict (a discarded candidate whose major
+    /// differs from the kept version) fails resolution unless the coordinate
+    /// opted out via `allowVersionConflict`.  Enable this only for the user's
+    /// declared `[dependencies]` / `[test-dependencies]`; internal tool
+    /// classpaths (formatters, kotlinc, etc.) resolve curated dep sets the user
+    /// cannot annotate, so they leave it `false`.
+    pub error_on_version_conflict: bool,
 }
 
 impl Default for ResolveOptions {
@@ -145,6 +152,7 @@ impl Default for ResolveOptions {
             bom_imports: vec![],
             offline: false,
             skip_version_ranges: false,
+            error_on_version_conflict: false,
         }
     }
 }
@@ -171,6 +179,10 @@ pub struct DepEntry<'a> {
     /// When set, the resolved JAR filename will include `-classifier`.
     /// Most user dependencies do not need this.
     pub classifier: Option<&'a str>,
+    /// When `true`, the user has accepted a transitive major-version mismatch for
+    /// this coordinate (`allowVersionConflict = true` in `Curie.toml`), so
+    /// [`resolve`] will not fail the build on a major-version conflict for it.
+    pub allow_version_conflict: bool,
 }
 
 /// Internal BFS work item carrying per-artifact repository context.
@@ -278,8 +290,64 @@ struct RangeViolation {
     declared_in: Gav,
 }
 
+/// A discarded version candidate whose MAJOR component differs from the version
+/// the build kept for the same `group:artifact`.  Surfaced as a hard error
+/// unless the coordinate opts out via `allowVersionConflict = true`.
+struct VersionConflict {
+    /// `"group:artifact"`.
+    key: String,
+    /// The version the build keeps (nearest-wins / first-declared winner).
+    chosen: String,
+    /// The discarded candidate version with a different major.
+    needed: String,
+    /// The artifact that required `needed` (`None` = a second declaration of the
+    /// same coordinate in `Curie.toml`).
+    via: Option<Gav>,
+}
+
 fn is_version_range(version: &str) -> bool {
     version.starts_with('[') || version.starts_with('(')
+}
+
+/// Leading numeric component of a Maven version (the "major"), if parseable.
+/// `"2.17.2" -> 2`, `"5" -> 5`, `"1-beta" -> 1`, `"RELEASE" -> None`.
+fn major_component(version: &str) -> Option<u64> {
+    version.split(['.', '-']).next()?.parse::<u64>().ok()
+}
+
+/// True only when both versions have a parseable major and the majors differ.
+/// Unparseable majors (e.g. `"RELEASE"`) never count as a conflict.
+fn differs_by_major(a: &str, b: &str) -> bool {
+    matches!((major_component(a), major_component(b)), (Some(x), Some(y)) if x != y)
+}
+
+fn format_conflict_error(conflicts: &[VersionConflict]) -> String {
+    let mut msg = String::from("dependency version conflict (major-version mismatch)");
+
+    for c in conflicts {
+        let requirer = match &c.via {
+            Some(g) => g.notation(),
+            None => "a second declaration in Curie.toml".to_string(),
+        };
+        msg.push_str(&format!(
+            "\n\n  {} — keeping {}, but {} requires {}",
+            c.key, c.chosen, requirer, c.needed
+        ));
+    }
+
+    msg.push_str(
+        "\n\nA major-version difference can cause runtime errors (missing classes/methods).\n\
+         Fix the version, exclude the transitive dependency, or — if intentional —\n\
+         allow it in Curie.toml:",
+    );
+    for c in conflicts {
+        msg.push_str(&format!(
+            "\n  \"{}\" = {{ version = \"{}\", allowVersionConflict = true }}",
+            c.key, c.chosen
+        ));
+    }
+
+    msg
 }
 
 fn curie_toml_gav() -> Gav {
@@ -858,6 +926,12 @@ pub fn resolve(
     // -----------------------------------------------------------------------
 
     let mut visited: HashSet<String> = HashSet::new();
+    // Chosen version per `group:artifact`, recorded as each GA is committed.
+    // Used to detect major-version conflicts against later discarded candidates.
+    let mut chosen: HashMap<String, String> = HashMap::new();
+    // Coordinates the user opted out of conflict errors for (`allowVersionConflict`).
+    let mut allow_conflict: HashSet<String> = HashSet::new();
+    let mut conflicts: Vec<VersionConflict> = Vec::new();
     // Ordered list of (GAV, fetch_repos) in BFS discovery order — used in Phase 2.
     let mut ordered_gavs: Vec<(Gav, Vec<Repository>)> = Vec::new();
     let mut range_violations: Vec<RangeViolation> = Vec::new();
@@ -920,9 +994,24 @@ pub fn resolve(
             Gav::from_key_version(dep.key, &resolved_version)?
         };
         let ga = format!("{}:{}", gav.group, gav.artifact);
+        if dep.allow_version_conflict {
+            allow_conflict.insert(ga.clone());
+        }
         let user_exclusions = parse_exclusion_strings(&dep.exclusions);
-        if visited.insert(ga) {
+        if visited.insert(ga.clone()) {
+            chosen.insert(ga, resolved_version);
             current_level.push(BfsWork { gav, fetch_repos, child_repos, depth: 0, via: None, exclusions: user_exclusions });
+        } else if let Some(kept) = chosen.get(&ga) {
+            // A second declaration of the same group:artifact is dropped (first
+            // wins).  If the dropped version's major differs, that's a conflict.
+            if differs_by_major(kept, &resolved_version) {
+                conflicts.push(VersionConflict {
+                    key: ga,
+                    chosen: kept.clone(),
+                    needed: resolved_version,
+                    via: None,
+                });
+            }
         }
     }
 
@@ -965,8 +1054,27 @@ pub fn resolve(
                     }
 
                     // Nearest-wins short-circuit: already committed to a version
-                    // for this GA at a shallower depth — skip.
+                    // for this GA at a shallower depth — skip.  If the discarded
+                    // candidate's major differs from the chosen one, record a
+                    // conflict (surfaced as an error later unless opted out).
                     if visited.contains(&ga_key) {
+                        if let Some(candidate) = resolve_transitive_version(
+                            &ga_key,
+                            dep.version.as_deref(),
+                            pom,
+                            &global_managed,
+                        ) {
+                            if let Some(kept) = chosen.get(&ga_key) {
+                                if differs_by_major(kept, &candidate) {
+                                    conflicts.push(VersionConflict {
+                                        key: ga_key.clone(),
+                                        chosen: kept.clone(),
+                                        needed: candidate,
+                                        via: Some(work.gav.clone()),
+                                    });
+                                }
+                            }
+                        }
                         continue;
                     }
 
@@ -999,6 +1107,7 @@ pub fn resolve(
                         classifier: dep.classifier.clone(),
                         extension: None,
                     };
+                    chosen.insert(ga_key.clone(), child_gav.version.clone());
                     visited.insert(ga_key);
                     // Transitives inherit the parent's child_repos.
                     next_level.push(BfsWork {
@@ -1026,6 +1135,19 @@ pub fn resolve(
 
     if !range_violations.is_empty() {
         bail!("{}", format_range_error(&range_violations));
+    }
+
+    // Major-version conflicts are a hard error for user-declared dependency
+    // graphs (opt-in via `error_on_version_conflict`), unless the specific
+    // coordinate opted out with `allowVersionConflict = true` in Curie.toml.
+    if opts.error_on_version_conflict {
+        let unresolved: Vec<VersionConflict> = conflicts
+            .into_iter()
+            .filter(|c| !allow_conflict.contains(&c.key))
+            .collect();
+        if !unresolved.is_empty() {
+            bail!("{}", format_conflict_error(&unresolved));
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2121,7 +2243,7 @@ mod tests {
         // cache miss produces an immediate error rather than a network attempt.
         let entries: Vec<DepEntry> = deps
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None })
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false })
             .collect();
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -2129,7 +2251,50 @@ mod tests {
             progress: false,
             bom_imports,
             offline: true,
-            skip_version_ranges: false,
+            // These helpers exercise the user-dependency path, so conflict
+            // errors are enabled (matching compile.rs / test.rs).
+            skip_version_ranges: false, error_on_version_conflict: true,
+        };
+        let result = resolve(&entries, &opts);
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        result
+    }
+
+    /// Like [`run_resolve`] but each dep carries an `allow_version_conflict`
+    /// flag — for exercising the major-version-conflict error + opt-out.
+    fn run_resolve_with_allow(
+        home_dir: &std::path::Path,
+        deps: &[(&str, &str, bool)],
+        bom_imports: Vec<Gav>,
+    ) -> Result<Vec<PathBuf>> {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home_dir.to_str().unwrap());
+
+        let entries: Vec<DepEntry> = deps
+            .iter()
+            .map(|(k, v, allow)| DepEntry {
+                key: k,
+                version: v,
+                repo_id: None,
+                exclusions: vec![],
+                classifier: None,
+                allow_version_conflict: *allow,
+            })
+            .collect();
+        let opts = ResolveOptions {
+            default_repos: vec![],
+            named_repos: vec![],
+            progress: false,
+            bom_imports,
+            offline: true,
+            // These helpers exercise the user-dependency path, so conflict
+            // errors are enabled (matching compile.rs / test.rs).
+            skip_version_ranges: false, error_on_version_conflict: true,
         };
         let result = resolve(&entries, &opts);
 
@@ -2174,13 +2339,14 @@ mod tests {
     #[test]
     fn declared_dep_overrides_transitive_version() {
         // User declares foo:bar 1.0 directly AND foo:other 1.0 which
-        // transitively pulls foo:bar 2.0.  Maven nearest-wins: bar 1.0.
+        // transitively pulls foo:bar 1.5.  Maven nearest-wins: bar 1.0.
+        // (Same major on both, so the major-version-conflict check stays quiet.)
         let dir = tempfile::tempdir().unwrap();
         write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
-        write_fake_artifact(dir.path(), "foo", "bar", "2.0", &[]);
+        write_fake_artifact(dir.path(), "foo", "bar", "1.5", &[]);
         write_fake_artifact(
             dir.path(), "foo", "other", "1.0",
-            &[("foo", "bar", "2.0")],
+            &[("foo", "bar", "1.5")],
         );
 
         let result = run_resolve(
@@ -2195,26 +2361,122 @@ mod tests {
             "expected foo:bar:1.0 in {:?}", gavs,
         );
         assert!(
-            !gavs.contains(&"foo:bar:2.0".to_string()),
-            "foo:bar:2.0 must not appear (nearest wins): {:?}", gavs,
+            !gavs.contains(&"foo:bar:1.5".to_string()),
+            "foo:bar:1.5 must not appear (nearest wins): {:?}", gavs,
         );
+    }
+
+    #[test]
+    fn major_version_conflict_is_an_error() {
+        // Declared foo:bar 2.0; foo:other 1.0 transitively needs foo:bar 5.0.
+        // Nearest-wins keeps 2.0, but the major differs (2 vs 5) -> hard error.
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "foo", "bar", "2.0", &[]);
+        write_fake_artifact(
+            dir.path(), "foo", "other", "1.0",
+            &[("foo", "bar", "5.0")],
+        );
+
+        let err = run_resolve(
+            dir.path(),
+            &[("foo:bar", "2.0"), ("foo:other", "1.0")],
+            vec![],
+        ).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("foo:bar"), "should name the conflicting artifact: {msg}");
+        assert!(msg.contains("2.0") && msg.contains("5.0"), "should show both versions: {msg}");
+    }
+
+    #[test]
+    fn allow_version_conflict_suppresses_error() {
+        // Same graph as above, but foo:bar opts out with allowVersionConflict.
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "foo", "bar", "2.0", &[]);
+        write_fake_artifact(
+            dir.path(), "foo", "other", "1.0",
+            &[("foo", "bar", "5.0")],
+        );
+
+        let result = run_resolve_with_allow(
+            dir.path(),
+            &[("foo:bar", "2.0", true), ("foo:other", "1.0", false)],
+            vec![],
+        ).unwrap();
+
+        let gavs = jar_gavs(&result);
+        assert!(gavs.contains(&"foo:bar:2.0".to_string()), "expected foo:bar:2.0: {gavs:?}");
+    }
+
+    #[test]
+    fn minor_version_conflict_is_not_an_error() {
+        // Transitive needs foo:bar 2.5 while 2.0 is kept — same major, no error.
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "foo", "bar", "2.0", &[]);
+        write_fake_artifact(
+            dir.path(), "foo", "other", "1.0",
+            &[("foo", "bar", "2.5")],
+        );
+
+        let result = run_resolve(
+            dir.path(),
+            &[("foo:bar", "2.0"), ("foo:other", "1.0")],
+            vec![],
+        ).unwrap();
+
+        let gavs = jar_gavs(&result);
+        assert!(gavs.contains(&"foo:bar:2.0".to_string()), "expected foo:bar:2.0: {gavs:?}");
+    }
+
+    #[test]
+    fn duplicate_declaration_major_conflict_is_an_error() {
+        // The same coordinate declared twice with different majors: the second
+        // is dropped (first wins) and the major mismatch is a hard error.
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
+
+        let err = run_resolve(
+            dir.path(),
+            &[("foo:bar", "1.0"), ("foo:bar", "3.0")],
+            vec![],
+        ).unwrap_err();
+        assert!(format!("{err:#}").contains("foo:bar"), "should name foo:bar");
+
+        // Opting out makes it succeed, keeping the first declaration.
+        let result = run_resolve_with_allow(
+            dir.path(),
+            &[("foo:bar", "1.0", true), ("foo:bar", "3.0", true)],
+            vec![],
+        ).unwrap();
+        assert!(jar_gavs(&result).contains(&"foo:bar:1.0".to_string()));
+    }
+
+    #[test]
+    fn major_component_parses_leading_number() {
+        assert_eq!(major_component("2.17.2"), Some(2));
+        assert_eq!(major_component("5"), Some(5));
+        assert_eq!(major_component("1-beta"), Some(1));
+        assert_eq!(major_component("RELEASE"), None);
+        assert!(differs_by_major("2.0", "5.0"));
+        assert!(!differs_by_major("2.0", "2.5"));
+        assert!(!differs_by_major("2.0", "RELEASE")); // unparseable -> no conflict
     }
 
     #[test]
     fn first_declared_wins_at_same_depth() {
         // Two declared deps, both at depth 0, each pulling a different
         // version of foo:bar at depth 1.  BFS visits a's children before
-        // b's children → a's version (1.0) wins.
+        // b's children → a's version (1.0) wins.  (Both 1.x — same major, so
+        // the major-version-conflict check stays quiet.)
         let dir = tempfile::tempdir().unwrap();
         write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
-        write_fake_artifact(dir.path(), "foo", "bar", "2.0", &[]);
+        write_fake_artifact(dir.path(), "foo", "bar", "1.1", &[]);
         write_fake_artifact(
             dir.path(), "grp", "a", "1.0",
             &[("foo", "bar", "1.0")],
         );
         write_fake_artifact(
             dir.path(), "grp", "b", "1.0",
-            &[("foo", "bar", "2.0")],
+            &[("foo", "bar", "1.1")],
         );
 
         let result = run_resolve(
@@ -2232,8 +2494,8 @@ mod tests {
             "first-declared a's choice (foo:bar:1.0) must win: {:?}", gavs,
         );
         assert!(
-            !gavs.contains(&"foo:bar:2.0".to_string()),
-            "b's choice (foo:bar:2.0) must lose to a's: {:?}", gavs,
+            !gavs.contains(&"foo:bar:1.1".to_string()),
+            "b's choice (foo:bar:1.1) must lose to a's: {:?}", gavs,
         );
     }
 
@@ -2410,6 +2672,7 @@ mod tests {
             repo_id: None,
             exclusions: vec!["foo:baz"],
             classifier: None,
+            allow_version_conflict: false,
         }];
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -2417,7 +2680,7 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true,
-            skip_version_ranges: false,
+            skip_version_ranges: false, error_on_version_conflict: false,
         };
         let result = resolve(&entries, &opts).unwrap();
 
@@ -2455,6 +2718,7 @@ mod tests {
             repo_id: None,
             exclusions: vec!["*:*"],
             classifier: None,
+            allow_version_conflict: false,
         }];
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -2462,7 +2726,7 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true,
-            skip_version_ranges: false,
+            skip_version_ranges: false, error_on_version_conflict: false,
         };
         let result = resolve(&entries, &opts).unwrap();
 
@@ -2497,6 +2761,7 @@ mod tests {
             repo_id: None,
             exclusions: vec!["foo:leaf"],
             classifier: None,
+            allow_version_conflict: false,
         }];
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -2504,7 +2769,7 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true,
-            skip_version_ranges: false,
+            skip_version_ranges: false, error_on_version_conflict: false,
         };
         let result = resolve(&entries, &opts).unwrap();
 
@@ -2844,7 +3109,7 @@ mod tests {
 
         let entries: Vec<DepEntry> = deps
             .iter()
-            .map(|(k, v, r)| DepEntry { key: k, version: v, repo_id: *r, exclusions: vec![], classifier: None })
+            .map(|(k, v, r)| DepEntry { key: k, version: v, repo_id: *r, exclusions: vec![], classifier: None, allow_version_conflict: false })
             .collect();
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -2852,7 +3117,9 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true,
-            skip_version_ranges: false,
+            // These helpers exercise the user-dependency path, so conflict
+            // errors are enabled (matching compile.rs / test.rs).
+            skip_version_ranges: false, error_on_version_conflict: true,
         };
         let result = resolve(&entries, &opts);
 
@@ -2896,9 +3163,9 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true, // cache-hit path; no network call made
-            skip_version_ranges: false,
+            skip_version_ranges: false, error_on_version_conflict: false,
         };
-        let entries = [DepEntry { key: "foo:bar", version: "1.0", repo_id: None, exclusions: vec![], classifier: None }];
+        let entries = [DepEntry { key: "foo:bar", version: "1.0", repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }];
         let result = resolve(&entries, &opts).unwrap();
         assert_eq!(result.len(), 1, "should find cached artifact regardless of mirror URL");
 
@@ -2986,7 +3253,7 @@ mod tests {
 
         let entries: Vec<DepEntry> = deps
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None })
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false })
             .collect();
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -2994,7 +3261,7 @@ mod tests {
             progress: false,
             bom_imports,
             offline: true,
-            skip_version_ranges: false,
+            skip_version_ranges: false, error_on_version_conflict: false,
         };
         let result = resolve_tree(&entries, &opts);
 
@@ -3199,6 +3466,7 @@ mod tests {
             repo_id: None,
             exclusions: vec![],
             classifier: Some("runtime"),
+            allow_version_conflict: false,
         }];
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -3206,7 +3474,7 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true,
-            skip_version_ranges: false,
+            skip_version_ranges: false, error_on_version_conflict: false,
         };
         let result = resolve(&entries, &opts).unwrap();
 

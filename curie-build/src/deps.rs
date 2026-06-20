@@ -57,7 +57,7 @@ pub fn run_deps_with_desc(
 
     let entries: Vec<DepEntry> = dep_map
         .iter()
-        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None })
+        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
         .collect();
     let opts = ResolveOptions {
         default_repos: central_repos(),
@@ -65,7 +65,7 @@ pub fn run_deps_with_desc(
         progress: false,
         bom_imports: bom_gavs,
         offline,
-        skip_version_ranges: false,
+        skip_version_ranges: false, error_on_version_conflict: false,
     };
 
     let tree = curie_deps::resolve_tree(&entries, &opts)?;
@@ -106,7 +106,7 @@ pub fn resolve_pinned_dependencies(desc: &descriptor::Descriptor, offline: bool)
         .iter()
         .chain(desc.test_dependencies.iter())
         .filter(|(k, _)| seen.insert(k.as_str()))
-        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None })
+        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
         .collect();
 
     let tree = curie_deps::resolve_tree(
@@ -117,7 +117,7 @@ pub fn resolve_pinned_dependencies(desc: &descriptor::Descriptor, offline: bool)
             progress: false,
             bom_imports: desc.test_bom_gavs()?,
             offline,
-            skip_version_ranges: false,
+            skip_version_ranges: false, error_on_version_conflict: false,
         },
     )
     .context("pinTransitive: failed to resolve the transitive dependency closure")?;
@@ -156,7 +156,7 @@ pub fn resolve_ap_versions_for_sync(desc: &descriptor::Descriptor, offline: bool
 
     let entries: Vec<DepEntry> = blank
         .iter()
-        .map(|coord| DepEntry { key: coord, version: "", repo_id: None, exclusions: vec![], classifier: None })
+        .map(|coord| DepEntry { key: coord, version: "", repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false })
         .collect();
 
     let tree = curie_deps::resolve_tree(
@@ -167,7 +167,7 @@ pub fn resolve_ap_versions_for_sync(desc: &descriptor::Descriptor, offline: bool
             progress: false,
             bom_imports: desc.test_bom_gavs()?,
             offline,
-            skip_version_ranges: false,
+            skip_version_ranges: false, error_on_version_conflict: false,
         },
     )
     .context("failed to resolve BOM-managed annotation processor versions")?;
