@@ -131,9 +131,6 @@ fn find_mirror<'a>(repo_id: &str, mirrors: &'a [MirrorEntry]) -> Option<&'a Mirr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     fn make_repo(id: &str, url: &str) -> Repository {
         Repository {
@@ -153,26 +150,17 @@ mod tests {
 
     #[test]
     fn load_config_returns_default_when_file_absent() {
-        let _guard = HOME_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let prev = std::env::var("HOME").ok();
-        std::env::set_var("HOME", dir.path());
+        let _home = crate::testenv::set_home(dir.path());
 
         let cfg = load_config().unwrap();
         assert!(cfg.mirrors.is_empty());
-
-        match prev {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     fn load_config_parses_mirror_entries() {
-        let _guard = HOME_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let prev = std::env::var("HOME").ok();
-        std::env::set_var("HOME", dir.path());
+        let _home = crate::testenv::set_home(dir.path());
 
         let curie_dir = dir.path().join(".curie");
         std::fs::create_dir_all(&curie_dir).unwrap();
@@ -197,11 +185,6 @@ url = "https://nexus.internal/shibboleth"
         assert_eq!(cfg.mirrors[0].id, "nexus");
         assert_eq!(cfg.mirrors[0].mirror_of, "central");
         assert_eq!(cfg.mirrors[1].mirror_of, "shibboleth");
-
-        match prev {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
@@ -270,10 +253,8 @@ url = "https://nexus.internal/shibboleth"
 
     #[test]
     fn credentials_load_with_literal_values() {
-        let _guard = HOME_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let prev = std::env::var("HOME").ok();
-        std::env::set_var("HOME", dir.path());
+        let _home = crate::testenv::set_home(dir.path());
 
         std::fs::create_dir_all(dir.path().join(".curie")).unwrap();
         std::fs::write(
@@ -292,21 +273,18 @@ password = "literal-secret"
         let (u, p) = cred.resolve().unwrap();
         assert_eq!(u, "alice");
         assert_eq!(p, "literal-secret");
-
-        match prev {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
     fn credentials_load_with_env_var_substitution() {
-        let _guard = HOME_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", dir.path());
-        std::env::set_var("TEST_NEXUS_USER", "bob");
-        std::env::set_var("TEST_NEXUS_TOKEN", "tok-xyz");
+        let _home = crate::testenv::set_home(dir.path());
+        // SAFETY: the HOME lock held by `_home` serializes all env mutation in
+        // the test binary; these names are unique to this test.
+        unsafe {
+            std::env::set_var("TEST_NEXUS_USER", "bob");
+            std::env::set_var("TEST_NEXUS_TOKEN", "tok-xyz");
+        }
 
         std::fs::create_dir_all(dir.path().join(".curie")).unwrap();
         std::fs::write(
@@ -325,11 +303,10 @@ password = "${TEST_NEXUS_TOKEN}"
         assert_eq!(u, "bob");
         assert_eq!(p, "tok-xyz");
 
-        std::env::remove_var("TEST_NEXUS_USER");
-        std::env::remove_var("TEST_NEXUS_TOKEN");
-        match prev_home {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
+        // SAFETY: still under the HOME lock held by `_home`.
+        unsafe {
+            std::env::remove_var("TEST_NEXUS_USER");
+            std::env::remove_var("TEST_NEXUS_TOKEN");
         }
     }
 

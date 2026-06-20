@@ -38,6 +38,8 @@ mod style;
 mod term;
 mod test;
 mod test_runner;
+#[cfg(test)]
+mod testenv;
 mod tui;
 mod update;
 mod workspace;

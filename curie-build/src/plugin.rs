@@ -439,24 +439,6 @@ mod tests {
         hex::encode(sha1::Sha1::digest(data))
     }
 
-    /// Override HOME for the duration of the closure so artifact cache
-    /// paths land in `tmp` instead of the real ~/.m2.
-    ///
-    /// # Safety
-    /// `std::env::set_var` is not thread-safe; callers must ensure no
-    /// other thread is concurrently reading or writing HOME.  Use only
-    /// in tests that are unlikely to race (single-threaded or isolated).
-    fn with_home<F: FnOnce()>(tmp: &TempDir, f: F) {
-        let prev = std::env::var("HOME").ok();
-        // SAFETY: test-only override; we restore below.
-        unsafe { std::env::set_var("HOME", tmp.path()); }
-        f();
-        match prev {
-            Some(h) => unsafe { std::env::set_var("HOME", h) },
-            None    => unsafe { std::env::remove_var("HOME") },
-        }
-    }
-
     fn sample_manifest() -> PluginManifest {
         serde_json::from_str(r#"{
             "name": "test",
@@ -636,10 +618,11 @@ mod tests {
             .create();
 
         let repos = vec![test_repo(&server.url())];
-        with_home(&tmp, || {
+        {
+            let _home = crate::testenv::set_home(tmp.path());
             let result = download_artifact(&art, &repos, false);
             assert!(result.is_ok(), "expected success: {:#}", result.unwrap_err());
-        });
+        }
 
         // The mock was hit — meaning the repo URL was used, not Maven Central.
         _m_jar.assert();
@@ -680,10 +663,11 @@ mod tests {
             .create();
 
         let repos = vec![test_repo(&server.url()), test_repo(&server2.url())];
-        with_home(&tmp, || {
+        {
+            let _home = crate::testenv::set_home(tmp.path());
             let result = download_artifact(&art, &repos, false);
             assert!(result.is_ok(), "expected fallback success: {:#}", result.unwrap_err());
-        });
+        }
 
         _m2_jar.assert();
         _m2_sha256.assert();
