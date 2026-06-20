@@ -4,9 +4,11 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Co-located unit tests for StringUtils (Maven layout, src/main/java/).
- * Confirms backward compatibility: *Test.java files in src/main/java/ are
- * treated as unit tests by Curie's test discovery.
+ * Unit tests for StringUtils (Maven layout, src/test/java/).
+ * Confirms backward compatibility: the classic Maven layout — production in
+ * src/main/java/, tests in src/test/java/ — works unchanged.  (In Maven
+ * layout a *Test class under src/main/java/ is production code, unlike the
+ * flat-package layout's co-located-test convention.)
  */
 class StringUtilsTest {
 

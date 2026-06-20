@@ -717,39 +717,20 @@ fn discover_source_roots(project_root: &Path) -> Vec<PathBuf> {
 ///
 /// Returns `(java_sources, kotlin_sources)` — each sorted and deduplicated.
 ///
-/// **Existing Maven-style layouts (unchanged):**
-/// - Co-located: `src/main/java` — files ending in `Test.java`, `Tests.java`,
-///   or `Spec.java`.
+/// **Maven-style layouts:**
 /// - Separate tree: `src/test/java` — all `*.java` files.
-///
-/// **Kotlin Maven-style layouts:**
-/// - Co-located: `src/main/kotlin` — files ending in `Test.kt`, `Tests.kt`,
-///   or `Spec.kt`.
 /// - Separate tree: `src/test/kotlin` — all `*.kt` files.
+/// - `src/main/java` and `src/main/kotlin` are production roots; files there
+///   named `*Test.java` / `*Spec.java` are production classes (Maven-compatible).
 ///
-/// **New flat-package layouts:**
-/// - Co-located unit tests: each dot-named directory under `src/` — files ending
-///   in `Test.java/kt`, `Tests.java/kt`, or `Spec.java/kt`.
-/// - Integration tests: each dot-named directory under `tests/` — all `*.java`
-///   and `*.kt` files.
+/// **Curie flat-package layouts:**
+/// - Co-located unit tests: each dot-named directory under `src/` — files
+///   ending in `Test.java/kt`, `Tests.java/kt`, or `Spec.java/kt`.
+/// - Integration tests: each dot-named directory under `tests/` — all
+///   `*.java` and `*.kt` files.
 fn discover_test_sources(project_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut java_sources: Vec<PathBuf> = Vec::new();
     let mut kotlin_sources: Vec<PathBuf> = Vec::new();
-
-    // --- Maven-style Java: co-located tests in src/main/java ----------------
-    let main_java_src = project_root.join("src").join("main").join("java");
-    if main_java_src.exists() {
-        let colocated: Vec<PathBuf> = walk_files(&main_java_src)
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy();
-                name.ends_with("Test.java")
-                    || name.ends_with("Tests.java")
-                    || name.ends_with("Spec.java")
-            })
-            .map(|e| e.into_path())
-            .collect();
-        java_sources.extend(colocated);
-    }
 
     // --- Maven-style Java: separate test tree src/test/java -----------------
     let test_java_src = project_root.join("src").join("test").join("java");
@@ -759,21 +740,6 @@ fn discover_test_sources(project_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
             .map(|e| e.into_path())
             .collect();
         java_sources.extend(separate);
-    }
-
-    // --- Maven-style Kotlin: co-located tests in src/main/kotlin ------------
-    let main_kotlin_src = project_root.join("src").join("main").join("kotlin");
-    if main_kotlin_src.exists() {
-        let colocated: Vec<PathBuf> = walk_files(&main_kotlin_src)
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy();
-                name.ends_with("Test.kt")
-                    || name.ends_with("Tests.kt")
-                    || name.ends_with("Spec.kt")
-            })
-            .map(|e| e.into_path())
-            .collect();
-        kotlin_sources.extend(colocated);
     }
 
     // --- Maven-style Kotlin: separate test tree src/test/kotlin -------------
@@ -836,23 +802,12 @@ fn discover_test_sources(project_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
 }
 
 /// Discover Groovy test sources — mirrors [`discover_test_sources`] for `.groovy` files.
+///
+/// `src/main/groovy` is a production root; files there named `*Test.groovy` / `*Spec.groovy`
+/// are production classes (Maven-compatible).  The co-located convention applies only to
+/// flat-package roots under `src/<dot.pkg>/`.
 fn discover_groovy_test_sources(project_root: &Path) -> Vec<PathBuf> {
     let mut sources: Vec<PathBuf> = Vec::new();
-
-    // Co-located tests in src/main/groovy/
-    let main_groovy = project_root.join("src").join("main").join("groovy");
-    if main_groovy.exists() {
-        let colocated: Vec<PathBuf> = walk_files(&main_groovy)
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy();
-                name.ends_with("Test.groovy")
-                    || name.ends_with("Tests.groovy")
-                    || name.ends_with("Spec.groovy")
-            })
-            .map(|e| e.into_path())
-            .collect();
-        sources.extend(colocated);
-    }
 
     // Separate test tree src/test/groovy/
     let test_groovy = project_root.join("src").join("test").join("groovy");
@@ -983,11 +938,12 @@ fn kotlin_test_module_name(desc: &descriptor::Descriptor) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn kotlin_test_module_name_appends_test_suffix() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
+        fs::write(
             dir.path().join("Curie.toml"),
             "[application]\nname = \"hello-kotlin\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
              [java]\nreleaseVersion = \"21\"\n",
@@ -996,6 +952,78 @@ mod tests {
         let desc = descriptor::load(dir.path()).unwrap();
 
         assert_eq!(kotlin_test_module_name(&desc), "hello-kotlin-test");
+    }
+
+    // --- discover_test_sources -----------------------------------------------
+
+    #[test]
+    fn maven_layout_test_named_files_are_not_test_sources() {
+        // A file like LoadTest.java in src/main/java is a production class.
+        // The co-located convention does NOT apply to Maven layout roots.
+        let dir = tempfile::tempdir().unwrap();
+        let main_java = dir.path().join("src").join("main").join("java").join("com").join("example");
+        fs::create_dir_all(&main_java).unwrap();
+        fs::write(main_java.join("LoadTest.java"), b"public class LoadTest {}").unwrap();
+        fs::write(main_java.join("SmokeTests.java"), b"public class SmokeTests {}").unwrap();
+        fs::write(main_java.join("OpenApiSpec.java"), b"public class OpenApiSpec {}").unwrap();
+
+        let (java, _kotlin) = discover_test_sources(dir.path());
+        assert!(
+            java.is_empty(),
+            "test-named files in src/main/java must not be discovered as test sources; got: {java:?}"
+        );
+    }
+
+    #[test]
+    fn separate_test_tree_java_is_discovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let test_java = dir.path().join("src").join("test").join("java").join("com").join("example");
+        fs::create_dir_all(&test_java).unwrap();
+        fs::write(test_java.join("GreeterTest.java"), b"public class GreeterTest {}").unwrap();
+        fs::write(test_java.join("HelperUtil.java"), b"public class HelperUtil {}").unwrap();
+
+        let (java, _kotlin) = discover_test_sources(dir.path());
+        assert_eq!(java.len(), 2, "all files in src/test/java are test sources; got: {java:?}");
+    }
+
+    #[test]
+    fn flat_package_colocated_tests_are_discovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("src").join("com.example");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("Greeter.java"), b"package com.example; class Greeter {}").unwrap();
+        fs::write(pkg.join("GreeterTest.java"), b"package com.example; class GreeterTest {}").unwrap();
+        fs::write(pkg.join("GreeterSpec.java"), b"package com.example; class GreeterSpec {}").unwrap();
+
+        let (java, _kotlin) = discover_test_sources(dir.path());
+        assert_eq!(java.len(), 2, "only *Test.java and *Spec.java from flat-package are test sources; got: {java:?}");
+        assert!(java.iter().any(|p| p.ends_with("GreeterTest.java")));
+        assert!(java.iter().any(|p| p.ends_with("GreeterSpec.java")));
+    }
+
+    #[test]
+    fn groovy_colocated_tests_not_from_maven_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_groovy = dir.path().join("src").join("main").join("groovy").join("com").join("example");
+        fs::create_dir_all(&main_groovy).unwrap();
+        fs::write(main_groovy.join("GreeterSpec.groovy"), b"package com.example; class GreeterSpec {}").unwrap();
+
+        let sources = discover_groovy_test_sources(dir.path());
+        assert!(
+            sources.is_empty(),
+            "test-named files in src/main/groovy must not be test sources; got: {sources:?}"
+        );
+    }
+
+    #[test]
+    fn groovy_separate_test_tree_is_discovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let test_groovy = dir.path().join("src").join("test").join("groovy").join("com").join("example");
+        fs::create_dir_all(&test_groovy).unwrap();
+        fs::write(test_groovy.join("GreeterSpec.groovy"), b"package com.example; class GreeterSpec {}").unwrap();
+
+        let sources = discover_groovy_test_sources(dir.path());
+        assert_eq!(sources.len(), 1, "src/test/groovy files must be test sources; got: {sources:?}");
     }
 }
 

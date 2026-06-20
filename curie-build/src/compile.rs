@@ -240,6 +240,8 @@ pub fn compile(
     let maven_kotlin_src = project_root.join("src").join("main").join("kotlin");
     let maven_groovy_src = project_root.join("src").join("main").join("groovy");
     let flat_src_dirs = flat_package_src_dirs(project_root);
+    // Track which roots use the Curie co-located-test convention (flat-package only).
+    let flat_src_set: std::collections::HashSet<PathBuf> = flat_src_dirs.iter().cloned().collect();
 
     let mut src_roots: Vec<PathBuf> = Vec::new();
     if maven_java_src.exists()   { src_roots.push(maven_java_src.clone()); }
@@ -464,19 +466,28 @@ pub fn compile(
         (jars, on_cp_jars)
     };
 
-    // --- discover production sources (exclude test files) --------------------
+    // --- discover production sources -----------------------------------------
+    // Co-located test convention (*Test.java, *Spec.java, etc.) applies only to
+    // Curie flat-package roots.  Maven layout roots (src/main/java, etc.) include
+    // every file — a class named LoadTest or ABTest there is production code.
     let mut java_sources: Vec<PathBuf>   = Vec::new();
     let mut kotlin_sources: Vec<PathBuf> = Vec::new();
     let mut groovy_sources: Vec<PathBuf> = Vec::new();
 
     for src_root in &src_roots {
+        let colocated_layout = flat_src_set.contains(src_root);
+
         let root_java: Vec<_> = walk_files(src_root)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
-                name.ends_with(".java")
-                    && !name.ends_with("Test.java")
-                    && !name.ends_with("Tests.java")
-                    && !name.ends_with("Spec.java")
+                if !name.ends_with(".java") { return false; }
+                if colocated_layout {
+                    !name.ends_with("Test.java")
+                        && !name.ends_with("Tests.java")
+                        && !name.ends_with("Spec.java")
+                } else {
+                    true
+                }
             })
             .map(|e| e.into_path())
             .collect();
@@ -485,10 +496,14 @@ pub fn compile(
         let root_kotlin: Vec<_> = walk_files(src_root)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
-                name.ends_with(".kt")
-                    && !name.ends_with("Test.kt")
-                    && !name.ends_with("Tests.kt")
-                    && !name.ends_with("Spec.kt")
+                if !name.ends_with(".kt") { return false; }
+                if colocated_layout {
+                    !name.ends_with("Test.kt")
+                        && !name.ends_with("Tests.kt")
+                        && !name.ends_with("Spec.kt")
+                } else {
+                    true
+                }
             })
             .map(|e| e.into_path())
             .collect();
@@ -497,10 +512,14 @@ pub fn compile(
         let root_groovy: Vec<_> = walk_files(src_root)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
-                name.ends_with(".groovy")
-                    && !name.ends_with("Test.groovy")
-                    && !name.ends_with("Tests.groovy")
-                    && !name.ends_with("Spec.groovy")
+                if !name.ends_with(".groovy") { return false; }
+                if colocated_layout {
+                    !name.ends_with("Test.groovy")
+                        && !name.ends_with("Tests.groovy")
+                        && !name.ends_with("Spec.groovy")
+                } else {
+                    true
+                }
             })
             .map(|e| e.into_path())
             .collect();
@@ -1236,27 +1255,23 @@ mod tests {
     // --- Groovy source detection helpers ------------------------------------
 
     #[test]
-    fn groovy_sources_discovered_from_maven_layout() {
+    fn groovy_sources_discovered_from_maven_layout_includes_test_named_files() {
+        // Maven layout (src/main/groovy) is a production root — files named
+        // *Test.groovy / *Spec.groovy there are production classes, not tests.
         let dir = tempfile::tempdir().unwrap();
         let groovy_src = dir.path().join("src").join("main").join("groovy")
             .join("com").join("example");
         std::fs::create_dir_all(&groovy_src).unwrap();
         std::fs::write(groovy_src.join("Greeter.groovy"), b"package com.example; class Greeter {}").unwrap();
+        std::fs::write(groovy_src.join("GreeterSpec.groovy"), b"package com.example; class GreeterSpec {}").unwrap();
 
-        // Walk the maven-layout Groovy root and collect *.groovy, excluding test suffixes.
         use crate::incremental::walk_files;
         let root = dir.path().join("src").join("main").join("groovy");
+        // No test-suffix exclusion for maven layout — all .groovy files are production.
         let found: Vec<_> = walk_files(&root)
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy();
-                name.ends_with(".groovy")
-                    && !name.ends_with("Test.groovy")
-                    && !name.ends_with("Tests.groovy")
-                    && !name.ends_with("Spec.groovy")
-            })
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".groovy"))
             .collect();
-        assert_eq!(found.len(), 1, "should find exactly Greeter.groovy; got: {:?}", found);
-        assert!(found[0].file_name().to_string_lossy().ends_with("Greeter.groovy"));
+        assert_eq!(found.len(), 2, "both Greeter.groovy and GreeterSpec.groovy should be included; got: {:?}", found);
     }
 
     #[test]
