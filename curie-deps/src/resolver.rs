@@ -392,18 +392,27 @@ fn format_range_error(violations: &[RangeViolation]) -> String {
 
 /// Walk the parent POM chain (up to 10 levels) and merge properties +
 /// managed_versions into `pom`. Parent values only fill gaps — own values win.
+///
+/// A missing `<parent>` is the normal terminating case (returns `Ok`).  A parent
+/// that is declared but cannot be fetched, read, or parsed is a hard error:
+/// silently continuing would leave `pom` with missing properties / managed
+/// versions and cause its transitive dependencies to be dropped, producing an
+/// incomplete classpath (bug #15).  `child` is the coordinate whose chain we are
+/// walking, used only for error context.
 fn merge_parent_chain(
     pom: &mut Pom,
+    child: &Gav,
     repos: &[Repository],
     client: &reqwest::blocking::Client,
     offline: bool,
-) {
+) -> Result<()> {
     let mut depth = 0;
     let mut current_parent = pom.parent.clone();
 
     while let Some(parent_ref) = current_parent {
         depth += 1;
         if depth > 10 {
+            // Cycle / pathological depth guard — not a fetch failure.
             break;
         }
 
@@ -415,18 +424,12 @@ fn merge_parent_chain(
             extension: None,
         };
 
-        let pom_path = match ensure_artifact(&parent_gav, repos, client, ArtifactKind::Pom, offline, None, None) {
-            Ok(p) => p,
-            Err(_) => break,
-        };
-        let xml = match std::fs::read_to_string(&pom_path) {
-            Ok(s) => s,
-            Err(_) => break,
-        };
-        let parent_pom = match pom::parse(&xml) {
-            Ok(p) => p,
-            Err(_) => break,
-        };
+        let pom_path = ensure_artifact(&parent_gav, repos, client, ArtifactKind::Pom, offline, None, None)
+            .with_context(|| format!("failed to fetch parent POM {parent_gav} (parent of {child})"))?;
+        let xml = std::fs::read_to_string(&pom_path)
+            .with_context(|| format!("failed to read parent POM {} (parent of {child})", pom_path.display()))?;
+        let parent_pom = pom::parse(&xml)
+            .with_context(|| format!("failed to parse parent POM {parent_gav} (parent of {child})"))?;
 
         // Properties: parent fills gaps.
         for (k, v) in &parent_pom.properties {
@@ -443,6 +446,7 @@ fn merge_parent_chain(
 
         current_parent = parent_pom.parent.clone();
     }
+    Ok(())
 }
 
 /// Resolve a flat list of BOM GAVs into a combined `managed_versions` map.
@@ -487,7 +491,7 @@ fn fetch_and_parse_pom(
         .with_context(|| format!("failed to read POM {}", pom_path.display()))?;
     let mut pom = pom::parse(&xml)
         .with_context(|| format!("failed to parse POM for {}", gav))?;
-    merge_parent_chain(&mut pom, repos, client, offline);
+    merge_parent_chain(&mut pom, gav, repos, client, offline)?;
 
     // Resolve the POM's own <dependencyManagement> BOM imports so that
     // dependencies declared without an explicit version (e.g. spock-core's
@@ -773,6 +777,15 @@ pub fn resolve_tree(
     while !current_level.is_empty() {
         let pom_results = parallel_pom_fetch(&current_level, &client, opts.offline);
 
+        // A POM that failed to fetch/read/parse (including any parent in its
+        // chain) is fatal: silently skipping it would drop its transitive
+        // subtree and yield an incomplete classpath (bug #15).
+        for (i, r) in pom_results.iter().enumerate() {
+            if let Some(Err(e)) = r {
+                bail!("failed to resolve {}: {:#}", current_level[i].gav, e);
+            }
+        }
+
         let mut next_level: Vec<BfsWork> = Vec::new();
         for (i, work) in current_level.iter().enumerate() {
             resolved.push(ResolvedDep {
@@ -1034,6 +1047,15 @@ pub fn resolve(
         // Parallel fetch: each thread pulls the next item from `current_level`
         // via an atomic index and stores (index, pom_result).
         let pom_results = parallel_pom_fetch(&current_level, &client, opts.offline);
+
+        // A POM that failed to fetch/read/parse (including any parent in its
+        // chain) is fatal: silently skipping it would drop its transitive
+        // subtree and yield an incomplete classpath (bug #15).
+        for (i, r) in pom_results.iter().enumerate() {
+            if let Some(Err(e)) = r {
+                bail!("failed to resolve {}: {:#}", current_level[i].gav, e);
+            }
+        }
 
         // Serial pass: collect results in level order, deduplicate via `visited`,
         // and build the next level.  Processing in declaration order preserves
@@ -2596,6 +2618,47 @@ mod tests {
         assert!(
             gavs.contains(&"com.google.guava:guava:30.0-jre".to_string()),
             "guava version from parent POM property must resolve: {:?}", gavs,
+        );
+    }
+
+    #[test]
+    fn parent_pom_fetch_failure_is_an_error() {
+        // my-app declares a <parent> that is NOT present in the cache (offline).
+        // Previously merge_parent_chain swallowed the failure and resolution
+        // "succeeded" with an incomplete classpath; now it is a hard error
+        // naming the missing parent (bug #15).
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact_with_pom(
+            dir.path(), "com.example", "my-app", "1.0",
+            &make_pom_with_parent(
+                "com.example", "my-app", "1.0",
+                ("com.example", "parent-pom", "1.0"), // never written to the cache
+                &[],
+            ),
+        );
+
+        let err = run_resolve(dir.path(), &[("com.example:my-app", "1.0")], vec![]).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("parent POM") && msg.contains("com.example:parent-pom"),
+            "error should name the missing parent: {msg}",
+        );
+    }
+
+    #[test]
+    fn missing_transitive_pom_is_an_error() {
+        // grp:lib:1.0 depends on foo:bar:1.0, but bar's POM is absent from the
+        // cache.  The BFS must surface the fetch failure rather than silently
+        // dropping bar's subtree.
+        let dir = tempfile::tempdir().unwrap();
+        // Writes lib's POM (listing foo:bar:1.0) + lib's JAR, but NOT bar.
+        write_fake_artifact(dir.path(), "grp", "lib", "1.0", &[("foo", "bar", "1.0")]);
+
+        let err = run_resolve(dir.path(), &[("grp:lib", "1.0")], vec![]).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("foo:bar"),
+            "error should name the unfetchable transitive POM: {msg}",
         );
     }
 
