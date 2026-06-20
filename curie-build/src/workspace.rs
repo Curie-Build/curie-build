@@ -362,10 +362,11 @@ pub fn run_one(
 
     // ---- run phase --------------------------------------------------------
     let target_output = &outputs[&member_index];
-    let main_class = target_output
-        .main_class
-        .as_deref()
-        .expect("application member should have resolved main_class after build");
+    let main_class = run::resolve_main_class(
+        target_output.main_class.as_deref(),
+        target.descriptor.buildable_name(),
+        &target_output.jar,
+    )?;
 
     println!("{}", crate::style::run_step(
         target.descriptor.buildable_name(),

@@ -1,8 +1,29 @@
 use crate::jar::classpath_string;
 use crate::{build, descriptor, docker};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
+
+/// Resolve the main class to launch, or produce an actionable error when it
+/// couldn't be determined.  `main_class` is `None` when the packaged JAR is
+/// up to date but corrupt, externally built, or has no `Main-Class`, and the
+/// user also didn't declare `mainClass` under `[application]`.  Previously this
+/// hit an `.expect(...)` and panicked with an internal-invariant message.
+pub(crate) fn resolve_main_class<'a>(
+    main_class: Option<&'a str>,
+    name: &str,
+    jar: &Path,
+) -> Result<&'a str> {
+    main_class.ok_or_else(|| {
+        anyhow!(
+            "could not determine the main class for `{name}`.\n\
+             The packaged JAR ({}) has no readable Main-Class — it may be corrupt \
+             or externally built. Set `mainClass` under [application] in Curie.toml, \
+             or run `curie clean` and build again.",
+            jar.display(),
+        )
+    })
+}
 
 pub struct RunOptions {
     pub no_docker: bool,
@@ -26,11 +47,7 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
     };
     let output = build::do_build(project_root, &desc, build_opts, &[])?;
 
-    // main_class is always Some for application projects after do_build succeeds.
-    let main_class = output
-        .main_class
-        .as_deref()
-        .expect("do_build guarantees a resolved main_class for application projects");
+    let main_class = resolve_main_class(output.main_class.as_deref(), &app.name, &output.jar)?;
 
     println!("{}", crate::style::run_step(&app.name, &app.version));
     println!();
@@ -132,4 +149,29 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolve_main_class_returns_value_when_present() {
+        let jar = PathBuf::from("target/app.jar");
+        let mc = resolve_main_class(Some("com.example.Main"), "app", &jar).unwrap();
+        assert_eq!(mc, "com.example.Main");
+    }
+
+    #[test]
+    fn resolve_main_class_errors_with_guidance_when_absent() {
+        let jar = PathBuf::from("target/app.jar");
+        let err = resolve_main_class(None, "app", &jar).unwrap_err().to_string();
+        // The message must name the project, the JAR, and the two remedies, so
+        // the user-facing guidance can't silently regress.
+        assert!(err.contains("app"), "should name the project: {err}");
+        assert!(err.contains("target/app.jar"), "should show the jar path: {err}");
+        assert!(err.contains("mainClass"), "should suggest declaring mainClass: {err}");
+        assert!(err.contains("curie clean"), "should suggest curie clean: {err}");
+    }
 }
