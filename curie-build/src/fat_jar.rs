@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
+use crate::incremental::{finalize_staged, staging_path};
+
 use crate::descriptor::{self, Relocation};
 
 /// Reproducible-build epoch: 2024-01-01 00:00:00 UTC.
@@ -485,20 +487,27 @@ pub fn write_fat_jar(
     build_info: Option<&str>,
     relocations: &[Relocation],
 ) -> Result<()> {
-    let file = std::fs::File::create(jar_path)
-        .with_context(|| format!("cannot create {}", jar_path.display()))?;
+    let part = staging_path(jar_path);
+    if let Some(parent) = part.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create parent for staging file {}", parent.display()))?;
+    }
 
-    let mut zip = ZipWriter::new(file);
+    {
+        let file = std::fs::File::create(&part)
+            .with_context(|| format!("cannot create {}", part.display()))?;
 
-    let options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .last_modified_time(epoch())
-        .unix_permissions(0o644);
+        let mut zip = ZipWriter::new(file);
 
-    let dir_options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored)
-        .last_modified_time(epoch())
-        .unix_permissions(0o755);
+        let options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .last_modified_time(epoch())
+            .unix_permissions(0o644);
+
+        let dir_options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(epoch())
+            .unix_permissions(0o755);
 
     // --- MANIFEST.MF (must be first entry per JAR spec) ---------------------
     zip.start_file("META-INF/", dir_options)
@@ -731,6 +740,9 @@ pub fn write_fat_jar(
     }
 
     zip.finish().context("failed to finalise fat JAR")?;
+    } // drop writer + file for the part
+
+    finalize_staged(&part, jar_path)?;
     Ok(())
 }
 

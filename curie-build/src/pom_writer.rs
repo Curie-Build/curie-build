@@ -4,6 +4,7 @@
 //! character escaping, well-formed structure).
 
 use crate::descriptor::{Descriptor, DependencyValue, PublishConfig};
+use crate::incremental::{finalize_staged, staging_path};
 use anyhow::Result;
 use curie_deps::Gav;
 use quick_xml::{
@@ -67,8 +68,13 @@ pub fn build_pom(desc: &Descriptor, declared_deps: &[Gav]) -> Result<String> {
 /// Convenience wrapper: build the POM and write it to `path`.
 pub fn write_pom(desc: &Descriptor, declared_deps: &[Gav], path: &Path) -> Result<()> {
     let body = build_pom(desc, declared_deps)?;
-    std::fs::write(path, body.as_bytes())
-        .map_err(|e| anyhow::anyhow!("failed to write POM at {}: {}", path.display(), e))?;
+    let part = staging_path(path);
+    if let Some(parent) = part.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&part, body.as_bytes())
+        .map_err(|e| anyhow::anyhow!("failed to write POM at {}: {}", part.display(), e))?;
+    finalize_staged(&part, path)?;
     Ok(())
 }
 
@@ -124,8 +130,13 @@ pub fn build_bom_pom(desc: &Descriptor) -> Result<String> {
 /// Convenience wrapper: build the BOM POM and write it to `path`.
 pub fn write_bom_pom(desc: &Descriptor, path: &Path) -> Result<()> {
     let body = build_bom_pom(desc)?;
-    std::fs::write(path, body.as_bytes())
-        .map_err(|e| anyhow::anyhow!("failed to write BOM POM at {}: {}", path.display(), e))?;
+    let part = staging_path(path);
+    if let Some(parent) = part.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&part, body.as_bytes())
+        .map_err(|e| anyhow::anyhow!("failed to write BOM POM at {}: {}", part.display(), e))?;
+    finalize_staged(&part, path)?;
     Ok(())
 }
 

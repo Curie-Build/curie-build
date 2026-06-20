@@ -26,6 +26,7 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use walkdir::{DirEntry, WalkDir};
 
@@ -171,6 +172,50 @@ pub(crate) fn newest_mtime(paths: &[PathBuf]) -> SystemTime {
         .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
         .max()
         .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+// ---------------------------------------------------------------------------
+// Atomic staging for build outputs (protects against truncated files on crash)
+// ---------------------------------------------------------------------------
+
+/// Per-process counter to make staging names unique even within one PID
+/// (e.g. parallel threads or two `curie` invocations on the same project).
+static NEXT_STAGING_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+/// Return a unique collocated staging path for `dest`.
+///
+/// The result lives next to `dest` and includes the PID + a monotonic seq so
+/// that concurrent writers (different processes or threads) never collide on
+/// the temporary file. The original filename is preserved in the part name so
+/// that a `.jar` and a `.pom` for the same artifact do not collide on their
+/// staging files.
+pub(crate) fn staging_path(dest: &Path) -> PathBuf {
+    let pid = std::process::id();
+    let seq = NEXT_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+    let orig = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "out".to_string());
+    dest.with_file_name(format!("{}.part.{}.{}", orig, pid, seq))
+}
+
+/// Rename `part` to `dest`. If the rename fails because `dest` already exists
+/// (another writer won the race), treat it as success and remove our part file.
+/// This is the same tolerant pattern used by wrapper.rs and the resolver.
+pub(crate) fn finalize_staged(part: &Path, dest: &Path) -> Result<()> {
+    match std::fs::rename(part, dest) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if dest.exists() {
+                let _ = std::fs::remove_file(part);
+                Ok(())
+            } else {
+                Err(e).with_context(|| {
+                    format!("failed to rename {} \u{2192} {}", part.display(), dest.display())
+                })
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -989,5 +1034,64 @@ mod tests {
     fn compile_status_source_set_changed_reason_and_needs_recompile() {
         assert_eq!(CompileStatus::SourceSetChanged.reason(), "source set changed");
         assert!(CompileStatus::SourceSetChanged.needs_recompile());
+    }
+
+    // -- atomic staging helpers ----------------------------------------------
+
+    #[test]
+    fn staging_path_is_sibling_and_unique() {
+        let dest = Path::new("/tmp/target/foo.jar");
+        let p1 = staging_path(dest);
+        let p2 = staging_path(dest);
+
+        assert!(p1.starts_with("/tmp/target"));
+        assert!(p1.file_name().unwrap().to_string_lossy().contains("foo.jar.part."));
+        assert_ne!(p1, p2, "consecutive calls must produce distinct staging names");
+    }
+
+    #[test]
+    fn finalize_staged_success_moves_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.jar");
+        let part = dir.path().join("out.jar.part.test");
+        write_file(&part, b"complete");
+
+        finalize_staged(&part, &dest).unwrap();
+        assert!(dest.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"complete");
+        assert!(!part.exists());
+    }
+
+    #[test]
+    fn finalize_staged_tolerates_dest_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.jar");
+        write_file(&dest, b"winner");
+
+        let part = dir.path().join("out.jar.part.loser");
+        write_file(&part, b"loser-content");
+
+        // On Unix rename replaces; the tolerant path is exercised on platforms
+        // or races where rename returns error but dest now exists. We at least
+        // verify we never leave the part behind and dest ends up with complete bytes.
+        finalize_staged(&part, &dest).unwrap();
+        // Either content is acceptable — what matters is that a *complete* file
+        // from one of the writers is present and our staging file is gone.
+        let final_bytes = std::fs::read(&dest).unwrap();
+        assert!(final_bytes == b"winner" || final_bytes == b"loser-content");
+        assert!(!part.exists());
+    }
+
+    #[test]
+    fn finalize_staged_errors_if_neither_exists_after_failure() {
+        // Hard to simulate rename failure without the dest appearing, but we can at
+        // least ensure the error path is reachable by attempting rename of a
+        // non-existent part (the helper will propagate the underlying error).
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("ghost.part");
+        let dest = dir.path().join("never-created");
+
+        let res = finalize_staged(&part, &dest);
+        assert!(res.is_err());
     }
 }

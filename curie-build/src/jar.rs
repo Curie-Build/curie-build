@@ -11,6 +11,8 @@ use walkdir::WalkDir;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
+use crate::incremental::{finalize_staged, staging_path};
+
 /// Reproducible-build epoch: 2024-01-01 00:00:00 UTC.
 /// Matches SOURCE_DATE_EPOCH convention used by Debian, Nix, etc.
 fn epoch() -> zip::DateTime {
@@ -143,20 +145,30 @@ pub(crate) fn write_deterministic_jar(
     build_info: Option<&str>,
     automatic_module_name: Option<&str>,
 ) -> Result<()> {
-    let file = std::fs::File::create(jar_path)
-        .with_context(|| format!("cannot create {}", jar_path.display()))?;
+    let part = staging_path(jar_path);
+    if let Some(parent) = part.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create parent for staging file {}", parent.display()))?;
+    }
 
-    let mut zip = ZipWriter::new(file);
+    // Write the complete JAR to the staging file first. Only on success do we
+    // rename it into place. This prevents a mid-write crash from leaving a
+    // truncated JAR at the final path with a fresh mtime.
+    {
+        let file = std::fs::File::create(&part)
+            .with_context(|| format!("cannot create {}", part.display()))?;
 
-    let options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .last_modified_time(epoch())
-        .unix_permissions(0o644);
+        let mut zip = ZipWriter::new(file);
 
-    let dir_options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored)
-        .last_modified_time(epoch())
-        .unix_permissions(0o755);
+        let options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .last_modified_time(epoch())
+            .unix_permissions(0o644);
+
+        let dir_options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(epoch())
+            .unix_permissions(0o755);
 
     // --- MANIFEST.MF (must be first entry per JAR spec) ---------------------
     zip.start_file("META-INF/", dir_options)
@@ -255,6 +267,9 @@ pub(crate) fn write_deterministic_jar(
     }
 
     zip.finish().context("failed to finalise JAR")?;
+    } // drop ZipWriter + File for the part before rename
+
+    finalize_staged(&part, jar_path)?;
     Ok(())
 }
 
@@ -514,5 +529,29 @@ mod tests {
         let names = zip_entry_names(&bytes);
         let count = names.iter().filter(|n| *n == "META-INF/").count();
         assert_eq!(count, 1, "expected exactly one META-INF/ directory entry; entries: {:?}", names);
+    }
+
+    #[test]
+    fn write_deterministic_jar_leaves_no_part_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let classes_dir = tmp.path().join("classes");
+        std::fs::create_dir_all(&classes_dir).unwrap();
+        std::fs::write(classes_dir.join("Foo.class"), b"\xca\xfe\xba\xbe").unwrap();
+
+        let jar_path = tmp.path().join("myapp.jar");
+        write_deterministic_jar(&jar_path, &classes_dir, None, None, &[], None, None).unwrap();
+
+        assert!(jar_path.exists(), "final jar must exist");
+
+        // No sibling .part.* for this base name should remain.
+        let has_leftover_part = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("myapp.jar.part.")
+            });
+        assert!(!has_leftover_part, "no .part.* sibling should be left after successful write");
     }
 }

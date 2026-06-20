@@ -16,6 +16,7 @@
 use crate::build::{build_with_desc, BuildOptions};
 use crate::config;
 use crate::descriptor::{self, Descriptor};
+use crate::incremental::{finalize_staged, staging_path};
 use crate::pom_writer;
 use crate::sources_jar;
 use anyhow::{bail, Context, Result};
@@ -334,9 +335,17 @@ fn write_dir_as_jar(jar_path: &Path, src_dir: &Path) -> Result<()> {
     use std::io::Write as _;
     use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
-    let file = std::fs::File::create(jar_path)
-        .with_context(|| format!("cannot create {}", jar_path.display()))?;
-    let mut zip = ZipWriter::new(file);
+
+    let part = staging_path(jar_path);
+    if let Some(parent) = part.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create parent for staging file {}", parent.display()))?;
+    }
+
+    {
+        let file = std::fs::File::create(&part)
+            .with_context(|| format!("cannot create {}", part.display()))?;
+        let mut zip = ZipWriter::new(file);
     let opts = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .last_modified_time(zip::DateTime::from_date_and_time(2024, 1, 1, 0, 0, 0).unwrap())
@@ -358,6 +367,9 @@ fn write_dir_as_jar(jar_path: &Path, src_dir: &Path) -> Result<()> {
         zip.write_all(&bytes)?;
     }
     zip.finish().context("failed to finalize javadoc jar")?;
+    } // drop writer + file for part
+
+    finalize_staged(&part, jar_path)?;
     Ok(())
 }
 

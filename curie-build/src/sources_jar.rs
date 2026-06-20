@@ -13,6 +13,8 @@ use crate::compile::pkg_prefix_for_src_root;
 use anyhow::{Context, Result};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+
+use crate::incremental::{finalize_staged, staging_path};
 use walkdir::WalkDir;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
@@ -29,19 +31,26 @@ pub fn write_sources_jar(
     src_roots: &[PathBuf],
     resources_dir: Option<&Path>,
 ) -> Result<()> {
-    let file = std::fs::File::create(jar_path)
-        .with_context(|| format!("cannot create {}", jar_path.display()))?;
-    let mut zip = ZipWriter::new(file);
+    let part = staging_path(jar_path);
+    if let Some(parent) = part.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create parent for staging file {}", parent.display()))?;
+    }
 
-    let file_opts = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .last_modified_time(epoch())
-        .unix_permissions(0o644);
+    {
+        let file = std::fs::File::create(&part)
+            .with_context(|| format!("cannot create {}", part.display()))?;
+        let mut zip = ZipWriter::new(file);
 
-    let dir_opts = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored)
-        .last_modified_time(epoch())
-        .unix_permissions(0o755);
+        let file_opts = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .last_modified_time(epoch())
+            .unix_permissions(0o644);
+
+        let dir_opts = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(epoch())
+            .unix_permissions(0o755);
 
     // MANIFEST.MF (must be first).
     zip.start_file("META-INF/", dir_opts)
@@ -125,6 +134,9 @@ pub fn write_sources_jar(
     }
 
     zip.finish().context("failed to finalize sources jar")?;
+    } // drop ZipWriter + File
+
+    finalize_staged(&part, jar_path)?;
     Ok(())
 }
 
