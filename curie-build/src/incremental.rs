@@ -27,6 +27,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 use walkdir::{DirEntry, WalkDir};
 
@@ -330,8 +331,30 @@ impl CompileStatus {
 
 /// Returns the version string reported by `javac -version` (e.g. `"javac 21.0.3"`).
 ///
-/// `javac` writes its version to **stderr** (not stdout).
+/// The result is cached for the lifetime of the process: the JDK can't change
+/// mid-build, and `needs_recompile` (prod + test) plus the post-compile stamp
+/// writers would otherwise each spawn `javac -version`, ~100–300 ms of overhead
+/// on the hot incremental path (bug #20).  A failure (e.g. no JDK) is cached as
+/// `Err` for the process too.
 pub(crate) fn javac_version() -> Result<String> {
+    static CACHE: OnceLock<Option<String>> = OnceLock::new();
+    cached_or_init(&CACHE, || detect_javac_version().ok())
+        .ok_or_else(|| anyhow::anyhow!("failed to invoke javac — is a JDK installed?"))
+}
+
+/// Initialise `cache` from `detect` on first use, returning a clone of the
+/// stored value on every call.  Split out from [`javac_version`] so the caching
+/// semantics can be unit-tested without a JDK present.
+fn cached_or_init(
+    cache: &OnceLock<Option<String>>,
+    detect: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    cache.get_or_init(detect).clone()
+}
+
+/// Spawn `javac -version` and parse its output.  `javac` writes its version to
+/// **stderr** (not stdout).
+fn detect_javac_version() -> Result<String> {
     let out = Command::new("javac")
         .arg("-version")
         .output()
@@ -436,6 +459,41 @@ pub(crate) fn needs_repackage(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn javac_version_cache_runs_detector_once() {
+        let cache = OnceLock::new();
+        let calls = std::cell::Cell::new(0u32);
+        let first = cached_or_init(&cache, || {
+            calls.set(calls.get() + 1);
+            Some("javac 21".to_string())
+        });
+        // Second call must hit the cache; its detector is never run.
+        let second = cached_or_init(&cache, || {
+            calls.set(calls.get() + 1);
+            Some("javac 99".to_string())
+        });
+        assert_eq!(first.as_deref(), Some("javac 21"));
+        assert_eq!(second.as_deref(), Some("javac 21"), "second call must return the cached value");
+        assert_eq!(calls.get(), 1, "detector must run exactly once");
+    }
+
+    #[test]
+    fn javac_version_cache_caches_none() {
+        let cache = OnceLock::new();
+        let calls = std::cell::Cell::new(0u32);
+        let first = cached_or_init(&cache, || {
+            calls.set(calls.get() + 1);
+            None
+        });
+        let second = cached_or_init(&cache, || {
+            calls.set(calls.get() + 1);
+            Some("javac 21".to_string())
+        });
+        assert_eq!(first, None);
+        assert_eq!(second, None, "a cached None must not be re-detected");
+        assert_eq!(calls.get(), 1, "detector must run exactly once even for None");
+    }
 
     /// Write `content` to `path`, creating parent directories as needed.
     fn write_file(path: &Path, content: &[u8]) {
