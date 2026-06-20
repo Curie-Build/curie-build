@@ -3,7 +3,8 @@ use crate::compile::{
     KOTLIN_STDLIB_COORD,
 };
 use crate::incremental::{
-    self, javac_version, needs_recompile, walk_files, write_javac_version_stamp, Inputs, Stamp,
+    self, javac_version, needs_recompile, walk_files, write_javac_version_stamp, CompileStatus,
+    Inputs, Stamp,
 };
 use crate::jar::classpath_string;
 use crate::{build, descriptor};
@@ -319,17 +320,28 @@ pub fn run_tests(
     let test_source_set_changed =
         incremental::source_set_changed(test_source_set_prev.as_ref(), &test_source_set);
 
-    let needs_recompile_tests = pre_pruned_tests > 0
-        || test_source_set_changed
-        || needs_recompile(&all_test_sources, &test_classes_dir, &toml_path, &project_root.join("target")).needs_recompile();
+    let test_compile_status = if pre_pruned_tests > 0 {
+        CompileStatus::StaleClasses
+    } else if test_source_set_changed {
+        CompileStatus::SourceSetChanged
+    } else {
+        needs_recompile(
+            &all_test_sources,
+            &test_classes_dir,
+            &toml_path,
+            &project_root.join("target"),
+            &[classes_dir],
+        )
+    };
+    let needs_recompile_tests = test_compile_status.needs_recompile();
 
     if needs_recompile_tests {
         let reason = if pre_pruned_tests > 0 {
-            "  [stale classes removed]"
+            "  [stale classes removed]".to_string()
         } else if test_source_set_changed {
-            "  [source set changed]"
+            "  [source set changed]".to_string()
         } else {
-            ""
+            format!("  [{}]", test_compile_status.reason())
         };
         crate::parallel::emit(&crate::style::active(
             "Compile tests",

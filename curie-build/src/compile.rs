@@ -724,7 +724,7 @@ pub fn compile(
     } else if source_set_changed {
         CompileStatus::SourceSetChanged
     } else {
-        needs_recompile(&sources, &classes_dir, &toml_path, &output_dir)
+        needs_recompile(&sources, &classes_dir, &toml_path, &output_dir, &[])
     };
 
     if compile_status.needs_recompile() {

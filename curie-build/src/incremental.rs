@@ -250,6 +250,9 @@ pub(crate) enum CompileStatus {
     /// The set of source files changed (a source was added or removed) since
     /// the last compile — caught even when mtimes don't reflect it.
     SourceSetChanged,
+    /// A secondary input directory (e.g. production `classes` when deciding
+    /// whether to recompile tests) is newer than the output classes.
+    DependencyChanged,
     /// `Curie.toml` is newer than the oldest `.class` file.
     TomlChanged,
     /// Stale `.class` files were found (sources deleted since last compile).
@@ -271,6 +274,7 @@ impl CompileStatus {
             CompileStatus::NoClassFiles => "no class files",
             CompileStatus::SourceChanged => "source changed",
             CompileStatus::SourceSetChanged => "source set changed",
+            CompileStatus::DependencyChanged => "dependency changed",
             CompileStatus::TomlChanged => "Curie.toml changed",
             CompileStatus::StaleClasses => "stale classes removed",
             CompileStatus::JdkChanged => "JDK version changed",
@@ -320,11 +324,16 @@ pub(crate) fn write_javac_version_stamp(target_dir: &Path, version: &str) -> Res
 /// Uses `>=` against `oldest_class_mtime_in_dir(classes_dir)` so a source edited
 /// in the same filesystem-second as the oldest class file is still treated
 /// as "changed".  See the module-level tie-breaking note.
+///
+/// `extra_input_dirs` may be used to model additional inputs that should
+/// invalidate the outputs (e.g. pass the production `classes` directory when
+/// deciding whether test sources need recompilation).
 pub(crate) fn needs_recompile(
     sources: &[PathBuf],
     classes_dir: &Path,
     toml_path: &Path,
     target_dir: &Path,
+    extra_input_dirs: &[&Path],
 ) -> CompileStatus {
     // Use only .class files as the baseline — annotation processors (e.g. JMH)
     // may write non-class resources (BenchmarkList, CompilerHints, …) into the
@@ -345,6 +354,11 @@ pub(crate) fn needs_recompile(
     }
     if newest_mtime(sources) >= oldest_class {
         return CompileStatus::SourceChanged;
+    }
+    for &d in extra_input_dirs {
+        if newest_mtime_in_dir(d) >= oldest_class {
+            return CompileStatus::DependencyChanged;
+        }
     }
     if mtime(toml_path) >= oldest_class {
         return CompileStatus::TomlChanged;
@@ -485,7 +499,7 @@ mod tests {
         let toml = dir.path().join("Curie.toml");
         write_file(&toml, b"[application]");
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path()), CompileStatus::NoClassFiles);
+        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]), CompileStatus::NoClassFiles);
     }
 
     #[test]
@@ -498,7 +512,7 @@ mod tests {
         let toml = dir.path().join("Curie.toml");
         write_file(&toml, b"[application]");
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path()), CompileStatus::NoClassFiles);
+        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]), CompileStatus::NoClassFiles);
     }
 
     #[test]
@@ -525,7 +539,7 @@ mod tests {
             write_javac_version_stamp(dir.path(), &v).unwrap();
         }
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path()), CompileStatus::UpToDate);
+        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]), CompileStatus::UpToDate);
     }
 
     #[test]
@@ -552,7 +566,7 @@ mod tests {
             write_javac_version_stamp(dir.path(), &v).unwrap();
         }
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path()), CompileStatus::SourceChanged);
+        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]), CompileStatus::SourceChanged);
     }
 
     #[test]
@@ -579,7 +593,7 @@ mod tests {
             write_javac_version_stamp(dir.path(), &v).unwrap();
         }
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path()), CompileStatus::TomlChanged);
+        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]), CompileStatus::TomlChanged);
     }
 
     #[test]
@@ -603,7 +617,92 @@ mod tests {
         // Write a *different* javac version to simulate a JDK upgrade.
         write_javac_version_stamp(dir.path(), "javac 99.0.0").unwrap();
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path()), CompileStatus::JdkChanged);
+        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]), CompileStatus::JdkChanged);
+    }
+
+    #[test]
+    fn needs_recompile_true_when_extra_input_dir_newer_than_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(3_000_000);
+
+        let classes_dir = dir.path().join("test-classes");
+        let class_file = classes_dir.join("FooTest.class");
+        write_file(&class_file, b"bytecode");
+        set_mtime(&class_file, base);
+
+        let src = dir.path().join("FooTest.java");
+        write_file(&src, b"class FooTest {}");
+        set_mtime(&src, base - Duration::from_secs(10));
+
+        let toml = dir.path().join("Curie.toml");
+        write_file(&toml, b"[application]");
+        set_mtime(&toml, base - Duration::from_secs(20));
+
+        if let Ok(v) = javac_version() {
+            write_javac_version_stamp(dir.path(), &v).unwrap();
+        }
+
+        // Production classes newer than test outputs.
+        let prod_dir = dir.path().join("classes");
+        let prod_class = prod_dir.join("Foo.class");
+        write_file(&prod_class, b"bytecode");
+        set_mtime(&prod_class, base + Duration::from_secs(5));
+
+        assert_eq!(
+            needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[&prod_dir]),
+            CompileStatus::DependencyChanged
+        );
+    }
+
+    #[test]
+    fn needs_recompile_false_when_extra_input_dir_older_than_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(3_000_000);
+
+        let classes_dir = dir.path().join("test-classes");
+        let class_file = classes_dir.join("FooTest.class");
+        write_file(&class_file, b"bytecode");
+        set_mtime(&class_file, base);
+
+        let src = dir.path().join("FooTest.java");
+        write_file(&src, b"class FooTest {}");
+        set_mtime(&src, base - Duration::from_secs(10));
+
+        let toml = dir.path().join("Curie.toml");
+        write_file(&toml, b"[application]");
+        set_mtime(&toml, base - Duration::from_secs(20));
+
+        if let Ok(v) = javac_version() {
+            write_javac_version_stamp(dir.path(), &v).unwrap();
+        }
+
+        let prod_dir = dir.path().join("classes");
+        let prod_class = prod_dir.join("Foo.class");
+        write_file(&prod_class, b"bytecode");
+        set_mtime(&prod_class, base - Duration::from_secs(5));
+
+        assert_eq!(
+            needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[&prod_dir]),
+            CompileStatus::UpToDate
+        );
+    }
+
+    #[test]
+    fn needs_recompile_no_class_files_even_with_extra_dir_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("FooTest.java");
+        write_file(&src, b"class FooTest {}");
+        let classes_dir = dir.path().join("test-classes"); // does not exist
+        let toml = dir.path().join("Curie.toml");
+        write_file(&toml, b"[application]");
+
+        let prod_dir = dir.path().join("classes");
+        write_file(&prod_dir.join("Foo.class"), b"bytecode");
+
+        assert_eq!(
+            needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[&prod_dir]),
+            CompileStatus::NoClassFiles
+        );
     }
 
     // -- needs_repackage ------------------------------------------------------
