@@ -15,8 +15,9 @@ use anyhow::{Context, Result};
 use curie_deps::repo::Repository;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write as _;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::UNIX_EPOCH;
 
 // ── Manifest types (re-exported from curie-plugin) ────────────────────────────
@@ -44,6 +45,59 @@ struct MtimeEntry {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+/// Spawn the child with piped stdin and return the child plus a thread that
+/// performs the write (and drops the handle to send EOF). This prevents
+/// blocking the main thread on large envelopes and allows us to wait for the
+/// child even if the write fails (e.g. EPIPE when child exited early).
+fn spawn_with_stdin_thread(
+    mut cmd: std::process::Command,
+    data: &[u8],
+) -> Result<(std::process::Child, thread::JoinHandle<io::Result<()>>)> {
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("failed to spawn {}", cmd.get_program().to_string_lossy()))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .expect("stdin was requested as piped");
+    let data = data.to_vec();
+    let handle = thread::spawn(move || {
+        let res = stdin.write_all(&data);
+        drop(stdin); // send EOF to child
+        res
+    });
+    Ok((child, handle))
+}
+
+/// Given the result of the stdin write thread and the child's exit status,
+/// decide what error (if any) to surface. We prefer the child's status when
+/// it exited unsuccessfully (the real error is typically on the inherited
+/// stderr that the user already saw).
+fn check_write_result_vs_status(
+    write_res: io::Result<()>,
+    status: std::process::ExitStatus,
+    bin_name: &str,
+) -> Result<()> {
+    if let Err(e) = write_res {
+        if status.success() {
+            // Write failed even though child reported success — unusual, surface it.
+            return Err(e).with_context(|| format!("failed to write stdin to {bin_name}"));
+        }
+        // Child exited with failure (EPIPE or other write error); report child's status.
+        anyhow::bail!(
+            "{bin_name} exited with status {:?}",
+            status.code()
+        );
+    }
+    if !status.success() {
+        anyhow::bail!(
+            "{bin_name} exited with status {:?}",
+            status.code()
+        );
+    }
+    Ok(())
+}
+
 /// Invoke `curie-<name> manifest`, returning the parsed manifest.
 pub fn fetch_manifest(
     name: &str,
@@ -54,31 +108,22 @@ pub fn fetch_manifest(
     let bin = which::which(&bin_name)
         .with_context(|| format!("{bin_name} not found on PATH (required by [plugin.{name}])"))?;
 
-    let mut child = std::process::Command::new(&bin)
-        .args(["manifest", "--project"])
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.args(["manifest", "--project"])
         .arg(project_root)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .with_context(|| format!("failed to spawn {bin_name}"))?;
+        .stderr(std::process::Stdio::inherit());
 
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(envelope_json.as_bytes())
-        .with_context(|| format!("failed to write stdin to {bin_name}"))?;
+    let (child, write_th) =
+        spawn_with_stdin_thread(cmd, envelope_json.as_bytes())?;
 
     let output = child
         .wait_with_output()
         .with_context(|| format!("failed to wait for {bin_name}"))?;
 
-    anyhow::ensure!(
-        output.status.success(),
-        "{bin_name} manifest exited with status {:?}",
-        output.status.code()
-    );
+    let write_res = write_th.join().expect("stdin writer thread panicked");
+    check_write_result_vs_status(write_res, output.status, &bin_name)?;
 
     serde_json::from_slice(&output.stdout)
         .with_context(|| format!("{bin_name} manifest produced invalid JSON on stdout"))
@@ -180,23 +225,15 @@ pub fn generate_sources(
         cmd.arg("--offline");
     }
 
-    let mut child = cmd.spawn().with_context(|| format!("failed to spawn {bin_name}"))?;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(run_json.as_bytes())
-        .with_context(|| format!("failed to write stdin to {bin_name}"))?;
+    let (mut child, write_th) = spawn_with_stdin_thread(cmd, run_json.as_bytes())?;
 
     let status = child
         .wait()
         .with_context(|| format!("failed to wait for {bin_name}"))?;
 
-    anyhow::ensure!(
-        status.success(),
-        "{bin_name} generate-sources exited with status {:?}",
-        status.code()
-    );
+    let write_res = write_th.join().expect("stdin writer thread panicked");
+    check_write_result_vs_status(write_res, status, &bin_name)?;
+
     Ok(())
 }
 
@@ -875,5 +912,115 @@ mod tests {
         let wiped = wipe_orphaned_plugin_outputs(&set, &set);
         assert!(wiped.is_empty());
         assert!(foo.exists());
+    }
+
+    // ── stdin write thread + error masking fix (bug #14) ──────────────────────
+
+    #[cfg(unix)]
+    fn make_fake_plugin_script(dir: &Path, name: &str, script_body: &str) -> Result<PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, script_body)?;
+        let mut perms = std::fs::metadata(&path)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms)?;
+        Ok(path)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fetch_manifest_large_envelope_no_deadlock_and_parses() {
+        let tmp = TempDir::new().unwrap();
+        // Script: read all stdin (to unblock writer), emit a minimal valid manifest on stdout.
+        let script = r#"#!/bin/sh
+cat >/dev/null
+echo '{"name":"dummy","description":"test","version":"0.0.0","types":[],"inputs":{"dirs":[],"files":[]},"outputs":{"source_dirs":[]},"artifacts":[]}'
+"#;
+        let script_path = make_fake_plugin_script(tmp.path(), "curie-dummy", script).unwrap();
+
+        // Prepend script dir to PATH for this test only.
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp.path().display(), old_path);
+        std::env::set_var("PATH", &new_path);
+
+        // Large envelope (>64KiB) that would previously risk deadlock with blocking write_all.
+        let big = "x".repeat(128 * 1024);
+        let envelope = format!(
+            r#"{{"curie_version":"0.6.0","config":{{"big":"{}"}}}}"#,
+            big
+        );
+
+        let result = fetch_manifest("dummy", &envelope, tmp.path());
+        std::env::set_var("PATH", old_path);
+
+        assert!(result.is_ok(), "expected success: {:#}", result.unwrap_err());
+        let m = result.unwrap();
+        assert_eq!(m.name, "dummy");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fetch_manifest_reports_child_status_not_write_error_on_early_exit() {
+        let tmp = TempDir::new().unwrap();
+        // Script: ignore stdin, write real error to stderr, exit non-zero.
+        let script = r#"#!/bin/sh
+echo 'PLUGIN FATAL: invalid config' >&2
+exit 42
+"#;
+        let _ = make_fake_plugin_script(tmp.path(), "curie-errplug", script).unwrap();
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp.path().display(), old_path);
+        std::env::set_var("PATH", &new_path);
+
+        let large = "y".repeat(100 * 1024);
+        let envelope = format!(r#"{{"curie_version":"0","config":{{"data":"{}"}}}}"#, large);
+
+        let result = fetch_manifest("errplug", &envelope, tmp.path());
+        std::env::set_var("PATH", old_path);
+
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("42") || msg.contains("exited with status"),
+            "should report child exit status, got: {}",
+            msg
+        );
+        // Must not be the old generic "failed to write stdin" as the primary message.
+        assert!(
+            !msg.contains("failed to write stdin to curie-errplug"),
+            "should not mask with write error: {}",
+            msg
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generate_sources_reports_child_status_not_write_error() {
+        let tmp = TempDir::new().unwrap();
+        let script = r#"#!/bin/sh
+echo 'GEN ERROR: something went wrong' >&2
+exit 77
+"#;
+        let _ = make_fake_plugin_script(tmp.path(), "curie-generr", script).unwrap();
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp.path().display(), old_path);
+        std::env::set_var("PATH", &new_path);
+
+        let large = "z".repeat(80 * 1024);
+        let envelope = format!(r#"{{"curie_version":"0","config":{{"x":"{}"}}}}"#, large);
+        let resolved = BTreeMap::new();
+
+        let result = generate_sources("generr", &envelope, &resolved, tmp.path(), false);
+        std::env::set_var("PATH", old_path);
+
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("77") || msg.contains("exited with status"),
+            "expected child status, got: {}",
+            msg
+        );
     }
 }
