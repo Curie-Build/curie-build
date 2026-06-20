@@ -283,6 +283,9 @@ pub fn compile(
         for (plugin_name, plugin_config) in &desc.plugins {
             let envelope = build_plugin_envelope(plugin_config)?;
             let manifest = crate::plugin::fetch_manifest(plugin_name, &envelope, project_root)?;
+            // Hash the config envelope + plugin version so a config edit that
+            // doesn't touch any input file still re-runs generation (bug #5).
+            let config_hash = crate::plugin::config_hash(&envelope, &manifest.version);
             let plugins_dir = project_root.join("target").join(".curie-plugins");
             let stamp_path = plugins_dir.join(format!("{plugin_name}.stamp"));
             let output_set_stamp =
@@ -300,7 +303,7 @@ pub fn compile(
                 .map(|prev| pre_run_output_set.is_superset(prev))
                 .unwrap_or(true); // no stamp yet → first build, rely on input check only
 
-            if !crate::plugin::is_up_to_date(&manifest, &stamp_path, project_root)
+            if !crate::plugin::is_up_to_date(&manifest, &stamp_path, project_root, &config_hash)
                 || !outputs_intact
             {
                 let input_summary = summarise_plugin_inputs(&manifest, project_root);
@@ -328,7 +331,7 @@ pub fn compile(
                     project_root,
                     offline,
                 )?;
-                crate::plugin::write_stamp(&manifest, &stamp_path, project_root)?;
+                crate::plugin::write_stamp(&manifest, &stamp_path, project_root, &config_hash)?;
 
                 // Orphan wipe: delete files from the previous run that the plugin no
                 // longer emits (e.g. a .proto source was removed).

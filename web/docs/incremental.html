@@ -165,7 +165,7 @@
         <tr><td><code>target/.javac-version</code></td><td>successful production compile</td><td>JDK version change</td></tr>
         <tr><td><code>target/.classes.toml</code></td><td>successful javac run</td><td>stale Java class files (pre- and post-compile)</td></tr>
         <tr><td><code>target/.test-classes.toml</code></td><td>successful test javac run</td><td>stale Java test class files</td></tr>
-        <tr><td><code>target/.curie-plugins/&lt;name&gt;.stamp</code></td><td>successful plugin run</td><td>plugin input file changed (mtime-based)</td></tr>
+        <tr><td><code>target/.curie-plugins/&lt;name&gt;.stamp</code></td><td>successful plugin run</td><td>plugin input file changed (mtime-based), or plugin config / curie version / plugin version changed (hash-based)</td></tr>
         <tr><td><code>target/.test-stamp</code></td><td>successful test run</td><td>whether tests need to re-run</td></tr>
       </tbody>
     </table>

@@ -30,6 +30,10 @@ pub use curie_plugin::Manifest as PluginManifest;
 struct Stamp {
     dir_mtimes: Vec<MtimeEntry>,
     file_mtimes: Vec<MtimeEntry>,
+    /// SHA-256 of the config envelope + plugin manifest version.  Empty in
+    /// stamps written before this field existed, which forces one regeneration.
+    #[serde(default)]
+    config_hash: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -81,15 +85,25 @@ pub fn fetch_manifest(
 }
 
 /// Return true when all inputs recorded in the stamp are still unchanged.
+///
+/// `config_hash` is the current hash of the config envelope + plugin version
+/// (see [`config_hash`]); a mismatch means the plugin config or version changed
+/// and generation must re-run even when no input file did.
 pub fn is_up_to_date(
     manifest: &PluginManifest,
     stamp_path: &Path,
     project_root: &Path,
+    config_hash: &str,
 ) -> bool {
     let stamp = match read_stamp(stamp_path) {
         Ok(s) => s,
         Err(_) => return false,
     };
+
+    // Config envelope or plugin version changed → stale even if files didn't.
+    if stamp.config_hash != config_hash {
+        return false;
+    }
 
     // Verify directory mtimes (detects added / removed files).
     for entry in &stamp.dir_mtimes {
@@ -186,11 +200,25 @@ pub fn generate_sources(
     Ok(())
 }
 
-/// Write a fresh stamp file reflecting current input mtimes from the manifest.
+/// Hash the inputs that should trigger regeneration when changed: the full
+/// config envelope (`curie_version` + the `[plugin.<name>]` config) plus the
+/// plugin's own manifest version.  Returned as a hex SHA-256 string.
+pub fn config_hash(envelope_json: &str, manifest_version: &str) -> String {
+    use sha2::Digest as _;
+    let mut h = sha2::Sha256::new();
+    h.update(manifest_version.as_bytes());
+    h.update(b"\n");
+    h.update(envelope_json.as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// Write a fresh stamp file reflecting current input mtimes from the manifest
+/// plus the current config/version hash.
 pub fn write_stamp(
     manifest: &PluginManifest,
     stamp_path: &Path,
     project_root: &Path,
+    config_hash: &str,
 ) -> Result<()> {
     let dir_mtimes = manifest
         .inputs
@@ -210,7 +238,7 @@ pub fn write_stamp(
         })
         .collect();
 
-    let stamp = Stamp { dir_mtimes, file_mtimes };
+    let stamp = Stamp { dir_mtimes, file_mtimes, config_hash: config_hash.to_string() };
 
     if let Some(parent) = stamp_path.parent() {
         std::fs::create_dir_all(parent).context("failed to create .curie-plugins dir")?;
@@ -454,9 +482,13 @@ mod tests {
         }"#).unwrap()
     }
 
+    /// Fixed config hash used by the input-tracking tests, which only care
+    /// about file/dir staleness and keep the config constant.
+    const TEST_HASH: &str = "test-config-hash";
+
     fn write_stamp_at(dir: &Path, manifest: &PluginManifest) {
         let stamp_path = dir.join("stamp.json");
-        write_stamp(manifest, &stamp_path, dir).unwrap();
+        write_stamp(manifest, &stamp_path, dir, TEST_HASH).unwrap();
     }
 
     #[test]
@@ -465,7 +497,7 @@ mod tests {
         let manifest = sample_manifest();
         fs::create_dir_all(tmp.path().join("proto")).unwrap();
         let stamp = tmp.path().join("nonexistent.stamp");
-        assert!(!is_up_to_date(&manifest, &stamp, tmp.path()));
+        assert!(!is_up_to_date(&manifest, &stamp, tmp.path(), TEST_HASH));
     }
 
     #[test]
@@ -478,7 +510,7 @@ mod tests {
         let manifest = sample_manifest();
         write_stamp_at(tmp.path(), &manifest);
         let stamp_path = tmp.path().join("stamp.json");
-        assert!(is_up_to_date(&manifest, &stamp_path, tmp.path()));
+        assert!(is_up_to_date(&manifest, &stamp_path, tmp.path(), TEST_HASH));
     }
 
     #[test]
@@ -497,7 +529,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         fs::write(&proto_file, b"syntax = \"proto3\"; // modified").unwrap();
 
-        assert!(!is_up_to_date(&manifest, &stamp_path, tmp.path()));
+        assert!(!is_up_to_date(&manifest, &stamp_path, tmp.path(), TEST_HASH));
     }
 
     #[test]
@@ -514,7 +546,74 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         fs::write(proto_dir.join("new.proto"), b"syntax = \"proto3\";").unwrap();
 
-        assert!(!is_up_to_date(&manifest, &stamp_path, tmp.path()));
+        assert!(!is_up_to_date(&manifest, &stamp_path, tmp.path(), TEST_HASH));
+    }
+
+    #[test]
+    fn stale_when_config_hash_changes() {
+        let tmp = TempDir::new().unwrap();
+        let proto_dir = tmp.path().join("proto");
+        fs::create_dir_all(&proto_dir).unwrap();
+        fs::write(proto_dir.join("foo.proto"), b"syntax = \"proto3\";").unwrap();
+
+        let manifest = sample_manifest();
+        // Stamp written with one config hash...
+        write_stamp_at(tmp.path(), &manifest);
+        let stamp_path = tmp.path().join("stamp.json");
+
+        // ...but the current build has a different config hash (e.g. modelPackage
+        // changed).  No input file moved, yet the plugin must re-run.
+        assert!(!is_up_to_date(&manifest, &stamp_path, tmp.path(), "different-hash"));
+    }
+
+    #[test]
+    fn up_to_date_when_config_hash_matches() {
+        let tmp = TempDir::new().unwrap();
+        let proto_dir = tmp.path().join("proto");
+        fs::create_dir_all(&proto_dir).unwrap();
+        fs::write(proto_dir.join("foo.proto"), b"syntax = \"proto3\";").unwrap();
+
+        let manifest = sample_manifest();
+        write_stamp(&manifest, &tmp.path().join("stamp.json"), tmp.path(), "abc123").unwrap();
+        let stamp_path = tmp.path().join("stamp.json");
+        assert!(is_up_to_date(&manifest, &stamp_path, tmp.path(), "abc123"));
+    }
+
+    #[test]
+    fn stale_when_stamp_predates_config_hash_field() {
+        // A legacy stamp written before config_hash existed deserializes with an
+        // empty hash, which never matches a real hash → one forced regeneration.
+        let tmp = TempDir::new().unwrap();
+        let proto_dir = tmp.path().join("proto");
+        fs::create_dir_all(&proto_dir).unwrap();
+        fs::write(proto_dir.join("foo.proto"), b"syntax = \"proto3\";").unwrap();
+
+        let manifest = sample_manifest();
+        let stamp_path = tmp.path().join("stamp.json");
+        // Emulate an old stamp: write a fresh one, then strip the config_hash key.
+        write_stamp(&manifest, &stamp_path, tmp.path(), "real-hash").unwrap();
+        let json = fs::read_to_string(&stamp_path).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value.as_object_mut().unwrap().remove("config_hash");
+        fs::write(&stamp_path, serde_json::to_string(&value).unwrap()).unwrap();
+
+        assert!(!is_up_to_date(&manifest, &stamp_path, tmp.path(), "real-hash"));
+    }
+
+    #[test]
+    fn config_hash_changes_with_config_and_version() {
+        let env_a = r#"{"curie_version":"0.6.0","config":{"modelPackage":"a"}}"#;
+        let env_b = r#"{"curie_version":"0.6.0","config":{"modelPackage":"b"}}"#;
+        // Different config → different hash.
+        assert_ne!(config_hash(env_a, "1.0.0"), config_hash(env_b, "1.0.0"));
+        // Different plugin version → different hash.
+        assert_ne!(config_hash(env_a, "1.0.0"), config_hash(env_a, "2.0.0"));
+    }
+
+    #[test]
+    fn config_hash_stable_for_same_input() {
+        let env = r#"{"curie_version":"0.6.0","config":{"version":"3.25.0"}}"#;
+        assert_eq!(config_hash(env, "1.0.0"), config_hash(env, "1.0.0"));
     }
 
     #[test]

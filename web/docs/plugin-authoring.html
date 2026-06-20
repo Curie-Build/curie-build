@@ -215,7 +215,7 @@
     <h2 id="stamp">Stamp file</h2>
     <p>Curie manages the stamp at <code>target/.curie-plugins/&lt;name&gt;.stamp</code>. The plugin never reads or writes it directly. Curie writes the stamp after a successful <code>generate-sources</code> exit, recording the mtimes (and hashes for small files) of every input file matched by <code>inputs.dirs</code> + <code>inputs.file_regex</code> + <code>inputs.files</code>. On subsequent builds Curie compares current state against the stamp; if nothing changed, <code>generate-sources</code> is not called.</p>
 
-    <p>The stamp also records the <code>curie_version</code> and the plugin's own <code>version</code> field from the manifest. Upgrading either Curie or the plugin binary automatically invalidates the stamp so the next build regenerates cleanly.</p>
+    <p>The stamp also records a SHA-256 hash of the config envelope (the <code>curie_version</code> plus the entire <code>[plugin.&lt;name&gt;]</code> config) together with the plugin's own <code>version</code> field from the manifest. Changing any of these — a config option that does not touch a watched file (for example <code>modelPackage</code>), upgrading Curie, or upgrading the plugin binary — changes the hash and invalidates the stamp, so the next build regenerates cleanly.</p>
 
     <h2 id="platform-detection">Platform detection</h2>
     <p>When your plugin wraps a native tool distributed as platform-specific Maven artifacts (like <code>protoc</code>), detect the current OS and architecture in the <code>manifest</code> handler and emit the correct classifier. The plugin binary itself is native and has access to <code>std::env::consts</code> (Rust) or equivalent, so no external detection step is needed.</p>
