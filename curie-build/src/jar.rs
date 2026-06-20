@@ -29,13 +29,92 @@ pub fn classpath_string(jars: &[PathBuf]) -> String {
         .join(sep)
 }
 
+/// Extract the dotted Maven groupId from a local-repository JAR path of the form
+/// `…/repository/<g1>/<g2>/…/<artifact>/<version>/<file>`.  Returns `None` when
+/// the path doesn't follow that layout.
+fn group_id_from_repo_path(path: &Path) -> Option<String> {
+    let segs: Vec<String> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    // Need: repository / <group…(>=1)> / artifact / version / file
+    let repo_idx = segs.iter().rposition(|s| s == "repository")?;
+    let group_start = repo_idx + 1;
+    let group_end = segs.len().checked_sub(3)?; // exclude artifact/version/file
+    if group_end <= group_start {
+        return None;
+    }
+    Some(segs[group_start..group_end].join("."))
+}
+
+/// Map each dependency JAR to the filename it should take under `libs/`.
+///
+/// Normally this is just the JAR's own filename.  When two JARs would land on the
+/// same filename (same artifact+version but different Maven groups — e.g.
+/// `javax.inject:javax.inject:1` vs a re-bundled `com.example:javax.inject:1`),
+/// the colliding entries are qualified with their dotted groupId
+/// (`javax.inject-javax.inject-1.jar`), mirroring Maven's `prependGroupId`, so
+/// neither JAR is lost.  Returned names are aligned 1:1 with `dep_jars` and are a
+/// pure function of the slice (so `populate_libs_dir` and the manifest Class-Path
+/// stay in lockstep when given the same input).
+fn libs_entry_names(dep_jars: &[PathBuf]) -> Vec<String> {
+    let bases: Vec<String> = dep_jars
+        .iter()
+        .map(|p| {
+            p.file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        })
+        .collect();
+
+    let mut base_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for b in &bases {
+        *base_counts.entry(b.as_str()).or_insert(0) += 1;
+    }
+
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut names = Vec::with_capacity(dep_jars.len());
+    for (i, base) in bases.iter().enumerate() {
+        // Qualify only when the bare filename collides with another JAR's.
+        let mut candidate = if base_counts.get(base.as_str()).copied().unwrap_or(0) > 1 {
+            match group_id_from_repo_path(&dep_jars[i]) {
+                Some(group) => format!("{group}-{base}"),
+                None => insert_before_extension(base, &format!("-{i}")),
+            }
+        } else {
+            base.clone()
+        };
+        // Paranoia: guarantee global uniqueness even if two qualified names still
+        // match (e.g. identical group, or the group couldn't be derived).
+        while !used.insert(candidate.clone()) {
+            candidate = insert_before_extension(&candidate, &format!("-{i}"));
+        }
+        names.push(candidate);
+    }
+    names
+}
+
+/// Insert `suffix` before the file extension: `foo-1.0.jar` + `-2` ->
+/// `foo-1.0-2.jar`.  Appends to the end when there is no extension.
+fn insert_before_extension(name: &str, suffix: &str) -> String {
+    match name.rfind('.') {
+        Some(dot) => format!("{}{}{}", &name[..dot], suffix, &name[dot..]),
+        None => format!("{name}{suffix}"),
+    }
+}
+
 /// Build the *value* portion of the Class-Path header (the "libs/..." space-
 /// separated list). Used by the writer to feed the common build_manifest.
+///
+/// Uses the same [`libs_entry_names`] mapping as [`populate_libs_dir`], so the
+/// Class-Path entries match the files actually written to `target/libs/`.
 fn manifest_class_path_value(dep_jars: &[PathBuf]) -> String {
-    dep_jars
+    libs_entry_names(dep_jars)
         .iter()
-        .filter_map(|p| p.file_name())
-        .map(|f| format!("libs/{}", f.to_string_lossy()))
+        .map(|name| format!("libs/{name}"))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -171,11 +250,21 @@ pub(crate) fn populate_libs_dir(libs_dir: &Path, dep_jars: &[PathBuf]) -> Result
     std::fs::create_dir_all(libs_dir)
         .with_context(|| format!("failed to create {}", libs_dir.display()))?;
 
-    for src in dep_jars {
-        let file_name = src
-            .file_name()
-            .with_context(|| format!("dep JAR has no filename: {}", src.display()))?;
-        let dst = libs_dir.join(file_name);
+    // Disambiguated target filenames (qualifies group:artifact collisions so no
+    // JAR is silently overwritten).  Same mapping the manifest Class-Path uses.
+    let names = libs_entry_names(dep_jars);
+    let qualified = dep_jars
+        .iter()
+        .zip(&names)
+        .filter(|(src, name)| {
+            src.file_name()
+                .map(|f| f.to_string_lossy().as_ref() != name.as_str())
+                .unwrap_or(false)
+        })
+        .count();
+
+    for (src, name) in dep_jars.iter().zip(&names) {
+        let dst = libs_dir.join(name);
 
         // Try hardlink first; fall back to copy on any error (cross-device,
         // unsupported filesystem, permissions, etc.).
@@ -186,6 +275,12 @@ pub(crate) fn populate_libs_dir(libs_dir: &Path, dep_jars: &[PathBuf]) -> Result
     }
 
     crate::parallel::emit(&crate::style::info("Libs", &format!("{} JAR(s) → target/libs/", dep_jars.len())));
+    if qualified > 0 {
+        crate::parallel::emit(&crate::style::warn(
+            "Libs",
+            &format!("{qualified} JAR(s) with colliding filenames qualified by group"),
+        ));
+    }
     Ok(())
 }
 
@@ -651,5 +746,118 @@ mod tests {
                     .starts_with("myapp.jar.part.")
             });
         assert!(!has_leftover_part, "no .part.* sibling should be left after successful write");
+    }
+
+    // ── libs/ filename disambiguation (bug #19) ──────────────────────────────
+
+    /// Create a real JAR file under a fake `~/.m2/repository` layout and return
+    /// its absolute path.
+    fn fake_m2_jar(root: &Path, group: &str, artifact: &str, version: &str) -> PathBuf {
+        let p = root
+            .join("repository")
+            .join(group.replace('.', "/"))
+            .join(artifact)
+            .join(version)
+            .join(format!("{artifact}-{version}.jar"));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, format!("{group}:{artifact}:{version}").as_bytes()).unwrap();
+        p
+    }
+
+    fn sorted_dir_names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn group_id_from_repo_path_parses_layout() {
+        let p = PathBuf::from("/home/u/.m2/repository/javax/inject/javax.inject/1/javax.inject-1.jar");
+        assert_eq!(group_id_from_repo_path(&p).as_deref(), Some("javax.inject"));
+        let p2 = PathBuf::from("/home/u/.m2/repository/com/google/guava/guava/33.0/guava-33.0.jar");
+        assert_eq!(group_id_from_repo_path(&p2).as_deref(), Some("com.google.guava"));
+    }
+
+    #[test]
+    fn group_id_from_repo_path_none_for_non_repo_path() {
+        assert_eq!(group_id_from_repo_path(&PathBuf::from("/tmp/whatever/foo-1.0.jar")), None);
+    }
+
+    #[test]
+    fn libs_entry_names_leaves_unique_names_unchanged() {
+        let jars = vec![
+            PathBuf::from("/home/u/.m2/repository/com/example/foo/1.0/foo-1.0.jar"),
+            PathBuf::from("/home/u/.m2/repository/com/example/bar/2.0/bar-2.0.jar"),
+        ];
+        assert_eq!(libs_entry_names(&jars), vec!["foo-1.0.jar", "bar-2.0.jar"]);
+    }
+
+    #[test]
+    fn libs_entry_names_disambiguates_group_collision() {
+        let jars = vec![
+            PathBuf::from("/home/u/.m2/repository/javax/inject/javax.inject/1/javax.inject-1.jar"),
+            PathBuf::from("/home/u/.m2/repository/com/example/javax.inject/1/javax.inject-1.jar"),
+        ];
+        let names = libs_entry_names(&jars);
+        assert_eq!(names[0], "javax.inject-javax.inject-1.jar");
+        assert_eq!(names[1], "com.example-javax.inject-1.jar");
+        assert_ne!(names[0], names[1], "colliding names must be made distinct");
+    }
+
+    #[test]
+    fn populate_libs_dir_keeps_both_colliding_jars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = fake_m2_jar(tmp.path(), "javax.inject", "javax.inject", "1");
+        let b = fake_m2_jar(tmp.path(), "com.example", "javax.inject", "1");
+        let libs = tmp.path().join("target").join("libs");
+
+        populate_libs_dir(&libs, &[a, b]).unwrap();
+
+        assert_eq!(
+            sorted_dir_names(&libs),
+            vec!["com.example-javax.inject-1.jar", "javax.inject-javax.inject-1.jar"],
+            "both colliding JARs must be kept under distinct names",
+        );
+    }
+
+    #[test]
+    fn populate_libs_dir_removes_stale_bare_name_on_transition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let libs = tmp.path().join("target").join("libs");
+
+        // Build 1: a single dep keeps its bare filename.
+        let a = fake_m2_jar(tmp.path(), "javax.inject", "javax.inject", "1");
+        populate_libs_dir(&libs, std::slice::from_ref(&a)).unwrap();
+        assert!(libs.join("javax.inject-1.jar").exists(), "build 1 writes the bare name");
+
+        // Build 2: a colliding dep is added → both get group-qualified, and the
+        // stale bare name from build 1 must be gone (libs/ is wiped each build).
+        let b = fake_m2_jar(tmp.path(), "com.example", "javax.inject", "1");
+        populate_libs_dir(&libs, &[a, b]).unwrap();
+
+        assert!(
+            !libs.join("javax.inject-1.jar").exists(),
+            "stale bare name from the previous build must be removed",
+        );
+        assert_eq!(
+            sorted_dir_names(&libs),
+            vec!["com.example-javax.inject-1.jar", "javax.inject-javax.inject-1.jar"],
+        );
+    }
+
+    #[test]
+    fn class_path_lists_both_colliding_jars() {
+        let jars = vec![
+            PathBuf::from("/home/u/.m2/repository/javax/inject/javax.inject/1/javax.inject-1.jar"),
+            PathBuf::from("/home/u/.m2/repository/com/example/javax.inject/1/javax.inject-1.jar"),
+        ];
+        // The Class-Path entries must match the disambiguated libs/ filenames.
+        assert_eq!(
+            manifest_class_path_value(&jars),
+            "libs/javax.inject-javax.inject-1.jar libs/com.example-javax.inject-1.jar",
+        );
     }
 }
