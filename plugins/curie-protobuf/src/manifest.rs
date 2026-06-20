@@ -1,51 +1,18 @@
 use crate::config::ProtobufConfig;
 use crate::platform;
 use anyhow::Result;
-use serde::Serialize;
+use std::path::PathBuf;
 
-#[derive(Serialize)]
-pub struct Manifest {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub version: &'static str,
-    pub types: Vec<&'static str>,
-    pub inputs: Inputs,
-    pub outputs: Outputs,
-    pub artifacts: Vec<Artifact>,
-}
-
-#[derive(Serialize)]
-pub struct Inputs {
-    pub dirs: Vec<String>,
-    pub file_regex: &'static str,
-}
-
-#[derive(Serialize)]
-pub struct Outputs {
-    pub source_dirs: Vec<&'static str>,
-}
-
-#[derive(Serialize)]
-pub struct Artifact {
-    pub id: &'static str,
-    pub group: &'static str,
-    pub artifact: &'static str,
-    pub version: String,
-    pub classifier: String,
-    pub extension: &'static str,
-    pub executable: bool,
-}
-
-pub fn build(cfg: &ProtobufConfig) -> Result<Manifest> {
+pub fn build(cfg: &ProtobufConfig) -> Result<curie_plugin::Manifest> {
     let classifier = platform::maven_classifier()?.to_string();
 
-    let mut artifacts = vec![Artifact {
-        id: "protoc",
-        group: "com.google.protobuf",
-        artifact: "protoc",
+    let mut artifacts = vec![curie_plugin::Artifact {
+        id: "protoc".to_string(),
+        group: "com.google.protobuf".to_string(),
+        artifact: "protoc".to_string(),
         version: cfg.version.clone(),
-        classifier: classifier.clone(),
-        extension: "exe",
+        classifier: Some(classifier.clone()),
+        extension: "exe".to_string(),
         executable: true,
     }];
 
@@ -55,28 +22,29 @@ pub fn build(cfg: &ProtobufConfig) -> Result<Manifest> {
             .as_deref()
             .unwrap_or("1.60.0")
             .to_string();
-        artifacts.push(Artifact {
-            id: "grpc-plugin",
-            group: "io.grpc",
-            artifact: "protoc-gen-grpc-java",
+        artifacts.push(curie_plugin::Artifact {
+            id: "grpc-plugin".to_string(),
+            group: "io.grpc".to_string(),
+            artifact: "protoc-gen-grpc-java".to_string(),
             version: grpc_version,
-            classifier,
-            extension: "exe",
+            classifier: Some(classifier),
+            extension: "exe".to_string(),
             executable: true,
         });
     }
 
-    Ok(Manifest {
-        name: "protobuf",
-        description: "Generate Java + gRPC stubs from .proto files",
-        version: env!("CARGO_PKG_VERSION"),
-        types: vec!["source-generator"],
-        inputs: Inputs {
-            dirs: vec![cfg.source_dir.clone()],
-            file_regex: r"\.proto$",
+    Ok(curie_plugin::Manifest {
+        name: "protobuf".to_string(),
+        description: "Generate Java + gRPC stubs from .proto files".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        types: vec!["source-generator".to_string()],
+        inputs: curie_plugin::Inputs {
+            dirs: vec![PathBuf::from(&cfg.source_dir)],
+            file_regex: Some(r"\.proto$".to_string()),
+            files: vec![],
         },
-        outputs: Outputs {
-            source_dirs: vec!["target/generated-sources/protobuf"],
+        outputs: curie_plugin::Outputs {
+            source_dirs: vec![PathBuf::from("target/generated-sources/protobuf")],
         },
         artifacts,
     })
@@ -85,6 +53,7 @@ pub fn build(cfg: &ProtobufConfig) -> Result<Manifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn config_no_grpc() -> ProtobufConfig {
         serde_json::from_str(r#"{"version":"3.25.0"}"#).unwrap()
@@ -111,7 +80,7 @@ mod tests {
     #[test]
     fn manifest_types_includes_source_generator() {
         let m = build(&config_no_grpc()).unwrap();
-        assert!(m.types.contains(&"source-generator"));
+        assert!(m.types.iter().any(|t| t == "source-generator"));
     }
 
     #[test]
@@ -119,12 +88,15 @@ mod tests {
         let cfg: ProtobufConfig =
             serde_json::from_str(r#"{"version":"3.25.0","sourceDir":"src/main/proto"}"#).unwrap();
         let m = build(&cfg).unwrap();
-        assert_eq!(m.inputs.dirs, vec!["src/main/proto"]);
+        assert_eq!(m.inputs.dirs, vec![PathBuf::from("src/main/proto")]);
     }
 
     #[test]
     fn manifest_output_dir_is_fixed() {
         let m = build(&config_no_grpc()).unwrap();
-        assert_eq!(m.outputs.source_dirs, vec!["target/generated-sources/protobuf"]);
+        assert_eq!(
+            m.outputs.source_dirs,
+            vec![PathBuf::from("target/generated-sources/protobuf")]
+        );
     }
 }

@@ -403,6 +403,7 @@ dependencies = [
  "crossterm",
  "curie-deps",
  "curie-meta",
+ "curie-plugin",
  "dirs",
  "filetime",
  "hex",
@@ -460,8 +461,19 @@ name = "curie-openapi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "curie-plugin",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "curie-plugin"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -469,6 +481,7 @@ name = "curie-protobuf"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "curie-plugin",
  "serde",
  "serde_json",
  "walkdir",

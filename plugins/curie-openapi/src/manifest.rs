@@ -1,60 +1,29 @@
 use crate::config::OpenApiConfig;
-use serde::Serialize;
+use std::path::PathBuf;
 
-#[derive(Serialize)]
-pub struct Manifest {
-    pub name: &'static str,
-    pub description: &'static str,
-    pub version: &'static str,
-    pub types: Vec<&'static str>,
-    pub inputs: Inputs,
-    pub outputs: Outputs,
-    pub artifacts: Vec<Artifact>,
-}
-
-#[derive(Serialize)]
-pub struct Inputs {
-    pub files: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub struct Outputs {
-    pub source_dirs: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub struct Artifact {
-    pub id: &'static str,
-    pub group: &'static str,
-    pub artifact: &'static str,
-    pub version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub classifier: Option<String>,
-    pub extension: &'static str,
-    pub executable: bool,
-}
-
-pub fn build(cfg: &OpenApiConfig) -> Manifest {
+pub fn build(cfg: &OpenApiConfig) -> curie_plugin::Manifest {
     let source_dir = format!("{}/{}", cfg.output_dir, cfg.source_folder);
 
-    Manifest {
-        name: "openapi",
-        description: "Generate Java sources from an OpenAPI spec",
-        version: env!("CARGO_PKG_VERSION"),
-        types: vec!["source-generator"],
-        inputs: Inputs {
-            files: vec![cfg.spec_file.clone()],
+    curie_plugin::Manifest {
+        name: "openapi".to_string(),
+        description: "Generate Java sources from an OpenAPI spec".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        types: vec!["source-generator".to_string()],
+        inputs: curie_plugin::Inputs {
+            files: vec![PathBuf::from(&cfg.spec_file)],
+            dirs: vec![],
+            file_regex: None,
         },
-        outputs: Outputs {
-            source_dirs: vec![source_dir],
+        outputs: curie_plugin::Outputs {
+            source_dirs: vec![PathBuf::from(source_dir)],
         },
-        artifacts: vec![Artifact {
-            id: "openapi-generator-cli",
-            group: "org.openapitools",
-            artifact: "openapi-generator-cli",
+        artifacts: vec![curie_plugin::Artifact {
+            id: "openapi-generator-cli".to_string(),
+            group: "org.openapitools".to_string(),
+            artifact: "openapi-generator-cli".to_string(),
             version: cfg.version.clone(),
             classifier: None,
-            extension: "jar",
+            extension: "jar".to_string(),
             executable: false,
         }],
     }
@@ -63,6 +32,7 @@ pub fn build(cfg: &OpenApiConfig) -> Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn minimal_config() -> OpenApiConfig {
         serde_json::from_str(r#"{
@@ -77,7 +47,7 @@ mod tests {
     fn manifest_artifact_has_no_classifier() {
         let m = build(&minimal_config());
         let json = serde_json::to_string(&m.artifacts[0]).unwrap();
-        assert!(!json.contains("classifier"), "classifier should be absent from JSON");
+        assert!(!json.contains("classifier"), "classifier should be absent from JSON: {json}");
     }
 
     #[test]
@@ -85,20 +55,20 @@ mod tests {
         let m = build(&minimal_config());
         assert_eq!(
             m.outputs.source_dirs[0],
-            "target/generated-sources/openapi/src/main/java"
+            PathBuf::from("target/generated-sources/openapi/src/main/java")
         );
     }
 
     #[test]
     fn manifest_input_is_spec_file() {
         let m = build(&minimal_config());
-        assert_eq!(m.inputs.files, vec!["api/greeter.yaml"]);
+        assert_eq!(m.inputs.files, vec![PathBuf::from("api/greeter.yaml")]);
     }
 
     #[test]
     fn manifest_types_includes_source_generator() {
         let m = build(&minimal_config());
-        assert!(m.types.contains(&"source-generator"));
+        assert!(m.types.iter().any(|t| t == "source-generator"));
     }
 
     #[test]
@@ -123,6 +93,6 @@ mod tests {
         }"#)
         .unwrap();
         let m = build(&cfg);
-        assert_eq!(m.outputs.source_dirs[0], "target/gen/src/main/java");
+        assert_eq!(m.outputs.source_dirs[0], PathBuf::from("target/gen/src/main/java"));
     }
 }

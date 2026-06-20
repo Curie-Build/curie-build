@@ -1,18 +1,10 @@
 use anyhow::Result;
 use serde::Deserialize;
-use std::collections::BTreeMap;
-use std::path::PathBuf;
 
-/// Top-level envelope sent by curie-build on stdin.
-/// Unknown fields are ignored for forward-compatibility.
-#[derive(Deserialize)]
-#[allow(dead_code)]
-pub struct Envelope {
-    pub curie_version: String,
-    pub config: ProtobufConfig,
-    /// Only present in `generate-sources` calls.
-    #[serde(default)]
-    pub artifacts: BTreeMap<String, PathBuf>,
+pub type Envelope = curie_plugin::Envelope<ProtobufConfig>;
+
+pub fn read_envelope() -> Result<Envelope> {
+    curie_plugin::read_envelope()
 }
 
 #[derive(Deserialize)]
@@ -28,12 +20,6 @@ pub struct ProtobufConfig {
 
 fn default_source_dir() -> String {
     "proto".to_string()
-}
-
-pub fn read_envelope() -> Result<Envelope> {
-    let mut s = String::new();
-    std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
-    Ok(serde_json::from_str(&s)?)
 }
 
 #[cfg(test)]

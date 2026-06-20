@@ -3,6 +3,7 @@ members = [
     "curie-build",
     "curie-deps",
     "curie-meta",
+    "curie-plugin",
     "plugins/curie-protobuf",
     "plugins/curie-openapi",
 ]

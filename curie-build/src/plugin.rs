@@ -19,50 +19,10 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-// ── Manifest types ────────────────────────────────────────────────────────────
+// ── Manifest types (re-exported from curie-plugin) ────────────────────────────
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct PluginManifest {
-    pub name: String,
-    pub description: String,
-    pub version: String,
-    #[serde(default)]
-    pub types: Vec<String>,
-    #[serde(default)]
-    pub inputs: PluginInputs,
-    #[serde(default)]
-    pub outputs: PluginOutputs,
-    #[serde(default)]
-    pub artifacts: Vec<PluginArtifact>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub struct PluginInputs {
-    #[serde(default)]
-    pub dirs: Vec<PathBuf>,
-    pub file_regex: Option<String>,
-    #[serde(default)]
-    pub files: Vec<PathBuf>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub struct PluginOutputs {
-    #[serde(default)]
-    pub source_dirs: Vec<PathBuf>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PluginArtifact {
-    pub id: String,
-    pub group: String,
-    pub artifact: String,
-    pub version: String,
-    pub classifier: Option<String>,
-    pub extension: String,
-    #[serde(default)]
-    pub executable: bool,
-}
+pub use curie_plugin::Artifact as PluginArtifact;
+pub use curie_plugin::Manifest as PluginManifest;
 
 // ── Stamp types ───────────────────────────────────────────────────────────────
 
