@@ -109,9 +109,21 @@ impl Pom {
             let prev = result.clone();
 
             // Built-in project variables.
+            // ${project.version} → own version, inheriting parent when own is absent.
             if let Some(v) = self.effective_version() {
                 result = result.replace("${project.version}", v);
-                result = result.replace("${project.parent.version}", v);
+            }
+            // ${project.parent.version} → the parent's version specifically; fall
+            // back to the own version only when there is no <parent> (best-effort
+            // for malformed POMs).  Using effective_version() here would wrongly
+            // resolve to the child's own version when it differs from the parent.
+            if let Some(pv) = self
+                .parent
+                .as_ref()
+                .map(|p| p.version.as_str())
+                .or(self.version.as_deref())
+            {
+                result = result.replace("${project.parent.version}", pv);
             }
             if let Some(g) = self.effective_group() {
                 result = result.replace("${project.groupId}", g);
@@ -818,6 +830,29 @@ mod tests {
             version: "3.1.0".to_string(),
         });
         assert_eq!(pom.resolve_value("${project.parent.version}"), "3.1.0");
+    }
+
+    #[test]
+    fn resolve_parent_version_distinct_from_own() {
+        // Regression for bug #7: when the child declares its own version, the
+        // parent variable must resolve to the parent's version, not the child's.
+        let mut pom = Pom::default();
+        pom.version = Some("2.0.0".to_string());
+        pom.parent = Some(ParentRef {
+            group_id: "com.example".to_string(),
+            artifact_id: "parent".to_string(),
+            version: "5.0.0".to_string(),
+        });
+        assert_eq!(pom.resolve_value("${project.parent.version}"), "5.0.0");
+        assert_eq!(pom.resolve_value("${project.version}"), "2.0.0");
+    }
+
+    #[test]
+    fn resolve_parent_version_no_parent_falls_back_to_own() {
+        // No <parent>: best-effort fall back to the own version.
+        let mut pom = Pom::default();
+        pom.version = Some("1.2.3".to_string());
+        assert_eq!(pom.resolve_value("${project.parent.version}"), "1.2.3");
     }
 
     #[test]
