@@ -24,6 +24,7 @@
 //! the JAR's mtime changes.
 
 use anyhow::{bail, Context, Result};
+use crate::jar::get_manifest_header;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -814,19 +815,11 @@ fn try_read_manifest_module_name(
 
 /// Parse the value of `Automatic-Module-Name` from MANIFEST.MF text.
 ///
-/// MANIFEST.MF uses `Key: Value` pairs, one per line.  Lines may be continued
-/// by starting the next line with a space (RFC 2822-style folding), but the
-/// module name is always a single-line value in practice.
+/// Delegates to the crate-wide `get_manifest_header` so that folded
+/// (continuation-line) headers are handled correctly for all manifest
+/// attributes, not just Class-Path.
 fn parse_automatic_module_name_from_manifest(manifest: &str) -> Option<String> {
-    for line in manifest.lines() {
-        if let Some(rest) = line.strip_prefix("Automatic-Module-Name:") {
-            let name = rest.trim().to_string();
-            if !name.is_empty() {
-                return Some(name);
-            }
-        }
-    }
-    None
+    get_manifest_header(manifest, "Automatic-Module-Name")
 }
 
 // ---------------------------------------------------------------------------

@@ -29,29 +29,22 @@ pub fn classpath_string(jars: &[PathBuf]) -> String {
         .join(sep)
 }
 
-/// Build a properly folded `Class-Path` manifest header per the JAR spec.
-///
-/// The JAR/manifest spec (JVMS §5.3.4, java.util.jar.Manifest) requires:
-///   - No line in MANIFEST.MF may exceed 72 bytes (including the `\r\n`).
-///   - Continuation lines begin with a single space (which does not count
-///     as content); each continuation line is also limited to 72 bytes total.
-///
-/// So the first line holds 72 - len("Class-Path: ") - 2 = 58 bytes of value,
-/// and each subsequent line holds 72 - 1 (space) - 2 (\r\n) = 69 bytes.
-fn manifest_class_path(dep_jars: &[PathBuf]) -> String {
-    let value = dep_jars
+/// Build the *value* portion of the Class-Path header (the "libs/..." space-
+/// separated list). Used by the writer to feed the common build_manifest.
+fn manifest_class_path_value(dep_jars: &[PathBuf]) -> String {
+    dep_jars
         .iter()
         .filter_map(|p| p.file_name())
         .map(|f| format!("libs/{}", f.to_string_lossy()))
         .collect::<Vec<_>>()
-        .join(" ");
-
-    fold_manifest_header("Class-Path", &value)
+        .join(" ")
 }
 
-/// Fold a manifest header value to lines of at most 72 bytes (including \r\n).
-/// Returns the complete header block including the trailing \r\n.
-fn fold_manifest_header(name: &str, value: &str) -> String {
+/// Format (fold) a manifest header value to lines of at most 72 bytes (including \r\n).
+/// Returns the complete header block including the trailing \r\n. This is the
+/// common helper used for *all* manifest headers (Main-Class, Class-Path,
+/// Automatic-Module-Name, etc.).
+pub(crate) fn format_manifest_header(name: &str, value: &str) -> String {
     // Bytes available on the first line: 72 total - name - ": " - "\r\n"
     let first_capacity = 72usize.saturating_sub(name.len() + 2 + 2);
     // Bytes available on continuation lines: 72 total - " " prefix - "\r\n"
@@ -90,6 +83,78 @@ fn fold_manifest_header(name: &str, value: &str) -> String {
     }
 
     out
+}
+
+/// Unfold a raw MANIFEST.MF text by joining continuation lines (those starting
+/// with a single space) back onto their preceding header. This is the inverse
+/// of format_manifest_header and is required to correctly parse spec-compliant
+/// folded manifests (e.g. long Main-Class or Class-Path).
+fn unfold_manifest(manifest: &str) -> String {
+    let mut result = String::new();
+    let mut current = String::new();
+    for line in manifest.lines() {
+        if line.starts_with(' ') {
+            // Continuation: append content after the leading space.
+            if !current.is_empty() {
+                current.push_str(&line[1..]);
+            }
+        } else {
+            if !current.is_empty() {
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(&current);
+            }
+            current = line.to_string();
+        }
+    }
+    if !current.is_empty() {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(&current);
+    }
+    result
+}
+
+/// Return the (unfolded) value of a header from a MANIFEST.MF text, or None.
+/// Used by all readers (Main-Class in build.rs, Automatic-Module-Name in jpms.rs)
+/// so that folded manifests are handled uniformly.
+pub(crate) fn get_manifest_header(manifest: &str, name: &str) -> Option<String> {
+    let unfolded = unfold_manifest(manifest);
+    let prefix = format!("{}:", name);
+    for line in unfolded.lines() {
+        if let Some(rest) = line.strip_prefix(&prefix) {
+            let val = rest.trim().to_string();
+            if !val.is_empty() {
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
+/// Build a complete MANIFEST.MF (as bytes ready for Zip) using the common
+/// folding logic for every header. This is the single place that should be
+/// used to generate manifest content so that Main-Class, Class-Path,
+/// Automatic-Module-Name etc. are always written correctly.
+pub(crate) fn build_manifest(
+    main_class: Option<&str>,
+    class_path: Option<&str>,
+    automatic_module_name: Option<&str>,
+) -> String {
+    let mut m = "Manifest-Version: 1.0\r\n".to_string();
+    if let Some(v) = main_class {
+        m.push_str(&format_manifest_header("Main-Class", v));
+    }
+    if let Some(v) = class_path {
+        m.push_str(&format_manifest_header("Class-Path", v));
+    }
+    if let Some(v) = automatic_module_name {
+        m.push_str(&format_manifest_header("Automatic-Module-Name", v));
+    }
+    m.push_str("\r\n");
+    m
 }
 
 /// Populate `libs_dir` with all `dep_jars`, using hardlinks where possible
@@ -174,19 +239,15 @@ pub(crate) fn write_deterministic_jar(
     zip.start_file("META-INF/", dir_options)
         .context("failed to write META-INF/ directory entry")?;
 
-    let mut manifest = "Manifest-Version: 1.0\r\n".to_string();
-    if let Some(mc) = main_class {
-        manifest.push_str(&format!("Main-Class: {}\r\n", mc));
-    }
-    if !dep_jars.is_empty() {
-        // manifest_class_path() returns the fully-folded header block
-        // (including the trailing \r\n) per the JAR spec 72-byte line limit.
-        manifest.push_str(&manifest_class_path(dep_jars));
-    }
-    if let Some(amn) = automatic_module_name {
-        manifest.push_str(&format!("Automatic-Module-Name: {}\r\n", amn));
-    }
-    manifest.push_str("\r\n");
+    // Build the full manifest using the single common helper. This ensures
+    // Main-Class (and Automatic-Module-Name) are folded exactly like Class-Path
+    // and that all writers in the crate produce consistent output.
+    let cp_value = if !dep_jars.is_empty() {
+        Some(manifest_class_path_value(dep_jars))
+    } else {
+        None
+    };
+    let manifest = build_manifest(main_class, cp_value.as_deref(), automatic_module_name);
 
     zip.start_file("META-INF/MANIFEST.MF", options)
         .context("failed to start MANIFEST.MF entry")?;
@@ -284,7 +345,7 @@ mod tests {
     #[test]
     fn fold_manifest_header_short_value_fits_on_one_line() {
         // "Class-Path: libs/foo.jar\r\n" is 26 bytes — well under 72.
-        let result = fold_manifest_header("Class-Path", "libs/foo.jar");
+        let result = format_manifest_header("Class-Path", "libs/foo.jar");
         assert_eq!(result, "Class-Path: libs/foo.jar\r\n");
     }
 
@@ -292,7 +353,7 @@ mod tests {
     fn fold_manifest_header_long_value_is_folded() {
         // Build a value that definitely exceeds 72 bytes on the first line.
         let value = "libs/aaaa.jar libs/bbbb.jar libs/cccc.jar libs/dddd.jar libs/eeee.jar libs/ffff.jar";
-        let result = fold_manifest_header("Class-Path", value);
+        let result = format_manifest_header("Class-Path", value);
         for line in result.split("\r\n").filter(|l| !l.is_empty()) {
             assert!(
                 line.len() <= 70, // 70 bytes of content + \r\n = 72
@@ -315,8 +376,45 @@ mod tests {
 
     #[test]
     fn fold_manifest_header_empty_value() {
-        let result = fold_manifest_header("Class-Path", "");
+        let result = format_manifest_header("Class-Path", "");
         assert_eq!(result, "Class-Path: \r\n");
+    }
+
+    #[test]
+    fn format_manifest_header_long_main_class_is_folded() {
+        // A realistically long FQCN that will exceed the first-line capacity.
+        let long_mc = "com.example.very.deep.package.with.a.long.name.that.will.definitely.exceed.the.72.byte.limit.Main";
+        let result = format_manifest_header("Main-Class", long_mc);
+        // Every physical line (incl. \r\n) must be <= 72 bytes.
+        for line in result.split("\r\n").filter(|l| !l.is_empty()) {
+            assert!(
+                line.len() <= 70,
+                "Main-Class line exceeds 70 bytes of content: {:?} (len {})",
+                line,
+                line.len()
+            );
+        }
+        // Round-trip via the common getter (which does unfolding).
+        let got = get_manifest_header(&result, "Main-Class").expect("should parse");
+        assert_eq!(got, long_mc);
+    }
+
+    #[test]
+    fn build_manifest_and_get_header_roundtrip_main_class() {
+        let mc = "com.example.FooBarBaz";
+        let mf = build_manifest(Some(mc), None, None);
+        assert!(mf.starts_with("Manifest-Version: 1.0\r\n"));
+        assert!(mf.contains("Main-Class:"));
+        assert!(mf.ends_with("\r\n\r\n"));
+        assert_eq!(get_manifest_header(&mf, "Main-Class"), Some(mc.to_string()));
+    }
+
+    #[test]
+    fn get_manifest_header_unfolds_continuation_lines() {
+        // Simulate a manifest that an external tool (or old Curie) wrote with a folded Main-Class.
+        let folded = "Manifest-Version: 1.0\r\nMain-Class: com.example.a.very.long.package.name.that.\r\n was.folded.by.the.writer\r\n\r\n";
+        let got = get_manifest_header(folded, "Main-Class").expect("must unfold");
+        assert_eq!(got, "com.example.a.very.long.package.name.that.was.folded.by.the.writer");
     }
 
     // -----------------------------------------------------------------------

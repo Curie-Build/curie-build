@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
+use crate::jar::build_manifest;
+
 use crate::incremental::{finalize_staged, staging_path};
 
 use crate::descriptor::{self, Relocation};
@@ -513,12 +515,9 @@ pub fn write_fat_jar(
     zip.start_file("META-INF/", dir_options)
         .context("failed to write META-INF/ directory entry")?;
 
-    let mut manifest = "Manifest-Version: 1.0\r\n".to_string();
-    if let Some(mc) = main_class {
-        manifest.push_str(&format!("Main-Class: {}\r\n", mc));
-    }
-    // No Class-Path header needed — all deps are embedded.
-    manifest.push_str("\r\n");
+    // Use the common builder so Main-Class is folded when long and we have
+    // a single implementation for all manifest content in the crate.
+    let manifest = build_manifest(main_class, None, None);
 
     zip.start_file("META-INF/MANIFEST.MF", options)
         .context("failed to start MANIFEST.MF entry")?;

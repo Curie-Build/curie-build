@@ -10,6 +10,7 @@
 //!     the jar (matching what `javac` does at compile time).
 
 use crate::compile::pkg_prefix_for_src_root;
+use crate::jar::build_manifest;
 use anyhow::{Context, Result};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -55,9 +56,11 @@ pub fn write_sources_jar(
     // MANIFEST.MF (must be first).
     zip.start_file("META-INF/", dir_opts)
         .context("failed to write META-INF/ entry")?;
+    // Use the crate-wide manifest builder so every MANIFEST.MF (even the
+    // minimal ones in sources jars) goes through the common path.
     zip.start_file("META-INF/MANIFEST.MF", file_opts)
         .context("failed to start MANIFEST.MF entry")?;
-    zip.write_all(b"Manifest-Version: 1.0\r\n\r\n")
+    zip.write_all(build_manifest(None, None, None).as_bytes())
         .context("failed to write MANIFEST.MF")?;
 
     // Collect (entry_path → fs_path) from all source roots and the resources dir.

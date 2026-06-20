@@ -7,7 +7,7 @@ use crate::descriptor;
 use crate::docker;
 use crate::git;
 use crate::incremental::{self, needs_repackage};
-use crate::jar::{populate_libs_dir, write_deterministic_jar};
+use crate::jar::{get_manifest_header, populate_libs_dir, write_deterministic_jar};
 use crate::main_class::{detect_main_class, validate_main_class};
 use crate::maven;
 use crate::native;
@@ -432,15 +432,9 @@ fn read_main_class_from_jar(jar_path: &Path) -> Option<String> {
     let mut entry = zip.by_name("META-INF/MANIFEST.MF").ok()?;
     let mut contents = String::new();
     std::io::Read::read_to_string(&mut entry, &mut contents).ok()?;
-    for line in contents.lines() {
-        if let Some(rest) = line.strip_prefix("Main-Class:") {
-            let mc = rest.trim().to_string();
-            if !mc.is_empty() {
-                return Some(mc);
-            }
-        }
-    }
-    None
+    // Use the common unfolded getter so that a spec-compliant folded Main-Class
+    // (produced by the shared build_manifest) is read correctly.
+    get_manifest_header(&contents, "Main-Class")
 }
 
 // ---------------------------------------------------------------------------

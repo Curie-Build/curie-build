@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use crate::jar::build_manifest;
 use sha2::{Digest, Sha256};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -138,9 +139,10 @@ fn create_jar(classes_dir: &Path, jar_path: &Path) -> Result<()> {
     let options = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
-    // Write a minimal manifest so `java -cp runner.jar` can find the classes.
+    // Use the common manifest builder (standardizes on \r\n and ensures we
+    // go through the single implementation used by every other JAR writer).
     zip.start_file("META-INF/MANIFEST.MF", options)?;
-    zip.write_all(b"Manifest-Version: 1.0\n")?;
+    zip.write_all(build_manifest(None, None, None).as_bytes())?;
 
     for entry in walkdir::WalkDir::new(classes_dir)
         .into_iter()
