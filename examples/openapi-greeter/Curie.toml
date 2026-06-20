@@ -3,7 +3,7 @@ name    = "openapi-greeter"
 version = "0.1.0"
 
 [java]
-version = "21"
+releaseVersion = "21"
 
 [dependencies]
 "com.fasterxml.jackson.core:jackson-databind"            = "2.16.0"

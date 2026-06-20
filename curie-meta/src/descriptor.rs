@@ -117,6 +117,7 @@ pub enum AnnotationProcessor {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct AnnotationProcessorDetailed {
     pub version: String,
     /// When `true`, the processor jar is added to javac's `-cp` in addition
@@ -164,6 +165,7 @@ pub enum DescriptorKind {
 /// private to descriptor.rs; consumers only see the validated
 /// [`Descriptor`].
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawDescriptor {
     application: Option<Application>,
     library: Option<Library>,
@@ -223,6 +225,7 @@ struct RawDescriptor {
 /// optional flags, or scope hints — the struct shape leaves room for that
 /// without breaking the table key.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceDep {
     pub path: String,
     /// Catch-all so a user who tries `version = "1.0"` (a common Cargo
@@ -234,6 +237,7 @@ pub struct WorkspaceDep {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Application {
     pub name: String,
     pub version: String,
@@ -249,6 +253,7 @@ pub struct Application {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Library {
     pub name: String,
     pub version: String,
@@ -263,6 +268,7 @@ pub struct Library {
 /// files are buildable modules.  Member paths are relative to the workspace
 /// `Curie.toml` directory.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceSection {
     pub members: Vec<String>,
 }
@@ -271,6 +277,7 @@ pub struct WorkspaceSection {
 /// that consumers can import via `[bom-imports]`.  Produces a POM-only
 /// artifact; no JAR, no compilation.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Bom {
     pub name: String,
     pub version: String,
@@ -280,6 +287,7 @@ pub struct Bom {
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Java {
     /// `[java].releaseVersion` as the user wrote it, or `None` when
     /// the key was absent.  Use [`Self::effective`] to get the resolved
@@ -351,6 +359,7 @@ pub const DEFAULT_KOTLIN_VERSION: &str = "2.1.21";
 /// Configuration for the `[test]` table (currently only the version of the
 /// JUnit Platform Console Standalone runner that Curie itself downloads).
 #[derive(Debug, Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Test {
     /// `junitPlatformVersion` — matches the camelCase style of
     /// `releaseVersion`, `mainClass`, `baseImage`, etc.
@@ -396,6 +405,7 @@ impl Test {
 /// Configuration for the `[kotlin]` table (the version of kotlinc + stdlib
 /// that Curie downloads when it sees Kotlin sources).
 #[derive(Debug, Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Kotlin {
     /// Simple `version` key inside the `[kotlin]` table.  The table name
     /// makes the meaning unambiguous.
@@ -447,6 +457,7 @@ pub const DEFAULT_GROOVY_VERSION: &str = "5.0.6";
 ///
 /// Install GraalVM from <https://www.graalvm.org/downloads/> or via sdkman.
 #[derive(Debug, Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct NativeImage {
     /// Name of the output binary written to `target/`.
     /// Defaults to the application name (hyphens replaced with hyphens — kept
@@ -511,6 +522,7 @@ impl NativeImage {
 ///
 /// Only meaningful for `[application]` and `[library]` projects.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct FatJar {
     /// `true` when fat-JAR packaging is active.  Defaults to `true` when
     /// the `[fat-jar]` section is present, `false` when it is absent.
@@ -569,6 +581,7 @@ impl Default for FatJar {
 /// ] }
 /// ```
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Relocation {
     /// The original package prefix to match (dot-separated).
     #[serde(rename = "from")]
@@ -583,6 +596,7 @@ pub struct Relocation {
 
 /// Configuration for the `[groovy]` table.
 #[derive(Debug, Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Groovy {
     #[serde(default)]
     pub version: Option<String>,
@@ -610,6 +624,7 @@ pub const DEFAULT_SPOCK_VERSION: &str = "2.4-groovy-5.0";
 /// (even with no keys) activates Spock support — `section_present` is set
 /// by [`load`] from the raw TOML.
 #[derive(Debug, Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Spock {
     #[serde(default)]
     pub version: Option<String>,
@@ -637,6 +652,7 @@ impl Spock {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Docker {
     #[serde(rename = "baseImage", default = "default_base_image")]
     pub base_image: String,
@@ -676,6 +692,7 @@ impl Default for Docker {
 /// enabled = false
 /// ```
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildInfo {
     /// `true` (default) — generate the file when Git information is available.
     /// `false` — never generate the file.
@@ -708,6 +725,7 @@ impl Default for BuildInfo {
 /// pinTransitive = false
 /// ```
 #[derive(Debug, Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct MavenConfig {
     /// `true` — `curie build` regenerates `pom.xml` (and, in a workspace,
     /// the aggregator POM) before compiling.  `None`/absent means disabled;
@@ -745,6 +763,7 @@ impl MavenConfig {
 /// test-mode   = "classpath"   # or "module"
 /// ```
 #[derive(Debug, Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ModulesConfig {
     #[serde(rename = "add-modules", default)]
     pub add_modules: Vec<String>,
@@ -771,6 +790,7 @@ impl ModulesConfig {
 /// without a `[publish]` section parse fine; they are validated at publish
 /// time by `publish::validate_for_publish`.
 #[derive(Debug, Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct PublishConfig {
     /// Named repository id from `[[repositories]]` to publish to.
     /// Mutually exclusive with [`url`].
@@ -797,6 +817,7 @@ pub struct PublishConfig {
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Developer {
     pub id: Option<String>,
     pub name: Option<String>,
@@ -804,6 +825,7 @@ pub struct Developer {
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Scm {
     pub url: Option<String>,
     pub connection: Option<String>,
@@ -817,6 +839,7 @@ fn default_true() -> bool {
 
 /// An additional Maven-compatible repository declared in `[[repositories]]`.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RepositoryEntry {
     /// Unique identifier used when deps select this repo via `repository = "id"`.
     pub id: String,
@@ -855,6 +878,7 @@ pub enum DependencyValue {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct DependencyDetailed {
     pub version: String,
     /// Id of the repository to fetch this artifact from (must match a
@@ -3086,5 +3110,98 @@ automaticModuleName = "com.example.mylib"
         } else {
             panic!("expected Library kind");
         }
+    }
+
+    // ── unknown keys now rejected (bug #17) ─────────────────────────────────
+
+    #[test]
+    fn unknown_top_level_key_is_rejected() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[java]
+releaseVersion = "21"
+unknownTop = true
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field") || err.contains("unknownTop"),
+            "expected rejection of unknown key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_key_inside_application_section_is_rejected() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+typoKey = "bad"
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field") || err.contains("typoKey"),
+            "expected rejection inside [application], got: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_key_inside_java_section_is_rejected() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[java]
+releaseVersion = "21"
+badKey = 42
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field") || err.contains("badKey"),
+            "expected rejection inside [java], got: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_key_inside_test_section_is_rejected() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[test]
+junitPlatformVersion = "1.10"
+weirdFlag = true
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field") || err.contains("weirdFlag"),
+            "expected rejection inside [test], got: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_section_at_top_level_is_rejected() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[weird-unknown-section]
+foo = "bar"
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field") || err.contains("weird-unknown-section"),
+            "expected top-level unknown section rejection, got: {err}"
+        );
     }
 }

@@ -3,7 +3,7 @@ name    = "proto-greeter"
 version = "0.1.0"
 
 [java]
-version = "21"
+releaseVersion = "21"
 
 [dependencies]
 "com.google.protobuf:protobuf-java" = "3.25.0"
