@@ -1062,7 +1062,13 @@ pub fn resolve(
         // "first declared wins" for same-depth conflicts.
         let mut next_level: Vec<BfsWork> = Vec::new();
         for (i, work) in current_level.iter().enumerate() {
-            ordered_gavs.push((work.gav.clone(), work.fetch_repos.clone()));
+            // A pom-packaged (aggregator) artifact has no JAR of its own: expand
+            // its dependencies but don't download it or put it on the classpath.
+            // Applies to both directly-declared and transitive nodes (bug #11).
+            let is_aggregator = matches!(&pom_results[i], Some(Ok(p)) if p.is_pom_packaging());
+            if !is_aggregator {
+                ordered_gavs.push((work.gav.clone(), work.fetch_repos.clone()));
+            }
 
             if let Some(Ok(pom)) = &pom_results[i] {
                 for dep in pom.dependencies.iter().filter(|d| d.is_compile_scope()) {
@@ -2093,6 +2099,33 @@ mod tests {
         xml
     }
 
+    /// Like [`make_pom`] but marks the artifact `<packaging>pom</packaging>`
+    /// (an aggregator with no JAR of its own).
+    fn make_aggregator_pom(group: &str, artifact: &str, version: &str, deps: &[(&str, &str, &str)]) -> String {
+        let mut xml = format!(
+            r#"<?xml version="1.0"?>
+<project>
+  <groupId>{group}</groupId>
+  <artifactId>{artifact}</artifactId>
+  <version>{version}</version>
+  <packaging>pom</packaging>
+  <dependencies>
+"#
+        );
+        for (g, a, v) in deps {
+            xml.push_str(&format!(
+                "    <dependency>\
+\n      <groupId>{g}</groupId>\
+\n      <artifactId>{a}</artifactId>\
+\n      <version>{v}</version>\
+\n      <scope>compile</scope>\
+\n    </dependency>\n"
+            ));
+        }
+        xml.push_str("  </dependencies>\n</project>");
+        xml
+    }
+
     /// Write both a POM and an empty placeholder JAR into the fake local
     /// Maven cache rooted at `home_dir`.  Returns the artifact's Gav.
     fn write_fake_artifact(
@@ -2659,6 +2692,51 @@ mod tests {
         assert!(
             msg.contains("foo:bar"),
             "error should name the unfetchable transitive POM: {msg}",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // pom-packaged (aggregator) dependency expansion (bug #11)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn transitive_pom_aggregator_is_expanded_without_jar() {
+        // grp:app (jar) -> agg:bundle (pom-packaged aggregator) -> foo:bar (jar).
+        // The aggregator has no JAR; previously its .jar 404'd and failed the
+        // build. It must be expanded for foo:bar but contribute no classpath entry.
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
+        write_fake_pom(
+            dir.path(), "agg", "bundle", "1.0",
+            &make_aggregator_pom("agg", "bundle", "1.0", &[("foo", "bar", "1.0")]),
+        );
+        write_fake_artifact(dir.path(), "grp", "app", "1.0", &[("agg", "bundle", "1.0")]);
+
+        let gavs = jar_gavs(&run_resolve(dir.path(), &[("grp:app", "1.0")], vec![]).unwrap());
+        assert!(gavs.contains(&"grp:app:1.0".to_string()), "app jar present: {gavs:?}");
+        assert!(gavs.contains(&"foo:bar:1.0".to_string()), "aggregator's dep present: {gavs:?}");
+        assert!(
+            !gavs.iter().any(|g| g.starts_with("agg:bundle")),
+            "pom-packaged aggregator must not be on the classpath: {gavs:?}",
+        );
+    }
+
+    #[test]
+    fn declared_pom_aggregator_is_expanded_without_jar() {
+        // Same aggregator declared DIRECTLY in Curie.toml: it is expanded for its
+        // dependencies and contributes no jar (no 404, no rejection).
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
+        write_fake_pom(
+            dir.path(), "agg", "bundle", "1.0",
+            &make_aggregator_pom("agg", "bundle", "1.0", &[("foo", "bar", "1.0")]),
+        );
+
+        let gavs = jar_gavs(&run_resolve(dir.path(), &[("agg:bundle", "1.0")], vec![]).unwrap());
+        assert!(gavs.contains(&"foo:bar:1.0".to_string()), "aggregator's dep present: {gavs:?}");
+        assert!(
+            !gavs.iter().any(|g| g.starts_with("agg:bundle")),
+            "directly-declared pom aggregator must not be on the classpath: {gavs:?}",
         );
     }
 

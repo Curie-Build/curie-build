@@ -21,6 +21,9 @@ pub struct Pom {
     pub group_id: Option<String>,
     pub artifact_id: Option<String>,
     pub version: Option<String>,
+    /// `<packaging>` element (e.g. `Some("pom")` for aggregator artifacts that
+    /// have no JAR of their own).  `None`/absent means the default, `jar`.
+    pub packaging: Option<String>,
     pub parent: Option<ParentRef>,
     pub properties: HashMap<String, String>,
     pub dependencies: Vec<PomDep>,
@@ -82,6 +85,13 @@ impl Pom {
         self.group_id
             .as_deref()
             .or_else(|| self.parent.as_ref().map(|p| p.group_id.as_str()))
+    }
+
+    /// True when this artifact is `<packaging>pom</packaging>` — an aggregator
+    /// with no JAR of its own.  Such a dependency contributes only its
+    /// transitive `<dependencies>`, never a jar (bug #11).
+    pub fn is_pom_packaging(&self) -> bool {
+        self.packaging.as_deref() == Some("pom")
     }
 
     /// Effective version, falling back to parent version if own is absent.
@@ -302,6 +312,7 @@ pub fn parse(xml: &str) -> Result<Pom> {
                     (Ctx::Project, "groupId") => pom.group_id = Some(text_buf.clone()),
                     (Ctx::Project, "artifactId") => pom.artifact_id = Some(text_buf.clone()),
                     (Ctx::Project, "version") => pom.version = Some(text_buf.clone()),
+                    (Ctx::Project, "packaging") => pom.packaging = Some(text_buf.clone()),
 
                     (Ctx::Parent, "groupId") => parent_ref_mut(&mut pom.parent).group_id = text_buf.clone(),
                     (Ctx::Parent, "artifactId") => parent_ref_mut(&mut pom.parent).artifact_id = text_buf.clone(),
@@ -478,6 +489,34 @@ mod tests {
         assert_eq!(parent.group_id, "com.example");
         assert_eq!(parent.artifact_id, "parent-pom");
         assert_eq!(parent.version, "2.0.0");
+    }
+
+    // --- parsing: packaging -----------------------------------------------------
+
+    #[test]
+    fn parse_packaging() {
+        let pom_xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>org.apache.groovy</groupId>
+  <artifactId>groovy-all</artifactId>
+  <version>4.0.0</version>
+  <packaging>pom</packaging>
+</project>"#;
+        let pom = parse(pom_xml).unwrap();
+        assert_eq!(pom.packaging.as_deref(), Some("pom"));
+        assert!(pom.is_pom_packaging());
+
+        // Explicit jar packaging and the default (absent) are not pom-packaging.
+        let jar_xml = r#"<?xml version="1.0"?>
+<project>
+  <artifactId>lib</artifactId>
+  <packaging>jar</packaging>
+</project>"#;
+        assert!(!parse(jar_xml).unwrap().is_pom_packaging());
+
+        let no_pkg = r#"<?xml version="1.0"?>
+<project><artifactId>lib</artifactId></project>"#;
+        assert!(!parse(no_pkg).unwrap().is_pom_packaging());
     }
 
     // --- parsing: properties ----------------------------------------------------
