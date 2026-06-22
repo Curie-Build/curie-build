@@ -469,8 +469,11 @@ pub fn run_tests(
         }
 
         if has_groovy_tests {
-            // groovyc — compile all .groovy test sources.
-            // When Java test sources are also present, use --jointCompilation.
+            // Groovy test phase: compile all .groovy test sources.
+            // Java test sources (if any) are compiled by the Java phase above so
+            // they produce a .classes.toml manifest and get full AP support.
+            // test_classes_dir is added to the compiler classpath so Groovy test
+            // code can reference Java test types from the same module.
             let groovy_cp_jars: Vec<PathBuf> = {
                 if groovy_jars.is_empty() {
                     // Groovy tests exist but production had no groovy sources
@@ -514,16 +517,13 @@ pub fn run_tests(
             groovyc.arg("-cp").arg(classpath_string(&groovyc_process_cp));
             groovyc.arg("org.codehaus.groovy.tools.FileSystemCompiler");
             groovyc.arg("-d").arg(&test_classes_dir);
-            let mut gcp = shared_cp.clone();
-            if !groovy_cp_jars.is_empty() {
-                gcp.extend_from_slice(&groovy_cp_jars);
-            }
+            let gcp = crate::compile::groovyc_compiler_classpath(
+                &shared_cp,
+                &groovy_cp_jars,
+                if has_java_tests { Some(&test_classes_dir) } else { None },
+            );
             if !gcp.is_empty() {
                 groovyc.arg("--classpath").arg(classpath_string(&gcp));
-            }
-            if has_java_tests {
-                groovyc.arg("--jointCompilation");
-                for src in &java_test_sources { groovyc.arg(src); }
             }
             for src in &groovy_test_sources { groovyc.arg(src); }
             let status = crate::proc::spawn_cmd(&mut groovyc)

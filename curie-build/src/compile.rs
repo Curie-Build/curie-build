@@ -216,6 +216,22 @@ pub(crate) fn groovy_target_bytecode_arg(desc: &descriptor::Descriptor) -> Optio
     desc.java.effective().map(|v| format!("-Dgroovy.target.bytecode={v}"))
 }
 
+/// Build the `--classpath` argument list for a groovyc invocation.
+/// When `java_classes_dir` is `Some`, it is appended last so Groovy code can
+/// resolve Java types compiled in the preceding javac phase.
+pub(crate) fn groovyc_compiler_classpath(
+    shared_cp: &[PathBuf],
+    groovy_jars: &[PathBuf],
+    java_classes_dir: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut gcp: Vec<PathBuf> = shared_cp.to_vec();
+    gcp.extend_from_slice(groovy_jars);
+    if let Some(dir) = java_classes_dir {
+        gcp.push(dir.to_path_buf());
+    }
+    gcp
+}
+
 /// Phase 1: resolve production deps and compile production sources.
 /// Does NOT run tests or package a JAR.
 ///
@@ -856,46 +872,13 @@ pub fn compile(
             ));
         }
 
-        if has_groovy {
+        if has_java {
             // ------------------------------------------------------------------
-            // Groovy phase: FileSystemCompiler compiles all .groovy sources.
-            // When Java sources are also present, --jointCompilation is passed
-            // so Groovy and Java can reference each other.  No separate javac
-            // step is needed in that case.
-            // ------------------------------------------------------------------
-            let mut groovyc = Command::new("java");
-            if let Some(arg) = groovy_target_bytecode_arg(desc) {
-                groovyc.arg(arg);
-            }
-            groovyc.arg("-cp").arg(classpath_string(&groovy_jars));
-            groovyc.arg("org.codehaus.groovy.tools.FileSystemCompiler");
-            groovyc.arg("-d").arg(&classes_dir);
-            // Provide the full compile classpath so Groovy can resolve types.
-            let mut gcp = shared_cp.clone();
-            gcp.extend_from_slice(&groovy_jars);
-            if !gcp.is_empty() {
-                groovyc.arg("--classpath").arg(classpath_string(&gcp));
-            }
-            if has_java {
-                groovyc.arg("--jointCompilation");
-                for src in &java_sources {
-                    groovyc.arg(src);
-                }
-            }
-            for src in &groovy_sources {
-                groovyc.arg(src);
-            }
-            let status = crate::proc::spawn_cmd(&mut groovyc)
-                .context("failed to invoke groovyc — is a JRE installed?")?;
-            if !status.success() {
-                bail!("Groovy compilation failed");
-            }
-        } else if has_java {
-            // ------------------------------------------------------------------
-            // Phase 2: javac — re-compiles Java sources only.
-            // target/classes/ is on the classpath so Java can see Kotlin bytecode.
-            // When there are no Kotlin sources this is the only phase (original
-            // behaviour, unchanged except for the manifest wrapper).
+            // Java phase: javac with our manifest wrapper.
+            // target/classes/ is on the classpath so Java can see Kotlin
+            // bytecode from the kotlinc phase above.  When Groovy sources are
+            // also present javac still runs first (see Groovy phase below), so
+            // Groovy code can reference the resulting Java bytecode.
             // ------------------------------------------------------------------
             let wrapper_jar = crate::wrapper::ensure()?;
             let mut javac = Command::new("java");
@@ -1001,17 +984,39 @@ pub fn compile(
                     }
                 }
             }
-        } else if has_kotlin || has_groovy {
-            // Kotlin-only / Groovy-only: no manifest written by javac wrapper,
-            // but we still
-            // need to write a minimal stamp so incremental works next time.
-            // We write an empty manifest that covers all .kt sources so that
-            // a future unchanged build is detected as up-to-date.
-            // (The manifest schema expects source→[class] entries; an empty
-            // file is accepted by class_manifest::load as None which triggers
-            // a full recompile — so we write a minimal placeholder instead.)
-            // For now: leave manifest absent; the stamp written below is enough
-            // because needs_recompile checks source mtimes against the stamp.
+        }
+
+        if has_groovy {
+            // ------------------------------------------------------------------
+            // Groovy phase: FileSystemCompiler compiles all .groovy sources.
+            // Java sources (if any) are compiled by the Java phase above so
+            // they produce a .classes.toml manifest and get full AP support.
+            // classes_dir is added to the compiler classpath so Groovy code
+            // can reference Java types from the same module.
+            // ------------------------------------------------------------------
+            let mut groovyc = Command::new("java");
+            if let Some(arg) = groovy_target_bytecode_arg(desc) {
+                groovyc.arg(arg);
+            }
+            groovyc.arg("-cp").arg(classpath_string(&groovy_jars));
+            groovyc.arg("org.codehaus.groovy.tools.FileSystemCompiler");
+            groovyc.arg("-d").arg(&classes_dir);
+            let gcp = groovyc_compiler_classpath(
+                &shared_cp,
+                &groovy_jars,
+                if has_java { Some(&classes_dir) } else { None },
+            );
+            if !gcp.is_empty() {
+                groovyc.arg("--classpath").arg(classpath_string(&gcp));
+            }
+            for src in &groovy_sources {
+                groovyc.arg(src);
+            }
+            let status = crate::proc::spawn_cmd(&mut groovyc)
+                .context("failed to invoke groovyc — is a JRE installed?")?;
+            if !status.success() {
+                bail!("Groovy compilation failed");
+            }
         }
 
         // Record the JDK version used so that a future upgrade triggers a rebuild.
@@ -1299,5 +1304,35 @@ mod tests {
             )
             .collect();
         assert_eq!(groovy_files.len(), 1, "should find Hello.groovy; got: {:?}", groovy_files);
+    }
+
+    // --- groovyc_compiler_classpath -----------------------------------------
+
+    #[test]
+    fn groovyc_classpath_omits_classes_dir_when_no_java() {
+        let shared = vec![PathBuf::from("/deps/dep.jar")];
+        let groovy = vec![PathBuf::from("/groovy/groovy.jar")];
+        let classes = PathBuf::from("/target/classes");
+
+        let gcp = groovyc_compiler_classpath(&shared, &groovy, None);
+        assert_eq!(gcp, vec![
+            PathBuf::from("/deps/dep.jar"),
+            PathBuf::from("/groovy/groovy.jar"),
+        ]);
+        assert!(!gcp.contains(&classes), "classes_dir must not appear when Java is absent");
+    }
+
+    #[test]
+    fn groovyc_classpath_appends_classes_dir_when_java_present() {
+        let shared = vec![PathBuf::from("/deps/dep.jar")];
+        let groovy = vec![PathBuf::from("/groovy/groovy.jar")];
+        let classes = PathBuf::from("/target/classes");
+
+        let gcp = groovyc_compiler_classpath(&shared, &groovy, Some(&classes));
+        assert_eq!(gcp, vec![
+            PathBuf::from("/deps/dep.jar"),
+            PathBuf::from("/groovy/groovy.jar"),
+            PathBuf::from("/target/classes"),
+        ]);
     }
 }

@@ -106,9 +106,10 @@
     <p>Curie resolves <code>org.apache.groovy:groovy</code> from Maven Central and invokes <code>org.codehaus.groovy.tools.FileSystemCompiler</code> via <code>java -cp</code>:</p>
     <ul>
       <li><strong>Groovy-only</strong> — <code>FileSystemCompiler</code> compiles all <code>.groovy</code> sources.</li>
-      <li><strong>Groovy + Java</strong> — <code>--jointCompilation</code> is passed so Groovy and Java can call each other in a single pass. No separate <code>javac</code> step is needed.</li>
+      <li><strong>Groovy + Java</strong> — two separate phases: <code>javac</code> first (with full annotation-processor and incremental-build support), then <code>FileSystemCompiler</code> on <code>.groovy</code> sources with <code>target/classes</code> on its classpath so Groovy code can resolve Java types. Java code in the same module cannot reference Groovy types at compile time; if you need that direction of dependency, put the Groovy code in a separate module.</li>
       <li><strong>Groovy + Kotlin</strong> — not supported in the same module; use separate modules.</li>
     </ul>
+    <p>Because the Java phase uses Curie's <code>javac</code> wrapper, annotation processors declared under <code>[annotation-processors]</code> work normally in Groovy + Java modules — generated sources appear under <code>target/generated-sources/annotations/</code> and stale Java <code>.class</code> files are pruned automatically on the next build.</p>
 
     <div class="term">
       <header>
