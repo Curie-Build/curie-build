@@ -135,15 +135,33 @@
 $ curie build --offline   <span class="dim"># succeeds entirely from the local cache</span></pre>
     </div>
 
-    <p>Pass a <code>group:artifact:version</code> coordinate to fetch one extra artifact and its full transitive closure — without adding it to <code>Curie.toml</code>:</p>
+    <p>Pass one or more <code>group:artifact:version</code> coordinates to fetch extra artifacts and their full transitive closures — without adding them to <code>Curie.toml</code>:</p>
 
     <div class="term">
       <header>
         <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
         <span>$ curie fetch org.apache.commons:commons-compress:1.27.1</span>
       </header>
-<pre>  Done            <span class="em">4 JAR(s) cached for org.apache.commons:commons-compress:1.27.1</span></pre>
+<pre>  Done            <span class="em">4 artifact(s) cached</span></pre>
     </div>
+
+    <p>If a transitive dependency declares a Maven <strong>version range</strong> (e.g. <code>[2.9.1,2.11)</code>), <code>curie fetch</code> queries <code>maven-metadata.xml</code>, picks the exact version Maven would select (the highest published version satisfying the range), and proposes a ready-to-run command that pins it — a supplied coordinate overrides the matching transitive range:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie fetch ch.epfl.scala:bsp4j:2.1.1</span>
+      </header>
+<pre><span class="err">error</span>: non-deterministic version ranges in dependency graph
+
+  com.google.code.gson:gson
+    [2.9.1,2.11)  &#8594;  2.10.1
+
+Re-run with an explicit version for each ranged artifact:
+  curie fetch ch.epfl.scala:bsp4j:2.1.1 com.google.code.gson:gson:2.10.1</pre>
+    </div>
+
+    <p>(<code>curie build</code>, by contrast, always requires you to pin the range explicitly in <code>Curie.toml</code> — see <a href="/docs/troubleshooting.html#version-range">Version range in dependency POM</a>.)</p>
 
     <p>Add <code>--no-transitive</code> to download just that one artifact's POM and JAR, skipping its dependencies:</p>
 
@@ -156,7 +174,7 @@ $ curie build --offline   <span class="dim"># succeeds entirely from the local c
     </div>
 
     <h3>Bulk pre-fetch from a file</h3>
-    <p>Pass <code>--file &lt;path&gt;</code> to read a list of coordinates from a file — one <code>group:artifact:version</code> per line. Blank lines and lines starting with <code>#</code> are ignored. All listed artifacts are resolved together in a single pass (shared transitive closure, parallel JAR downloads), making this much faster than fetching them one by one.</p>
+    <p>Pass <code>--file &lt;path&gt;</code> to read a list of coordinates from a file — one <code>group:artifact:version</code> per line. Blank lines and lines starting with <code>#</code> are ignored. The listed artifacts are resolved with parallel JAR downloads, making this much faster than fetching them one by one. If a transitive range is encountered, <code>curie fetch</code> names the coordinate line to add to the file (with the exact version computed from <code>maven-metadata.xml</code>); adding it pins the range so the file ends up listing the concrete versions you intend to use.</p>
 
     <div class="code">
       <header>
@@ -179,7 +197,7 @@ org.apache.maven.plugins:maven-surefire-plugin:3.5.6</pre>
         <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
         <span>$ curie fetch --file offline-deps.txt</span>
       </header>
-<pre>  Done            <span class="em">47 JAR(s) cached</span>
+<pre>  Done            <span class="em">47 artifact(s) cached</span>
 
 $ mvn clean verify   <span class="dim"># now works without internet access</span></pre>
     </div>

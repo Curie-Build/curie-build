@@ -182,19 +182,21 @@ enum Cmd {
     },
     /// Download dependency artifacts into the local Maven cache (~/.m2/repository)
     Fetch {
-        /// Coordinate "group:artifact:version" to fetch. Omit to fetch every
-        /// dependency declared in Curie.toml, including [test-dependencies]
-        /// and annotation processors.
-        coord: Option<String>,
+        /// Coordinates "group:artifact:version" to fetch (one or more). Omit to
+        /// fetch every dependency declared in Curie.toml, including
+        /// [test-dependencies] and annotation processors. Supplying a
+        /// coordinate that a transitive range needs pins that range.
+        #[arg(num_args = 0..)]
+        coords: Vec<String>,
 
         /// Read coordinates from a file (one "group:artifact:version" per line;
         /// blank lines and lines starting with '#' are ignored). Mutually
-        /// exclusive with the positional coordinate.
-        #[arg(long, conflicts_with = "coord")]
+        /// exclusive with positional coordinates.
+        #[arg(long, conflicts_with = "coords")]
         file: Option<std::path::PathBuf>,
 
-        /// With a coordinate, download only that artifact — skip its
-        /// transitive dependencies. Requires `coord`.
+        /// With coordinates, download only those artifacts — skip their
+        /// transitive dependencies. Requires at least one coordinate.
         #[arg(long)]
         no_transitive: bool,
 
@@ -527,7 +529,7 @@ fn main() {
                 deps::run_deps(project, why.as_deref(), tests, offline)
             }
         },
-        Cmd::Fetch { coord, file, no_transitive, offline } => {
+        Cmd::Fetch { coords, file, no_transitive, offline } => {
             if let Some(path) = file {
                 fetch::run_fetch_file(&cli.project, &path, no_transitive, offline)
             } else {
@@ -539,11 +541,11 @@ fn main() {
                     )),
                     workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
                         fetch::run_fetch_workspace_member(
-                            workspace_root, *member_index, coord.as_deref(), no_transitive, offline,
+                            workspace_root, *member_index, &coords, no_transitive, offline,
                         )
                     }
                     workspace::WorkspaceContext::Standalone(project) => {
-                        fetch::run_fetch(project, coord.as_deref(), no_transitive, offline)
+                        fetch::run_fetch(project, &coords, no_transitive, offline)
                     }
                 }
             }

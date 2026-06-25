@@ -284,11 +284,35 @@ fn merge_exclusions(
     merged
 }
 
-struct RangeViolation {
-    dep_key: String,
-    range: String,
-    declared_in: Gav,
+/// One dependency that declared a non-deterministic Maven version range
+/// (e.g. `[2.9.1,2.11)`) instead of a fixed version.
+#[derive(Debug, Clone)]
+pub struct RangeViolation {
+    /// `"group:artifact"` of the ranged dependency.
+    pub dep_key: String,
+    /// The range expression as written, e.g. `[2.9.1,2.11)`.
+    pub range: String,
+    /// The artifact whose POM declared the range (or `Curie.toml` for a direct
+    /// declaration).
+    pub declared_in: Gav,
 }
+
+/// Error returned by [`resolve`]/[`resolve_with_pins`] when the dependency graph
+/// contains one or more version ranges.  Its `Display` is the canonical
+/// pin-in-`Curie.toml` guidance, so `curie build` behaviour is unchanged; the
+/// structured `violations` let `curie fetch` propose a tailored fix instead.
+#[derive(Debug)]
+pub struct VersionRangeError {
+    pub violations: Vec<RangeViolation>,
+}
+
+impl std::fmt::Display for VersionRangeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format_range_error(&self.violations))
+    }
+}
+
+impl std::error::Error for VersionRangeError {}
 
 /// A discarded version candidate whose MAJOR component differs from the version
 /// the build kept for the same `group:artifact`.  Surfaced as a hard error
@@ -860,7 +884,7 @@ pub fn resolve_tree(
     }
 
     if !range_violations.is_empty() {
-        bail!("{}", format_range_error(&range_violations));
+        return Err(anyhow::Error::new(VersionRangeError { violations: range_violations }));
     }
 
     Ok(DepTree { resolved, skipped })
@@ -906,9 +930,20 @@ pub fn resolve_declared_gavs(
 /// An entry with an empty version string (`""`) means the version must be
 /// supplied by one of the BOMs in `opts.bom_imports`; it is a hard error if
 /// no BOM provides it.
-pub fn resolve(
+pub fn resolve(deps: &[DepEntry], opts: &ResolveOptions) -> Result<Vec<PathBuf>> {
+    resolve_with_pins(deps, opts, &[])
+}
+
+/// Like [`resolve`], but treats each `group:artifact` key in `pins` as already
+/// resolved before the transitive walk begins.  A transitive occurrence of a
+/// pinned coordinate — including one declaring a version range — is then skipped
+/// exactly as a sibling root would skip it.  `curie fetch` uses this so that one
+/// supplied coordinate suppresses the matching transitive range in every other
+/// coordinate's tree while still fetching each coordinate independently.
+pub fn resolve_with_pins(
     deps: &[DepEntry],
     opts: &ResolveOptions,
+    pins: &[String],
 ) -> Result<Vec<PathBuf>> {
     let central = effective_repos(&opts.default_repos);
 
@@ -1026,6 +1061,13 @@ pub fn resolve(
                 });
             }
         }
+    }
+
+    // Mark pinned coordinates as already resolved.  Done *after* root seeding so
+    // a pin that is also a declared root is still fetched; its only effect is to
+    // make later transitive occurrences (including ranges) skip as "visited".
+    for ga in pins {
+        visited.insert(ga.clone());
     }
 
     // Phase 1 spinner — shows a running count of resolved POMs.  Cleared
@@ -1162,7 +1204,7 @@ pub fn resolve(
     }
 
     if !range_violations.is_empty() {
-        bail!("{}", format_range_error(&range_violations));
+        return Err(anyhow::Error::new(VersionRangeError { violations: range_violations }));
     }
 
     // Major-version conflicts are a hard error for user-declared dependency
@@ -1403,6 +1445,112 @@ pub fn fetch_artifact(gav: &Gav, repos: &[Repository], offline: bool) -> Result<
 pub fn fetch_pom_only(gav: &Gav, repos: &[Repository], offline: bool) -> Result<PathBuf> {
     let client = build_http_client()?;
     ensure_artifact(gav, repos, &client, ArtifactKind::Pom, offline, None, None)
+}
+
+// ---------------------------------------------------------------------------
+// maven-metadata.xml — available-version discovery (for resolving ranges).
+// ---------------------------------------------------------------------------
+
+/// Fetch the list of available versions for a `"group:artifact"` key from the
+/// first repository in `repos` that publishes a `maven-metadata.xml` for it.
+///
+/// Unlike artifact downloads, `maven-metadata.xml` is mutable and not
+/// checksum-pinned, so it is fetched with a plain GET and never cached in
+/// `~/.m2/repository`.  Used by `curie fetch` to turn a version range into a
+/// concrete suggestion; a range cannot be resolved offline, so `offline` is a
+/// hard error.
+pub fn fetch_available_versions(ga: &str, repos: &[Repository], offline: bool) -> Result<Vec<String>> {
+    if offline {
+        bail!("cannot resolve a version range for {ga} without network access (--offline)");
+    }
+    let (group, artifact) = ga.split_once(':').with_context(|| {
+        format!("invalid coordinate key {ga:?}; expected \"group:artifact\"")
+    })?;
+    let relative = format!("{}/{}/maven-metadata.xml", group.replace('.', "/"), artifact);
+
+    let client = build_http_client()?;
+    for repo in &effective_repos(repos) {
+        let url = repo.artifact_url(&relative);
+        if let Some(xml) = http_get_text(&client, &url)? {
+            let versions =
+                parse_metadata_versions(&xml).with_context(|| format!("failed to parse {url}"))?;
+            if !versions.is_empty() {
+                return Ok(versions);
+            }
+        }
+    }
+    bail!("no maven-metadata.xml with versions found for {ga} in any repository");
+}
+
+/// Plain-text GET that returns `None` on a 404 (so the caller can try the next
+/// repository) and errors on any other non-success status or transport failure.
+fn http_get_text(client: &Client, url: &str) -> Result<Option<String>> {
+    let response = client
+        .get(url)
+        .send()
+        .with_context(|| format!("HTTP request failed for {url}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        bail!("HTTP {} for {}", response.status(), url);
+    }
+    response
+        .text()
+        .map(Some)
+        .with_context(|| format!("failed to read response body for {url}"))
+}
+
+/// Extract the `<versioning><versions><version>…</version></versions></versioning>`
+/// entries from a `maven-metadata.xml` document, in document order.
+fn parse_metadata_versions(xml: &str) -> Result<Vec<String>> {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+
+    let mut versions = Vec::new();
+    let mut path: Vec<String> = Vec::new();
+    let mut text = String::new();
+
+    loop {
+        match reader.read_event().context("XML read error")? {
+            Event::Start(e) => {
+                let tag = std::str::from_utf8(e.local_name().as_ref())
+                    .context("invalid UTF-8 in metadata tag name")?
+                    .to_string();
+                path.push(tag);
+                text.clear();
+            }
+            Event::Text(e) => {
+                let decoded = e.decode().context("invalid encoding in metadata text")?;
+                text.push_str(&decoded);
+            }
+            Event::End(_) => {
+                if path_ends_with(&path, &["versioning", "versions", "version"]) {
+                    let v = text.trim();
+                    if !v.is_empty() {
+                        versions.push(v.to_string());
+                    }
+                }
+                path.pop();
+                text.clear();
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(versions)
+}
+
+/// True when the tail of `path` equals `tail` (element by element).
+fn path_ends_with(path: &[String], tail: &[&str]) -> bool {
+    path.len() >= tail.len()
+        && path[path.len() - tail.len()..]
+            .iter()
+            .zip(tail)
+            .all(|(a, b)| a == b)
 }
 
 /// Download an arbitrary artifact file (any classifier and any file extension)
@@ -2311,6 +2459,39 @@ mod tests {
             skip_version_ranges: false, error_on_version_conflict: true,
         };
         let result = resolve(&entries, &opts);
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        result
+    }
+
+    /// Like [`run_resolve`] but passes `pins` (a set of `group:artifact` keys)
+    /// to [`resolve_with_pins`], so a matching transitive range is skipped.
+    fn run_resolve_with_pins(
+        home_dir: &std::path::Path,
+        deps: &[(&str, &str)],
+        pins: &[&str],
+    ) -> Result<Vec<PathBuf>> {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home_dir.to_str().unwrap());
+
+        let entries: Vec<DepEntry> = deps
+            .iter()
+            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false })
+            .collect();
+        let opts = ResolveOptions {
+            default_repos: vec![],
+            named_repos: vec![],
+            progress: false,
+            bom_imports: vec![],
+            offline: true,
+            skip_version_ranges: false, error_on_version_conflict: false,
+        };
+        let pins: Vec<String> = pins.iter().map(|s| s.to_string()).collect();
+        let result = resolve_with_pins(&entries, &opts, &pins);
 
         match prev_home {
             Some(h) => std::env::set_var("HOME", h),
@@ -3580,6 +3761,70 @@ mod tests {
             msg.contains("[1.0]"),
             "expected [1.0] range notation in error, got {:?}", msg,
         );
+    }
+
+    #[test]
+    fn range_error_is_downcastable_to_version_range_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "foo", "parent", "1.0",
+            &[("foo", "child", "[1.0,2.0)")]);
+
+        let err = run_resolve(dir.path(), &[("foo:parent", "1.0")], vec![])
+            .unwrap_err();
+        let range_err = err
+            .downcast_ref::<VersionRangeError>()
+            .expect("error should downcast to VersionRangeError");
+        assert_eq!(range_err.violations.len(), 1);
+        assert_eq!(range_err.violations[0].dep_key, "foo:child");
+        assert_eq!(range_err.violations[0].range, "[1.0,2.0)");
+        assert_eq!(range_err.violations[0].declared_in.notation(), "foo:parent:1.0");
+    }
+
+    #[test]
+    fn pinning_a_transitive_range_suppresses_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // parent:1.0 declares child via a range; child:1.5 is available.
+        write_fake_artifact(dir.path(), "foo", "parent", "1.0",
+            &[("foo", "child", "[1.0,2.0)")]);
+        write_fake_artifact(dir.path(), "foo", "child", "1.5", &[]);
+
+        // Without the pin the transitive range is a hard error.
+        assert!(run_resolve(dir.path(), &[("foo:parent", "1.0")], vec![]).is_err());
+
+        // With foo:child pinned (and supplied as a sibling root at a concrete
+        // version), the transitive range is skipped and resolution succeeds.
+        let jars = run_resolve_with_pins(
+            dir.path(),
+            &[("foo:parent", "1.0"), ("foo:child", "1.5")],
+            &["foo:child"],
+        )
+        .unwrap();
+        assert!(
+            jars.iter().any(|p| p.to_string_lossy().contains("child")),
+            "expected child JAR to be fetched, got {:?}", jars,
+        );
+    }
+
+    #[test]
+    fn parse_metadata_versions_extracts_versions_in_order() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <metadata>
+              <groupId>com.google.code.gson</groupId>
+              <artifactId>gson</artifactId>
+              <version>2.8.0</version>
+              <versioning>
+                <latest>2.11.0</latest>
+                <release>2.11.0</release>
+                <versions>
+                  <version>2.8.0</version>
+                  <version>2.9.1</version>
+                  <version>2.10.1</version>
+                  <version>2.11.0</version>
+                </versions>
+              </versioning>
+            </metadata>"#;
+        let versions = parse_metadata_versions(xml).unwrap();
+        assert_eq!(versions, vec!["2.8.0", "2.9.1", "2.10.1", "2.11.0"]);
     }
 
     #[test]

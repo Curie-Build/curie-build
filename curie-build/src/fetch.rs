@@ -10,42 +10,48 @@ use crate::build::{central_repos, extra_repos};
 use crate::{descriptor, workspace};
 use anyhow::{bail, Context, Result};
 use curie_deps::repo::Repository;
-use curie_deps::{DepEntry, Gav, ResolveOptions};
+use curie_deps::version::{intersect_highest_satisfying, VersionRange};
+use curie_deps::{
+    fetch_available_versions, resolve_with_pins, DepEntry, Gav, ResolveOptions, VersionRangeError,
+};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Entry point when called from a workspace member context.
 pub fn run_fetch_workspace_member(
     workspace_root: &Path,
     member_index: usize,
-    coord: Option<&str>,
+    coords: &[String],
     no_transitive: bool,
     offline: bool,
 ) -> Result<()> {
     let ws = workspace::load(workspace_root)?;
     let member = &ws.members[member_index];
-    run_fetch_with_desc(&member.descriptor, coord, no_transitive, offline)
+    run_fetch_with_desc(&member.descriptor, coords, no_transitive, offline)
 }
 
 /// Entry point for standalone (non-workspace) projects.
-pub fn run_fetch(project_root: &Path, coord: Option<&str>, no_transitive: bool, offline: bool) -> Result<()> {
+pub fn run_fetch(project_root: &Path, coords: &[String], no_transitive: bool, offline: bool) -> Result<()> {
     let desc = descriptor::load(project_root)?;
     if desc.is_workspace() {
         bail!("`curie fetch` cannot run on a workspace root; target a member with --project");
     }
-    run_fetch_with_desc(&desc, coord, no_transitive, offline)
+    run_fetch_with_desc(&desc, coords, no_transitive, offline)
 }
 
 fn run_fetch_with_desc(
     desc: &descriptor::Descriptor,
-    coord: Option<&str>,
+    coords: &[String],
     no_transitive: bool,
     offline: bool,
 ) -> Result<()> {
-    match coord {
-        Some(c) => fetch_coordinate(desc, c, no_transitive, offline),
-        None if no_transitive => bail!("--no-transitive requires a coordinate argument"),
-        None => fetch_project_dependencies(desc, offline),
+    if coords.is_empty() {
+        if no_transitive {
+            bail!("--no-transitive requires at least one coordinate argument");
+        }
+        return fetch_project_dependencies(desc, offline);
     }
+    fetch_coordinates(desc, coords, no_transitive, offline)
 }
 
 // ---------------------------------------------------------------------------
@@ -114,45 +120,234 @@ fn parse_gav_arg(arg: &str) -> Result<Gav> {
 }
 
 // ---------------------------------------------------------------------------
-// `curie fetch <group:artifact:version> [--no-transitive]`
+// `curie fetch <coord> [<coord>...] [--no-transitive]`
 // ---------------------------------------------------------------------------
 
-fn fetch_coordinate(desc: &descriptor::Descriptor, coord: &str, no_transitive: bool, offline: bool) -> Result<()> {
-    let (gav, artifact_type) = parse_artifact_coord(coord)?;
+fn fetch_coordinates(
+    desc: &descriptor::Descriptor,
+    coords: &[String],
+    no_transitive: bool,
+    offline: bool,
+) -> Result<()> {
+    let parsed: Vec<(Gav, ArtifactType)> = coords
+        .iter()
+        .map(|c| parse_artifact_coord(c))
+        .collect::<Result<_>>()?;
 
-    if artifact_type == ArtifactType::Pom {
-        let mut repos = central_repos();
-        repos.extend(extra_repos(desc));
-        let pom = curie_deps::fetch_pom_only(&gav, &repos, offline)?;
-        crate::parallel::emit(&crate::style::done(&pom.display().to_string()));
-        return Ok(());
-    }
+    let mut repos = central_repos();
+    repos.extend(extra_repos(desc));
 
-    if no_transitive {
-        let mut repos = central_repos();
-        repos.extend(extra_repos(desc));
-        let jar = curie_deps::fetch_artifact(&gav, &repos, offline)?;
-        crate::parallel::emit(&crate::style::done(&jar.display().to_string()));
-        return Ok(());
-    }
-
-    let key = format!("{}:{}", gav.group, gav.artifact);
-    let entries = [DepEntry { key: &key, version: &gav.version, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }];
-    let opts = ResolveOptions {
-        default_repos: central_repos(),
-        named_repos: extra_repos(desc),
-        progress: true,
-        bom_imports: desc.prod_bom_gavs()?,
+    // POM-only coordinates (BOMs, parent POMs) are fetched individually.
+    let pom_count = fetch_pom_coords(
+        parsed.iter().filter(|(_, t)| *t == ArtifactType::Pom).map(|(g, _)| g),
+        &repos,
         offline,
-        skip_version_ranges: false, error_on_version_conflict: false,
+    )?;
+
+    let jar_gavs: Vec<&Gav> =
+        parsed.iter().filter(|(_, t)| *t == ArtifactType::Jar).map(|(g, _)| g).collect();
+    let hint = RangeHintMode::Command { original: coords };
+    let jar_count = if jar_gavs.is_empty() {
+        0
+    } else if no_transitive {
+        fetch_jars_flat(&jar_gavs, &repos, offline, &hint)?
+    } else {
+        fetch_jars_transitive(&jar_gavs, &repos, offline, &hint)?
     };
-    let jars = curie_deps::resolve(&entries, &opts)?;
-    crate::parallel::emit(&crate::style::done(&format!(
-        "{} JAR(s) cached for {}",
-        jars.len(),
-        gav.notation()
-    )));
+
+    let total = pom_count + jar_count;
+    crate::parallel::emit(&crate::style::done(&format!("{} artifact(s) cached", total)));
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Shared JAR fetching + version-range suggestions (positional and --file modes)
+// ---------------------------------------------------------------------------
+
+/// How to phrase the "supply an exact version" fix when a coordinate's graph
+/// contains a version range.
+enum RangeHintMode<'a> {
+    /// `curie fetch <coords...>` — propose a ready-to-run command.
+    Command { original: &'a [String] },
+    /// `curie fetch --file <path>` — propose line(s) to add to the file.
+    File { path: &'a Path },
+}
+
+/// Resolve every JAR coordinate transitively, with all sibling roots pinned so a
+/// supplied coordinate overrides a matching transitive range.  Each coordinate
+/// is resolved separately, so two versions of the same `group:artifact` are both
+/// fetched.  On a range violation, fails with a mode-appropriate, copy-pasteable
+/// fix.  Returns the total number of JARs cached.
+fn fetch_jars_transitive(
+    gavs: &[&Gav],
+    repos: &[Repository],
+    offline: bool,
+    hint: &RangeHintMode,
+) -> Result<usize> {
+    let pins: Vec<String> = gavs.iter().map(|g| format!("{}:{}", g.group, g.artifact)).collect();
+
+    let mut total = 0;
+    let mut range_pairs: Vec<(String, String)> = Vec::new();
+    for gav in gavs {
+        let key = format!("{}:{}", gav.group, gav.artifact);
+        let classifier = gav.classifier.as_deref();
+        let entry = DepEntry { key: &key, version: &gav.version, repo_id: None, exclusions: vec![], classifier, allow_version_conflict: false };
+        let opts = ResolveOptions {
+            default_repos: repos.to_vec(),
+            named_repos: vec![],
+            progress: true,
+            bom_imports: vec![],
+            offline,
+            skip_version_ranges: false, error_on_version_conflict: false,
+        };
+        match resolve_with_pins(&[entry], &opts, &pins) {
+            Ok(jars) => total += jars.len(),
+            Err(e) => match e.downcast::<VersionRangeError>() {
+                Ok(range_err) => range_pairs
+                    .extend(range_err.violations.into_iter().map(|v| (v.dep_key, v.range))),
+                Err(other) => return Err(other),
+            },
+        }
+    }
+
+    if !range_pairs.is_empty() {
+        bail!("{}", build_range_message(&range_pairs, repos, offline, hint));
+    }
+    Ok(total)
+}
+
+/// Download each JAR coordinate without resolving transitives.  No range
+/// handling is needed: a coordinate's own version cannot be a range (the
+/// coordinate parser rejects `[`/`(`), and `--no-transitive` skips the
+/// dependency graph where transitive ranges would otherwise appear.
+fn fetch_jars_flat(
+    gavs: &[&Gav],
+    repos: &[Repository],
+    offline: bool,
+    _hint: &RangeHintMode,
+) -> Result<usize> {
+    let mut count = 0;
+    for gav in gavs {
+        curie_deps::fetch_artifact(gav, repos, offline)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// One ranged artifact and the exact version Curie suggests pinning it to.
+struct RangeSuggestion {
+    dep_key: String,
+    /// All ranges declared for this `group:artifact`, as written.
+    ranges: Vec<String>,
+    /// Highest published version satisfying every range, if one was found.
+    exact: Option<String>,
+}
+
+/// The coordinate string to add for a suggestion: `group:artifact:exact`, or a
+/// `<version>` placeholder when no exact version could be computed.
+fn suggested_coord(s: &RangeSuggestion) -> String {
+    match &s.exact {
+        Some(v) => format!("{}:{}", s.dep_key, v),
+        None => format!("{}:<version>", s.dep_key),
+    }
+}
+
+/// Group range violations by artifact and compute the exact version Maven would
+/// select (highest published version satisfying *all* of that artifact's
+/// ranges) by consulting `maven-metadata.xml`.
+fn range_suggestions(
+    pairs: &[(String, String)],
+    repos: &[Repository],
+    offline: bool,
+) -> Vec<RangeSuggestion> {
+    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (dep_key, range) in pairs {
+        let ranges = grouped.entry(dep_key.clone()).or_default();
+        if !ranges.contains(range) {
+            ranges.push(range.clone());
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(dep_key, ranges)| {
+            let exact = compute_exact_version(&dep_key, &ranges, repos, offline);
+            RangeSuggestion { dep_key, ranges, exact }
+        })
+        .collect()
+}
+
+/// Resolve a set of ranges for one artifact to a single concrete version, or
+/// `None` if any range is unparseable, metadata can't be fetched, or nothing
+/// published satisfies them all.
+fn compute_exact_version(
+    dep_key: &str,
+    ranges: &[String],
+    repos: &[Repository],
+    offline: bool,
+) -> Option<String> {
+    let parsed: Vec<VersionRange> = ranges.iter().filter_map(|r| VersionRange::parse(r).ok()).collect();
+    if parsed.len() != ranges.len() {
+        return None;
+    }
+    let available = fetch_available_versions(dep_key, repos, offline).ok()?;
+    intersect_highest_satisfying(&parsed, &available)
+}
+
+/// Build the user-facing range error, computing each exact version and rendering
+/// the fix appropriate to the invocation mode.
+fn build_range_message(
+    pairs: &[(String, String)],
+    repos: &[Repository],
+    offline: bool,
+    hint: &RangeHintMode,
+) -> String {
+    let suggestions = range_suggestions(pairs, repos, offline);
+    match hint {
+        RangeHintMode::Command { original } => format_command_hint(&suggestions, original),
+        RangeHintMode::File { path } => format_file_hint(&suggestions, path),
+    }
+}
+
+/// Shared lead-in: the diagnosis and per-artifact range → exact-version lines.
+fn range_diagnosis(suggestions: &[RangeSuggestion]) -> String {
+    let mut msg = String::from("non-deterministic version ranges in dependency graph");
+    for s in suggestions {
+        let target = match &s.exact {
+            Some(v) => v.clone(),
+            None => "(no published version satisfies the range — pick one manually)".to_string(),
+        };
+        msg.push_str(&format!("\n\n  {}\n    {}  \u{2192}  {}", s.dep_key, s.ranges.join(", "), target));
+    }
+    msg
+}
+
+/// Positional mode: propose a runnable `curie fetch` command that keeps the
+/// user's coordinates and appends an explicit version for each (transitive)
+/// ranged artifact, so the appended coordinate pins the range.
+fn format_command_hint(suggestions: &[RangeSuggestion], original: &[String]) -> String {
+    let mut coords: Vec<String> = original.to_vec();
+    for s in suggestions {
+        coords.push(suggested_coord(s));
+    }
+
+    let mut msg = range_diagnosis(suggestions);
+    msg.push_str("\n\nRe-run with an explicit version for each ranged artifact:\n  curie fetch ");
+    msg.push_str(&coords.join(" "));
+    msg
+}
+
+/// `--file` mode: instruct the user to add an explicit-version line per ranged
+/// artifact to the coordinate file.
+fn format_file_hint(suggestions: &[RangeSuggestion], path: &Path) -> String {
+    let mut msg = range_diagnosis(suggestions);
+    msg.push_str(&format!(
+        "\n\nAdd an explicit version for each ranged artifact to {}:",
+        path.display()
+    ));
+    for s in suggestions {
+        msg.push_str(&format!("\n  {}", suggested_coord(s)));
+    }
+    msg
 }
 
 // ---------------------------------------------------------------------------
@@ -272,14 +467,15 @@ pub fn run_fetch_file(project_root: &Path, path: &Path, no_transitive: bool, off
     // regardless of --no-transitive (there is no JAR to resolve transitively).
     let pom_count = fetch_pom_coords(coords.iter().filter(|(_, t)| *t == ArtifactType::Pom).map(|(g, _)| g), &repos, offline)?;
 
-    // JAR artifacts — either flat (--no-transitive) or a single shared resolve pass.
+    // JAR artifacts — flat (--no-transitive) or pin-aware transitive resolution.
     let jar_gavs: Vec<&Gav> = coords.iter().filter(|(_, t)| *t == ArtifactType::Jar).map(|(g, _)| g).collect();
+    let hint = RangeHintMode::File { path };
     let jar_count = if jar_gavs.is_empty() {
         0
     } else if no_transitive {
-        fetch_jar_coords_flat(&jar_gavs, &repos, offline)?
+        fetch_jars_flat(&jar_gavs, &repos, offline, &hint)?
     } else {
-        fetch_jar_coords_transitive(&jar_gavs, &repos, offline)?
+        fetch_jars_transitive(&jar_gavs, &repos, offline, &hint)?
     };
 
     let total = pom_count + jar_count;
@@ -298,39 +494,6 @@ fn fetch_pom_coords<'a>(
         count += 1;
     }
     Ok(count)
-}
-
-fn fetch_jar_coords_flat(gavs: &[&Gav], repos: &[curie_deps::repo::Repository], offline: bool) -> Result<usize> {
-    let mut count = 0;
-    for gav in gavs {
-        curie_deps::fetch_artifact(gav, repos, offline)?;
-        count += 1;
-    }
-    Ok(count)
-}
-
-fn fetch_jar_coords_transitive(gavs: &[&Gav], repos: &[curie_deps::repo::Repository], offline: bool) -> Result<usize> {
-    // Resolve each coordinate individually so that multiple versions of the
-    // same group:artifact (e.g. maven-compiler-plugin:3.13.0 and :3.15.0)
-    // are both fetched.  The resolver deduplicates by group:artifact key within
-    // a single batch, which would silently drop the second version.
-    let mut total = 0;
-    for gav in gavs {
-        let key = format!("{}:{}", gav.group, gav.artifact);
-        let classifier = gav.classifier.as_deref();
-        let entry = DepEntry { key: &key, version: &gav.version, repo_id: None, exclusions: vec![], classifier, allow_version_conflict: false };
-        let opts = ResolveOptions {
-            default_repos: repos.to_vec(),
-            named_repos: vec![],
-            progress: true,
-            bom_imports: vec![],
-            offline,
-            skip_version_ranges: true, error_on_version_conflict: false,
-        };
-        let jars = curie_deps::resolve(&[entry], &opts)?;
-        total += jars.len();
-    }
-    Ok(total)
 }
 
 // ---------------------------------------------------------------------------
@@ -387,14 +550,14 @@ mod tests {
     #[test]
     fn no_transitive_without_coord_is_an_error() {
         let desc = empty_app_descriptor();
-        let err = run_fetch_with_desc(&desc, None, true, true).unwrap_err();
+        let err = run_fetch_with_desc(&desc, &[], true, true).unwrap_err();
         assert!(err.to_string().contains("--no-transitive"));
     }
 
     #[test]
     fn empty_project_fetch_succeeds_without_network() {
         let desc = empty_app_descriptor();
-        run_fetch_with_desc(&desc, None, false, true).unwrap();
+        run_fetch_with_desc(&desc, &[], false, true).unwrap();
     }
 
     // -----------------------------------------------------------------------
@@ -499,5 +662,68 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let err = run_fetch_file(project.path(), &path, false, true).unwrap_err();
         assert!(!err.to_string().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Range-suggestion formatters — pure, no network
+    // -----------------------------------------------------------------------
+
+    fn suggestion(dep_key: &str, ranges: &[&str], exact: Option<&str>) -> RangeSuggestion {
+        RangeSuggestion {
+            dep_key: dep_key.to_string(),
+            ranges: ranges.iter().map(|s| s.to_string()).collect(),
+            exact: exact.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn command_hint_appends_transitive_pin_with_exact_version() {
+        // A transitive range under bsp4j, resolved to a concrete version.
+        let suggestions = vec![suggestion(
+            "com.google.code.gson:gson",
+            &["[2.9.1,2.11)"],
+            Some("2.10.1"),
+        )];
+        let original = vec!["ch.epfl.scala:bsp4j:2.1.1".to_string()];
+        let msg = format_command_hint(&suggestions, &original);
+        assert!(msg.contains("non-deterministic version ranges"), "{msg}");
+        assert!(
+            msg.contains(
+                "curie fetch ch.epfl.scala:bsp4j:2.1.1 com.google.code.gson:gson:2.10.1"
+            ),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn command_hint_keeps_all_original_coords_and_appends_pins() {
+        let suggestions = vec![suggestion("foo:bar", &["[1.0,2.0)"], Some("1.5"))];
+        let original = vec!["a:b:1.0".to_string(), "c:d:2.0".to_string()];
+        let msg = format_command_hint(&suggestions, &original);
+        assert!(
+            msg.contains("curie fetch a:b:1.0 c:d:2.0 foo:bar:1.5"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn command_hint_falls_back_to_placeholder_when_unresolved() {
+        let suggestions = vec![suggestion("foo:bar", &["[9.0,)"], None)];
+        let original = vec!["grp:app:1.0".to_string()];
+        let msg = format_command_hint(&suggestions, &original);
+        assert!(msg.contains("foo:bar:<version>"), "{msg}");
+    }
+
+    #[test]
+    fn file_hint_names_the_file_and_lists_lines_to_add() {
+        let suggestions = vec![suggestion(
+            "com.google.code.gson:gson",
+            &["[2.9.1,2.11)"],
+            Some("2.10.1"),
+        )];
+        let msg = format_file_hint(&suggestions, Path::new("deps.txt"));
+        assert!(msg.contains("Add an explicit version"), "{msg}");
+        assert!(msg.contains("deps.txt"), "{msg}");
+        assert!(msg.contains("com.google.code.gson:gson:2.10.1"), "{msg}");
     }
 }

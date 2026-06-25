@@ -19,6 +19,20 @@
 #     "junit:junit-dep" = "<version>"
 #
 # Adding the explicit pin restores deterministic resolution.
+#
+# `curie fetch` (ad-hoc downloads, not a reproducible build) handles ranges
+# differently: instead of asking you to find a version, it queries
+# maven-metadata.xml and proposes the exact one.  For example,
+#
+#   curie fetch ch.epfl.scala:bsp4j:2.1.1
+#
+# fails with a ready-to-run command that pins the ranged transitive:
+#
+#   curie fetch ch.epfl.scala:bsp4j:2.1.1 com.google.code.gson:gson:2.10.1
+#
+# `curie fetch` also accepts several coordinates at once; a supplied coordinate
+# overrides the matching transitive range.  With `--file`, the same fix is
+# phrased as the coordinate line to add to the file.
 
 [application]
 name = "version-range-demo"

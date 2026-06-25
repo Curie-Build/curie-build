@@ -193,7 +193,22 @@
 <span class="pkg">"junit:junit"</span> = <span class="str">"4.13.2"</span></pre>
     </div>
 
-    <p>When using <code>curie fetch --file</code> for offline pre-fetching, version ranges are automatically skipped (they cannot be pre-fetched without a network request anyway). The coordinate file should list the concrete version you intend to use.</p>
+    <p><strong><code>curie fetch</code> resolves ranges for you.</strong> Unlike <code>curie build</code> (which always requires an explicit pin, for reproducibility), <code>curie fetch</code> is an ad-hoc download command. When it hits a range it queries <code>maven-metadata.xml</code>, computes the exact version Maven would select (the highest published version satisfying the range), and proposes a ready-to-run command:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+      </header>
+<pre><span class="err">error</span>: non-deterministic version ranges in dependency graph
+
+  com.google.code.gson:gson
+    [2.9.1,2.11)  &#8594;  2.10.1
+
+Re-run with an explicit version for each ranged artifact:
+  curie fetch ch.epfl.scala:bsp4j:2.1.1 com.google.code.gson:gson:2.10.1</pre>
+    </div>
+
+    <p><code>curie fetch</code> accepts several coordinates at once; a supplied coordinate overrides the matching transitive range (it is pinned across every coordinate's graph). With <code>curie fetch --file</code>, the same fix is phrased as the coordinate line(s) to add to the file, so the file ends up listing the concrete versions you intend to use.</p>
 
     <h2 id="workspace-build-order">Workspace member builds in wrong order</h2>
 
