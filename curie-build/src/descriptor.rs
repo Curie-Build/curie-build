@@ -46,6 +46,8 @@ pub(crate) fn fake_bom_desc(
         plugins: std::collections::BTreeMap::new(),
         maven: MavenConfig::default(),
         modules: ModulesConfig::default(),
+        resources: Resources::default(),
+        test_resources: Resources::default(),
     }
 }
 
@@ -92,5 +94,7 @@ pub(crate) fn fake_library_desc(
         plugins: std::collections::BTreeMap::new(),
         maven: MavenConfig::default(),
         modules: ModulesConfig::default(),
+        resources: Resources::default(),
+        test_resources: Resources::default(),
     }
 }

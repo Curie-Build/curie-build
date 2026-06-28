@@ -1,4 +1,4 @@
-use crate::descriptor::{self, Descriptor};
+use crate::descriptor::{self, Descriptor, Resources};
 use anyhow::{bail, Context, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -348,6 +348,35 @@ fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
         &mut member.inherited_test_annotation_processor_options,
         &ws.test_annotation_processor_options,
     );
+    inherit_resource_scope(&mut member.resources, &ws.resources);
+    inherit_resource_scope(&mut member.test_resources, &ws.test_resources);
+}
+
+/// Inherit one resource scope from the workspace.  A member that declares no
+/// `filter` stages of its own inherits the workspace's stages wholesale; inline
+/// `properties` merge member-wins.  `directories` are *not* inherited — source
+/// layout is per-module and paths are member-relative.
+fn inherit_resource_scope(member: &mut Resources, ws: &Resources) {
+    if !ws.section_present {
+        return;
+    }
+    if member.filter.is_empty() {
+        member.filter = ws.filter.clone();
+        // Inheriting filtering activates the scope even if the member's own
+        // section was absent, so downstream `is_active()` sees the stages.
+        member.section_present = true;
+    }
+    merge_resource_properties(&mut member.properties, &ws.properties);
+}
+
+/// Merge workspace `properties` into the member's, member entries winning.
+fn merge_resource_properties(
+    member: &mut std::collections::BTreeMap<String, String>,
+    ws: &std::collections::BTreeMap<String, String>,
+) {
+    for (key, value) in ws {
+        member.entry(key.clone()).or_insert_with(|| value.clone());
+    }
 }
 
 /// Merge `base` entries into `target`.  Existing entries in `target`
@@ -1813,5 +1842,63 @@ mod tests {
         let t = &ws.members[0].descriptor.test;
         assert!(t.coverage_enabled());
         assert_eq!(t.junit_platform_version(), "5.10.0");
+    }
+
+    // -- resource scope inheritance -------------------------------------------
+
+    #[test]
+    fn member_inherits_workspace_filter_stages() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\
+             [[resources.filter]]\nengine = \"substitute\"\nincludes = [\"**/*.properties\"]\n\
+             [resources.properties]\nshared = \"ws\"\n",
+            &[("a", "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n")],
+        )
+        .unwrap();
+        let res = &ws.members[0].descriptor.resources;
+        assert!(res.is_active(), "inherited stages should activate the scope");
+        assert_eq!(res.filter.len(), 1);
+        assert_eq!(res.filter[0].includes, vec!["**/*.properties"]);
+        assert_eq!(res.properties.get("shared").map(String::as_str), Some("ws"));
+    }
+
+    #[test]
+    fn member_filter_stages_win_over_workspace() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\
+             [[resources.filter]]\nengine = \"substitute\"\nincludes = [\"**/ws.properties\"]\n",
+            &[("a", "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n\
+                     [[resources.filter]]\nengine = \"substitute\"\nincludes = [\"**/member.properties\"]\n")],
+        )
+        .unwrap();
+        let res = &ws.members[0].descriptor.resources;
+        assert_eq!(res.filter.len(), 1);
+        assert_eq!(res.filter[0].includes, vec!["**/member.properties"]);
+    }
+
+    #[test]
+    fn member_properties_win_over_workspace() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\
+             [resources.properties]\nk = \"ws\"\nonly_ws = \"yes\"\n",
+            &[("a", "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n\
+                     [resources.properties]\nk = \"member\"\n")],
+        )
+        .unwrap();
+        let props = &ws.members[0].descriptor.resources.properties;
+        assert_eq!(props.get("k").map(String::as_str), Some("member"));
+        assert_eq!(props.get("only_ws").map(String::as_str), Some("yes"));
+    }
+
+    #[test]
+    fn directories_not_inherited() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\
+             [resources]\ndirectories = [\"ws/dir\"]\n",
+            &[("a", "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n")],
+        )
+        .unwrap();
+        // The member inherits no directories (layout is per-module).
+        assert!(ws.members[0].descriptor.resources.directories.is_empty());
     }
 }

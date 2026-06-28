@@ -935,6 +935,8 @@ mod tests {
             plugins: BTreeMap::new(),
             maven: MavenConfig::default(),
             modules: ModulesConfig::default(),
+            resources: Resources::default(),
+            test_resources: Resources::default(),
         }
     }
 }

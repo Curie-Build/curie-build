@@ -1585,6 +1585,8 @@ mod tests {
             plugins: BTreeMap::new(),
             maven: MavenConfig::default(),
             modules: crate::descriptor::ModulesConfig::default(),
+            resources: crate::descriptor::Resources::default(),
+            test_resources: crate::descriptor::Resources::default(),
         };
 
         let all_jars = vec![

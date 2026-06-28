@@ -275,6 +275,18 @@ pub(crate) fn write_source_set(path: &Path, set: &BTreeSet<String>) -> Result<()
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
+/// Load a `u64` fingerprint previously written with [`write_u64_stamp`], or
+/// `None` when the stamp is missing or unparsable (first build after clean).
+pub(crate) fn load_u64_stamp(path: &Path) -> Option<u64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Write a `u64` fingerprint to the stamp at `path`.
+pub(crate) fn write_u64_stamp(path: &Path, value: u64) -> Result<()> {
+    std::fs::write(path, value.to_string())
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
 /// True when the current source set differs from the previously stamped one
 /// (a source was added or removed).  A missing previous stamp reports `false`:
 /// the very first build is driven by the no-class-files check instead, and we

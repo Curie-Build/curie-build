@@ -13,7 +13,7 @@
 //! recompiled, and the app restarts.  On a compile failure the process stays
 //! down and curie keeps watching so the user can fix the error and save again.
 
-use crate::{compile, descriptor, incremental, jar, main_class, style};
+use crate::{compile, descriptor, incremental, jar, main_class, resources, style};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -40,7 +40,8 @@ pub fn run_dev(project_root: &Path, opts: DevOptions, extra_args: &[String]) -> 
 
     let compiled = compile::compile(project_root, &desc, opts.offline, &[])?;
     let main = resolve_main_class(app, &compiled)?;
-    let classpath = exploded_classpath(&compiled);
+    let resources_dir = dev_resources_dir(project_root, &desc, &compiled);
+    let classpath = exploded_classpath(&compiled, resources_dir.as_deref());
 
     let agent_coords = desc.dep_java_agent_coords();
     let agent_jars = crate::java_agent::find_agent_jars(&agent_coords, &classpath);
@@ -65,7 +66,8 @@ pub fn run_dev(project_root: &Path, opts: DevOptions, extra_args: &[String]) -> 
 
         match compile::compile(project_root, &desc, opts.offline, &[]) {
             Ok(new_compiled) => {
-                let new_cp = exploded_classpath(&new_compiled);
+                let new_rd = dev_resources_dir(project_root, &desc, &new_compiled);
+                let new_cp = exploded_classpath(&new_compiled, new_rd.as_deref());
                 match spawn_app(&main, &new_cp, enable_preview, &agent_jars, extra_args) {
                     Ok(child) => {
                         proc = Some(child);
@@ -84,12 +86,16 @@ pub fn run_dev(project_root: &Path, opts: DevOptions, extra_args: &[String]) -> 
 
 /// Build the exploded classpath: classes dir first, then resources (if
 /// present), then dep JARs, then language runtime JARs (Kotlin, Groovy).
-fn exploded_classpath(compiled: &compile::CompileOutput) -> Vec<PathBuf> {
+///
+/// `resources_dir` is the *effective* directory — the filtered output when a
+/// `[resources]` scope is active, else the raw source dir — so `dev` and `run`
+/// read identical resource values.
+fn exploded_classpath(compiled: &compile::CompileOutput, resources_dir: Option<&Path>) -> Vec<PathBuf> {
     let mut cp = vec![compiled.classes_dir.clone()];
 
-    if let Some(ref rd) = compiled.resources_dir {
+    if let Some(rd) = resources_dir {
         if rd.exists() {
-            cp.push(rd.clone());
+            cp.push(rd.to_path_buf());
         }
     }
 
@@ -97,6 +103,33 @@ fn exploded_classpath(compiled: &compile::CompileOutput) -> Vec<PathBuf> {
     cp.extend_from_slice(&compiled.kotlin_stdlib_jars);
     cp.extend_from_slice(&compiled.groovy_jars);
     cp
+}
+
+/// Run resource filtering for the dev loop and return the effective main
+/// resources dir (filtered output when active, else the raw source dir).  A
+/// filtering error is reported but does not crash the watch loop — dev falls
+/// back to the raw dir so the user can keep iterating.
+fn dev_resources_dir(
+    project_root: &Path,
+    desc: &descriptor::Descriptor,
+    compiled: &compile::CompileOutput,
+) -> Option<PathBuf> {
+    let target_dir = compiled.classes_dir.parent().unwrap_or(project_root);
+    let git_commit = crate::git::detect(project_root).map(|i| i.commit_id);
+    match resources::process_resources(
+        project_root,
+        desc,
+        compiled.resources_dir.as_deref(),
+        compiled.test_resources_dir.as_deref(),
+        git_commit.as_deref(),
+        target_dir,
+    ) {
+        Ok(out) => out.main_dir.or_else(|| compiled.resources_dir.clone()),
+        Err(e) => {
+            eprintln!("warning: resource filtering failed: {e:#}");
+            compiled.resources_dir.clone()
+        }
+    }
 }
 
 // ── Main class ────────────────────────────────────────────────────────────────
@@ -395,7 +428,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let classes = dir.path().join("classes");
         let compiled = fake_compile_output(classes.clone(), vec![], vec![], vec![], None);
-        let cp = exploded_classpath(&compiled);
+        let cp = exploded_classpath(&compiled, compiled.resources_dir.as_deref());
         assert_eq!(cp[0], classes);
     }
 
@@ -413,7 +446,7 @@ mod tests {
             vec![groovy.clone()],
             None,
         );
-        let cp = exploded_classpath(&compiled);
+        let cp = exploded_classpath(&compiled, compiled.resources_dir.as_deref());
         assert!(cp.contains(&dep));
         assert!(cp.contains(&kotlin));
         assert!(cp.contains(&groovy));
@@ -427,7 +460,7 @@ mod tests {
         std::fs::create_dir_all(&resources).unwrap();
         let compiled =
             fake_compile_output(classes.clone(), vec![], vec![], vec![], Some(resources.clone()));
-        let cp = exploded_classpath(&compiled);
+        let cp = exploded_classpath(&compiled, compiled.resources_dir.as_deref());
         assert!(cp.contains(&resources));
     }
 
@@ -438,7 +471,7 @@ mod tests {
         let resources = dir.path().join("does-not-exist");
         let compiled =
             fake_compile_output(classes.clone(), vec![], vec![], vec![], Some(resources.clone()));
-        let cp = exploded_classpath(&compiled);
+        let cp = exploded_classpath(&compiled, compiled.resources_dir.as_deref());
         assert!(!cp.contains(&resources));
     }
 

@@ -11,6 +11,7 @@ use crate::jar::{get_manifest_header, populate_libs_dir, write_deterministic_jar
 use crate::main_class::{detect_main_class, validate_main_class};
 use crate::maven;
 use crate::native;
+use crate::resources;
 use crate::test;
 use anyhow::{Context, Result};
 use curie_deps::repo::Repository;
@@ -194,6 +195,28 @@ pub fn do_build(
     let offline = opts.offline;
     let compiled = compile(project_root, desc, offline, extra_cp)?;
 
+    // Detect Git once: reused by resource filtering (`git.*` vars) and below
+    // by build-info generation, so a non-repo degrades both gracefully.
+    let git_info = git::detect(project_root);
+
+    // --- resource filtering --------------------------------------------------
+    // When a `[resources]`/`[test-resources]` scope is active, materialize a
+    // merged/filtered output dir under target/ and rebind every downstream
+    // consumer to it (the "processed-dir swap"); inactive scopes keep the raw
+    // dir via the `or_else` fallback.
+    let pkg_target_dir = compiled.jar_path.parent().unwrap_or(project_root).to_path_buf();
+    let filtered = resources::process_resources(
+        project_root,
+        desc,
+        compiled.resources_dir.as_deref(),
+        compiled.test_resources_dir.as_deref(),
+        git_info.as_ref().map(|i| i.commit_id.as_str()),
+        &pkg_target_dir,
+    )?;
+    let eff_resources_dir = filtered.main_dir.clone().or_else(|| compiled.resources_dir.clone());
+    let eff_test_resources_dir =
+        filtered.test_dir.clone().or_else(|| compiled.test_resources_dir.clone());
+
     // --- run tests before packaging ------------------------------------------
     test::run_tests(
         project_root,
@@ -202,8 +225,8 @@ pub fn do_build(
         &compiled.dep_jars,
         &compiled.kotlin_stdlib_jars,
         &compiled.groovy_jars,
-        compiled.resources_dir.as_deref(),
-        compiled.test_resources_dir.as_deref(),
+        eff_resources_dir.as_deref(),
+        eff_test_resources_dir.as_deref(),
         None,
         offline,
         opts.coverage || desc.test.coverage_enabled(),
@@ -213,13 +236,13 @@ pub fn do_build(
     // --- package (deterministic JAR, incremental) ----------------------------
     // mainClass detection/validation is deferred to here: it is only needed to
     // write the JAR manifest, so we skip it entirely when packaging is up to date.
-    let resources_dir = compiled.resources_dir.as_deref();
+    let resources_dir = eff_resources_dir.as_deref();
     let toml_path = project_root.join("Curie.toml");
 
-    // Detect Git information once for the whole packaging step.
+    // Build-info reuses the Git detection performed once above.
     // `None` when git is unavailable or the project is not in a repo.
     let build_info_content: Option<String> = if desc.build_info.enabled {
-        git::detect(project_root).map(|info| {
+        git_info.as_ref().map(|info| {
             format!("git.commit.id={}\n", info.commit_id)
         })
     } else {
@@ -358,7 +381,7 @@ pub fn do_build(
         if crate::fat_jar::needs_rebuild(
             &fat_path,
             &compiled.classes_dir,
-            compiled.resources_dir.as_deref(),
+            eff_resources_dir.as_deref(),
             &fat_dep_jars,
             &toml_path,
         ) {
@@ -366,7 +389,7 @@ pub fn do_build(
             crate::fat_jar::write_fat_jar(
                 &fat_path,
                 &compiled.classes_dir,
-                compiled.resources_dir.as_deref(),
+                eff_resources_dir.as_deref(),
                 resolved_main_class.as_deref(),
                 &fat_dep_jars,
                 build_info_content.as_deref(),
@@ -386,7 +409,7 @@ pub fn do_build(
         jar: compiled.jar_path,
         dep_jars: effective_dep_jars,
         main_class: resolved_main_class,
-        resources_dir: compiled.resources_dir,
+        resources_dir: eff_resources_dir,
         fat_jar: fat_jar_path,
         is_modular: compiled.is_modular,
         module_name: compiled.module_name,

@@ -1,0 +1,44 @@
+# resource-filtering-demo
+#
+# Demonstrates curie's resource filtering (the modern replacement for Maven's
+# maven-resources-plugin `<filtering>`).
+#
+#   * Two source directories that MERGE into one output:
+#       src/main/resources     (kept verbatim)
+#       src/main/extra-config  (filtered)
+#   * A `substitute` stage scoped to `src/main/extra-config` only, so
+#     `app.properties` there has its @project.version@ / @git.commit.id@ /
+#     @api.url@ placeholders substituted, while `notes.properties` in
+#     `src/main/resources` keeps its literal @project.version@.
+#   * A binary file (logo.png) is copied byte-for-byte — never corrupted.
+#   * An independent [test-resources] scope filters a test fixture.
+
+[application]
+name = "resource-filtering-demo"
+version = "0.1.0"
+groupId = "com.example"
+mainClass = "com.example.filtering.App"
+
+[test-dependencies]
+"org.junit.jupiter:junit-jupiter" = "6.0.3"
+
+[resources]
+directories = ["src/main/resources", "src/main/extra-config"]
+# Inline variable available to @api.url@ in the filtered files.
+properties = { "api.url" = "https://api.example.com" }
+
+# Filter only the extra-config root, and only its .properties files.
+[[resources.filter]]
+engine = "substitute"
+directories = ["src/main/extra-config"]
+includes = ["**/*.properties"]
+[resources.filter.substitute]
+delimiter = { begin = "@", end = "@" }
+failOnUnresolved = true
+
+# Test resources are configured independently of production resources.
+[test-resources]
+directories = ["src/test/resources"]
+[[test-resources.filter]]
+engine = "substitute"
+includes = ["**/*.properties"]

@@ -46,6 +46,7 @@ members = [
     "spring-boot-demo",
     "proto-greeter",
     "openapi-greeter",
+    "resource-filtering-demo",
 ]
 
 [bom-imports]

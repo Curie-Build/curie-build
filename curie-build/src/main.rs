@@ -32,6 +32,7 @@ mod plugin;
 mod pom_writer;
 mod proc;
 mod publish;
+mod resources;
 mod run;
 mod sources_jar;
 mod style;
@@ -725,6 +726,14 @@ fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: 
     );
     let compiled = compile::compile(project, &desc, offline, &[])?;
     let enable_coverage = cli_coverage || desc.test.coverage_enabled();
+    let target_dir = compiled.classes_dir.parent().unwrap_or(project);
+    let (eff_main, eff_test) = resources::effective_test_dirs(
+        project,
+        &desc,
+        compiled.resources_dir.as_deref(),
+        compiled.test_resources_dir.as_deref(),
+        target_dir,
+    )?;
     test::run_tests(
         project,
         &desc,
@@ -732,8 +741,8 @@ fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: 
         &compiled.dep_jars,
         &compiled.kotlin_stdlib_jars,
         &compiled.groovy_jars,
-        compiled.resources_dir.as_deref(),
-        compiled.test_resources_dir.as_deref(),
+        eff_main.as_deref(),
+        eff_test.as_deref(),
         filter,
         offline,
         enable_coverage,

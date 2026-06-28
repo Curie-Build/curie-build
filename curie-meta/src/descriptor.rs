@@ -92,6 +92,12 @@ pub struct Descriptor {
     /// `--add-opens`, `--add-exports`, `--add-reads`) and the test launch
     /// strategy (`test-mode`).
     pub modules: ModulesConfig,
+    /// Populated from `[resources]` — production-resource source directories
+    /// and filter stages.  `section_present`/`is_active()` gate filtering;
+    /// absent or empty keeps the zero-copy verbatim path.
+    pub resources: Resources,
+    /// Populated from `[test-resources]` — the independent test-resource scope.
+    pub test_resources: Resources,
 }
 
 /// One entry in `[annotation-processors]` or `[test-annotation-processors]`.
@@ -217,6 +223,10 @@ struct RawDescriptor {
     maven: MavenConfig,
     #[serde(default)]
     modules: ModulesConfig,
+    #[serde(default)]
+    resources: Resources,
+    #[serde(rename = "test-resources", default)]
+    test_resources: Resources,
 }
 
 /// One entry in `[workspace-dependencies]`.
@@ -648,6 +658,148 @@ impl Spock {
     /// mere presence of the `[spock]` section activates Spock.
     pub fn enabled(&self) -> bool {
         self.enabled.unwrap_or(self.section_present)
+    }
+}
+
+/// Configuration for one resource scope: `[resources]` (production) or
+/// `[test-resources]` (test).  Both sections deserialize into this same struct;
+/// the [`Descriptor`] holds one of each so the two scopes are configured fully
+/// independently (own source directories, own filter stages, own variables).
+///
+/// When the section is absent — or present but with neither `directories` nor
+/// `filter` — the scope keeps curie's zero-copy verbatim behavior.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Resources {
+    /// Source roots for this scope, project-relative.  Empty ⇒ auto-discover
+    /// (main: `src/main/resources` or `resources/`; test: `src/test/resources`
+    /// or `test-resources/`).  When several are given they merge into one
+    /// output; later dirs win on a relative-path collision (Maven ordering).
+    #[serde(default)]
+    pub directories: Vec<String>,
+    /// Ordered filter stages.  Empty ⇒ no filtering (verbatim copy/merge).
+    #[serde(default)]
+    pub filter: Vec<FilterStage>,
+    /// Scope-local inline variables, highest precedence below `env.*`.
+    #[serde(default)]
+    pub properties: BTreeMap<String, String>,
+    /// Scope-local external `.properties` files, applied in listed order.
+    #[serde(rename = "filterFiles", default)]
+    pub filter_files: Vec<String>,
+    /// Extra file extensions to treat as binary (never filtered), merged with
+    /// the built-in binary list.
+    #[serde(rename = "nonFilteredExtensions", default)]
+    pub non_filtered_extensions: Vec<String>,
+    /// Whether the section was explicitly present in `Curie.toml`.  Set by
+    /// [`load`]; never written by serde.
+    #[serde(skip)]
+    pub section_present: bool,
+}
+
+impl Resources {
+    /// A scope is active when its section is present and it either declares
+    /// filter stages or custom source directories — custom dirs must be merged
+    /// into one output even with no filtering.
+    pub fn is_active(&self) -> bool {
+        self.section_present && (!self.filter.is_empty() || !self.directories.is_empty())
+    }
+}
+
+/// One filter stage: which engine, which files, and (nested) that engine's
+/// options.  Stages run in declaration order and chain on the same file — a
+/// file matched by two stages is rendered by the first, then its output feeds
+/// the second.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct FilterStage {
+    /// `"substitute"` (v1) or `"liquid"` (reserved for v2).
+    pub engine: Engine,
+    /// Restrict this stage to files originating from these source roots (a
+    /// subset of the scope's `directories`, project-relative).  Empty ⇒ all of
+    /// the scope's roots.  Combined with `includes`/`excludes` (both must match).
+    #[serde(default)]
+    pub directories: Vec<String>,
+    /// Glob patterns selecting files this stage applies to.  Empty ⇒ all
+    /// (non-binary) files.
+    #[serde(default)]
+    pub includes: Vec<String>,
+    /// Glob patterns excluding files from this stage (wins over `includes`).
+    #[serde(default)]
+    pub excludes: Vec<String>,
+    /// `[…​.filter.substitute]` — present only for the substitute engine.
+    #[serde(default)]
+    pub substitute: Option<SubstituteOpts>,
+    /// `[…​.filter.liquid]` — reserved for v2; parses today, must be absent
+    /// until the liquid engine ships.
+    #[serde(default)]
+    pub liquid: Option<LiquidOpts>,
+}
+
+impl FilterStage {
+    /// Engine name as it appears in `Curie.toml`, for diagnostics.
+    pub fn engine_name(&self) -> &'static str {
+        match self.engine {
+            Engine::Substitute => "substitute",
+            Engine::Liquid => "liquid",
+        }
+    }
+}
+
+/// The filtering mechanism a stage selects.
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    #[default]
+    Substitute,
+    Liquid,
+}
+
+/// Options for the `substitute` engine.  Each engine owns its own opts struct,
+/// so adding an engine never widens another engine's config surface.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct SubstituteOpts {
+    /// Begin/end tokens for placeholders.  Default `@var@`.
+    #[serde(default)]
+    pub delimiter: Delimiter,
+    /// Fail the build on an unresolved placeholder (default `true`); when
+    /// `false` the placeholder is left verbatim.
+    #[serde(rename = "failOnUnresolved", default = "default_true")]
+    pub fail_on_unresolved: bool,
+}
+
+impl Default for SubstituteOpts {
+    fn default() -> Self {
+        SubstituteOpts {
+            delimiter: Delimiter::default(),
+            fail_on_unresolved: true,
+        }
+    }
+}
+
+/// Options for the `liquid` engine.  Reserved for v2; an empty table today.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LiquidOpts {}
+
+/// Placeholder delimiter tokens for the substitute engine.  Default `@`/`@`.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Delimiter {
+    #[serde(default)]
+    pub begin: Option<String>,
+    #[serde(default)]
+    pub end: Option<String>,
+}
+
+impl Delimiter {
+    /// Begin token, defaulting to `"@"`.
+    pub fn begin_token(&self) -> &str {
+        self.begin.as_deref().unwrap_or("@")
+    }
+    /// End token, defaulting to `"@"`.
+    pub fn end_token(&self) -> &str {
+        self.end.as_deref().unwrap_or("@")
     }
 }
 
@@ -1402,6 +1554,15 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     let mut spock = parsed.spock;
     spock.section_present = spock_section_present;
 
+    let resources_section_present = table.map(|t| t.contains_key("resources")).unwrap_or(false);
+    let mut resources = parsed.resources;
+    resources.section_present = resources_section_present;
+
+    let test_resources_section_present =
+        table.map(|t| t.contains_key("test-resources")).unwrap_or(false);
+    let mut test_resources = parsed.test_resources;
+    test_resources.section_present = test_resources_section_present;
+
     let descriptor = Descriptor {
         kind,
         java: parsed.java,
@@ -1433,7 +1594,23 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         plugins: parsed.plugin,
         maven: parsed.maven,
         modules: parsed.modules,
+        resources,
+        test_resources,
     };
+
+    validate_resource_scope(&descriptor.resources, "resources")?;
+    validate_resource_scope(&descriptor.test_resources, "test-resources")?;
+    // BOM projects have no sources, so resource filtering is meaningless there.
+    // Workspace roots *may* declare [resources]/[test-resources]: members
+    // inherit their `filter` stages and `properties` (see workspace.rs).
+    if descriptor.is_bom() {
+        if resources_section_present {
+            bail!("BOM projects must not declare [resources]");
+        }
+        if test_resources_section_present {
+            bail!("BOM projects must not declare [test-resources]");
+        }
+    }
 
     // Workspace-only restrictions: they describe member layout, not
     // build inputs of their own.  These checks need the now-built
@@ -1497,6 +1674,59 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     validate_dep_repo_refs(&descriptor)?;
 
     Ok(descriptor)
+}
+
+/// Validate one resource scope's filter stages.  `section` is `"resources"` or
+/// `"test-resources"` for diagnostics.  Checked for both scopes at load time,
+/// matching curie's strict-config philosophy.
+fn validate_resource_scope(scope: &Resources, section: &str) -> Result<()> {
+    // The set of source roots a stage may restrict itself to: the scope's own
+    // `directories`, or (when none configured) the auto-discovered default,
+    // which isn't known at load time — so only validate the subset relation
+    // when explicit `directories` are present.
+    for stage in &scope.filter {
+        validate_stage_engine_opts(stage, section)?;
+        if !scope.directories.is_empty() {
+            for dir in &stage.directories {
+                if !scope.directories.contains(dir) {
+                    bail!(
+                        "[{}] filter stage directory '{}' is not one of the [{}] source \
+                         directories {:?}",
+                        section, dir, section, scope.directories
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reject engine/options mismatches and the not-yet-implemented liquid engine.
+fn validate_stage_engine_opts(stage: &FilterStage, section: &str) -> Result<()> {
+    match stage.engine {
+        Engine::Substitute => {
+            if stage.liquid.is_some() {
+                bail!(
+                    "[{}] the `liquid` options table is not valid for the substitute engine",
+                    section
+                );
+            }
+        }
+        Engine::Liquid => {
+            if stage.substitute.is_some() {
+                bail!(
+                    "[{}] the `substitute` options table is not valid for the liquid engine",
+                    section
+                );
+            }
+            bail!(
+                "[{}] the 'liquid' filtering engine is not implemented yet; \
+                 use engine = \"substitute\"",
+                section
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Enforce restrictions that apply exclusively to BOM projects.
@@ -3203,5 +3433,112 @@ foo = "bar"
             err.contains("unknown field") || err.contains("weird-unknown-section"),
             "expected top-level unknown section rejection, got: {err}"
         );
+    }
+
+    // -- resource filtering ---------------------------------------------------
+
+    const APP: &str = "[application]\nname = \"x\"\nversion = \"1.0\"\n";
+
+    #[test]
+    fn resources_absent_means_disabled() {
+        let d = load_str(APP).unwrap();
+        assert!(!d.resources.section_present);
+        assert!(!d.resources.is_active());
+        assert!(!d.test_resources.is_active());
+    }
+
+    #[test]
+    fn single_substitute_stage_parses() {
+        let toml = format!(
+            "{APP}\n[[resources.filter]]\nengine = \"substitute\"\nincludes = [\"**/*.properties\"]\n"
+        );
+        let d = load_str(&toml).unwrap();
+        assert!(d.resources.is_active());
+        assert_eq!(d.resources.filter.len(), 1);
+        assert_eq!(d.resources.filter[0].engine, Engine::Substitute);
+        assert_eq!(d.resources.filter[0].includes, vec!["**/*.properties"]);
+    }
+
+    #[test]
+    fn substitute_opts_nested_under_engine() {
+        let toml = format!(
+            "{APP}\n[[resources.filter]]\nengine = \"substitute\"\n\
+             [resources.filter.substitute]\ndelimiter = {{ begin = \"${{\", end = \"}}\" }}\n\
+             failOnUnresolved = false\n"
+        );
+        let d = load_str(&toml).unwrap();
+        let opts = d.resources.filter[0].substitute.as_ref().unwrap();
+        assert_eq!(opts.delimiter.begin_token(), "${");
+        assert_eq!(opts.delimiter.end_token(), "}");
+        assert!(!opts.fail_on_unresolved);
+    }
+
+    #[test]
+    fn directories_parse() {
+        let toml = format!("{APP}\n[resources]\ndirectories = [\"src/main/resources\", \"src/main/config\"]\n");
+        let d = load_str(&toml).unwrap();
+        assert_eq!(d.resources.directories, vec!["src/main/resources", "src/main/config"]);
+        assert!(d.resources.is_active()); // custom directories activate the scope
+    }
+
+    #[test]
+    fn test_resources_section_independent_of_resources() {
+        let toml = format!(
+            "{APP}\n[[test-resources.filter]]\nengine = \"substitute\"\nincludes = [\"**/test.properties\"]\n"
+        );
+        let d = load_str(&toml).unwrap();
+        assert!(!d.resources.is_active());
+        assert!(d.test_resources.is_active());
+        assert_eq!(d.test_resources.filter.len(), 1);
+    }
+
+    #[test]
+    fn liquid_stage_errors_not_implemented() {
+        let toml = format!("{APP}\n[[resources.filter]]\nengine = \"liquid\"\n");
+        let err = load_str(&toml).unwrap_err().to_string();
+        assert!(err.contains("not implemented yet"), "got: {err}");
+    }
+
+    #[test]
+    fn substitute_table_rejected_for_liquid() {
+        let toml = format!(
+            "{APP}\n[[resources.filter]]\nengine = \"liquid\"\n[resources.filter.substitute]\nfailOnUnresolved = true\n"
+        );
+        let err = load_str(&toml).unwrap_err().to_string();
+        assert!(err.contains("not valid for the liquid engine"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_engine_value_rejected() {
+        let toml = format!("{APP}\n[[resources.filter]]\nengine = \"mustache\"\n");
+        let err = load_str(&toml).unwrap_err().to_string();
+        assert!(
+            err.contains("unknown variant") || err.contains("mustache"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn deny_unknown_fields_rejects_typo_in_stage() {
+        let toml = format!("{APP}\n[[resources.filter]]\nengine = \"substitute\"\ninclude = [\"x\"]\n");
+        let err = load_str(&toml).unwrap_err().to_string();
+        assert!(err.contains("unknown field"), "got: {err}");
+    }
+
+    #[test]
+    fn stage_directory_not_in_scope_directories_rejected() {
+        let toml = format!(
+            "{APP}\n[resources]\ndirectories = [\"src/main/resources\"]\n\
+             [[resources.filter]]\nengine = \"substitute\"\ndirectories = [\"src/main/other\"]\n"
+        );
+        let err = load_str(&toml).unwrap_err().to_string();
+        assert!(err.contains("is not one of the [resources] source directories"), "got: {err}");
+    }
+
+    #[test]
+    fn bom_rejects_resources() {
+        let toml = "[bom]\nname = \"x\"\nversion = \"1.0\"\ngroupId = \"g\"\n[resources]\ndirectories = [\"r\"]\n";
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("BOM projects must not declare [resources]"), "got: {err}");
     }
 }

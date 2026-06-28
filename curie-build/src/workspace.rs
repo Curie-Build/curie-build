@@ -271,6 +271,14 @@ fn test_one_member(
     ));
     let compiled = compile::compile(&m.path, &m.descriptor, offline, extra_cp)?;
     let enable_coverage = cli_coverage || m.descriptor.test.coverage_enabled();
+    let target_dir = compiled.classes_dir.parent().unwrap_or(&m.path);
+    let (eff_main, eff_test) = crate::resources::effective_test_dirs(
+        &m.path,
+        &m.descriptor,
+        compiled.resources_dir.as_deref(),
+        compiled.test_resources_dir.as_deref(),
+        target_dir,
+    )?;
     test::run_tests(
         &m.path,
         &m.descriptor,
@@ -278,8 +286,8 @@ fn test_one_member(
         &compiled.dep_jars,
         &compiled.kotlin_stdlib_jars,
         &compiled.groovy_jars,
-        compiled.resources_dir.as_deref(),
-        compiled.test_resources_dir.as_deref(),
+        eff_main.as_deref(),
+        eff_test.as_deref(),
         filter,
         offline,
         enable_coverage,

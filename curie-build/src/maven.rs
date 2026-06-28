@@ -13,7 +13,7 @@
 //!   the "don't clobber a hand-written pom.xml" safety check.
 
 use crate::compile::{flat_package_src_dirs, flat_package_test_dirs};
-use crate::descriptor::{self, Descriptor, DependencyValue, Relocation};
+use crate::descriptor::{self, Descriptor, DependencyValue, Relocation, Resources};
 use crate::incremental::walk_files;
 use crate::workspace;
 use anyhow::{Context, Result};
@@ -68,6 +68,7 @@ pub mod plugin_versions {
     pub const BUILD_HELPER: &str = "3.6.0";
     pub const GMAVENPLUS: &str = "4.2.0";
     pub const JACOCO: &str = "0.8.13";
+    pub const RESOURCES: &str = "3.3.1";
     /// The ascopes protobuf-maven-plugin wrapper version (not the protoc
     /// version, which comes from `[plugin.protobuf].version` in Curie.toml).
     pub const PROTOBUF_MAVEN: &str = "5.1.2";
@@ -378,6 +379,39 @@ pub struct MavenProject {
     /// `<modules>` entries for a `[workspace]` aggregator POM; empty for
     /// `[application]`/`[library]`/`[bom]` projects.
     pub modules: Vec<String>,
+    /// Resource filtering derived from `[resources]`/`[test-resources]`.  When
+    /// inactive, the default single-directory resource blocks are written.
+    pub resource_filtering: ResourceFiltering,
+}
+
+/// Maven-side resource filtering derived from curie's `[resources]` /
+/// `[test-resources]` scopes.  Only the faithfully-representable subset (one
+/// `substitute` stage per scope) reaches here; richer pipelines are rejected
+/// upstream by [`ensure_maven_representable`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceFiltering {
+    /// When `false`, the writer falls back to the legacy single-`<directory>`
+    /// resource blocks (preserving existing behavior for unfiltered projects).
+    pub active: bool,
+    /// `<build><resources>` entries (one per source directory).
+    pub main: Vec<MavenResourceEntry>,
+    /// `<build><testResources>` entries.
+    pub test: Vec<MavenResourceEntry>,
+    /// `<build><filters>` — external `.properties` files (union of both scopes).
+    pub filters: Vec<String>,
+    /// The custom maven-resources-plugin delimiter (`@`, or `begin*end`), or
+    /// `None` when curie uses Maven's native `${}` (no plugin override needed).
+    pub delimiter: Option<String>,
+}
+
+/// One `<resource>`/`<testResource>` block: a source directory, whether
+/// `<filtering>` is on, and any include/exclude patterns.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MavenResourceEntry {
+    pub directory: String,
+    pub filtering: bool,
+    pub includes: Vec<String>,
+    pub excludes: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -479,18 +513,29 @@ pub fn build_project(
     plugins.extend(build_source_generator_plugins(desc)?);
     plugins.extend(build_helper_plugins(&layout));
 
+    // Resource filtering: validate the pipeline is Maven-representable, emit the
+    // resources-plugin delimiter override, and merge scope properties into the
+    // POM's shared <properties>.
+    let resource_filtering = build_resource_filtering(desc, &layout)?;
+    if let Some(plugin) = build_resources_plugin(&resource_filtering) {
+        plugins.push(plugin);
+    }
+    let mut properties = default_properties(desc);
+    properties.extend(merge_resource_properties(desc)?);
+
     Ok(MavenProject {
         group_id: desc.group_id().unwrap_or(GENERATED_GROUP_ID).to_string(),
         artifact_id: desc.buildable_name().to_string(),
         version: desc.buildable_version().to_string(),
         packaging: "jar".to_string(),
-        properties: default_properties(desc),
+        properties,
         dependencies,
         managed_dependencies: build_managed_dependencies(desc, pinned)?,
         repositories: build_repositories(desc),
         layout,
         plugins,
         modules: Vec::new(),
+        resource_filtering,
     })
 }
 
@@ -1376,6 +1421,28 @@ fn build_jar_plugin(main_class: Option<&str>, populate_libs: bool) -> MavenPlugi
     }
 }
 
+/// `maven-resources-plugin` configured for curie's custom `@..@` delimiter:
+/// `<delimiters><delimiter>@</delimiter></delimiters>` plus
+/// `<useDefaultDelimiters>false</useDefaultDelimiters>` so a Maven build of the
+/// synced POM substitutes byte-identically.  `None` when curie uses Maven's
+/// native `${}` (no override needed).
+fn build_resources_plugin(filtering: &ResourceFiltering) -> Option<MavenPlugin> {
+    let delimiter = filtering.delimiter.as_ref()?;
+    let config = vec![
+        XmlNode::element(
+            "delimiters",
+            vec![XmlNode::text("delimiter", delimiter.clone())],
+        ),
+        XmlNode::text("useDefaultDelimiters", "false".to_string()),
+    ];
+    Some(MavenPlugin {
+        artifact_id: "maven-resources-plugin".to_string(),
+        version: plugin_versions::RESOURCES.to_string(),
+        configuration: config,
+        ..Default::default()
+    })
+}
+
 /// `<execution>` entries for `maven-dependency-plugin`: `properties`
 /// (defines `${groupId:artifactId:jar}` properties for the `-javaagent:`
 /// paths in [`surefire_arg_line`]) and/or `copy-dependencies` (populates
@@ -1772,10 +1839,12 @@ fn write_build(w: &mut XmlWriter<'_>, project: &MavenProject) -> Result<()> {
         .first()
         .filter(|r| r.as_path() != Path::new("src/test/java"));
 
+    let filtering = &project.resource_filtering;
     let has_build_content = source_directory.is_some()
         || test_source_directory.is_some()
         || layout.resources.is_some()
         || layout.test_resources.is_some()
+        || filtering.active
         || !project.plugins.is_empty();
 
     if !has_build_content {
@@ -1789,11 +1858,221 @@ fn write_build(w: &mut XmlWriter<'_>, project: &MavenProject) -> Result<()> {
     if let Some(dir) = test_source_directory {
         text_elem(w, "testSourceDirectory", &path_to_maven(dir))?;
     }
-    write_resource_block(w, "resources", "resource", layout.resources.as_deref())?;
-    write_resource_block(w, "testResources", "testResource", layout.test_resources.as_deref())?;
+    if filtering.active {
+        write_filtered_resources(w, "resources", "resource", &filtering.main)?;
+        write_filtered_resources(w, "testResources", "testResource", &filtering.test)?;
+        write_filters(w, &filtering.filters)?;
+    } else {
+        write_resource_block(w, "resources", "resource", layout.resources.as_deref())?;
+        write_resource_block(w, "testResources", "testResource", layout.test_resources.as_deref())?;
+    }
     write_plugins(w, &project.plugins)?;
     w.write_event(Event::End(BytesEnd::new("build")))?;
     Ok(())
+}
+
+/// Write `<resources>`/`<testResources>` from the filtering model: one block
+/// per entry, with `<filtering>` and any `<includes>`/`<excludes>`.
+fn write_filtered_resources(
+    w: &mut XmlWriter<'_>,
+    outer: &str,
+    inner: &str,
+    entries: &[MavenResourceEntry],
+) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    w.write_event(Event::Start(BytesStart::new(outer)))?;
+    for entry in entries {
+        write_one_filtered_resource(w, inner, entry)?;
+    }
+    w.write_event(Event::End(BytesEnd::new(outer)))?;
+    Ok(())
+}
+
+fn write_one_filtered_resource(
+    w: &mut XmlWriter<'_>,
+    inner: &str,
+    entry: &MavenResourceEntry,
+) -> Result<()> {
+    w.write_event(Event::Start(BytesStart::new(inner)))?;
+    text_elem(w, "directory", &entry.directory)?;
+    if entry.filtering {
+        text_elem(w, "filtering", "true")?;
+    }
+    write_pattern_list(w, "includes", "include", &entry.includes)?;
+    write_pattern_list(w, "excludes", "exclude", &entry.excludes)?;
+    w.write_event(Event::End(BytesEnd::new(inner)))?;
+    Ok(())
+}
+
+fn write_pattern_list(
+    w: &mut XmlWriter<'_>,
+    outer: &str,
+    inner: &str,
+    patterns: &[String],
+) -> Result<()> {
+    if patterns.is_empty() {
+        return Ok(());
+    }
+    w.write_event(Event::Start(BytesStart::new(outer)))?;
+    for pattern in patterns {
+        text_elem(w, inner, pattern)?;
+    }
+    w.write_event(Event::End(BytesEnd::new(outer)))?;
+    Ok(())
+}
+
+/// Write `<filters><filter>path</filter>...</filters>` (external property files).
+fn write_filters(w: &mut XmlWriter<'_>, filters: &[String]) -> Result<()> {
+    write_pattern_list(w, "filters", "filter", filters)
+}
+
+/// Build the Maven resource-filtering model from both scopes, rejecting any
+/// pipeline Maven can't faithfully reproduce.  Returns an inactive value when
+/// neither scope is active (legacy single-directory blocks are written).
+fn build_resource_filtering(desc: &Descriptor, layout: &MavenLayout) -> Result<ResourceFiltering> {
+    ensure_maven_representable(&desc.resources, "resources")?;
+    ensure_maven_representable(&desc.test_resources, "test-resources")?;
+
+    if !desc.resources.is_active() && !desc.test_resources.is_active() {
+        return Ok(ResourceFiltering::default());
+    }
+
+    let main = scope_resource_entries(&desc.resources, layout.resources.as_deref());
+    let test = scope_resource_entries(&desc.test_resources, layout.test_resources.as_deref());
+    let delimiter = resolve_maven_delimiter(desc)?;
+    let filters = merge_filter_files(desc);
+
+    Ok(ResourceFiltering { active: true, main, test, filters, delimiter })
+}
+
+/// A scope reaches Maven faithfully only with at most one `substitute` stage.
+/// Multiple chained stages or a `liquid` stage have no maven-resources-plugin
+/// equivalent, so syncing them would emit a misleading POM — hard-error instead.
+fn ensure_maven_representable(scope: &Resources, label: &str) -> Result<()> {
+    if scope.filter.len() > 1 {
+        anyhow::bail!(
+            "curie maven sync supports a single `substitute` filter stage per scope; \
+             [{}] has {} stages — Maven cannot reproduce a chained pipeline. \
+             Remove stages or skip maven sync for this project.",
+            label,
+            scope.filter.len()
+        );
+    }
+    if let Some(stage) = scope.filter.first() {
+        if stage.engine != crate::descriptor::Engine::Substitute {
+            anyhow::bail!(
+                "curie maven sync supports only the `substitute` filter engine; \
+                 [{}] uses the `{}` engine — Maven has no equivalent.",
+                label,
+                stage.engine_name()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// One `<resource>` entry per source directory: filtering is on for directories
+/// the (single) stage covers; includes/excludes come from that stage.
+fn scope_resource_entries(scope: &Resources, auto: Option<&Path>) -> Vec<MavenResourceEntry> {
+    let directories = scope_directories(scope, auto);
+    let stage = scope.filter.first();
+    directories
+        .into_iter()
+        .map(|directory| {
+            let filtering = stage.map(|s| stage_covers_dir(s, &directory)).unwrap_or(false);
+            let (includes, excludes) = match (filtering, stage) {
+                (true, Some(s)) => (s.includes.clone(), s.excludes.clone()),
+                _ => (Vec::new(), Vec::new()),
+            };
+            MavenResourceEntry { directory, filtering, includes, excludes }
+        })
+        .collect()
+}
+
+/// The scope's source directories (maven-relative strings): its configured
+/// `directories`, or the auto-discovered default as a single entry.
+fn scope_directories(scope: &Resources, auto: Option<&Path>) -> Vec<String> {
+    if !scope.directories.is_empty() {
+        return scope.directories.clone();
+    }
+    auto.map(|p| vec![path_to_maven(p)]).into_iter().flatten().collect()
+}
+
+/// Whether a stage filters files from `directory` (no `directories` restriction
+/// ⇒ all; otherwise only the listed roots).
+fn stage_covers_dir(stage: &crate::descriptor::FilterStage, directory: &str) -> bool {
+    stage.directories.is_empty() || stage.directories.iter().any(|d| d == directory)
+}
+
+/// Resolve the single maven-resources-plugin delimiter both active scopes must
+/// agree on (Maven's config is POM-global).  `None` ⇒ Maven's native `${}`.
+fn resolve_maven_delimiter(desc: &Descriptor) -> Result<Option<String>> {
+    let mut found: Option<Option<String>> = None;
+    for scope in [&desc.resources, &desc.test_resources] {
+        if let Some(stage) = scope.filter.first() {
+            let opts = stage.substitute.clone().unwrap_or_default();
+            let delim = maven_delimiter_spec(opts.delimiter.begin_token(), opts.delimiter.end_token());
+            match &found {
+                Some(prev) if prev != &delim => anyhow::bail!(
+                    "curie maven sync: [resources] and [test-resources] use different \
+                     substitution delimiters, but Maven's resources plugin is configured \
+                     POM-wide — make them match or skip maven sync."
+                ),
+                _ => found = Some(delim),
+            }
+        }
+    }
+    Ok(found.flatten())
+}
+
+/// Maven delimiter spec for a begin/end token pair, or `None` when the pair is
+/// Maven's native `${`/`}` (which needs no `<delimiters>` override).
+fn maven_delimiter_spec(begin: &str, end: &str) -> Option<String> {
+    if begin == "${" && end == "}" {
+        return None;
+    }
+    if begin == end {
+        Some(begin.to_string())
+    } else {
+        Some(format!("{}*{}", begin, end))
+    }
+}
+
+/// Union of both scopes' `filterFiles`, in order, de-duplicated.
+fn merge_filter_files(desc: &Descriptor) -> Vec<String> {
+    let mut out = Vec::new();
+    for scope in [&desc.resources, &desc.test_resources] {
+        for file in &scope.filter_files {
+            if !out.contains(file) {
+                out.push(file.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Inline `[resources.properties]` + `[test-resources.properties]` merged for
+/// the POM's `<properties>`.  Maven shares one property set across main and
+/// test, so a key bound to different values in the two scopes is a hard error.
+fn merge_resource_properties(desc: &Descriptor) -> Result<Vec<(String, String)>> {
+    let mut merged: BTreeMap<String, String> = BTreeMap::new();
+    for scope in [&desc.resources, &desc.test_resources] {
+        for (key, value) in &scope.properties {
+            if let Some(existing) = merged.get(key) {
+                if existing != value {
+                    anyhow::bail!(
+                        "curie maven sync: property '{}' has different values in [resources] \
+                         and [test-resources], but Maven shares one <properties> set across both.",
+                        key
+                    );
+                }
+            }
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(merged.into_iter().collect())
 }
 
 /// Writes `<resources><resource><directory>dir</directory></resource></resources>`
@@ -2428,6 +2707,8 @@ mod tests {
             plugins: BTreeMap::new(),
             maven: MavenConfig::default(),
             modules: ModulesConfig::default(),
+            resources: Resources::default(),
+            test_resources: Resources::default(),
         }
     }
 
@@ -2844,6 +3125,106 @@ mod tests {
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<resources>"));
         assert!(xml.contains("<directory>src/main/resources</directory>"));
+    }
+
+    // -- resource filtering -------------------------------------------------------
+
+    fn substitute_stage_for(includes: &[&str], directories: &[&str]) -> crate::descriptor::FilterStage {
+        crate::descriptor::FilterStage {
+            engine: crate::descriptor::Engine::Substitute,
+            directories: directories.iter().map(|s| s.to_string()).collect(),
+            includes: includes.iter().map(|s| s.to_string()).collect(),
+            excludes: vec![],
+            substitute: None,
+            liquid: None,
+        }
+    }
+
+    #[test]
+    fn pom_emits_filtering_and_at_delimiter_for_single_substitute_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        write_file(dir.path(), "src/main/resources/app.properties", "v=@project.version@");
+
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.resources.section_present = true;
+        desc.resources.filter = vec![substitute_stage_for(&["**/*.properties"], &[])];
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(xml.contains("<filtering>true</filtering>"), "got: {xml}");
+        assert!(xml.contains("<include>**/*.properties</include>"), "got: {xml}");
+        assert!(xml.contains("maven-resources-plugin"), "got: {xml}");
+        assert!(xml.contains("<delimiter>@</delimiter>"), "got: {xml}");
+        assert!(xml.contains("<useDefaultDelimiters>false</useDefaultDelimiters>"), "got: {xml}");
+    }
+
+    #[test]
+    fn pom_emits_resources_and_testresources_per_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.resources.section_present = true;
+        desc.resources.directories = vec!["src/main/resources".into(), "src/main/config".into()];
+        desc.test_resources.section_present = true;
+        desc.test_resources.directories = vec!["src/test/resources".into()];
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(xml.contains("<directory>src/main/resources</directory>"), "got: {xml}");
+        assert!(xml.contains("<directory>src/main/config</directory>"), "got: {xml}");
+        assert!(xml.contains("<testResources>"), "got: {xml}");
+        assert!(xml.contains("<directory>src/test/resources</directory>"), "got: {xml}");
+        // Pure merge (no filter stages) → no filtering flag.
+        assert!(!xml.contains("<filtering>true</filtering>"), "got: {xml}");
+    }
+
+    #[test]
+    fn maven_sync_errors_on_multiple_stages_in_either_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.test_resources.section_present = true;
+        desc.test_resources.filter = vec![
+            substitute_stage_for(&["**/a"], &[]),
+            substitute_stage_for(&["**/b"], &[]),
+        ];
+        let err = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("single `substitute` filter stage"), "got: {err}");
+        assert!(err.contains("test-resources"), "got: {err}");
+    }
+
+    #[test]
+    fn maven_sync_errors_on_liquid_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.resources.section_present = true;
+        let mut stage = substitute_stage_for(&[], &[]);
+        stage.engine = crate::descriptor::Engine::Liquid;
+        desc.resources.filter = vec![stage];
+        let err = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("substitute"), "got: {err}");
+    }
+
+    #[test]
+    fn pom_emits_properties_and_filters_from_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.resources.section_present = true;
+        desc.resources.filter = vec![substitute_stage_for(&["**/*.properties"], &[])];
+        desc.resources.properties.insert("api.url".into(), "https://x".into());
+        desc.resources.filter_files = vec!["build.properties".into()];
+
+        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(xml.contains("<api.url>https://x</api.url>"), "got: {xml}");
+        assert!(xml.contains("<filter>build.properties</filter>"), "got: {xml}");
     }
 
     // -- annotation processors / compiler plugin ---------------------------------

@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Resource filtering · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/installation.html">Installation</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/resources.html">Resource filtering</a></li>
+      <li><a href="/docs/plugins.html">Plugins</a></li>
+      <li><a href="/docs/plugin-authoring.html">Plugin authoring</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
+      <li><a href="/docs/maven.html">Maven sync</a></li>
+
+      <li><span class="nav-group">Reference</span></li>
+      <li><a href="/docs/reference.html">TOML reference</a></li>
+      <li><a href="/docs/troubleshooting.html">Troubleshooting</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · resources</span>
+    <h1>Resource filtering</h1>
+    <p class="lede">Curie copies resources verbatim by default — the zero-copy fast path. Opt in to <strong>filtering</strong> to substitute build-time values (project version, git commit, declared properties, environment) into text resources. It is the modern, collision-safe replacement for Maven's <code>maven-resources-plugin</code> <code>&lt;filtering&gt;</code>.</p>
+
+    <h2>Why not just copy Maven</h2>
+    <p>Maven's filtering has three footguns curie deliberately avoids:</p>
+    <ul>
+      <li><strong>Global <code>${}</code> delimiter</strong> mangles Spring placeholders, shell/conf interpolation, and JS template literals that live in the same files. Curie defaults to <code>@var@</code>, which is rare in real payloads.</li>
+      <li><strong>Silent binary corruption</strong> — Maven can substitute inside images and archives. Curie is binary-safe by extension list <em>and</em> content sniffing.</li>
+      <li><strong>Silent <code>${unset}</code> shipping to prod</strong> — an unresolved placeholder leaks through. Curie fails the build by default.</li>
+    </ul>
+
+    <h2>Two independent scopes</h2>
+    <p>Production and test resources are configured separately by two sections of the same shape — <code>[resources]</code> and <code>[test-resources]</code>. Each has its own source directories, filter stages, and variables, so you can filter test fixtures differently from (or without) filtering production resources. A scope is <em>active</em> when it declares filter stages or custom source directories; otherwise that scope keeps the verbatim copy path.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[resources]</span>
+directories = [<span class="str">"src/main/resources"</span>, <span class="str">"src/main/config"</span>]  <span class="com"># merged; later wins on collision</span>
+properties = { <span class="str">"api.url"</span> = <span class="str">"https://api.example.com"</span> }   <span class="com"># scope variables</span>
+filterFiles = [<span class="str">"build.properties"</span>]                       <span class="com"># external vars (.properties)</span>
+nonFilteredExtensions = [<span class="str">"bin"</span>]                           <span class="com"># extra binary types</span>
+
+<span class="com"># Stage 1: @var@ substitution, only over config files from one root.</span>
+<span class="kw">[[resources.filter]]</span>
+engine = <span class="str">"substitute"</span>
+directories = [<span class="str">"src/main/config"</span>]                        <span class="com"># optional: a subset of the roots above</span>
+includes = [<span class="str">"**/*.properties"</span>, <span class="str">"**/*.yml"</span>, <span class="str">"**/*.xml"</span>]
+excludes = [<span class="str">"**/secret.*"</span>]
+<span class="kw">[resources.filter.substitute]</span>                             <span class="com"># engine-specific options</span>
+delimiter = { begin = <span class="str">"@"</span>, end = <span class="str">"@"</span> }
+failOnUnresolved = <span class="kw">true</span>
+
+<span class="com"># Test resources: independent — own dirs, own (or no) filtering.</span>
+<span class="kw">[test-resources]</span>
+directories = [<span class="str">"src/test/resources"</span>]
+<span class="kw">[[test-resources.filter]]</span>
+engine = <span class="str">"substitute"</span>
+includes = [<span class="str">"**/test.properties"</span>]</pre>
+    </div>
+
+    <h2>The stage pipeline</h2>
+    <p>Within a scope, filtering is an <strong>ordered list of stages</strong> (<code>[[resources.filter]]</code>). Each stage picks an engine, the files it applies to (include/exclude globs), an optional subset of origin directories, and that engine's own nested options. Stages run in declaration order and <strong>chain on the same file</strong> — a file matched by two stages is rendered by the first, then its output feeds the second. A file matched by no stage is copied verbatim.</p>
+    <ul>
+      <li><strong>includes / excludes</strong> — ant-style globs (<code>**</code> crosses <code>/</code>, <code>*</code> stays within a segment, <code>?</code> one char). Empty <code>includes</code> means every non-binary file; <code>excludes</code> win over <code>includes</code>.</li>
+      <li><strong>directories</strong> — restrict a stage to files originating from a subset of the scope's source roots. Must be a subset of the scope's <code>directories</code>. Empty means all roots.</li>
+    </ul>
+
+    <h2>Pluggable engines</h2>
+    <p>The per-file text transform sits behind a trait, so new mechanisms drop in without touching discovery, the dir walk, binary safety, or incremental tracking.</p>
+    <ul>
+      <li><strong><code>substitute</code></strong> (v1) — fast, dependency-free <code>@var@</code> replacement. Maven-syncable.</li>
+      <li><strong><code>liquid</code></strong> (roadmap) — richer <a href="https://crates.io/crates/liquid" target="_blank" rel="noopener">Liquid</a> templating (<code>{{ project.version }}</code>, <code>{% if %}</code>, filters). It uses its own <code>{{ }}</code>/<code>{% %}</code> syntax, so it has no delimiter knob, and has no maven-resources-plugin equivalent. Setting <code>engine = "liquid"</code> today is a clear "not implemented yet" error — the seam is proven without the dependency.</li>
+    </ul>
+
+    <h2>Delimiter &amp; escaping</h2>
+    <p>The default delimiter is <code>@var@</code>. The scanner finds the begin token, then the next end token; the trimmed inner slice is the variable name. A <strong>doubled begin token</strong> escapes to a literal (<code>@@</code> → <code>@</code>) and does not start a placeholder. Configure <code>${}</code> with <code>delimiter = { begin = "${", end = "}" }</code> when you actually want Maven-style syntax.</p>
+
+    <h2>Variables &amp; precedence</h2>
+    <p>Each scope gets a flat variable map: a shared base plus the scope's own variables. Precedence, low → high (later wins):</p>
+    <ol>
+      <li><code>project.*</code> — <code>name</code>, <code>version</code>, <code>groupId</code>, <code>artifactId</code></li>
+      <li><code>git.*</code> — <code>git.commit.id</code> (requires a git repo; referencing it outside one errors clearly)</li>
+      <li>the scope's <code>filterFiles</code> <code>.properties</code>, in listed order</li>
+      <li>the scope's inline <code>[…&#8203;.properties]</code></li>
+      <li><code>env.*</code> — any environment variable, resolved on reference</li>
+    </ol>
+    <p><code>project.*</code>/<code>git.*</code>/<code>env.*</code> are identical for both scopes; <code>properties</code>/<code>filterFiles</code> are scope-local, so main and test can bind the same key differently. An unresolved <code>@var@</code> is a hard build error naming the file and token, unless that stage sets <code>failOnUnresolved = false</code> (then the placeholder passes through verbatim).</p>
+
+    <h2>Binary safety</h2>
+    <p>Two layers prevent corruption. First, a built-in extension allowlist (images, archives, fonts, class files, media, keystores…) plus your <code>nonFilteredExtensions</code> marks files as binary and copies them byte-for-byte. Second, any file with a NUL byte in its first ~8&nbsp;KB (or invalid UTF-8) is treated as binary regardless of extension. Binary files bypass every stage.</p>
+
+    <h2>The processed-dir swap</h2>
+    <p>When a scope is active, curie materializes a merged/filtered output directory under <code>target/</code> (<code>target/resources</code>, <code>target/test-resources</code>) and rebinds every downstream consumer — the JAR, fat JAR, <code>run</code>, <code>test</code>, and <code>dev</code> — to read it instead of the raw sources. <code>run</code> and <code>dev</code> see identical values. Source JARs deliberately stay on the raw sources (they ship unfiltered originals).</p>
+
+    <h2>Incremental behavior</h2>
+    <p>Re-filtering is driven by a value <strong>fingerprint</strong> hashed over every resolved variable, every stage's config, the resolved source-root list, and filter-file mtimes — plus a standard source-mtime check. So a version bump in <code>Curie.toml</code> re-filters even though no resource file was touched, and the JAR repackage cascades naturally off the rewritten output's mtimes. An unchanged build stays zero-work.</p>
+
+    <h2>Maven sync fidelity</h2>
+    <p><code>curie maven sync</code> maps a scope cleanly only when its pipeline is <strong>one <code>substitute</code> stage</strong> (the common case): it emits <code>&lt;resources&gt;</code>/<code>&lt;testResources&gt;</code> per directory with <code>&lt;filtering&gt;</code>, the includes/excludes, a <code>maven-resources-plugin</code> <code>&lt;delimiter&gt;</code> override (so a Maven build substitutes byte-identically), and the scope properties/filters. Multiple source directories map fine — Maven supports multiple <code>&lt;resource&gt;</code> entries.</p>
+    <p>For anything Maven cannot faithfully reproduce — a <code>liquid</code> stage, or multiple chained stages in <em>either</em> scope — <code>curie maven sync</code> <strong>fails with a hard error</strong> naming the offending scope, rather than emitting a misleading POM that would ship differently-filtered resources. Silent metadata loss is exactly the divergence sync exists to prevent.</p>
+
+    <h2>Example</h2>
+    <p>See <code>examples/resource-filtering-demo/</code>: two merged source directories, a stage scoped to one of them, a binary file copied untouched, and an independent <code>[test-resources]</code> scope filtering a test fixture.</p>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>
