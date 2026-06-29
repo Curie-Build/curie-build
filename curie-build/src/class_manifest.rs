@@ -142,6 +142,23 @@ pub fn delete_classes(classes_dir: &Path, relative: &[String]) -> Result<usize> 
     Ok(removed)
 }
 
+/// True if any class file recorded in `manifest` is absent from `classes_dir`
+/// (uses the same `classes_dir.join(rel)` convention as [`delete_classes`]).
+///
+/// Forces a recompile when the compiled output is incomplete — an interrupted
+/// build, an externally deleted class, or a failed partial build can leave a
+/// classes dir that still holds *some* `.class` files but is missing others
+/// (e.g. the main class).  The mtime / `NoClassFiles` check only notices a
+/// *completely* empty classes dir, so without this a partially-populated dir is
+/// wrongly reported "up to date" and never repaired short of `curie clean`.
+pub fn has_missing_classes(manifest: &Manifest, classes_dir: &Path) -> bool {
+    manifest
+        .sources
+        .values()
+        .flatten()
+        .any(|rel| !classes_dir.join(rel).exists())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +304,49 @@ mod tests {
     }
 
     // -- delete_classes -----------------------------------------------------
+
+    // -- has_missing_classes ------------------------------------------------
+
+    /// Create `classes_dir/<rel>` (with parents) for each relative class path.
+    fn touch_classes(classes_dir: &Path, relative: &[&str]) {
+        for rel in relative {
+            let p = classes_dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"\xca\xfe\xba\xbe").unwrap();
+        }
+    }
+
+    #[test]
+    fn has_missing_classes_false_when_all_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let classes = dir.path().join("classes");
+        let manifest = manifest_with(&[
+            ("/a/Foo.java", &["com/Foo.class", "com/Foo$Inner.class"]),
+            ("/a/Bar.java", &["com/Bar.class"]),
+        ]);
+        touch_classes(&classes, &["com/Foo.class", "com/Foo$Inner.class", "com/Bar.class"]);
+        assert!(!has_missing_classes(&manifest, &classes));
+    }
+
+    #[test]
+    fn has_missing_classes_true_when_one_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let classes = dir.path().join("classes");
+        let manifest = manifest_with(&[
+            ("/a/Main.java", &["com/Main.class"]),
+            ("/a/Animal.java", &["com/Animal.class"]),
+        ]);
+        // Main.class lost (e.g. interrupted/partial build); sibling survives.
+        touch_classes(&classes, &["com/Animal.class"]);
+        assert!(has_missing_classes(&manifest, &classes));
+    }
+
+    #[test]
+    fn has_missing_classes_false_for_empty_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let classes = dir.path().join("classes");
+        assert!(!has_missing_classes(&Manifest::default(), &classes));
+    }
 
     #[test]
     fn delete_classes_removes_existing_skips_missing() {

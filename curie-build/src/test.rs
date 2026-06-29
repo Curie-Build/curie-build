@@ -328,6 +328,13 @@ pub fn run_tests(
         CompileStatus::StaleClasses
     } else if test_source_set_changed {
         CompileStatus::SourceSetChanged
+    } else if old_test_manifest
+        .as_ref()
+        .is_some_and(|m| crate::class_manifest::has_missing_classes(m, &test_classes_dir))
+    {
+        // A recorded test class vanished from target/test-classes — recompile to
+        // regenerate it rather than reporting the incomplete output up to date.
+        CompileStatus::MissingClasses
     } else {
         needs_recompile(
             &all_test_sources,

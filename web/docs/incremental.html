@@ -75,7 +75,7 @@
   <main class="prose">
     <span class="eyebrow">Subsystem · incremental</span>
     <h1>Incremental builds</h1>
-    <p class="lede">Curie's rebuild gate is precise — a missed recompile (false negative) is always worse than a stray one (false positive), and the design is biased accordingly. Three independent checks work together; the compiler runs when any of them fires.</p>
+    <p class="lede">Curie's rebuild gate is precise — a missed recompile (false negative) is always worse than a stray one (false positive), and the design is biased accordingly. Several independent checks work together; the compiler runs when any of them fires.</p>
 
     <h2>Decision flow</h2>
     <p>For each build step the checks run in this order. The first one that fires determines the rebuild reason; subsequent ones are not consulted.</p>
@@ -83,6 +83,7 @@
     <ol>
       <li><strong>Stale-class pre-prune</strong> — deleted sources have their old class files removed before the compiler runs (<code>StaleClasses</code>).</li>
       <li><strong>Source-set stamp</strong> — the saved set of source paths is compared to the current one. Any difference (addition <em>or</em> deletion) forces a recompile even when mtimes don't reflect it (<code>SourceSetChanged</code>).</li>
+      <li><strong>Output completeness</strong> — every class recorded in the source→class manifest is checked against disk; if one is missing (interrupted build, deleted output, failed partial build) the compiler reruns to regenerate it (<code>MissingClasses</code>).</li>
       <li><strong>JDK fingerprint</strong> — the stored <code>javac -version</code> string is compared to the current one. A JDK upgrade forces a full recompile regardless of source mtimes (<code>JdkChanged</code>).</li>
       <li><strong>mtime check</strong> — any source file or <code>Curie.toml</code> with a modification time ≥ the oldest <code>.class</code> file triggers a recompile (<code>SourceChanged</code> or <code>TomlChanged</code>).</li>
     </ol>
@@ -103,6 +104,9 @@
 
     <h2>JDK fingerprint</h2>
     <p>Curie records the output of <code>javac -version</code> in <code>target/.javac-version</code> after every successful build. The next build compares the stored string against the current one; any difference — even a patch-level JDK upgrade — forces a full recompile regardless of source mtimes.</p>
+
+    <h2>Output completeness</h2>
+    <p>The mtime check only treats a <em>completely empty</em> <code>target/classes</code> as needing a rebuild (<code>NoClassFiles</code>). A directory that still holds some class files but is missing others — an interrupted compile, a class deleted out from under the build, or a failed parallel build — would otherwise read as "up to date", and the gap stays invisible until packaging fails to find the main class. Curie closes it by checking every class recorded in the <code>target/.classes.toml</code> manifest (and <code>target/.test-classes.toml</code> for tests): if any recorded <code>.class</code> file is absent from disk, the compiler reruns to regenerate it (<code>MissingClasses</code>). The check only runs on the path that would otherwise report up-to-date, so a genuine no-op rebuild stays fast.</p>
 
     <h2 id="stale">Stale-class detection</h2>
     <p>The checks above decide <em>whether</em> to recompile. Stale-class detection decides <em>what stays on disk</em> before and after the compiler runs. The mechanism differs by language because Java and Kotlin emit metadata differently.</p>

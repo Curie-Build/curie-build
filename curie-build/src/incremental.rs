@@ -303,6 +303,10 @@ pub(crate) enum CompileStatus {
     TomlChanged,
     /// Stale `.class` files were found (sources deleted since last compile).
     StaleClasses,
+    /// A class file recorded in the per-build manifest is missing from the
+    /// output dir, so the compiled output is incomplete (interrupted build,
+    /// externally deleted class, or a failed partial build).
+    MissingClasses,
     /// The JDK version used to compile has changed since the last build.
     JdkChanged,
     /// All outputs are up to date — no recompile needed.
@@ -323,6 +327,7 @@ impl CompileStatus {
             CompileStatus::DependencyChanged => "dependency changed",
             CompileStatus::TomlChanged => "Curie.toml changed",
             CompileStatus::StaleClasses => "stale classes removed",
+            CompileStatus::MissingClasses => "missing class files",
             CompileStatus::JdkChanged => "JDK version changed",
             CompileStatus::UpToDate => "up to date",
         }
@@ -1092,6 +1097,12 @@ mod tests {
     fn compile_status_source_set_changed_reason_and_needs_recompile() {
         assert_eq!(CompileStatus::SourceSetChanged.reason(), "source set changed");
         assert!(CompileStatus::SourceSetChanged.needs_recompile());
+    }
+
+    #[test]
+    fn compile_status_missing_classes_reason_and_needs_recompile() {
+        assert_eq!(CompileStatus::MissingClasses.reason(), "missing class files");
+        assert!(CompileStatus::MissingClasses.needs_recompile());
     }
 
     // -- atomic staging helpers ----------------------------------------------

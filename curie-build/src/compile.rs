@@ -764,6 +764,15 @@ pub fn compile(
         CompileStatus::StaleClasses
     } else if source_set_changed {
         CompileStatus::SourceSetChanged
+    } else if old_manifest
+        .as_ref()
+        .is_some_and(|m| crate::class_manifest::has_missing_classes(m, &classes_dir))
+    {
+        // A class recorded in the manifest vanished from target/classes (partial
+        // build, interrupted compile, externally deleted, or a failed parallel
+        // build).  The mtime check would otherwise report "up to date" and never
+        // regenerate it — leaving e.g. the main class missing.
+        CompileStatus::MissingClasses
     } else {
         needs_recompile(&sources, &classes_dir, &toml_path, &output_dir, &[])
     };
