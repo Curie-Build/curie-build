@@ -40,28 +40,18 @@ pub fn filter_fat_jar_deps(
 ) -> Vec<PathBuf> {
     let shade_all = desc.fat_jar.shade_all;
 
-    // Artifact prefixes of direct deps that should NOT be shaded.
-    let excluded_prefixes: Vec<String> = desc
+    // Direct deps that must not be shaded — match JARs by artifact-version stem
+    // (or m2 layout), not a bare artifact-name prefix (bug #23).
+    let excluded: Vec<(&str, &str)> = desc
         .dependencies
         .iter()
         .filter(|(_, v)| !v.should_shade(shade_all))
-        .map(|(k, _)| {
-            // key is "group:artifact", extract artifact for filename matching
-            let artifact = k.split(':').nth(1).unwrap_or(k);
-            artifact.to_string()
-        })
+        .map(|(k, v)| (k.as_str(), v.version()))
         .collect();
 
     dep_jars
         .iter()
-        .filter(|jar| {
-            let fname = jar
-                .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_default();
-            // Keep the JAR unless its filename matches an excluded direct-dep prefix.
-            !excluded_prefixes.iter().any(|prefix| fname.starts_with(prefix))
-        })
+        .filter(|jar| !excluded.iter().any(|(coord, ver)| jar_matches_direct_dep(jar, coord, ver)))
         .cloned()
         .collect()
 }
@@ -88,12 +78,7 @@ pub fn check_per_dep_relocation_overlap(
             continue;
         }
 
-        // Artifact prefix for this declaring direct dep (used to identify "our" JARs)
-        let own_prefix = coord
-            .split(':')
-            .nth(1)
-            .unwrap_or(coord)
-            .to_string();
+        let version = v.version();
 
         for reloc in relocs {
             let internal_from = reloc.from.replace('.', "/");
@@ -102,15 +87,15 @@ pub fn check_per_dep_relocation_overlap(
             }
 
             for jar in fat_dep_jars {
+                // Skip JARs that belong to the declaring direct dep itself.
+                if jar_matches_direct_dep(jar, coord, version) {
+                    continue;
+                }
+
                 let fname = jar
                     .file_name()
                     .map(|f| f.to_string_lossy().to_string())
                     .unwrap_or_default();
-
-                // Skip JARs that belong to the same direct dep (by the coarse prefix)
-                if fname.starts_with(&own_prefix) {
-                    continue;
-                }
 
                 if jar_contains_prefix(jar, &internal_from) {
                     anyhow::bail!(
@@ -125,6 +110,91 @@ pub fn check_per_dep_relocation_overlap(
         }
     }
     Ok(())
+}
+
+/// True if `fname` is the Maven file name for `artifact` at `version`:
+/// `artifact-version.jar` or `artifact-version-<classifier>.jar`.
+///
+/// Deliberately does **not** treat `json-path-0.9.jar` as belonging to
+/// artifact `json` (bug #23 used a bare `starts_with(artifact)` prefix).
+fn jar_file_matches_artifact_version(fname: &str, artifact: &str, version: &str) -> bool {
+    if artifact.is_empty() || version.is_empty() {
+        return false;
+    }
+    let stem = format!("{artifact}-{version}");
+    if fname == format!("{stem}.jar") {
+        return true;
+    }
+    fname
+        .strip_prefix(&format!("{stem}-"))
+        .is_some_and(|rest| rest.ends_with(".jar") && rest.len() > ".jar".len())
+}
+
+/// Whether `jar` is the resolved file for direct dependency `group:artifact`
+/// at `version` (`""` when BOM-managed).
+fn jar_matches_direct_dep(jar: &Path, coord: &str, version: &str) -> bool {
+    let artifact = coord.split(':').nth(1).unwrap_or(coord);
+    let fname = jar
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    if jar_file_matches_artifact_version(&fname, artifact, version) {
+        // When the path encodes a Maven groupId, require it matches so two
+        // groups publishing the same artifact:version are not conflated.
+        if let Some((group, _)) = coord.split_once(':') {
+            if let Some(path_group) = m2_group_id_from_path(jar) {
+                return path_group == group;
+            }
+        }
+        return true;
+    }
+
+    // BOM / unknown version: fall back to local-repository layout
+    // `…/repository/<group…>/<artifact>/<version>/<file>`.
+    m2_path_matches_coord(jar, coord)
+}
+
+/// Dotted groupId from a `…/repository/…` JAR path, if the layout matches.
+fn m2_group_id_from_path(path: &Path) -> Option<String> {
+    let segs = path_segments(path);
+    let repo_idx = segs.iter().rposition(|s| s == "repository")?;
+    let group_start = repo_idx + 1;
+    let group_end = segs.len().checked_sub(3)?; // exclude artifact / version / file
+    if group_end <= group_start {
+        return None;
+    }
+    Some(segs[group_start..group_end].join("."))
+}
+
+/// True when `jar` sits at `…/repository/<group…>/<artifact>/<ver>/<file>` for `coord`.
+fn m2_path_matches_coord(jar: &Path, coord: &str) -> bool {
+    let Some((group, artifact)) = coord.split_once(':') else {
+        return false;
+    };
+    let segs = path_segments(jar);
+    let Some(repo_idx) = segs.iter().rposition(|s| s == "repository") else {
+        return false;
+    };
+    let group_start = repo_idx + 1;
+    let Some(group_end) = segs.len().checked_sub(3) else {
+        return false;
+    };
+    if group_end <= group_start {
+        return false;
+    }
+    let path_group = segs[group_start..group_end].join(".");
+    let path_artifact = segs[group_end].as_str();
+    path_group == group && path_artifact == artifact
+}
+
+fn path_segments(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Return true if the given JAR (opened as a zip) contains any entry whose
@@ -1806,6 +1876,124 @@ mod tests {
         assert!(filtered.contains(&PathBuf::from("/m2/included-lib-1.0.jar")));
         assert!(filtered.contains(&PathBuf::from("/m2/transitive-1.0.jar")));
         assert!(!filtered.contains(&PathBuf::from("/m2/excluded-lib-1.0.jar")));
+    }
+
+    /// Regression for bug #23: excluding `com.example:json` must not drop
+    /// `json-path-*.jar` / `json-smart-*.jar` just because they share a prefix.
+    #[test]
+    fn filter_does_not_exclude_jars_with_longer_artifact_prefix() {
+        use std::collections::BTreeMap;
+        use crate::descriptor::*;
+
+        let mut deps = BTreeMap::new();
+        deps.insert(
+            "com.example:json".to_string(),
+            DependencyValue::Detailed(DependencyDetailed {
+                version: "1.0".to_string(),
+                repository: None,
+                java_agent: false,
+                exclusions: vec![],
+                shade: Some(false),
+                relocations: vec![],
+                allow_version_conflict: false,
+            }),
+        );
+
+        let desc = Descriptor {
+            kind: DescriptorKind::Application(Application {
+                name: "test".to_string(),
+                version: "1.0".to_string(),
+                group_id: None,
+                main_class: None,
+            }),
+            java: Java::default(),
+            test: Test::default(),
+            kotlin: Kotlin::default(),
+            groovy: Groovy::default(),
+            spock: Spock::default(),
+            native_image: NativeImage::default(),
+            docker: Docker::default(),
+            build_info: BuildInfo::default(),
+            fat_jar: FatJar {
+                enabled: true,
+                shade_all: true,
+                ..FatJar::default()
+            },
+            dependencies: deps,
+            test_dependencies: BTreeMap::new(),
+            repositories: vec![],
+            bom_imports: BTreeMap::new(),
+            test_bom_imports: BTreeMap::new(),
+            inherited_bom_imports: BTreeMap::new(),
+            inherited_test_bom_imports: BTreeMap::new(),
+            workspace_dependencies: BTreeMap::new(),
+            annotation_processors: BTreeMap::new(),
+            test_annotation_processors: BTreeMap::new(),
+            inherited_annotation_processors: BTreeMap::new(),
+            inherited_test_annotation_processors: BTreeMap::new(),
+            annotation_processor_options: BTreeMap::new(),
+            test_annotation_processor_options: BTreeMap::new(),
+            inherited_annotation_processor_options: BTreeMap::new(),
+            inherited_test_annotation_processor_options: BTreeMap::new(),
+            publish: PublishConfig::default(),
+            plugins: BTreeMap::new(),
+            maven: MavenConfig::default(),
+            modules: crate::descriptor::ModulesConfig::default(),
+            resources: crate::descriptor::Resources::default(),
+            test_resources: crate::descriptor::Resources::default(),
+        };
+
+        let all_jars = vec![
+            PathBuf::from("/m2/json-1.0.jar"),
+            PathBuf::from("/m2/json-path-0.9.jar"),
+            PathBuf::from("/m2/json-smart-2.4.jar"),
+            PathBuf::from("/m2/json-1.0-tests.jar"), // classifier of excluded dep
+        ];
+
+        let filtered = filter_fat_jar_deps(&all_jars, &desc);
+        assert!(
+            !filtered.iter().any(|p| p.ends_with("json-1.0.jar")),
+            "exact excluded artifact-version must be dropped"
+        );
+        assert!(
+            !filtered.iter().any(|p| p.ends_with("json-1.0-tests.jar")),
+            "classifier JAR of excluded dep must be dropped"
+        );
+        assert!(
+            filtered.iter().any(|p| p.ends_with("json-path-0.9.jar")),
+            "json-path must not be treated as artifact json"
+        );
+        assert!(
+            filtered.iter().any(|p| p.ends_with("json-smart-2.4.jar")),
+            "json-smart must not be treated as artifact json"
+        );
+    }
+
+    #[test]
+    fn jar_file_matches_artifact_version_boundaries() {
+        assert!(jar_file_matches_artifact_version("json-1.0.jar", "json", "1.0"));
+        assert!(jar_file_matches_artifact_version("json-1.0-tests.jar", "json", "1.0"));
+        assert!(!jar_file_matches_artifact_version("json-path-0.9.jar", "json", "1.0"));
+        assert!(!jar_file_matches_artifact_version("json-1.0.jar", "json", "2.0"));
+        assert!(!jar_file_matches_artifact_version("json-1.0.jar", "json", ""));
+    }
+
+    #[test]
+    fn jar_matches_direct_dep_via_m2_layout_when_version_empty() {
+        let jar = PathBuf::from(
+            "/home/u/.m2/repository/com/example/json/1.0/json-1.0.jar",
+        );
+        assert!(jar_matches_direct_dep(&jar, "com.example:json", ""));
+        assert!(!jar_matches_direct_dep(
+            &jar,
+            "com.example:json-path",
+            ""
+        ));
+        let other = PathBuf::from(
+            "/home/u/.m2/repository/com/example/json-path/0.9/json-path-0.9.jar",
+        );
+        assert!(!jar_matches_direct_dep(&other, "com.example:json", ""));
+        assert!(jar_matches_direct_dep(&other, "com.example:json-path", ""));
     }
 
     // --- test helpers --------------------------------------------------------
