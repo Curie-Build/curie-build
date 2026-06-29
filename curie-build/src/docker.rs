@@ -214,19 +214,18 @@ fn build_with_generated_dockerfile(
         .to_string();
 
     // Copy dependency JARs into target/libs/ (skip up-to-date files).
+    // Use the same disambiguated names as jar::populate_libs_dir / MANIFEST
+    // Class-Path so colliding bare filenames (same artifact+version, different
+    // group) do not overwrite each other (bug #38).
     if !dep_jars.is_empty() {
         let libs_dir = target_dir.join("libs");
         std::fs::create_dir_all(&libs_dir).context("failed to create target/libs")?;
 
+        let names = crate::jar::libs_entry_names(dep_jars);
         let mut copied = 0usize;
         let mut skipped = 0usize;
-        for dep in dep_jars {
-            let fname = dep
-                .file_name()
-                .context("dep JAR path has no filename")?
-                .to_string_lossy()
-                .to_string();
-            let dest = libs_dir.join(&fname);
+        for (dep, fname) in dep_jars.iter().zip(&names) {
+            let dest = libs_dir.join(fname);
             if mtime(dep) > mtime(&dest) {
                 std::fs::copy(dep, &dest).with_context(|| {
                     format!(
@@ -374,6 +373,24 @@ mod tests {
              COPY myapp-1.0.jar app.jar\n\
              ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"]\n"
         );
+    }
+
+    /// Regression for bug #38: docker must use the same destination names as
+    /// `populate_libs_dir` / MANIFEST Class-Path when bare filenames collide.
+    #[test]
+    fn docker_libs_dest_names_disambiguate_collisions() {
+        use std::path::PathBuf;
+        let jars = vec![
+            PathBuf::from("/home/u/.m2/repository/javax/inject/javax.inject/1/javax.inject-1.jar"),
+            PathBuf::from("/home/u/.m2/repository/com/example/javax.inject/1/javax.inject-1.jar"),
+        ];
+        let names = crate::jar::libs_entry_names(&jars);
+        assert_eq!(names.len(), 2);
+        assert_ne!(names[0], names[1], "colliding deps must not share a libs/ name");
+        assert_eq!(names[0], "javax.inject-javax.inject-1.jar");
+        assert_eq!(names[1], "com.example-javax.inject-1.jar");
+        // Same mapping as jar packaging — docker and Class-Path stay aligned.
+        assert_eq!(names, crate::jar::libs_entry_names(&jars));
     }
 
     #[test]

@@ -58,9 +58,9 @@ fn group_id_from_repo_path(path: &Path) -> Option<String> {
 /// the colliding entries are qualified with their dotted groupId
 /// (`javax.inject-javax.inject-1.jar`), mirroring Maven's `prependGroupId`, so
 /// neither JAR is lost.  Returned names are aligned 1:1 with `dep_jars` and are a
-/// pure function of the slice (so `populate_libs_dir` and the manifest Class-Path
-/// stay in lockstep when given the same input).
-fn libs_entry_names(dep_jars: &[PathBuf]) -> Vec<String> {
+/// pure function of the slice (so `populate_libs_dir`, the manifest Class-Path,
+/// and the docker `target/libs/` copy stay in lockstep when given the same input).
+pub(crate) fn libs_entry_names(dep_jars: &[PathBuf]) -> Vec<String> {
     let bases: Vec<String> = dep_jars
         .iter()
         .map(|p| {
