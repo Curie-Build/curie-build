@@ -188,18 +188,16 @@ pub fn relocate_path(path: &str, relocations: &[Relocation]) -> String {
 /// correctly updating their length prefixes. Both internal form
 /// (`com/google/common`) and dotted form (`com.google.common`) are handled
 /// inside descriptors, signatures, and class names. Excludes are respected.
-pub fn relocate_class_bytes(data: &[u8], relocations: &[Relocation]) -> Vec<u8> {
+///
+/// Returns `Err` when the buffer is not a well-formed classfile, or when a
+/// relocation would make a `CONSTANT_Utf8` entry longer than `u16::MAX` bytes
+/// (the class-file format limit). Callers must fail the fat-JAR build rather
+/// than shipping corrupt or unrelocated bytecode.
+pub fn relocate_class_bytes(data: &[u8], relocations: &[Relocation]) -> Result<Vec<u8>> {
     if relocations.is_empty() || data.len() < 10 {
-        return data.to_vec();
+        return Ok(data.to_vec());
     }
-    match rewrite_class_with_relocations(data, relocations) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            // If the input is not a well-formed classfile we leave it untouched.
-            // Callers (project classes and dep classes) are always real .class data.
-            data.to_vec()
-        }
-    }
+    rewrite_class_with_relocations(data, relocations)
 }
 
 /// Rewrite a classfile buffer, applying package relocations only to UTF-8
@@ -238,7 +236,15 @@ fn rewrite_class_with_relocations(data: &[u8], relocations: &[Relocation]) -> Re
                 let content = &data[i + 2..i + 2 + len];
                 let new_content = apply_relocations_to_utf8_content(content, relocations);
                 let new_len = new_content.len();
-                out.extend_from_slice(&(new_len as u16).to_be_bytes());
+                // JVMS §4.4.7: CONSTANT_Utf8 length is a u16 — never truncate.
+                let new_len_u16 = u16::try_from(new_len).map_err(|_| {
+                    anyhow::anyhow!(
+                        "relocated CONSTANT_Utf8 entry would be {new_len} bytes, \
+                         but the class-file format allows at most {}",
+                        u16::MAX
+                    )
+                })?;
+                out.extend_from_slice(&new_len_u16.to_be_bytes());
                 out.extend_from_slice(&new_content);
                 i += 2 + len;
             }
@@ -657,7 +663,9 @@ pub fn write_fat_jar(
 
             // Apply relocations to class files
             let data = if relocated_name.ends_with(".class") {
-                relocate_class_bytes(&data, relocations)
+                relocate_class_bytes(&data, relocations).with_context(|| {
+                    format!("relocating class entry '{relocated_name}'")
+                })?
             } else {
                 data
             };
@@ -720,7 +728,9 @@ pub fn write_fat_jar(
                     .with_context(|| format!("failed to read {}", fs_path.display()))?;
                 // Apply relocations to project's own class files
                 let data = if zip_path.ends_with(".class") {
-                    relocate_class_bytes(&data, relocations)
+                    relocate_class_bytes(&data, relocations).with_context(|| {
+                        format!("relocating class entry '{zip_path}'")
+                    })?
                 } else {
                     data
                 };
@@ -984,7 +994,7 @@ mod tests {
     #[test]
     fn relocate_class_bytes_no_relocations() {
         let (data, _) = make_minimal_class_with_utf8s(&["com/google/common/Foo"]);
-        let result = relocate_class_bytes(&data, &[]);
+        let result = relocate_class_bytes(&data, &[]).unwrap();
         assert_eq!(result, data);
     }
 
@@ -997,7 +1007,7 @@ mod tests {
             to: "com.example.fatjar.shaded.com.google.common".into(),
             excludes: vec![],
         }];
-        let result = relocate_class_bytes(&data, &relocs);
+        let result = relocate_class_bytes(&data, &relocs).unwrap();
         // Must still be recognized as a classfile and be re-parsable
         assert_eq!(&result[0..4], b"\xCA\xFE\xBA\xBE");
         let new_content = parse_first_utf8_after_bootstrap(&result, indices[0]).expect("utf8 present");
@@ -1017,7 +1027,7 @@ mod tests {
             to: "shaded.com.google.common".into(),
             excludes: vec![],
         }];
-        let result = relocate_class_bytes(&data, &relocs);
+        let result = relocate_class_bytes(&data, &relocs).unwrap();
         let new_content = parse_first_utf8_after_bootstrap(&result, indices[0]).unwrap();
         assert!(std::str::from_utf8(&new_content)
             .unwrap()
@@ -1033,7 +1043,7 @@ mod tests {
             to: "shaded.com.google.common".into(),
             excludes: vec!["com.google.common.annotations.*".into()],
         }];
-        let result = relocate_class_bytes(&data, &relocs);
+        let result = relocate_class_bytes(&data, &relocs).unwrap();
         let new_content = parse_first_utf8_after_bootstrap(&result, indices[0]).unwrap();
         // Should remain unchanged because of the exclude
         assert_eq!(new_content, target.as_bytes());
@@ -1049,11 +1059,63 @@ mod tests {
             to: "shaded.com.google.common".into(),
             excludes: vec![],
         }];
-        let result = relocate_class_bytes(&data, &relocs);
+        let result = relocate_class_bytes(&data, &relocs).unwrap();
         let new_content = parse_first_utf8_after_bootstrap(&result, indices[0]).unwrap();
         assert_eq!(
             std::str::from_utf8(&new_content).unwrap(),
             "shaded.com.google.common.base.Preconditions"
+        );
+    }
+
+    #[test]
+    fn relocate_class_bytes_errors_when_utf8_exceeds_u16_max() {
+        // Use a token that does not appear in bootstrap CP strings
+        // (e.g. "java/lang/Object", "com/example/TestRelocated").
+        let (data, _) = make_minimal_class_with_utf8s(&["Q"]);
+        let to = "Z".repeat(u16::MAX as usize + 1);
+        let relocs = vec![Relocation {
+            from: "Q".into(),
+            to,
+            excludes: vec![],
+        }];
+        let err = relocate_class_bytes(&data, &relocs).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("CONSTANT_Utf8") && msg.contains(&u16::MAX.to_string()),
+            "expected limit error, got: {msg}"
+        );
+        // Must not silently return the original (unrelocated) class bytes.
+        assert!(relocate_class_bytes(&data, &relocs).is_err());
+    }
+
+    #[test]
+    fn relocate_class_bytes_allows_utf8_at_exactly_u16_max() {
+        // Content "Q" (1 byte) → to of length 65535 keeps the entry at the limit.
+        let (data, indices) = make_minimal_class_with_utf8s(&["Q"]);
+        let to = "Z".repeat(u16::MAX as usize);
+        let relocs = vec![Relocation {
+            from: "Q".into(),
+            to: to.clone(),
+            excludes: vec![],
+        }];
+        let result = relocate_class_bytes(&data, &relocs).unwrap();
+        assert_eq!(&result[0..4], b"\xCA\xFE\xBA\xBE");
+        let new_content = parse_first_utf8_after_bootstrap(&result, indices[0]).unwrap();
+        assert_eq!(new_content.len(), u16::MAX as usize);
+        assert_eq!(new_content, to.as_bytes());
+    }
+
+    #[test]
+    fn relocate_class_bytes_rejects_non_classfile() {
+        let err = relocate_class_bytes(b"not-a-classfile!!!!", &[Relocation {
+            from: "a".into(),
+            to: "b".into(),
+            excludes: vec![],
+        }])
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("not a classfile"),
+            "got: {err}"
         );
     }
 
