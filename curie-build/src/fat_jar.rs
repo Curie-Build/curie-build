@@ -426,8 +426,23 @@ fn merge_services(
             };
             let name = entry.name().to_string();
             if name.starts_with("META-INF/services/") && !entry.is_dir() {
-                let mut content = String::new();
-                let _ = entry.read_to_string(&mut content);
+                // Fail closed on I/O or non-UTF-8: partial reads used to be merged
+                // into META-INF/services and corrupt ServiceLoader descriptors (bug #33).
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).with_context(|| {
+                    format!(
+                        "failed to read service descriptor '{}' from {}",
+                        name,
+                        jar_path.display()
+                    )
+                })?;
+                let content = std::str::from_utf8(&bytes).with_context(|| {
+                    format!(
+                        "service descriptor '{}' in {} is not valid UTF-8",
+                        name,
+                        jar_path.display()
+                    )
+                })?;
                 let service_name = &name["META-INF/services/".len()..];
                 let relocated_service = relocate_service_name(service_name, relocations);
                 let providers = services.entry(relocated_service).or_default();
@@ -1207,6 +1222,40 @@ mod tests {
         // Provider class name should be relocated
         let content = merged.get("shaded.com.google.inject.Module").unwrap();
         assert!(content.contains("shaded.com.google.inject.BuiltinModule"));
+    }
+
+    #[test]
+    fn merge_services_errors_on_non_utf8_descriptor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jar = create_test_jar(
+            tmp.path(),
+            "bad-services.jar",
+            &[(
+                "META-INF/services/com.example.Spi",
+                b"com.ok.Provider\n\xff\xfe\n",
+            )],
+        );
+
+        let err = merge_services(&[jar], &[]).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("META-INF/services/com.example.Spi")
+                && (msg.contains("UTF-8") || msg.contains("utf-8")),
+            "expected UTF-8 error naming the entry, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn merge_services_allows_empty_utf8_descriptor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jar = create_test_jar(
+            tmp.path(),
+            "empty-services.jar",
+            &[("META-INF/services/com.example.Empty", b"")],
+        );
+        let merged = merge_services(&[jar], &[]).unwrap();
+        // Empty file yields an empty provider list → one trailing newline entry.
+        assert_eq!(merged.get("com.example.Empty").map(String::as_str), Some("\n"));
     }
 
     // --- write_fat_jar (integration) ----------------------------------------
