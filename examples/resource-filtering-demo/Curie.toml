@@ -33,7 +33,7 @@ engine = "substitute"
 directories = ["src/main/extra-config"]
 includes = ["**/*.properties"]
 [resources.filter.substitute]
-delimiter = { begin = "@", end = "@" }
+delimiter = "@..@"
 failOnUnresolved = true
 
 # Test resources are configured independently of production resources.

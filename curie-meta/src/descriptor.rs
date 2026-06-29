@@ -782,24 +782,38 @@ impl Default for SubstituteOpts {
 #[serde(deny_unknown_fields)]
 pub struct LiquidOpts {}
 
-/// Placeholder delimiter tokens for the substitute engine.  Default `@`/`@`.
-#[derive(Debug, Deserialize, Clone, Default)]
-#[serde(deny_unknown_fields)]
-pub struct Delimiter {
-    #[serde(default)]
-    pub begin: Option<String>,
-    #[serde(default)]
-    pub end: Option<String>,
+/// Placeholder delimiter for the substitute engine, written Maven-style as a
+/// single string where `..` marks the placeholder name: `"@..@"` (the default)
+/// means `@name@`, `"${..}"` means `${name}`.  The text before `..` is the
+/// begin token, the text after is the end token.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(transparent)]
+pub struct Delimiter(pub String);
+
+impl Default for Delimiter {
+    fn default() -> Self {
+        Delimiter("@..@".to_string())
+    }
 }
 
 impl Delimiter {
-    /// Begin token, defaulting to `"@"`.
-    pub fn begin_token(&self) -> &str {
-        self.begin.as_deref().unwrap_or("@")
+    /// Split into `(begin, end)` tokens on the `..` placeholder marker.  When
+    /// the marker is absent (rejected at load time) the whole string is used
+    /// for both, so callers still get something sane.
+    fn parts(&self) -> (&str, &str) {
+        self.0.split_once("..").unwrap_or((&self.0, &self.0))
     }
-    /// End token, defaulting to `"@"`.
+    /// The begin token (text before `..`).
+    pub fn begin_token(&self) -> &str {
+        self.parts().0
+    }
+    /// The end token (text after `..`).
     pub fn end_token(&self) -> &str {
-        self.end.as_deref().unwrap_or("@")
+        self.parts().1
+    }
+    /// Whether the configured string is well-formed (contains the `..` marker).
+    pub fn is_valid(&self) -> bool {
+        self.0.contains("..")
     }
 }
 
@@ -1710,6 +1724,16 @@ fn validate_stage_engine_opts(stage: &FilterStage, section: &str) -> Result<()> 
                     "[{}] the `liquid` options table is not valid for the substitute engine",
                     section
                 );
+            }
+            if let Some(opts) = &stage.substitute {
+                if !opts.delimiter.is_valid() {
+                    bail!(
+                        "[{}] substitute delimiter '{}' must contain the `..` placeholder marker, \
+                         e.g. \"@..@\" or \"${{..}}\"",
+                        section,
+                        opts.delimiter.0
+                    );
+                }
             }
         }
         Engine::Liquid => {
@@ -3463,7 +3487,7 @@ foo = "bar"
     fn substitute_opts_nested_under_engine() {
         let toml = format!(
             "{APP}\n[[resources.filter]]\nengine = \"substitute\"\n\
-             [resources.filter.substitute]\ndelimiter = {{ begin = \"${{\", end = \"}}\" }}\n\
+             [resources.filter.substitute]\ndelimiter = \"${{..}}\"\n\
              failOnUnresolved = false\n"
         );
         let d = load_str(&toml).unwrap();
@@ -3471,6 +3495,16 @@ foo = "bar"
         assert_eq!(opts.delimiter.begin_token(), "${");
         assert_eq!(opts.delimiter.end_token(), "}");
         assert!(!opts.fail_on_unresolved);
+    }
+
+    #[test]
+    fn delimiter_without_marker_rejected() {
+        let toml = format!(
+            "{APP}\n[[resources.filter]]\nengine = \"substitute\"\n\
+             [resources.filter.substitute]\ndelimiter = \"@\"\n"
+        );
+        let err = load_str(&toml).unwrap_err().to_string();
+        assert!(err.contains("placeholder marker"), "got: {err}");
     }
 
     #[test]

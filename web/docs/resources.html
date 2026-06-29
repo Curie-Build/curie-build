@@ -107,7 +107,7 @@ directories = [<span class="str">"src/main/config"</span>]                      
 includes = [<span class="str">"**/*.properties"</span>, <span class="str">"**/*.yml"</span>, <span class="str">"**/*.xml"</span>]
 excludes = [<span class="str">"**/secret.*"</span>]
 <span class="kw">[resources.filter.substitute]</span>                             <span class="com"># engine-specific options</span>
-delimiter = { begin = <span class="str">"@"</span>, end = <span class="str">"@"</span> }
+delimiter = <span class="str">"@..@"</span>
 failOnUnresolved = <span class="kw">true</span>
 
 <span class="com"># Test resources: independent — own dirs, own (or no) filtering.</span>
@@ -133,7 +133,7 @@ includes = [<span class="str">"**/test.properties"</span>]</pre>
     </ul>
 
     <h2>Delimiter &amp; escaping</h2>
-    <p>The default delimiter is <code>@var@</code>. The scanner finds the begin token, then the next end token; the trimmed inner slice is the variable name. A <strong>doubled begin token</strong> escapes to a literal (<code>@@</code> → <code>@</code>) and does not start a placeholder. Configure <code>${}</code> with <code>delimiter = { begin = "${", end = "}" }</code> when you actually want Maven-style syntax.</p>
+    <p>The delimiter is written Maven-style as a single string in which <code>..</code> marks the placeholder name: the default <code>"@..@"</code> means <code>@name@</code>, and <code>"${..}"</code> means <code>${name}</code>. The text before <code>..</code> is the begin token, the text after is the end token. The scanner finds the begin token, then the next end token; the trimmed inner slice is the variable name. A <strong>doubled begin token</strong> escapes to a literal (<code>@@</code> → <code>@</code>) and does not start a placeholder. Set <code>delimiter = "${..}"</code> when you actually want Maven-style <code>${}</code> syntax.</p>
 
     <h2>Variables &amp; precedence</h2>
     <p>Each scope gets a flat variable map: a shared base plus the scope's own variables. Precedence, low → high (later wins):</p>
