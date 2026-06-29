@@ -1,0 +1,8 @@
+# Filtered by the Liquid engine — demonstrates conditionals and filters.
+app:
+  name: {{ project.name }}
+  version: {{ project.version }}
+  environment: {{ app.env }}
+{% if git.commit %}  commit: {{ git.commit.id }}
+{% endif %}  api:
+    url: {{ api.url }}

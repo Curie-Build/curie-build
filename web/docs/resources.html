@@ -128,9 +128,29 @@ includes = [<span class="str">"**/test.properties"</span>]</pre>
     <h2>Pluggable engines</h2>
     <p>The per-file text transform sits behind a trait, so new mechanisms drop in without touching discovery, the dir walk, binary safety, or incremental tracking.</p>
     <ul>
-      <li><strong><code>substitute</code></strong> (v1) — fast, dependency-free <code>@var@</code> replacement. Maven-syncable.</li>
-      <li><strong><code>liquid</code></strong> (roadmap) — richer <a href="https://crates.io/crates/liquid" target="_blank" rel="noopener">Liquid</a> templating (<code>{{ project.version }}</code>, <code>{% if %}</code>, filters). It uses its own <code>{{ }}</code>/<code>{% %}</code> syntax, so it has no delimiter knob, and has no maven-resources-plugin equivalent. Setting <code>engine = "liquid"</code> today is a clear "not implemented yet" error — the seam is proven without the dependency.</li>
+      <li><strong><code>substitute</code></strong> — fast, dependency-free <code>@var@</code> replacement. Maven-syncable.</li>
+      <li><strong><code>liquid</code></strong> — richer <a href="https://crates.io/crates/liquid" target="_blank" rel="noopener">Liquid</a> templating (<code>{{ project.version }}</code>, <code>{% if %}</code>, filters). Uses its own <code>{{ }}</code>/<code>{% %}</code> syntax — no delimiter knob needed. Variables are exposed as nested objects, so <code>project.version</code> is accessed as <code>{{ project.version }}</code>. Environment variables are available under <code>{{ env.VAR_NAME }}</code>. Has no maven-resources-plugin equivalent; <code>curie maven sync</code> rejects liquid stages with a clear error.</li>
     </ul>
+
+    <h3>Liquid engine details</h3>
+    <p>The liquid engine is powered by <a href="https://crates.io/crates/liquid" target="_blank" rel="noopener">liquid-rust</a> and supports the full <a href="https://shopify.github.io/liquid/" target="_blank" rel="noopener">Liquid</a> template language, including:</p>
+    <ul>
+      <li><strong>Variable output:</strong> <code>{{ project.version }}</code>, <code>{{ git.commit.id }}</code></li>
+      <li><strong>Filters:</strong> <code>{{ project.name | upcase }}</code>, <code>{{ value | default: "fallback" }}</code></li>
+      <li><strong>Conditionals:</strong> <code>{% if project.version %}...{% endif %}</code></li>
+      <li><strong>Assignments:</strong> <code>{% assign name = project.name %}</code></li>
+    </ul>
+    <p>Undefined variables are a <strong>hard error</strong> (liquid-rust uses strict mode). This matches the <code>substitute</code> engine's <code>failOnUnresolved = true</code> default — no silent blanks leak into production. Use the <code>default</code> filter (<code>{{ maybe_set | default: "fallback" }}</code>) when a value is genuinely optional.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml — liquid engine</span>
+      </header>
+<pre><span class="kw">[[resources.filter]]</span>
+engine = <span class="str">"liquid"</span>
+includes = [<span class="str">"**/*.yml"</span>, <span class="str">"**/*.properties"</span>]</pre>
+    </div>
 
     <h2>Delimiter &amp; escaping</h2>
     <p>The delimiter is written Maven-style as a single string in which <code>..</code> marks the placeholder name: the default <code>"@..@"</code> means <code>@name@</code>, and <code>"${..}"</code> means <code>${name}</code>. The text before <code>..</code> is the begin token, the text after is the end token. The scanner finds the begin token, then the next end token; the trimmed inner slice is the variable name. A <strong>doubled begin token</strong> escapes to a literal (<code>@@</code> → <code>@</code>) and does not start a placeholder. Set <code>delimiter = "${..}"</code> when you actually want Maven-style <code>${}</code> syntax.</p>
@@ -159,8 +179,11 @@ includes = [<span class="str">"**/test.properties"</span>]</pre>
     <p><code>curie maven sync</code> maps a scope cleanly only when its pipeline is <strong>one <code>substitute</code> stage</strong> (the common case): it emits <code>&lt;resources&gt;</code>/<code>&lt;testResources&gt;</code> per directory with <code>&lt;filtering&gt;</code>, the includes/excludes, a <code>maven-resources-plugin</code> <code>&lt;delimiter&gt;</code> override (so a Maven build substitutes byte-identically), and the scope properties/filters. Multiple source directories map fine — Maven supports multiple <code>&lt;resource&gt;</code> entries.</p>
     <p>For anything Maven cannot faithfully reproduce — a <code>liquid</code> stage, or multiple chained stages in <em>either</em> scope — <code>curie maven sync</code> <strong>fails with a hard error</strong> naming the offending scope, rather than emitting a misleading POM that would ship differently-filtered resources. Silent metadata loss is exactly the divergence sync exists to prevent.</p>
 
-    <h2>Example</h2>
-    <p>See <code>examples/resource-filtering-demo/</code>: two merged source directories, a stage scoped to one of them, a binary file copied untouched, and an independent <code>[test-resources]</code> scope filtering a test fixture.</p>
+    <h2>Examples</h2>
+    <ul>
+      <li><strong><code>examples/resource-filtering-demo/</code></strong> — <code>substitute</code> engine: two merged source directories, a stage scoped to one of them, a binary file copied untouched, and an independent <code>[test-resources]</code> scope filtering a test fixture.</li>
+      <li><strong><code>examples/liquid-filtering-demo/</code></strong> — <code>liquid</code> engine: Liquid templating with conditionals, filters (<code>upcase</code>, <code>downcase</code>), and nested variable access. Shows how the liquid and substitute engines can coexist across different scopes or stages.</li>
+    </ul>
   </main>
 </div>
 

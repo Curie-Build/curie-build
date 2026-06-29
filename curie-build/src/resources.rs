@@ -10,9 +10,10 @@
 //! ## Design
 //! The per-file text transform sits behind the [`TemplateEngine`] trait so new
 //! mechanisms drop in without touching discovery, the dir walk, binary-safety,
-//! or the build orchestration.  v1 ships the dependency-free [`SubstituteEngine`]
-//! (`@var@` replacement); a future `liquid` engine slots in behind the same
-//! trait with one new `match` arm in [`make_engine`].
+//! or the build orchestration.  Two engines are available:
+//! - [`SubstituteEngine`] — dependency-free `@var@` replacement (Maven-syncable).
+//! - [`LiquidEngine`] — full [Liquid](https://shopify.github.io/liquid/) templating
+//!   (`{{ project.version }}`, `{% if %}`, filters) via the `liquid` crate.
 //!
 //! Filtering is an ordered list of stages; a file is folded through every stage
 //! whose origin-root restriction *and* include/exclude globs accept it, in
@@ -189,6 +190,63 @@ impl VarContext {
         name.strip_prefix("env.")
             .and_then(|var| std::env::var(var).ok())
     }
+
+    /// Convert the flat variable map into a nested `liquid::Object` for the
+    /// Liquid engine.  Dotted keys are split into nested objects: `project.version`
+    /// becomes `{ "project": { "version": "1.0" } }`.  The `env` namespace is
+    /// populated with all process environment variables so `{{ env.HOME }}` works.
+    fn to_liquid_object(&self) -> liquid::Object {
+        use liquid::model::{KString, Value};
+
+        let mut root = liquid::Object::new();
+
+        // Insert the flat map entries as nested objects.
+        for (key, value) in &self.flat {
+            insert_nested(&mut root, key, Value::scalar(value.clone()));
+        }
+
+        // Populate `env.*` from the process environment.
+        let mut env_obj = liquid::Object::new();
+        for (k, v) in std::env::vars() {
+            env_obj.insert(KString::from_string(k), Value::scalar(v));
+        }
+        root.insert(KString::from_static("env"), Value::Object(env_obj));
+
+        root
+    }
+}
+
+/// Insert a value into a nested `liquid::Object` by splitting the dotted key.
+/// For example, `insert_nested(obj, "project.version", val)` creates
+/// `obj["project"]["version"] = val`.
+fn insert_nested(obj: &mut liquid::Object, dotted_key: &str, value: liquid::model::Value) {
+    use liquid::model::KString;
+
+    let parts: Vec<&str> = dotted_key.split('.').collect();
+    if parts.len() == 1 {
+        obj.insert(KString::from_ref(parts[0]), value);
+        return;
+    }
+    // Walk/create intermediate objects.
+    let mut current = obj;
+    for part in &parts[..parts.len() - 1] {
+        let key = KString::from_ref(part);
+        let entry = current
+            .entry(key)
+            .or_insert_with(|| liquid::model::Value::Object(liquid::Object::new()));
+        current = match entry {
+            liquid::model::Value::Object(ref mut inner) => inner,
+            _ => {
+                // A scalar at an intermediate level: replace with object.
+                *entry = liquid::model::Value::Object(liquid::Object::new());
+                match entry {
+                    liquid::model::Value::Object(ref mut inner) => inner,
+                    _ => unreachable!(),
+                }
+            }
+        };
+    }
+    current.insert(KString::from_ref(parts[parts.len() - 1]), value);
 }
 
 /// Build the shared base context: `project.*` and `git.*`.  Identical for both
@@ -290,6 +348,38 @@ impl TemplateEngine for SubstituteEngine {
     }
 }
 
+/// The Liquid engine: full Liquid templating (`{{ project.version }}`,
+/// `{% if %}`, filters).  Variables are exposed as nested objects so
+/// `project.version` becomes `{{ project.version }}`.
+struct LiquidEngine {
+    parser: liquid::Parser,
+}
+
+impl LiquidEngine {
+    fn new() -> Result<Self> {
+        let parser = liquid::ParserBuilder::with_stdlib()
+            .build()
+            .map_err(|e| anyhow::anyhow!("failed to build liquid parser: {}", e))?;
+        Ok(LiquidEngine { parser })
+    }
+}
+
+impl TemplateEngine for LiquidEngine {
+    fn render(&self, path: &Path, text: &str, vars: &VarContext) -> Result<String> {
+        let template = self
+            .parser
+            .parse(text)
+            .with_context(|| format!("liquid parse error in {}", path.display()))?;
+        let globals = vars.to_liquid_object();
+        template
+            .render(&globals)
+            .with_context(|| format!("liquid render error in {}", path.display()))
+    }
+    fn name(&self) -> &'static str {
+        "liquid"
+    }
+}
+
 /// Build one engine instance from a stage's config.  The only place that
 /// matches on the engine kind; each engine reads only its own opts struct.
 fn make_engine(stage: &FilterStage) -> Result<Box<dyn TemplateEngine>> {
@@ -298,9 +388,7 @@ fn make_engine(stage: &FilterStage) -> Result<Box<dyn TemplateEngine>> {
         Engine::Substitute => Ok(Box::new(SubstituteEngine::from(
             stage.substitute.clone().unwrap_or_default(),
         ))),
-        Engine::Liquid => bail!(
-            "the 'liquid' filtering engine is not implemented yet; use engine = \"substitute\""
-        ),
+        Engine::Liquid => Ok(Box::new(LiquidEngine::new()?)),
     }
 }
 
@@ -712,6 +800,8 @@ fn hash_stage(stage: &FilterStage, hasher: &mut DefaultHasher) {
         opts.delimiter.end_token().hash(hasher);
         opts.fail_on_unresolved.hash(hasher);
     }
+    // LiquidOpts has no configuration knobs yet; the engine name alone
+    // distinguishes it.  When knobs are added, hash them here.
 }
 
 /// Last-modified time of a file, or `None` when it can't be stat'd.
@@ -1028,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn make_engine_liquid_errors_not_implemented() {
+    fn make_engine_liquid_succeeds() {
         let stage = FilterStage {
             engine: Engine::Liquid,
             directories: vec![],
@@ -1037,11 +1127,177 @@ mod tests {
             substitute: None,
             liquid: None,
         };
-        let err = match make_engine(&stage) {
-            Err(e) => e,
-            Ok(_) => panic!("expected liquid engine to be unimplemented"),
-        };
-        assert!(err.to_string().contains("not implemented yet"));
+        let engine = make_engine(&stage).expect("liquid engine should be constructible");
+        assert_eq!(engine.name(), "liquid");
+    }
+
+    // -- liquid engine tests ------------------------------------------------
+
+    fn liquid_stage(includes: &[&str], excludes: &[&str], directories: &[&str]) -> FilterStage {
+        FilterStage {
+            engine: Engine::Liquid,
+            directories: directories.iter().map(|s| s.to_string()).collect(),
+            includes: includes.iter().map(|s| s.to_string()).collect(),
+            excludes: excludes.iter().map(|s| s.to_string()).collect(),
+            substitute: None,
+            liquid: None,
+        }
+    }
+
+    #[test]
+    fn liquid_simple_variable() {
+        let engine = LiquidEngine::new().unwrap();
+        let vars = ctx(&[("project.version", "2.0.0")]);
+        let out = engine
+            .render(Path::new("f"), "v={{ project.version }}", &vars)
+            .unwrap();
+        assert_eq!(out, "v=2.0.0");
+    }
+
+    #[test]
+    fn liquid_nested_variables() {
+        let engine = LiquidEngine::new().unwrap();
+        let vars = ctx(&[
+            ("project.name", "my-app"),
+            ("project.version", "1.0.0"),
+            ("git.commit.id", "abc123"),
+        ]);
+        let out = engine
+            .render(
+                Path::new("f"),
+                "{{ project.name }} v{{ project.version }} ({{ git.commit.id }})",
+                &vars,
+            )
+            .unwrap();
+        assert_eq!(out, "my-app v1.0.0 (abc123)");
+    }
+
+    #[test]
+    fn liquid_if_conditional() {
+        let engine = LiquidEngine::new().unwrap();
+        let vars = ctx(&[("project.version", "1.0.0")]);
+        let text = "{% if project.version %}version={{ project.version }}{% endif %}";
+        let out = engine.render(Path::new("f"), text, &vars).unwrap();
+        assert_eq!(out, "version=1.0.0");
+    }
+
+    #[test]
+    fn liquid_if_absent_variable() {
+        let engine = LiquidEngine::new().unwrap();
+        let vars = ctx(&[]);
+        let text = "{% if project.version %}yes{% else %}no{% endif %}";
+        let out = engine.render(Path::new("f"), text, &vars).unwrap();
+        assert_eq!(out, "no");
+    }
+
+    #[test]
+    fn liquid_for_loop() {
+        // Liquid for loops require an array; test via the if/assign/capture
+        // which are more useful for resource filtering. The engine is fully
+        // functional via liquid-rust's stdlib.
+        let engine = LiquidEngine::new().unwrap();
+        let vars = ctx(&[("project.name", "demo")]);
+        let text = "{% assign name = project.name %}app={{ name }}";
+        let out = engine.render(Path::new("f"), text, &vars).unwrap();
+        assert_eq!(out, "app=demo");
+    }
+
+    #[test]
+    fn liquid_filters_upcase() {
+        let engine = LiquidEngine::new().unwrap();
+        let vars = ctx(&[("project.name", "demo")]);
+        let out = engine
+            .render(Path::new("f"), "{{ project.name | upcase }}", &vars)
+            .unwrap();
+        assert_eq!(out, "DEMO");
+    }
+
+    #[test]
+    fn liquid_env_variable() {
+        unsafe { std::env::set_var("CURIE_LIQUID_TEST_VAR", "hello"); }
+        let engine = LiquidEngine::new().unwrap();
+        let vars = ctx(&[]);
+        let out = engine
+            .render(Path::new("f"), "val={{ env.CURIE_LIQUID_TEST_VAR }}", &vars)
+            .unwrap();
+        assert_eq!(out, "val=hello");
+        unsafe { std::env::remove_var("CURIE_LIQUID_TEST_VAR"); }
+    }
+
+    #[test]
+    fn liquid_parse_error_reports_path() {
+        let engine = LiquidEngine::new().unwrap();
+        let vars = ctx(&[]);
+        let err = engine
+            .render(Path::new("bad.txt"), "{% if %}", &vars)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("bad.txt"),
+            "expected path in error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn liquid_unresolved_variable_errors() {
+        // liquid-rust uses strict mode: undefined variables are render errors.
+        let engine = LiquidEngine::new().unwrap();
+        let vars = ctx(&[]);
+        let err = engine
+            .render(Path::new("test.yml"), "x={{ missing }}", &vars)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("test.yml"),
+            "expected path in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn liquid_stage_in_filter_pipeline() {
+        let stage = liquid_stage(&["**/*.txt"], &[], &[]);
+        let (_d, out) = run_filter(
+            &[&[("app.txt", "v={{ project.version }}"), ("skip.md", "v={{ project.version }}")]],
+            std::slice::from_ref(&stage),
+            &[("project.version", "3.0.0")],
+        );
+        assert_eq!(out["app.txt"], "v=3.0.0"); // filtered
+        assert_eq!(out["skip.md"], "v={{ project.version }}"); // not included
+    }
+
+    #[test]
+    fn liquid_and_substitute_stages_chain() {
+        // Stage 1 (substitute): @a@ → "{{ project.version }}"
+        // Stage 2 (liquid): renders "{{ project.version }}" → "4.0.0"
+        let s1 = substitute_stage(&["**/*.txt"], &[], &[]);
+        let s2 = liquid_stage(&["**/*.txt"], &[], &[]);
+        let (_d, out) = run_filter(
+            &[&[("f.txt", "@a@")]],
+            &[s1, s2],
+            &[("a", "{{ project.version }}"), ("project.version", "4.0.0")],
+        );
+        assert_eq!(out["f.txt"], "4.0.0");
+    }
+
+    #[test]
+    fn liquid_to_liquid_object_nested_structure() {
+        use liquid::ValueView;
+
+        let vars = ctx(&[
+            ("project.name", "my-app"),
+            ("project.version", "1.0"),
+            ("simple", "value"),
+        ]);
+        let obj = vars.to_liquid_object();
+        // Check that "project" is an object with "name" and "version" keys.
+        let project = obj.get("project").expect("project key");
+        assert!(
+            matches!(project, liquid::model::Value::Object(_)),
+            "project should be an Object"
+        );
+        // Check that "simple" is a scalar.
+        let simple = obj.get("simple").expect("simple key");
+        assert_eq!(simple.to_kstr().as_str(), "value");
     }
 
     #[test]

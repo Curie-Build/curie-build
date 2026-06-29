@@ -47,6 +47,7 @@ members = [
     "proto-greeter",
     "openapi-greeter",
     "resource-filtering-demo",
+    "liquid-filtering-demo",
 ]
 
 [bom-imports]

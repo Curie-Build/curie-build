@@ -41,6 +41,7 @@ time = { version = "0.3", features = ["local-offset"] }
 terminal_size = "0.4"
 quick-xml = { version = "0.40", features = ["serialize"] }
 tempfile = "3"
+liquid = "0.26"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 inotify = "0.10"

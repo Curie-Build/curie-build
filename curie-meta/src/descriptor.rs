@@ -1715,7 +1715,8 @@ fn validate_resource_scope(scope: &Resources, section: &str) -> Result<()> {
     Ok(())
 }
 
-/// Reject engine/options mismatches and the not-yet-implemented liquid engine.
+/// Reject engine/options mismatches (e.g. a `substitute` opts table under the
+/// `liquid` engine, or vice versa).
 fn validate_stage_engine_opts(stage: &FilterStage, section: &str) -> Result<()> {
     match stage.engine {
         Engine::Substitute => {
@@ -1743,11 +1744,6 @@ fn validate_stage_engine_opts(stage: &FilterStage, section: &str) -> Result<()> 
                     section
                 );
             }
-            bail!(
-                "[{}] the 'liquid' filtering engine is not implemented yet; \
-                 use engine = \"substitute\"",
-                section
-            );
         }
     }
     Ok(())
@@ -3527,10 +3523,11 @@ foo = "bar"
     }
 
     #[test]
-    fn liquid_stage_errors_not_implemented() {
+    fn liquid_stage_parses() {
         let toml = format!("{APP}\n[[resources.filter]]\nengine = \"liquid\"\n");
-        let err = load_str(&toml).unwrap_err().to_string();
-        assert!(err.contains("not implemented yet"), "got: {err}");
+        let d = load_str(&toml).unwrap();
+        assert_eq!(d.resources.filter.len(), 1);
+        assert_eq!(d.resources.filter[0].engine, Engine::Liquid);
     }
 
     #[test]

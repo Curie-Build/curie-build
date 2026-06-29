@@ -1,0 +1,50 @@
+# liquid-filtering-demo
+#
+# Demonstrates curie's Liquid template engine for resource filtering.
+#
+# Unlike the `substitute` engine (which does simple `@var@` replacement),
+# the `liquid` engine gives you full Liquid templating power:
+#   - `{{ project.version }}` variable interpolation
+#   - `{% if %}` / `{% unless %}` conditionals
+#   - `{{ value | upcase }}` filters
+#   - `{% assign %}` / `{% capture %}` local variables
+#
+# This example uses:
+#   * Two source directories that MERGE into one output:
+#       src/main/resources     (kept verbatim)
+#       src/main/config        (filtered via liquid)
+#   * A `liquid` stage scoped to `src/main/config`, so only its `.properties`
+#     and `.yml` files are rendered with Liquid.
+#   * An independent [test-resources] scope using liquid to filter test fixtures.
+
+[application]
+name = "liquid-filtering-demo"
+version = "0.2.0"
+groupId = "com.example"
+mainClass = "com.example.liquid.App"
+
+# The Liquid engine has no maven-resources-plugin equivalent, so a generated
+# pom.xml could not reproduce this build.  The parent examples workspace enables
+# `[maven] sync = true`; override it here to opt this member out of POM sync.
+[maven]
+sync = false
+
+[test-dependencies]
+"org.junit.jupiter:junit-jupiter" = "6.0.3"
+
+[resources]
+directories = ["src/main/resources", "src/main/config"]
+properties = { "api.url" = "https://api.example.com", "app.env" = "production" }
+
+# Filter only the config root's .properties and .yml files with Liquid.
+[[resources.filter]]
+engine = "liquid"
+directories = ["src/main/config"]
+includes = ["**/*.properties", "**/*.yml"]
+
+# Test resources filtered independently with Liquid.
+[test-resources]
+directories = ["src/test/resources"]
+[[test-resources.filter]]
+engine = "liquid"
+includes = ["**/*.properties"]
