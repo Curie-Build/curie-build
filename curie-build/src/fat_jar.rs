@@ -193,11 +193,28 @@ pub fn relocate_path(path: &str, relocations: &[Relocation]) -> String {
 /// relocation would make a `CONSTANT_Utf8` entry longer than `u16::MAX` bytes
 /// (the class-file format limit). Callers must fail the fat-JAR build rather
 /// than shipping corrupt or unrelocated bytecode.
+///
+/// Callers should not invoke this for `module-info.class` (including
+/// multi-release `META-INF/versions/*/module-info.class`); those entries are
+/// copied through unchanged — see [`is_module_info_class_entry`].
 pub fn relocate_class_bytes(data: &[u8], relocations: &[Relocation]) -> Result<Vec<u8>> {
     if relocations.is_empty() || data.len() < 10 {
         return Ok(data.to_vec());
     }
     rewrite_class_with_relocations(data, relocations)
+}
+
+/// True for `module-info.class` and multi-release variants
+/// (`META-INF/versions/9/module-info.class`, …). Fat JARs keep these bytes
+/// as-is: the rewriter only understands a subset of CP tags and must not
+/// fail the build on module descriptors (regression after bug #24).
+fn is_module_info_class_entry(zip_path: &str) -> bool {
+    zip_path == "module-info.class" || zip_path.ends_with("/module-info.class")
+}
+
+/// Whether a ZIP entry should have package relocation applied to its bytecode.
+fn should_relocate_class_bytes(zip_path: &str) -> bool {
+    zip_path.ends_with(".class") && !is_module_info_class_entry(zip_path)
 }
 
 /// Rewrite a classfile buffer, applying package relocations only to UTF-8
@@ -676,8 +693,9 @@ pub fn write_fat_jar(
             let mut data = Vec::new();
             let _ = entry.read_to_end(&mut data);
 
-            // Apply relocations to class files
-            let data = if relocated_name.ends_with(".class") {
+            // Apply package relocations to ordinary class files only — never to
+            // module-info.class (incl. multi-release), which we copy through.
+            let data = if should_relocate_class_bytes(&relocated_name) {
                 relocate_class_bytes(&data, relocations).with_context(|| {
                     format!("relocating class entry '{relocated_name}'")
                 })?
@@ -741,8 +759,8 @@ pub fn write_fat_jar(
             EntrySource::File(fs_path) => {
                 let data = std::fs::read(fs_path)
                     .with_context(|| format!("failed to read {}", fs_path.display()))?;
-                // Apply relocations to project's own class files
-                let data = if zip_path.ends_with(".class") {
+                // Apply package relocations to ordinary class files only.
+                let data = if should_relocate_class_bytes(zip_path) {
                     relocate_class_bytes(&data, relocations).with_context(|| {
                         format!("relocating class entry '{zip_path}'")
                     })?
@@ -1399,6 +1417,83 @@ mod tests {
         assert!(names.contains(&"org/lib/Lib.class".to_string()));
     }
 
+    /// Minimal classfile whose constant pool uses unsupported tag 46 — mirrors
+    /// real multi-release `module-info.class` entries that trip the rewriter
+    /// (see fat-jar-demo regression after bug #24).
+    fn classfile_with_unknown_cp_tag_46() -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&0xCAFEBABEu32.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes()); // minor
+        out.extend_from_slice(&65u16.to_be_bytes()); // major (Java 21)
+        out.extend_from_slice(&2u16.to_be_bytes()); // constant_pool_count
+        out.push(46u8); // unknown tag at slot 1
+        out.extend_from_slice(&[0u8; 16]); // padding so the buffer is non-trivial
+        out
+    }
+
+    /// Regression for examples/fat-jar-demo after bug #24: multi-release
+    /// `META-INF/versions/*/module-info.class` must be kept as-is under
+    /// package relocation, not run through `relocate_class_bytes` (which fails
+    /// on unknown constant-pool tags such as 46).
+    #[test]
+    fn fat_jar_keeps_multi_release_module_info_under_relocations() {
+        let module_info = classfile_with_unknown_cp_tag_46();
+        let relocs = vec![Relocation {
+            from: "com.google.common".into(),
+            to: "shaded.com.google.common".into(),
+            excludes: vec![],
+        }];
+        // Preconditions: the rewriter cannot handle this classfile.
+        let rewrite_err = relocate_class_bytes(&module_info, &relocs).unwrap_err();
+        assert!(
+            rewrite_err.to_string().contains("unknown constant pool tag"),
+            "got: {rewrite_err}"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let classes_dir = tmp.path().join("classes");
+        std::fs::create_dir_all(&classes_dir).unwrap();
+        std::fs::write(classes_dir.join("App.class"), b"\xca\xfe\xba\xbe").unwrap();
+
+        let mr_path = "META-INF/versions/9/module-info.class";
+        let dep_jar = create_test_jar(
+            tmp.path(),
+            "dep.jar",
+            &[
+                (mr_path, module_info.as_slice()),
+                (
+                    "com/google/common/collect/ImmutableList.class",
+                    b"\xca\xfe\xba\xbe",
+                ),
+            ],
+        );
+
+        let fat_path = tmp.path().join("fat.jar");
+        write_fat_jar(
+            &fat_path,
+            &classes_dir,
+            None,
+            None,
+            &[dep_jar],
+            None,
+            &relocs,
+        )
+        .expect("fat JAR must succeed with multi-release module-info under relocations");
+
+        let bytes = std::fs::read(&fat_path).unwrap();
+        let names = zip_entry_names(&bytes);
+        assert!(
+            names.iter().any(|n| n == mr_path),
+            "multi-release module-info must be kept; names={names:?}"
+        );
+        assert_eq!(
+            zip_entry_content_bytes(&bytes, mr_path),
+            module_info,
+            "module-info bytes must be copied through unchanged"
+        );
+        assert!(names.contains(&"shaded/com/google/common/collect/ImmutableList.class".to_string()));
+    }
+
     #[test]
     fn fat_jar_merges_services_with_project() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1747,6 +1842,16 @@ mod tests {
         let mut entry = archive.by_name(name).unwrap();
         let mut content = String::new();
         entry.read_to_string(&mut content).unwrap();
+        content
+    }
+
+    fn zip_entry_content_bytes(bytes: &[u8], name: &str) -> Vec<u8> {
+        use std::io::Cursor;
+        let cursor = Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor).unwrap();
+        let mut entry = archive.by_name(name).unwrap();
+        let mut content = Vec::new();
+        entry.read_to_end(&mut content).unwrap();
         content
     }
 }
