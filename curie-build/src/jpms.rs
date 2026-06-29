@@ -94,8 +94,10 @@ pub struct ModuleSplit {
 /// Serialisable record of one JAR's cached module identity.
 #[derive(Debug, Serialize, Deserialize)]
 struct CachedIdentity {
-    /// `module-info.class` epoch seconds mtime at cache time.
-    mtime_secs: u64,
+    /// JAR mtime in seconds since the Unix epoch at cache time, or `None` when
+    /// mtime could not be determined.  Entries with `None` never produce a
+    /// cache hit — unknown mtime is always treated as stale.
+    mtime_secs: Option<u64>,
     /// One of: `"explicit"`, `"automatic-manifest"`, `"automatic-filename"`,
     /// `"underivable"`.
     kind: String,
@@ -128,16 +130,19 @@ impl ModuleCache {
             .with_context(|| format!("failed to write module cache {}", cache_path.display()))
     }
 
-    fn get(&self, jar_path: &Path, current_mtime: u64) -> Option<ModuleIdentity> {
+    /// Return a cached identity only when both the stored and current mtimes
+    /// are known (`Some`) and equal.  `None` current mtime (stat failure) is
+    /// always a miss so a replaced JAR is re-inspected.
+    fn get(&self, jar_path: &Path, current_mtime: Option<u64>) -> Option<ModuleIdentity> {
         let key = jar_path.to_string_lossy();
         let entry = self.entries.get(key.as_ref())?;
-        if entry.mtime_secs != current_mtime {
-            return None;
+        match (entry.mtime_secs, current_mtime) {
+            (Some(stored), Some(current)) if stored == current => Some(decode_identity(entry)),
+            _ => None,
         }
-        Some(decode_identity(entry))
     }
 
-    fn insert(&mut self, jar_path: &Path, mtime_secs: u64, identity: &ModuleIdentity) {
+    fn insert(&mut self, jar_path: &Path, mtime_secs: Option<u64>, identity: &ModuleIdentity) {
         let (kind, name) = encode_identity(identity);
         let key = jar_path.to_string_lossy().into_owned();
         self.entries.insert(key, CachedIdentity { mtime_secs, kind, name });
@@ -948,18 +953,23 @@ fn resolve_jar_identity(jar: &Path, cache: &mut ModuleCache) -> Result<ModuleIde
         return Ok(cached);
     }
     let identity = read_jar_module_identity(jar)?;
-    cache.insert(jar, mtime_secs, &identity);
+    // Only cache when mtime is known.  Inserting `None` would never hit
+    // usefully, and historically storing 0 for "error" froze stale identities
+    // when subsequent stats also failed (bug #36).
+    if mtime_secs.is_some() {
+        cache.insert(jar, mtime_secs, &identity);
+    }
     Ok(identity)
 }
 
-/// Return the mtime of a JAR as seconds since the Unix epoch, or 0 on error.
-fn jar_mtime_secs(jar: &Path) -> u64 {
+/// Return the JAR mtime as seconds since the Unix epoch, or `None` if it
+/// cannot be determined (missing file, unsupported `modified()`, etc.).
+fn jar_mtime_secs(jar: &Path) -> Option<u64> {
     std::fs::metadata(jar)
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1412,6 +1422,7 @@ mod tests {
         std::fs::write(&jar, b"").unwrap(); // create file so mtime exists
 
         let mtime = jar_mtime_secs(&jar);
+        assert!(mtime.is_some(), "temp file should have an mtime");
         let identity = ModuleIdentity::AutomaticManifest("my.module".to_string());
 
         let mut cache = ModuleCache::default();
@@ -1430,12 +1441,49 @@ mod tests {
         let jar = dir.path().join("lib.jar");
 
         let mut cache = ModuleCache::default();
-        cache.insert(&jar, 100, &ModuleIdentity::Underivable);
+        cache.insert(&jar, Some(100), &ModuleIdentity::Underivable);
         cache.save(&cache_path).unwrap();
 
         let loaded = ModuleCache::load(&cache_path);
         // Different mtime → cache miss.
-        assert!(loaded.get(&jar, 200).is_none());
+        assert!(loaded.get(&jar, Some(200)).is_none());
+    }
+
+    #[test]
+    fn module_cache_miss_when_current_mtime_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("lib.jar");
+
+        let mut cache = ModuleCache::default();
+        cache.insert(&jar, Some(100), &ModuleIdentity::Underivable);
+
+        // Stat failure → None current mtime must never hit, even if an entry exists.
+        assert!(cache.get(&jar, None).is_none());
+    }
+
+    #[test]
+    fn module_cache_miss_when_stored_mtime_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("lib.jar");
+
+        let mut cache = ModuleCache::default();
+        cache.insert(&jar, None, &ModuleIdentity::Underivable);
+
+        // None stored never matches a known current mtime (or another None).
+        assert!(cache.get(&jar, Some(100)).is_none());
+        assert!(cache.get(&jar, None).is_none());
+    }
+
+    #[test]
+    fn module_cache_hit_with_epoch_mtime() {
+        // Some(0) is a real fingerprint (1970-01-01), not an error sentinel.
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("lib.jar");
+
+        let mut cache = ModuleCache::default();
+        let identity = ModuleIdentity::AutomaticFilename("epoch.mod".into());
+        cache.insert(&jar, Some(0), &identity);
+        assert_eq!(cache.get(&jar, Some(0)), Some(identity));
     }
 
     #[test]
@@ -1444,6 +1492,13 @@ mod tests {
         let cache_path = dir.path().join("nonexistent.toml");
         let cache = ModuleCache::load(&cache_path);
         assert!(cache.entries.is_empty());
+    }
+
+    #[test]
+    fn jar_mtime_secs_none_for_missing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.jar");
+        assert_eq!(jar_mtime_secs(&missing), None);
     }
 
     // -----------------------------------------------------------------------
