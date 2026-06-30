@@ -429,7 +429,7 @@ dependencies = [
 
 [[package]]
 name = "curie-build"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "curie-deps"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "curie-meta"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "curie-deps",
@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "curie-plugin"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "serde",

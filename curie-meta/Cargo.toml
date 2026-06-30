@@ -1,6 +1,6 @@
 [package]
 name = "curie-meta"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "Apache-2.0"
 homepage = "https://curie-build.org"
@@ -10,7 +10,7 @@ description = "Programmatic metadata API for Curie projects"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1.2"
 anyhow = "1"
-curie-deps = { version = "0.6.0", path = "../curie-deps" }
+curie-deps = { version = "0.7.0", path = "../curie-deps" }
 
 [dev-dependencies]
 tempfile = "3"
