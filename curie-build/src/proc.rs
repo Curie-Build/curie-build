@@ -5,19 +5,43 @@
 //! per-thread sink is active, and falls back to the plain `Command::status()`
 //! path otherwise.
 //!
+//! [`spawn_cmd_with_stdin`] is the same idea for children that also need a
+//! finite stdin payload (plugin `generate-sources` envelopes): stdout/stderr
+//! still go through the mux when a sink is active (piped capture → line
+//! forwarding, same `LineSink` as the PTY path), while stdin is always a
+//! dedicated pipe with EOF after the payload.
+//!
 //! Call sites in `compile.rs` and `test.rs` swap
 //!   `cmd.status().context("…")?`   →   `proc::spawn_cmd(&mut cmd).context("…")?`
 //! and check `.success()` on the returned [`Status`], which has the same API.
 
 use anyhow::{Context, Result};
-use std::process::Command;
+use std::io::{self, Read, Write};
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::thread;
 
-/// Opaque process-exit wrapper.  Only `.success()` is used by callers.
-pub struct Status(bool);
+/// Opaque process-exit wrapper.
+pub struct Status {
+    success: bool,
+    code: Option<i32>,
+}
 
 impl Status {
     pub fn success(&self) -> bool {
-        self.0
+        self.success
+    }
+
+    /// Process exit code when known (Unix); `None` if terminated by signal etc.
+    pub fn code(&self) -> Option<i32> {
+        self.code
+    }
+}
+
+fn status_from_exit(s: std::process::ExitStatus) -> Status {
+    Status {
+        success: s.success(),
+        code: s.code(),
     }
 }
 
@@ -28,7 +52,127 @@ pub fn spawn_cmd(cmd: &mut Command) -> Result<Status> {
         spawn_pty(cmd, &sink)
     } else {
         let s = cmd.status().context("command failed to start")?;
-        Ok(Status(s.success()))
+        Ok(status_from_exit(s))
+    }
+}
+
+/// Run `cmd` with `stdin_data` written to the child's stdin (then EOF).
+///
+/// - **No sink (sequential):** stdout/stderr inherit the process terminal
+///   (same UX as historical plugin generate-sources).
+/// - **Sink active (parallel / TUI):** stdout and stderr are captured and
+///   forwarded line-by-line to the [`crate::parallel::LineSink`] (same
+///   destination as the PTY path used by [`spawn_cmd`]). Stdin remains a
+///   normal pipe so the child sees EOF after the payload — required for
+///   JSON envelopes; a PTY alone cannot provide that EOF reliably.
+pub fn spawn_cmd_with_stdin(cmd: &mut Command, stdin_data: &[u8]) -> Result<Status> {
+    if let Some(sink) = crate::parallel::try_get_sink() {
+        spawn_with_stdin_captured(cmd, stdin_data, &sink)
+    } else {
+        spawn_with_stdin_inherit(cmd, stdin_data)
+    }
+}
+
+// ── stdin + inherit (sequential) ───────────────────────────────────────────
+
+fn spawn_with_stdin_inherit(cmd: &mut Command, stdin_data: &[u8]) -> Result<Status> {
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    let mut child = cmd.spawn().context("command failed to start")?;
+    let write_th = take_stdin_writer(&mut child, stdin_data);
+
+    let status = child.wait().context("failed to wait for child process")?;
+    let write_res = write_th.join().expect("stdin writer thread panicked");
+    check_write_result_vs_status(write_res, status)?;
+    Ok(status_from_exit(status))
+}
+
+// ── stdin + captured stdout/stderr → LineSink (parallel) ──────────────────
+
+fn spawn_with_stdin_captured(
+    cmd: &mut Command,
+    stdin_data: &[u8],
+    sink: &Arc<dyn crate::parallel::LineSink + Send + Sync>,
+) -> Result<Status> {
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().context("command failed to start")?;
+    let write_th = take_stdin_writer(&mut child, stdin_data);
+
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let stderr = child.stderr.take().expect("stderr was piped");
+    let sink_out = Arc::clone(sink);
+    let sink_err = Arc::clone(sink);
+    let out_th = thread::spawn(move || forward_lines(stdout, &sink_out));
+    let err_th = thread::spawn(move || forward_lines(stderr, &sink_err));
+
+    let status = child.wait().context("failed to wait for child process")?;
+    let write_res = write_th.join().expect("stdin writer thread panicked");
+    let _ = out_th.join();
+    let _ = err_th.join();
+    check_write_result_vs_status(write_res, status)?;
+    Ok(status_from_exit(status))
+}
+
+fn take_stdin_writer(
+    child: &mut std::process::Child,
+    stdin_data: &[u8],
+) -> thread::JoinHandle<io::Result<()>> {
+    let mut stdin = child.stdin.take().expect("stdin was requested as piped");
+    let data = stdin_data.to_vec();
+    thread::spawn(move || {
+        let res = stdin.write_all(&data);
+        drop(stdin); // EOF
+        res
+    })
+}
+
+/// Prefer the child's exit status when it failed (real error is usually on
+/// captured/inherited stderr); only surface stdin write errors if the child
+/// reported success.
+fn check_write_result_vs_status(
+    write_res: io::Result<()>,
+    status: std::process::ExitStatus,
+) -> Result<()> {
+    if let Err(e) = write_res {
+        if status.success() {
+            return Err(e).context("failed to write stdin to child process");
+        }
+        // Child failed; EPIPE on stdin write is expected — report status below.
+    }
+    if !status.success() {
+        anyhow::bail!("command exited with status {:?}", status.code());
+    }
+    Ok(())
+}
+
+fn forward_lines(mut reader: impl Read, sink: &Arc<dyn crate::parallel::LineSink + Send + Sync>) {
+    let mut line_buf = String::new();
+    let mut byte_buf = [0u8; 4096];
+    loop {
+        match reader.read(&mut byte_buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                for ch in String::from_utf8_lossy(&byte_buf[..n]).chars() {
+                    if ch == '\n' {
+                        let line = std::mem::take(&mut line_buf);
+                        let line = line.trim_end_matches('\r').to_string();
+                        if !line.is_empty() {
+                            sink.push_line(line);
+                        }
+                    } else if ch != '\r' {
+                        line_buf.push(ch);
+                    }
+                }
+            }
+        }
+    }
+    if !line_buf.is_empty() {
+        sink.push_line(line_buf);
     }
 }
 
@@ -37,10 +181,9 @@ pub fn spawn_cmd(cmd: &mut Command) -> Result<Status> {
 #[cfg(unix)]
 fn spawn_pty(
     cmd: &mut Command,
-    sink: &std::sync::Arc<dyn crate::parallel::LineSink + Send + Sync>,
+    sink: &Arc<dyn crate::parallel::LineSink + Send + Sync>,
 ) -> Result<Status> {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-    use std::io::Read;
 
     let pty_system = native_pty_system();
     // Report a narrower PTY width so child output doesn't wrap past the edge
@@ -98,34 +241,24 @@ fn spawn_pty(
         .try_clone_reader()
         .context("failed to clone PTY master reader")?;
 
-    let mut line_buf = String::new();
-    let mut byte_buf = [0u8; 4096];
-    loop {
-        match reader.read(&mut byte_buf) {
-            Ok(0) | Err(_) => break, // EOF or EIO (macOS)
-            Ok(n) => {
-                let bytes = &byte_buf[..n];
-                // Split into lines and forward to the mux slot (push_line logs them).
-                for ch in String::from_utf8_lossy(bytes).chars() {
-                    if ch == '\n' {
-                        let line = std::mem::take(&mut line_buf);
-                        let line = line.trim_end_matches('\r').to_string();
-                        if !line.is_empty() {
-                            sink.push_line(line);
-                        }
-                    } else if ch != '\r' {
-                        line_buf.push(ch);
-                    }
-                }
-            }
-        }
-    }
-    if !line_buf.is_empty() {
-        sink.push_line(line_buf);
-    }
+    forward_lines(&mut reader, sink);
 
     let exit = child.wait().context("failed to wait for child process")?;
-    Ok(Status(exit.success()))
+    Ok(Status {
+        success: exit.success(),
+        code: exit_code_from_pty(&exit),
+    })
+}
+
+#[cfg(unix)]
+fn exit_code_from_pty(exit: &portable_pty::ExitStatus) -> Option<i32> {
+    // portable-pty ExitStatus: success() only in older API; try code if available
+    if exit.success() {
+        Some(0)
+    } else {
+        // No stable .code() on all versions — leave unknown on failure
+        None
+    }
 }
 
 // Non-Unix: no PTY support — fall back to normal spawn (sink was set but
@@ -133,10 +266,10 @@ fn spawn_pty(
 #[cfg(not(unix))]
 fn spawn_pty(
     cmd: &mut Command,
-    _sink: &std::sync::Arc<dyn crate::parallel::LineSink + Send + Sync>,
+    _sink: &Arc<dyn crate::parallel::LineSink + Send + Sync>,
 ) -> Result<Status> {
     let s = cmd.status().context("command failed to start")?;
-    Ok(Status(s.success()))
+    Ok(status_from_exit(s))
 }
 
 fn terminal_cols() -> u16 {

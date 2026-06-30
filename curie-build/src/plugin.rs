@@ -8,8 +8,9 @@
 //!
 //! 2. `curie-<name> generate-sources --project <dir> [--offline]`
 //!    stdin:  envelope JSON  (curie_version + config + artifacts map)
-//!    stdout: (not parsed)
-//!    stderr: progress, visible to the user
+//!    stdout / stderr: not parsed; routed through the parallel `LineSink`
+//!    (same destination as javac) when a workspace mux/TUI sink is active,
+//!    otherwise inherited on the process terminal for sequential builds.
 
 use anyhow::{Context, Result};
 use curie_deps::repo::Repository;
@@ -216,23 +217,20 @@ pub fn generate_sources(
     let run_json = serde_json::to_string(&envelope).context("internal: failed to serialize run envelope")?;
 
     let mut cmd = std::process::Command::new(&bin);
-    cmd.args(["generate-sources", "--project"])
-        .arg(project_root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit());
+    cmd.args(["generate-sources", "--project"]).arg(project_root);
     if offline {
         cmd.arg("--offline");
     }
 
-    let (mut child, write_th) = spawn_with_stdin_thread(cmd, run_json.as_bytes())?;
-
-    let status = child
-        .wait()
-        .with_context(|| format!("failed to wait for {bin_name}"))?;
-
-    let write_res = write_th.join().expect("stdin writer thread panicked");
-    check_write_result_vs_status(write_res, status, &bin_name)?;
+    // Stdin = envelope pipe; stdout/stderr → LineSink when parallel, else inherit.
+    let status = crate::proc::spawn_cmd_with_stdin(&mut cmd, run_json.as_bytes())
+        .with_context(|| format!("failed to run {bin_name}"))?;
+    if !status.success() {
+        anyhow::bail!(
+            "{bin_name} exited with status {:?}",
+            status.code()
+        );
+    }
 
     Ok(())
 }
@@ -918,6 +916,10 @@ mod tests {
 
     // ── stdin write thread + error masking fix (bug #14) ──────────────────────
 
+    /// Serializes PATH mutations across plugin subprocess tests (they run in parallel).
+    #[cfg(unix)]
+    static PLUGIN_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[cfg(unix)]
     fn make_fake_plugin_script(dir: &Path, name: &str, script_body: &str) -> Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
@@ -929,6 +931,23 @@ mod tests {
         Ok(path)
     }
 
+    /// Prepend `dir` to PATH for the duration of `f`, restoring afterward.
+    #[cfg(unix)]
+    fn with_path_prepended<R>(dir: &Path, f: impl FnOnce() -> R) -> R {
+        let _guard = PLUGIN_PATH_LOCK.lock().unwrap();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.display(), old_path);
+        // SAFETY: serialized by PLUGIN_PATH_LOCK; restored before unlock.
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
+        let result = f();
+        unsafe {
+            std::env::set_var("PATH", old_path);
+        }
+        result
+    }
+
     #[test]
     #[cfg(unix)]
     fn fetch_manifest_large_envelope_no_deadlock_and_parses() {
@@ -938,12 +957,7 @@ mod tests {
 cat >/dev/null
 echo '{"name":"dummy","description":"test","version":"0.0.0","types":[],"inputs":{"dirs":[],"files":[]},"outputs":{"source_dirs":[]},"artifacts":[]}'
 "#;
-        let script_path = make_fake_plugin_script(tmp.path(), "curie-dummy", script).unwrap();
-
-        // Prepend script dir to PATH for this test only.
-        let old_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", tmp.path().display(), old_path);
-        std::env::set_var("PATH", &new_path);
+        let _ = make_fake_plugin_script(tmp.path(), "curie-dummy", script).unwrap();
 
         // Large envelope (>64KiB) that would previously risk deadlock with blocking write_all.
         let big = "x".repeat(128 * 1024);
@@ -952,8 +966,7 @@ echo '{"name":"dummy","description":"test","version":"0.0.0","types":[],"inputs"
             big
         );
 
-        let result = fetch_manifest("dummy", &envelope, tmp.path());
-        std::env::set_var("PATH", old_path);
+        let result = with_path_prepended(tmp.path(), || fetch_manifest("dummy", &envelope, tmp.path()));
 
         assert!(result.is_ok(), "expected success: {:#}", result.unwrap_err());
         let m = result.unwrap();
@@ -971,15 +984,10 @@ exit 42
 "#;
         let _ = make_fake_plugin_script(tmp.path(), "curie-errplug", script).unwrap();
 
-        let old_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", tmp.path().display(), old_path);
-        std::env::set_var("PATH", &new_path);
-
         let large = "y".repeat(100 * 1024);
         let envelope = format!(r#"{{"curie_version":"0","config":{{"data":"{}"}}}}"#, large);
 
-        let result = fetch_manifest("errplug", &envelope, tmp.path());
-        std::env::set_var("PATH", old_path);
+        let result = with_path_prepended(tmp.path(), || fetch_manifest("errplug", &envelope, tmp.path()));
 
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
@@ -1006,16 +1014,13 @@ exit 77
 "#;
         let _ = make_fake_plugin_script(tmp.path(), "curie-generr", script).unwrap();
 
-        let old_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", tmp.path().display(), old_path);
-        std::env::set_var("PATH", &new_path);
-
         let large = "z".repeat(80 * 1024);
         let envelope = format!(r#"{{"curie_version":"0","config":{{"x":"{}"}}}}"#, large);
         let resolved = BTreeMap::new();
 
-        let result = generate_sources("generr", &envelope, &resolved, tmp.path(), false);
-        std::env::set_var("PATH", old_path);
+        let result = with_path_prepended(tmp.path(), || {
+            generate_sources("generr", &envelope, &resolved, tmp.path(), false)
+        });
 
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
@@ -1023,6 +1028,98 @@ exit 77
             msg.contains("77") || msg.contains("exited with status"),
             "expected child status, got: {}",
             msg
+        );
+    }
+
+    // ── generate_sources routes stdout/stderr through parallel LineSink ─────
+
+    /// Records lines pushed by the parallel mux (used to assert plugin output
+    /// is not inherited onto the real TTY when a sink is active).
+    struct RecordingSink {
+        lines: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::parallel::LineSink for RecordingSink {
+        fn push_line(&self, line: String) {
+            self.lines.lock().unwrap().push(line);
+        }
+        fn flush(&self) {}
+        fn complete(&self, _success: bool) {}
+        fn prefix_visual_len(&self) -> usize {
+            0
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generate_sources_with_sink_forwards_stdout_and_stderr_lines() {
+        let tmp = TempDir::new().unwrap();
+        // Read envelope from stdin (EOF), then emit one line on each stream.
+        let script = r#"#!/bin/sh
+cat >/dev/null
+echo 'GEN_STDOUT_LINE'
+echo 'GEN_STDERR_LINE' >&2
+"#;
+        let _ = make_fake_plugin_script(tmp.path(), "curie-genio", script).unwrap();
+
+        let sink = std::sync::Arc::new(RecordingSink {
+            lines: std::sync::Mutex::new(Vec::new()),
+        });
+
+        let envelope = r#"{"curie_version":"0","config":{}}"#;
+        let resolved = BTreeMap::new();
+        let result = with_path_prepended(tmp.path(), || {
+            crate::parallel::set_thread_sink(sink.clone());
+            let r = generate_sources("genio", envelope, &resolved, tmp.path(), false);
+            crate::parallel::clear_thread_sink();
+            r
+        });
+
+        assert!(result.is_ok(), "expected success: {:#}", result.unwrap_err());
+        let lines = sink.lines.lock().unwrap().clone();
+        assert!(
+            lines.iter().any(|l| l.contains("GEN_STDOUT_LINE")),
+            "stdout line must be forwarded to LineSink, got: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("GEN_STDERR_LINE")),
+            "stderr line must be forwarded to LineSink, got: {lines:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generate_sources_with_sink_reports_failure_status() {
+        let tmp = TempDir::new().unwrap();
+        let script = r#"#!/bin/sh
+cat >/dev/null
+echo 'FAIL_VISIBLE' >&2
+exit 9
+"#;
+        let _ = make_fake_plugin_script(tmp.path(), "curie-genfail", script).unwrap();
+
+        let sink = std::sync::Arc::new(RecordingSink {
+            lines: std::sync::Mutex::new(Vec::new()),
+        });
+
+        let envelope = r#"{"curie_version":"0","config":{}}"#;
+        let result = with_path_prepended(tmp.path(), || {
+            crate::parallel::set_thread_sink(sink.clone());
+            let r = generate_sources("genfail", envelope, &BTreeMap::new(), tmp.path(), false);
+            crate::parallel::clear_thread_sink();
+            r
+        });
+
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains('9') || msg.contains("exited with status"),
+            "expected exit status in error, got: {msg}"
+        );
+        let lines = sink.lines.lock().unwrap().clone();
+        assert!(
+            lines.iter().any(|l| l.contains("FAIL_VISIBLE")),
+            "failure diagnostics on stderr must still reach LineSink, got: {lines:?}"
         );
     }
 }
