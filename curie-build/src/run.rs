@@ -42,6 +42,7 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
     let build_opts = build::BuildOptions {
         no_docker: opts.no_docker,
         no_native: false,
+        no_jlink: false,
         offline: opts.offline,
         coverage: false,
     };

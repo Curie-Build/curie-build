@@ -31,6 +31,11 @@ pub struct Descriptor {
     /// and a section with all-default values produce the same deserialised
     /// struct — but only the former disables native-image compilation.
     pub native_image: NativeImage,
+    /// Populated from `[jlink]`.  Same `section_present` convention as
+    /// `native_image`: an absent section and an all-defaults section
+    /// deserialise identically, so only the raw-TOML presence check can
+    /// tell them apart.
+    pub jlink: Jlink,
     pub docker: Docker,
     pub build_info: BuildInfo,
     pub fat_jar: FatJar,
@@ -215,6 +220,8 @@ struct RawDescriptor {
     spock: Spock,
     #[serde(rename = "native-image", default)]
     native_image: NativeImage,
+    #[serde(rename = "jlink", default)]
+    jlink: Jlink,
     #[serde(default)]
     publish: PublishConfig,
     #[serde(default, rename = "plugin")]
@@ -494,6 +501,50 @@ pub struct NativeImage {
 
 impl NativeImage {
     /// Resolved output binary name: descriptor override or application name.
+    /// `app_name` is the fallback when `outputName` was omitted.
+    pub fn resolved_output_name<'a>(&'a self, app_name: &'a str) -> &'a str {
+        self.output_name.as_deref().unwrap_or(app_name)
+    }
+}
+
+/// Configuration for the `[jlink]` table: a self-contained JDK runtime image
+/// built with the plain JDK's own `jlink` (no GraalVM, no AOT compilation).
+///
+/// Produced under `target/runtime/`: a custom runtime under `runtime/jdk/`,
+/// the app JAR (plus dependency JARs) under `runtime/lib/`, and launcher
+/// scripts under `runtime/bin/`.
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Jlink {
+    /// JDK modules to link into the runtime image. When empty, the modules
+    /// are auto-detected by running `jdeps --print-module-deps` against the
+    /// built JAR (and its dependency JARs, if any).
+    #[serde(default)]
+    pub modules: Vec<String>,
+
+    /// Strip debug information from the linked runtime (`jlink --strip-debug`).
+    #[serde(rename = "stripDebug", default)]
+    pub strip_debug: bool,
+
+    /// Whether to compress the runtime image's resources
+    /// (`jlink --compress zip-6` when `true`, `--compress zip-0` when `false`).
+    #[serde(default)]
+    pub compress: bool,
+
+    /// Name of the launcher script written to `target/runtime/bin/`.
+    /// Defaults to the application name.
+    #[serde(rename = "outputName", default)]
+    pub output_name: Option<String>,
+
+    /// Whether the `[jlink]` section was explicitly present in `Curie.toml`.
+    /// Set by [`load`] after the raw-TOML presence check; never written by
+    /// serde.
+    #[serde(skip)]
+    pub section_present: bool,
+}
+
+impl Jlink {
+    /// Resolved launcher name: descriptor override or application name.
     /// `app_name` is the fallback when `outputName` was omitted.
     pub fn resolved_output_name<'a>(&'a self, app_name: &'a str) -> &'a str {
         self.output_name.as_deref().unwrap_or(app_name)
@@ -1560,6 +1611,10 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     let mut native_image = parsed.native_image;
     native_image.section_present = native_image_section_present;
 
+    let jlink_section_present = table.map(|t| t.contains_key("jlink")).unwrap_or(false);
+    let mut jlink = parsed.jlink;
+    jlink.section_present = jlink_section_present;
+
     let fat_jar_section_present = table.map(|t| t.contains_key("fat-jar")).unwrap_or(false);
     let mut fat_jar = parsed.fat_jar;
     fat_jar.section_present = fat_jar_section_present;
@@ -1585,6 +1640,7 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         groovy: parsed.groovy,
         spock,
         native_image,
+        jlink,
         docker,
         build_info: parsed.build_info,
         fat_jar,
@@ -1675,8 +1731,16 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         );
     }
 
+    if descriptor.is_library() && jlink_section_present {
+        bail!(
+            "library projects do not support jlink: \
+             remove the [jlink] section from Curie.toml"
+        );
+    }
+
     if descriptor.is_bom() {
         validate_bom_restrictions(&descriptor, docker_section_present, native_image_section_present,
+            jlink_section_present,
             table.map(|t| t.contains_key("test")).unwrap_or(false),
             table.map(|t| t.contains_key("test-dependencies")).unwrap_or(false),
             table.map(|t| t.contains_key("test-bom-imports")).unwrap_or(false),
@@ -1755,6 +1819,7 @@ fn validate_bom_restrictions(
     desc: &Descriptor,
     docker_present: bool,
     native_image_present: bool,
+    jlink_present: bool,
     test_present: bool,
     test_deps_present: bool,
     test_bom_imports_present: bool,
@@ -1766,6 +1831,9 @@ fn validate_bom_restrictions(
     }
     if native_image_present {
         bail!("BOM projects do not support native-image compilation: remove the [native-image] section from Curie.toml");
+    }
+    if jlink_present {
+        bail!("BOM projects do not support jlink: remove the [jlink] section from Curie.toml");
     }
     if test_present {
         bail!("BOM projects must not declare a [test] section");
@@ -1841,6 +1909,13 @@ pub fn docker_enabled(project_root: &Path, desc: &Descriptor) -> bool {
 /// trigger (no Dockerfile analogue); the section must always be declared.
 pub fn native_image_enabled(desc: &Descriptor) -> bool {
     desc.native_image.section_present
+}
+
+/// jlink runtime-image assembly is enabled when the `[jlink]` section is
+/// explicitly present in `Curie.toml`.  Like native-image, there is no
+/// implicit trigger; the section must always be declared.
+pub fn jlink_enabled(desc: &Descriptor) -> bool {
+    desc.jlink.section_present
 }
 
 /// Fat-JAR packaging is enabled when the `[fat-jar]` section is present and
@@ -2819,6 +2894,96 @@ version = "0.1"
     }
 
     #[test]
+    fn jlink_absent_means_disabled() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(!d.jlink.section_present);
+        assert!(!jlink_enabled(&d));
+    }
+
+    #[test]
+    fn jlink_section_present_enables_it() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[jlink]
+"#;
+        let d = load_str(toml).unwrap();
+        assert!(d.jlink.section_present);
+        assert!(jlink_enabled(&d));
+    }
+
+    #[test]
+    fn jlink_output_name_defaults_to_app_name() {
+        let toml = r#"
+[application]
+name = "my-app"
+version = "0.1"
+mainClass = "X"
+
+[jlink]
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.jlink.resolved_output_name("my-app"), "my-app");
+    }
+
+    #[test]
+    fn jlink_output_name_override() {
+        let toml = r#"
+[application]
+name = "my-app"
+version = "0.1"
+mainClass = "X"
+
+[jlink]
+outputName = "my-runtime"
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.jlink.output_name.as_deref(), Some("my-runtime"));
+        assert_eq!(d.jlink.resolved_output_name("my-app"), "my-runtime");
+    }
+
+    #[test]
+    fn jlink_modules_and_flags_parsed() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[jlink]
+modules = ["java.base", "java.logging"]
+stripDebug = true
+compress = true
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.jlink.modules, vec!["java.base", "java.logging"]);
+        assert!(d.jlink.strip_debug);
+        assert!(d.jlink.compress);
+    }
+
+    #[test]
+    fn jlink_on_library_is_rejected() {
+        let toml = r#"
+[library]
+name = "x"
+version = "0.1"
+
+[jlink]
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("library") && err.contains("jlink"), "got: {err}");
+    }
+
+    #[test]
     fn parse_bom_section() {
         let toml = r#"
 [bom]
@@ -2844,6 +3009,18 @@ version = "0.1"
 "#;
         let err = load_str(toml).unwrap_err().to_string();
         assert!(err.contains("BOM") && err.contains("docker"), "got: {err}");
+    }
+
+    #[test]
+    fn bom_with_jlink_is_rejected() {
+        let toml = r#"
+[bom]
+name = "x"
+version = "0.1"
+[jlink]
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("BOM") && err.contains("jlink"), "got: {err}");
     }
 
     #[test]

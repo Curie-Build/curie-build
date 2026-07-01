@@ -22,6 +22,7 @@ mod incremental;
 mod jar;
 mod jpms;
 mod java_agent;
+mod jlink;
 mod kt_stale;
 mod main_class;
 mod maven;
@@ -76,6 +77,10 @@ enum Cmd {
         /// Skip native-image compilation even when [native-image] is configured
         #[arg(long)]
         no_native: bool,
+
+        /// Skip jlink runtime-image assembly even when [jlink] is configured
+        #[arg(long)]
+        no_jlink: bool,
 
         /// Do not access the network; use only locally cached artifacts
         #[arg(long)]
@@ -144,6 +149,16 @@ enum Cmd {
     /// Requires GraalVM to be installed.  Curie looks for the `native-image`
     /// executable in $GRAALVM_HOME/bin first, then on $PATH.
     Native {
+        /// Do not access the network; use only locally cached artifacts
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Compile the project and assemble a self-contained JDK runtime image
+    ///
+    /// Runs the full build pipeline (compile, test, package JAR) and then
+    /// invokes the plain JDK's `jlink` — no GraalVM, no AOT compilation.
+    /// Works with any JDK 21+ already on `PATH`.
+    Jlink {
         /// Do not access the network; use only locally cached artifacts
         #[arg(long)]
         offline: bool,
@@ -389,8 +404,8 @@ fn main() {
     };
 
     let result = match cli.command {
-        Cmd::Build { no_docker, no_native, offline, jobs } => {
-            let opts = build::BuildOptions { no_docker, no_native, offline, coverage: false };
+        Cmd::Build { no_docker, no_native, no_jlink, offline, jobs } => {
+            let opts = build::BuildOptions { no_docker, no_native, no_jlink, offline, coverage: false };
             let jobs = resolve_jobs(jobs);
             match &ctx {
                 workspace::WorkspaceContext::WorkspaceRoot(root) => {
@@ -487,6 +502,18 @@ fn main() {
             workspace::WorkspaceContext::WorkspaceMember { .. }
             | workspace::WorkspaceContext::Standalone(_) => {
                 native_single_module(&cli.project, offline)
+            }
+        },
+        Cmd::Jlink { offline } => match &ctx {
+            workspace::WorkspaceContext::WorkspaceRoot(_)
+            | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
+                "`curie jlink` is ambiguous in a workspace — runtime images are \
+                 per-application.  Re-run with --project <member>, e.g.\n  \
+                 curie --project examples/jlink-hello jlink"
+            )),
+            workspace::WorkspaceContext::WorkspaceMember { .. }
+            | workspace::WorkspaceContext::Standalone(_) => {
+                jlink_single_module(&cli.project, offline)
             }
         },
         Cmd::List { all } => match &ctx {
@@ -778,6 +805,7 @@ fn native_single_module(project: &std::path::Path, offline: bool) -> anyhow::Res
     let opts = build::BuildOptions {
         no_docker: true,
         no_native: true, // we call native::build_native ourselves below
+        no_jlink: true,
         offline,
         coverage: false,
     };
@@ -786,6 +814,45 @@ fn native_single_module(project: &std::path::Path, offline: bool) -> anyhow::Res
     let effective_jar = output.fat_jar.as_ref().unwrap_or(&output.jar);
     let effective_deps: &[std::path::PathBuf] = if output.fat_jar.is_some() { &[] } else { &output.dep_jars };
     native::build_native(project, &desc, effective_jar, effective_deps)?;
+
+    Ok(())
+}
+
+/// Single-module variant of the jlink pipeline.
+///
+/// Runs the full build pipeline (compile, test, package JAR) → jlink.  The
+/// `[jlink]` section must be present in `Curie.toml`; if it is absent this
+/// function errors early.
+fn jlink_single_module(project: &std::path::Path, offline: bool) -> anyhow::Result<()> {
+    let desc = descriptor::load(project)?;
+
+    if !descriptor::jlink_enabled(&desc) {
+        anyhow::bail!(
+            "jlink is not enabled for this project.\n\
+             Add a [jlink] section to Curie.toml to enable it, e.g.:\n\n  \
+             [jlink]\n  stripDebug = true"
+        );
+    }
+
+    println!(
+        "Jlink   {} v{}",
+        desc.buildable_name(),
+        desc.buildable_version()
+    );
+
+    // compile + package JAR, skipping Docker and native-image
+    let opts = build::BuildOptions {
+        no_docker: true,
+        no_native: true,
+        no_jlink: true, // we call jlink::build_jlink ourselves below
+        offline,
+        coverage: false,
+    };
+    let output = build::build_with_desc(project, &desc, opts, &[])?;
+
+    let effective_jar = output.fat_jar.as_ref().unwrap_or(&output.jar);
+    let effective_deps: &[std::path::PathBuf] = if output.fat_jar.is_some() { &[] } else { &output.dep_jars };
+    jlink::build_jlink(project, &desc, effective_jar, effective_deps)?;
 
     Ok(())
 }

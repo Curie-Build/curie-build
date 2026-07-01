@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>GraalVM native · Curie docs</title>
+  <title>jlink runtime · Curie docs</title>
   <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -58,6 +58,7 @@
       <li><a href="/docs/docker.html">Docker</a></li>
       <li><a href="/docs/publish.html">Publishing</a></li>
       <li><a href="/docs/native.html">GraalVM native</a></li>
+      <li><a href="/docs/jlink.html">jlink runtime</a></li>
 
       <li><span class="nav-group">Tools</span></li>
       <li><a href="/docs/fmt.html">Formatter</a></li>
@@ -74,25 +75,26 @@
   </aside>
 
   <main class="prose">
-    <span class="eyebrow">Subsystem · native</span>
-    <h1>GraalVM native-image</h1>
-    <p class="lede"><code>curie native</code> compiles your project to a standalone native binary using GraalVM's <code>native-image</code> tool. The result starts in milliseconds, uses a fraction of the heap, and ships without a JVM — ideal for serverless functions, CLI tools, and containers where image size and cold-start time matter.</p>
+    <span class="eyebrow">Subsystem · jlink</span>
+    <h1>jlink runtime image</h1>
+    <p class="lede"><code>curie jlink</code> assembles a self-contained JDK runtime image using the plain JDK's own <code>jlink</code> tool — no GraalVM install, no AOT compilation. It sits between a fat JAR and full GraalVM native: still a JVM (so no reachability-metadata tuning), but bundled with a minimal custom runtime so the target machine only needs <code>bin/&lt;app&gt;</code>, not a system-wide JDK.</p>
 
     <h2>Prerequisites</h2>
-    <p>GraalVM (Community or Enterprise) must be installed and <code>native-image</code> must be on <code>PATH</code>. The easiest way is <a href="https://sdkman.io" target="_blank" rel="noopener">SDKMAN</a>:</p>
+    <p>Any JDK 21+ already on <code>PATH</code> — <code>jlink</code> and <code>jdeps</code> ship with every JDK distribution, so there is nothing extra to install:</p>
 
     <div class="term">
       <header>
         <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
         <span>shell</span>
       </header>
-<pre><span class="prompt">$</span> sdk install java 21.0.3-graalce
-<span class="prompt">$</span> native-image --version
-<span class="ok">native-image 21.0.3 2024-04-16</span></pre>
+<pre><span class="prompt">$</span> jlink --version
+<span class="ok">25.0.3</span>
+<span class="prompt">$</span> jdeps --version
+<span class="ok">jdeps 25.0.3</span></pre>
     </div>
 
     <h2>Configuration</h2>
-    <p>Add a <code>[native-image]</code> table. An empty table is enough to enable the step — all keys are optional:</p>
+    <p>Add a <code>[jlink]</code> table. An empty table is enough to enable the step — all keys are optional:</p>
 
     <div class="code">
       <header>
@@ -104,75 +106,84 @@
 <span class="kw">version</span>   = <span class="str">"0.1.0"</span>
 <span class="kw">mainClass</span> = <span class="str">"com.example.Main"</span>
 
-<span class="kw">[native-image]</span>
-<span class="com"># Output binary name (default: application name)</span>
-<span class="kw">outputName</span> = <span class="str">"my-cli"</span>
+<span class="kw">[jlink]</span>
+<span class="com"># JDK modules to link in (default: auto-detected via jdeps)</span>
+<span class="kw">modules</span> = [<span class="str">"java.base"</span>]
 
-<span class="com"># Path to reachability-metadata config dir</span>
-<span class="kw">configDir</span> = <span class="str">"src/main/resources/META-INF/native-image"</span>
+<span class="com"># Strip debug information from the runtime image</span>
+<span class="kw">stripDebug</span> = <span class="str">true</span>
 
-<span class="com"># Extra flags forwarded verbatim to native-image</span>
-<span class="kw">extraArgs</span> = [<span class="str">"--no-fallback"</span>, <span class="str">"-H:+ReportExceptionStackTraces"</span>]</pre>
+<span class="com"># Compress runtime image resources</span>
+<span class="kw">compress</span> = <span class="str">true</span>
+
+<span class="com"># Name of the launcher script (default: application name)</span>
+<span class="kw">outputName</span> = <span class="str">"my-cli"</span></pre>
     </div>
 
+    <p>When <code>modules</code> is omitted, Curie runs <code>jdeps --print-module-deps</code> against the built JAR (and its dependency JARs) to detect the minimal set of JDK modules the app actually needs.</p>
+
     <h2>Building</h2>
-    <p><code>curie native</code> compiles the project (skipping tests for a faster iteration loop) and then invokes <code>native-image</code>:</p>
+    <p><code>curie jlink</code> runs the full build pipeline (compile, test, package JAR) and then invokes <code>jlink</code>:</p>
 
     <div class="term">
       <header>
         <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-        <span>$ curie native --project my-cli</span>
+        <span>$ curie jlink --project my-cli</span>
       </header>
 <pre><span class="dim">Building my-cli v0.1.0</span>
   Resolve deps    3 JAR(s)
   Compile         4 source file(s)
+  Test            12 passed
   Package         my-cli-0.1.0.jar
-  Native image    my-cli (GraalVM native-image)
-  <span class="dim">…compiling…  ~1–2 minutes…</span>
-  Done            <span class="em">target/my-cli</span></pre>
+  jlink           java.base,java.logging -&gt; target/runtime/jdk
+  Done            <span class="em">target/runtime/bin/my-cli</span></pre>
     </div>
 
-    <p>The binary lands at <code>target/&lt;outputName&gt;</code>. Run it directly — no JVM needed:</p>
+    <p>The runtime image lands under <code>target/runtime/</code>:</p>
+    <ul>
+      <li><code>runtime/jdk/</code> — the custom JDK runtime built by <code>jlink</code></li>
+      <li><code>runtime/lib/</code> — the app JAR, plus a <code>libs/</code> subdirectory of dependency JARs</li>
+      <li><code>runtime/bin/&lt;name&gt;</code> / <code>bin/&lt;name&gt;.bat</code> — launcher scripts</li>
+    </ul>
+
+    <p>Run it directly — only the bundled runtime is needed, no system JDK:</p>
 
     <div class="term">
       <header>
         <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-        <span>$ ./target/my-cli --help</span>
+        <span>$ ./target/runtime/bin/my-cli</span>
       </header>
-<pre><span class="ok">my-cli 0.1.0</span>
-Usage: my-cli [options]</pre>
+<pre><span class="ok">Hello from a jlink runtime image!</span></pre>
     </div>
 
     <h2>Integration with curie build</h2>
-    <p>When <code>[native-image]</code> is present in <code>Curie.toml</code>, <code>curie build</code> also compiles the native binary after packaging the JAR and running tests. Pass <code>--no-native</code> to skip it when iterating quickly:</p>
+    <p>When <code>[jlink]</code> is present in <code>Curie.toml</code>, <code>curie build</code> also assembles the runtime image after packaging the JAR. Pass <code>--no-jlink</code> to skip it when iterating quickly:</p>
 
     <div class="term">
       <header>
         <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-        <span>$ curie build --no-native</span>
+        <span>$ curie build --no-jlink</span>
       </header>
 <pre><span class="dim">Building my-cli v0.1.0</span>
-  <span class="dim">…  (native-image step skipped)</span>
+  <span class="dim">…  (jlink step skipped)</span>
   Done            <span class="em">target/my-cli-0.1.0.jar</span></pre>
     </div>
 
-    <h2>Reachability metadata</h2>
-    <p>Frameworks that use reflection, dynamic proxies, or resources at runtime need GraalVM reachability metadata so the AOT compiler knows to include those classes. Place JSON configuration files in the directory declared by <code>configDir</code>:</p>
+    <h2>jlink vs. GraalVM native</h2>
+    <p>Both produce a self-contained artifact, but they trade off differently:</p>
     <ul>
-      <li><code>reflect-config.json</code> — classes accessed via reflection</li>
-      <li><code>resource-config.json</code> — resources loaded from the classpath</li>
-      <li><code>proxy-config.json</code> — dynamic proxy interfaces</li>
+      <li><strong>jlink</strong> — still a JVM, so no AOT-compatibility tuning (reflection, dynamic proxies, and resources all work exactly as they do today). Larger output and a normal JVM startup time, but no GraalVM install and nothing to configure beyond <code>[jlink]</code>.</li>
+      <li><strong><a href="/docs/native.html">native</a></strong> — a true native binary: instant startup, minimal footprint, but requires GraalVM and often reachability metadata for reflection-heavy frameworks.</li>
     </ul>
-    <p>The <a href="https://www.graalvm.org/native-image/libraries-and-frameworks/" target="_blank" rel="noopener">GraalVM reachability-metadata repository</a> already contains entries for many popular libraries.</p>
 
     <div class="pager">
-      <a href="/docs/publish.html">
+      <a href="/docs/native.html">
         <span>← Previous</span>
-        <strong>Publishing</strong>
+        <strong>GraalVM native</strong>
       </a>
-      <a href="/docs/jlink.html" style="text-align: right; align-items: flex-end;">
+      <a href="/docs/fmt.html" style="text-align: right; align-items: flex-end;">
         <span>Next →</span>
-        <strong>jlink runtime</strong>
+        <strong>Formatter</strong>
       </a>
     </div>
   </main>

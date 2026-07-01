@@ -332,7 +332,7 @@ pub fn run_one(
 
     // ---- build phase ------------------------------------------------------
     let subset = transitive_closure(&ws, member_index);
-    let build_opts = build::BuildOptions { no_docker: opts.no_docker, no_native: false, offline: opts.offline, coverage: false };
+    let build_opts = build::BuildOptions { no_docker: opts.no_docker, no_native: false, no_jlink: false, offline: opts.offline, coverage: false };
 
     let n = subset.len();
     println!(

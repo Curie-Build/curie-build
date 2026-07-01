@@ -912,6 +912,7 @@ mod tests {
             groovy: Groovy::default(),
             spock: Spock::default(),
             native_image: NativeImage::default(),
+            jlink: Jlink::default(),
             docker: Docker::default(),
             build_info: BuildInfo::default(),
             fat_jar: FatJar::default(),

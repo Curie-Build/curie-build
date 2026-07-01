@@ -58,6 +58,7 @@
       <li><a href="/docs/docker.html">Docker</a></li>
       <li><a href="/docs/publish.html">Publishing</a></li>
       <li><a href="/docs/native.html">GraalVM native</a></li>
+      <li><a href="/docs/jlink.html">jlink runtime</a></li>
 
       <li><span class="nav-group">Tools</span></li>
       <li><a href="/docs/fmt.html">Formatter</a></li>
@@ -266,6 +267,19 @@
         <tr><td><code>outputName</code></td><td>string</td><td><code>application.name</code></td><td>Name of the produced native binary</td></tr>
         <tr><td><code>configDir</code></td><td>string</td><td>—</td><td>Directory containing native-image configuration files (<code>reflect-config.json</code>, etc.)</td></tr>
         <tr><td><code>extraArgs</code></td><td>string[]</td><td><code>[]</code></td><td>Extra flags passed to <code>native-image</code>, e.g. <code>["--no-fallback"]</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="jlink">[jlink]</h2>
+    <p>Self-contained JDK runtime image assembled with the plain JDK's own <code>jlink</code> tool (no GraalVM).</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>modules</code></td><td>string[]</td><td><code>[]</code></td><td>JDK modules to link in. Empty ⇒ auto-detected via <code>jdeps --print-module-deps</code> against the built JAR</td></tr>
+        <tr><td><code>stripDebug</code></td><td>bool</td><td><code>false</code></td><td>Strip debug information from the runtime image (<code>jlink --strip-debug</code>)</td></tr>
+        <tr><td><code>compress</code></td><td>bool</td><td><code>false</code></td><td>Compress runtime image resources (<code>--compress zip-6</code> when <code>true</code>, <code>--compress zip-0</code> when <code>false</code>)</td></tr>
+        <tr><td><code>outputName</code></td><td>string</td><td><code>application.name</code></td><td>Name of the launcher script written to <code>target/runtime/bin/</code></td></tr>
       </tbody>
     </table>
 

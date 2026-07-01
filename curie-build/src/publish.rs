@@ -73,6 +73,7 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
         BuildOptions {
             no_docker: true, // publishing never builds docker
             no_native: true, // publishing never builds native binaries
+            no_jlink: true,  // publishing never builds jlink runtime images
             offline: false,
             coverage: false,
         },

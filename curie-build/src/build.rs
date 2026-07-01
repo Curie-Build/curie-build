@@ -8,6 +8,7 @@ use crate::docker;
 use crate::git;
 use crate::incremental::{self, needs_repackage};
 use crate::jar::{get_manifest_header, populate_libs_dir, write_deterministic_jar};
+use crate::jlink;
 use crate::main_class::{detect_main_class, validate_main_class};
 use crate::maven;
 use crate::native;
@@ -41,6 +42,7 @@ fn current_resource_set(resources_dir: Option<&Path>) -> BTreeSet<String> {
 pub struct BuildOptions {
     pub no_docker: bool,
     pub no_native: bool,
+    pub no_jlink: bool,
     pub offline: bool,
     pub coverage: bool,
 }
@@ -123,6 +125,10 @@ pub fn build_with_desc(
 
     if !desc.is_library() && !opts.no_native && descriptor::native_image_enabled(desc) {
         native::build_native(project_root, desc, effective_jar, effective_deps)?;
+    }
+
+    if !desc.is_library() && !opts.no_jlink && descriptor::jlink_enabled(desc) {
+        jlink::build_jlink(project_root, desc, effective_jar, effective_deps)?;
     }
 
     Ok(output)

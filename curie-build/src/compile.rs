@@ -166,7 +166,7 @@ fn parse_jdk_major_version(version_output: &str) -> Option<String> {
     None
 }
 
-fn running_jdk_major_version() -> Result<String> {
+pub(crate) fn running_jdk_major_version() -> Result<String> {
     let out = Command::new("javac")
         .arg("-version")
         .output()

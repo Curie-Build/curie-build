@@ -27,6 +27,7 @@ members = [
     "hello-kotlin",
     "hello-mixed",
     "graalvm-hello",
+    "jlink-hello",
     "nested-workspace-demo",
     "verbose-test-demo",
     "my-platform-bom",

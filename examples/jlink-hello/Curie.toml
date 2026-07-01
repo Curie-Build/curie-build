@@ -1,0 +1,27 @@
+# jlink-hello
+#
+# Demonstrates a self-contained JDK runtime image with `curie jlink`.
+# Unlike `curie native` (GraalVM), this uses the plain JDK's own `jlink` —
+# no GraalVM install required, works with any JDK 21+ already on PATH.
+#
+#   curie --project examples/jlink-hello build
+#
+# or use the faster iteration command:
+#
+#   curie --project examples/jlink-hello jlink
+#
+# Produces target/runtime/{jdk,lib,bin}; run it with:
+#
+#   ./target/runtime/bin/jlink-hello
+
+[application]
+name = "jlink-hello"
+version = "0.1.0"
+mainClass = "com.example.Hello"
+
+# Opt in to jlink runtime-image assembly.
+# The section must be explicitly present to trigger the jlink step.
+[jlink]
+# modules omitted — auto-detected via jdeps against the built JAR
+stripDebug = true
+compress = true

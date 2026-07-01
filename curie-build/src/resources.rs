@@ -501,7 +501,7 @@ fn filter_roots(
 }
 
 /// A sibling staging directory next to `out_dir` (same parent → atomic rename).
-fn staging_dir(out_dir: &Path) -> PathBuf {
+pub(crate) fn staging_dir(out_dir: &Path) -> PathBuf {
     let mut name = out_dir.file_name().unwrap_or_default().to_os_string();
     name.push(".part");
     out_dir.with_file_name(name)
