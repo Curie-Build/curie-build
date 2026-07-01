@@ -871,8 +871,14 @@ impl Delimiter {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Docker {
-    #[serde(rename = "baseImage", default = "default_base_image")]
-    pub base_image: String,
+    /// Base image for the generated Dockerfile. When absent, the effective
+    /// default depends on which artifact the image packages: a JRE image for
+    /// a plain JAR, or a minimal glibc base for a native-image binary or a
+    /// jlink runtime image (neither needs a JRE) — resolved by
+    /// `docker::resolved_base_image` in curie-build, not here, since that
+    /// decision depends on `[native-image]`/`[jlink]` section presence.
+    #[serde(rename = "baseImage", default)]
+    pub base_image: Option<String>,
     #[serde(rename = "imageName")]
     pub image_name: Option<String>,
     #[serde(rename = "imageTag")]
@@ -883,14 +889,10 @@ pub struct Docker {
     pub section_present: bool,
 }
 
-fn default_base_image() -> String {
-    "eclipse-temurin:21-jre-alpine".to_string()
-}
-
 impl Default for Docker {
     fn default() -> Self {
         Docker {
-            base_image: default_base_image(),
+            base_image: None,
             image_name: None,
             image_tag: None,
             section_present: false,

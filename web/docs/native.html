@@ -165,6 +165,9 @@ Usage: my-cli [options]</pre>
     </ul>
     <p>The <a href="https://www.graalvm.org/native-image/libraries-and-frameworks/" target="_blank" rel="noopener">GraalVM reachability-metadata repository</a> already contains entries for many popular libraries.</p>
 
+    <h2>Docker integration</h2>
+    <p>When <a href="/docs/docker.html"><code>[docker]</code></a> is also enabled, the generated Dockerfile packages the native binary directly (no JVM, no separate JRE base image) instead of the JAR — see <a href="/docs/docker.html">Docker + native/jlink</a>.</p>
+
     <div class="pager">
       <a href="/docs/publish.html">
         <span>← Previous</span>

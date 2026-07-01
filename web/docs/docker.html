@@ -98,7 +98,7 @@
 <span class="kw">baseImage</span> = <span class="str">"eclipse-temurin:21-jre-alpine"</span></pre>
     </div>
 
-    <p>The only knob is <code>baseImage</code>. The default is <code>eclipse-temurin:21-jre</code> — a JRE-sized image is much smaller than a JDK image, and the runtime needs no compiler. Switch to <code>-alpine</code> for a smaller image, or to a distroless base for hardened deployments; whatever you choose is interpolated verbatim into the <code>FROM</code> line.</p>
+    <p>The only knob is <code>baseImage</code>. When unset, the default depends on what the image packages: <code>eclipse-temurin:21-jre</code> for a plain JAR (see below for the native-image/jlink defaults) — a JRE-sized image is much smaller than a JDK image, and the runtime needs no compiler. Switch to <code>-alpine</code> for a smaller image, or to a distroless base for hardened deployments; whatever you choose is interpolated verbatim into the <code>FROM</code> line.</p>
 
     <h2>Generated Dockerfile</h2>
     <p>For an application with no dependencies, Curie writes:</p>
@@ -161,8 +161,39 @@
 <span class="ok">Hello from greeter.</span></pre>
     </div>
 
+    <h2>Docker + <a href="/docs/native.html">native</a> / <a href="/docs/jlink.html">jlink</a></h2>
+    <p>When <code>[native-image]</code> or <code>[jlink]</code> is also enabled, the generated Dockerfile packages that artifact instead of the plain JAR — neither needs a JRE, so the default base image switches from <code>eclipse-temurin:21-jre-alpine</code> to <code>debian:trixie-slim</code> (still overridable via <code>baseImage</code>). If both sections are present, <code>[native-image]</code> wins.</p>
+
+    <p>With <code>[native-image]</code>, the binary is copied in directly and run without a JVM at all:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>target/Dockerfile  (native-image)</span>
+      </header>
+<pre><span class="kw">FROM</span> debian:trixie-slim
+<span class="kw">WORKDIR</span> /app
+<span class="kw">COPY</span> greeter ./greeter
+<span class="kw">ENTRYPOINT</span> [<span class="str">"./greeter"</span>]</pre>
+    </div>
+
+    <p>With <code>[jlink]</code>, the whole <code>target/runtime/</code> tree (the custom JDK plus the app JAR and its <code>libs/</code>) is copied in, and the launcher script is the entrypoint — no <code>java -jar</code> and no separate JRE base image, since the runtime image already bundles its own JDK:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>target/Dockerfile  (jlink)</span>
+      </header>
+<pre><span class="kw">FROM</span> debian:trixie-slim
+<span class="kw">WORKDIR</span> /app
+<span class="kw">COPY</span> runtime/ runtime/
+<span class="kw">ENTRYPOINT</span> [<span class="str">"runtime/bin/greeter"</span>]</pre>
+    </div>
+
+    <p>Both <code>curie build</code> and <code>curie run</code> build the native/jlink artifact first when Docker is going to package it — if you skip that step explicitly (<code>--no-native</code> / <code>--no-jlink</code>) on a fresh checkout with nothing built yet, Docker fails with an actionable error rather than silently falling back to the JAR.</p>
+
     <h2>Incremental Docker builds</h2>
-    <p>The Dockerfile + <code>.dockerignore</code> are stamped against their inputs: the JAR mtime, the <code>libs/</code> directory mtime, and <code>Curie.toml</code>'s <code>[docker]</code> table. If none of those moved since the last image build, Curie skips the <code>docker build</code> invocation entirely.</p>
+    <p>The Dockerfile + <code>.dockerignore</code> are stamped against their inputs: the JAR mtime, the <code>libs/</code> directory mtime, and <code>Curie.toml</code>'s <code>[docker]</code> table (or, in native/jlink mode, the binary's or the <code>runtime/</code> tree's mtime instead). If none of those moved since the last image build, Curie skips the <code>docker build</code> invocation entirely.</p>
 
     <div class="pager">
       <a href="/docs/testing.html">

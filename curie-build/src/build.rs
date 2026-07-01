@@ -114,21 +114,25 @@ pub fn build_with_desc(
             .to_string(),
     ));
 
-    // When a fat JAR exists, downstream stages (docker, native) use it
+    // When a fat JAR exists, downstream stages (docker, native, jlink) use it
     // instead of the regular JAR + libs/, since it is self-contained.
     let effective_jar = output.fat_jar.as_ref().unwrap_or(&output.jar);
     let effective_deps: &[PathBuf] = if output.fat_jar.is_some() { &[] } else { &output.dep_jars };
 
-    if !desc.is_library() && !opts.no_docker && descriptor::docker_enabled(project_root, desc) {
-        docker::docker_build(project_root, desc, effective_jar, effective_deps)?;
-    }
-
+    // native-image and jlink must run before docker: when either is
+    // configured, the generated Dockerfile packages that artifact instead of
+    // the JAR (see docker::select_docker_artifact), so it must already exist
+    // on disk by the time docker_build runs.
     if !desc.is_library() && !opts.no_native && descriptor::native_image_enabled(desc) {
         native::build_native(project_root, desc, effective_jar, effective_deps)?;
     }
 
     if !desc.is_library() && !opts.no_jlink && descriptor::jlink_enabled(desc) {
         jlink::build_jlink(project_root, desc, effective_jar, effective_deps)?;
+    }
+
+    if !desc.is_library() && !opts.no_docker && descriptor::docker_enabled(project_root, desc) {
+        docker::docker_build(project_root, desc, effective_jar, effective_deps)?;
     }
 
     Ok(output)

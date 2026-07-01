@@ -42,13 +42,11 @@ pub fn build_native(
     dep_jars: &[PathBuf],
 ) -> Result<()> {
     let cfg = &desc.native_image;
-    let app_name = desc.buildable_name();
-    let output_name = cfg.resolved_output_name(app_name);
 
     let target_dir = project_root.join("target");
     std::fs::create_dir_all(&target_dir).context("failed to create target/")?;
 
-    let output_path = target_dir.join(output_name);
+    let output_path = output_path(project_root, desc);
     let stamp = stamp_path(&target_dir);
 
     // --- incremental skip ---------------------------------------------------
@@ -96,6 +94,12 @@ pub fn build_native(
     for extra in &cfg.extra_args {
         cmd.arg(extra);
     }
+
+    let output_name = output_path
+        .file_name()
+        .context("native-image output path has no file name")?
+        .to_string_lossy()
+        .into_owned();
 
     crate::parallel::emit(&crate::style::active("Native image", &format!("{} -> target/{}", exe.display(), output_name)));
 
@@ -159,6 +163,20 @@ fn find_native_image_exe() -> Option<PathBuf> {
     }
 
     None
+}
+
+// ---------------------------------------------------------------------------
+// Output path
+// ---------------------------------------------------------------------------
+
+/// The path `native-image` writes its binary to: `target/<resolved output name>`.
+///
+/// Exposed so other steps (`docker.rs`) that need to check for or reference
+/// the native binary don't duplicate this path construction.
+pub(crate) fn output_path(project_root: &Path, desc: &Descriptor) -> PathBuf {
+    let app_name = desc.buildable_name();
+    let output_name = desc.native_image.resolved_output_name(app_name);
+    project_root.join("target").join(output_name)
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +274,34 @@ mod tests {
     fn resolved_output_name_uses_app_name_as_default() {
         let cfg = NativeImage::default();
         assert_eq!(cfg.resolved_output_name("my-app"), "my-app");
+    }
+
+    #[test]
+    fn output_path_defaults_to_app_name_under_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            "[application]\nname = \"my-app\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
+             [native-image]\n",
+        )
+        .unwrap();
+        let desc = crate::descriptor::load(root).unwrap();
+        assert_eq!(output_path(root, &desc), root.join("target").join("my-app"));
+    }
+
+    #[test]
+    fn output_path_uses_output_name_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            "[application]\nname = \"my-app\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
+             [native-image]\noutputName = \"custom-binary\"\n",
+        )
+        .unwrap();
+        let desc = crate::descriptor::load(root).unwrap();
+        assert_eq!(output_path(root, &desc), root.join("target").join("custom-binary"));
     }
 
     #[test]

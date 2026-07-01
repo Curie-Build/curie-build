@@ -14,6 +14,10 @@
 # executable in $GRAALVM_HOME/bin first, then on $PATH.
 # Install GraalVM from https://www.graalvm.org/downloads/ or via sdkman:
 #   sdk install java 25.0.1-graal
+#
+# Since [docker] is also enabled below, `curie build` additionally produces
+# a Docker image that bundles the native binary directly (no JVM at all) and
+# runs it as its entrypoint.
 
 [application]
 name = "graalvm-hello"
@@ -27,3 +31,9 @@ mainClass = "com.example.Hello"
 outputName = "graalvm-hello"
 # Extra flags forwarded verbatim to native-image.
 extraArgs = ["--no-fallback"]
+
+# Opt in to Docker image building. Since [native-image] is enabled above,
+# the generated Dockerfile packages the native binary instead of the plain
+# JAR, on a minimal glibc base (debian:trixie-slim by default) rather than
+# a JRE image.
+[docker]

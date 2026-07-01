@@ -1,5 +1,5 @@
 use crate::jar::classpath_string;
-use crate::{build, descriptor, docker};
+use crate::{build, descriptor, docker, jlink, native};
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
@@ -64,6 +64,15 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
     };
 
     if use_docker {
+        // The generated Dockerfile packages the native/jlink artifact instead
+        // of the JAR when configured (see docker::select_docker_artifact),
+        // but `do_build` above never builds those — only `build_with_desc`
+        // does. Build whichever one Docker will need before handing off.
+        if descriptor::native_image_enabled(&desc) {
+            native::build_native(project_root, &desc, effective_jar, &effective_deps)?;
+        } else if descriptor::jlink_enabled(&desc) {
+            jlink::build_jlink(project_root, &desc, effective_jar, &effective_deps)?;
+        }
         docker::docker_run(project_root, &desc, effective_jar, &effective_deps, extra_args)?;
     } else {
         let mut java = Command::new("java");

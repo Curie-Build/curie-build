@@ -13,6 +13,11 @@
 # Produces target/runtime/{jdk,lib,bin}; run it with:
 #
 #   ./target/runtime/bin/jlink-hello
+#
+# Since [docker] is also enabled below, `curie build` additionally produces
+# a Docker image that bundles the whole runtime/ tree (no separate JRE base
+# image needed — the jlink runtime already has its own) and runs the
+# launcher as its entrypoint.
 
 [application]
 name = "jlink-hello"
@@ -25,3 +30,9 @@ mainClass = "com.example.Hello"
 # modules omitted — auto-detected via jdeps against the built JAR
 stripDebug = true
 compress = true
+
+# Opt in to Docker image building. Since [jlink] is enabled above, the
+# generated Dockerfile packages the jlink runtime image (target/runtime/)
+# instead of the plain JAR, on a minimal glibc base (debian:trixie-slim
+# by default) rather than a JRE image.
+[docker]

@@ -62,13 +62,12 @@ pub fn build_jlink(
     dep_jars: &[PathBuf],
 ) -> Result<()> {
     let cfg = &desc.jlink;
-    let app_name = desc.buildable_name();
-    let launcher_name = cfg.resolved_output_name(app_name);
+    let launcher_name = launcher_name(desc);
 
     let target_dir = project_root.join("target");
     std::fs::create_dir_all(&target_dir).context("failed to create target/")?;
 
-    let runtime_dir = target_dir.join("runtime");
+    let runtime_dir = runtime_dir(project_root);
     let jdk_dir = runtime_dir.join("jdk");
     let lib_dir = runtime_dir.join("lib");
     let bin_dir = runtime_dir.join("bin");
@@ -257,6 +256,24 @@ fn write_launchers(bin_dir: &Path, launcher_name: &str, jar_file_name: &str) -> 
 }
 
 // ---------------------------------------------------------------------------
+// Output paths
+// ---------------------------------------------------------------------------
+
+/// The directory `jlink` runtime images are assembled under: `target/runtime`.
+///
+/// Exposed so other steps (`docker.rs`) that need to check for or reference
+/// the runtime image don't duplicate this path construction.
+pub(crate) fn runtime_dir(project_root: &Path) -> PathBuf {
+    project_root.join("target").join("runtime")
+}
+
+/// Resolved launcher name: `[jlink].outputName` override, or the application
+/// name.  Exposed for the same reason as [`runtime_dir`].
+pub(crate) fn launcher_name(desc: &Descriptor) -> &str {
+    desc.jlink.resolved_output_name(desc.buildable_name())
+}
+
+// ---------------------------------------------------------------------------
 // Stamp helpers
 // ---------------------------------------------------------------------------
 
@@ -332,6 +349,40 @@ mod tests {
             ..Jlink::default()
         };
         assert_eq!(cfg.resolved_output_name("my-app"), "my-runtime");
+    }
+
+    #[test]
+    fn runtime_dir_is_under_target() {
+        let root = PathBuf::from("/project");
+        assert_eq!(runtime_dir(&root), PathBuf::from("/project/target/runtime"));
+    }
+
+    #[test]
+    fn launcher_name_defaults_to_app_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            "[application]\nname = \"my-app\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
+             [jlink]\n",
+        )
+        .unwrap();
+        let desc = crate::descriptor::load(root).unwrap();
+        assert_eq!(launcher_name(&desc), "my-app");
+    }
+
+    #[test]
+    fn launcher_name_uses_output_name_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            "[application]\nname = \"my-app\"\nversion = \"0.1.0\"\nmainClass = \"Main\"\n\
+             [jlink]\noutputName = \"my-runtime\"\n",
+        )
+        .unwrap();
+        let desc = crate::descriptor::load(root).unwrap();
+        assert_eq!(launcher_name(&desc), "my-runtime");
     }
 
     #[test]

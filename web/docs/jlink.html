@@ -176,6 +176,9 @@
       <li><strong><a href="/docs/native.html">native</a></strong> — a true native binary: instant startup, minimal footprint, but requires GraalVM and often reachability metadata for reflection-heavy frameworks.</li>
     </ul>
 
+    <h2>Docker integration</h2>
+    <p>When <a href="/docs/docker.html"><code>[docker]</code></a> is also enabled, the generated Dockerfile packages the whole <code>target/runtime/</code> tree and runs the launcher — no separate JRE base image, since the runtime image already bundles its own JDK. See <a href="/docs/docker.html">Docker + native/jlink</a>.</p>
+
     <div class="pager">
       <a href="/docs/native.html">
         <span>← Previous</span>
