@@ -1,0 +1,7 @@
+[application]
+name = "polyrepo-app"
+version = "0.1.0"
+mainClass = "com.example.app.Main"
+
+[workspace-dependencies]
+shared = { path = "../shared-lib/shared/core" }

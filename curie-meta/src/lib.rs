@@ -3,8 +3,9 @@ pub mod workspace;
 
 pub use descriptor::{
     AnnotationProcessor, AnnotationProcessorDetailed, Bom, BuildInfo, DependencyDetailed,
-    DependencyValue, Descriptor, DescriptorKind, Developer, Docker, Groovy, Java, Kotlin,
-    NativeImage, PublishConfig, RepositoryEntry, Scm, Spock, Test, WorkspaceDep, WorkspaceSection,
+    DependencyValue, Descriptor, DescriptorKind, Developer, Docker, GitMember, Groovy, Java,
+    Kotlin, MemberEntry, MissingMembers, NativeImage, PublishConfig, RepositoryEntry, Scm, Spock,
+    Test, WorkspaceDep, WorkspaceSection,
     DEFAULT_GROOVY_VERSION, DEFAULT_JUNIT_PLATFORM_VERSION, DEFAULT_KOTLIN_VERSION,
     DEFAULT_SPOCK_VERSION,
 };

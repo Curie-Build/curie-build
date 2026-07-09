@@ -232,6 +232,60 @@
          └─ hello-app  application v0.1.0</pre>
     </div>
 
+    <h2>Git members (polyrepo)</h2>
+    <p>Workspace members can live in separate Git repositories. Instead of a plain directory name, declare a table with <code>path</code>, <code>git</code>, and an optional <code>branch</code>:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml — polyrepo workspace</span>
+      </header>
+<pre><span class="kw">[workspace]</span>
+<span class="kw">members</span> = [
+    <span class="str">"local-lib"</span>,
+    { <span class="kw">path</span> = <span class="str">"shared-lib"</span>, <span class="kw">git</span> = <span class="str">"https://github.com/org/shared-lib.git"</span>, <span class="kw">branch</span> = <span class="str">"main"</span> },
+]</pre>
+    </div>
+
+    <p>When you run any workspace command (<code>curie build</code>, <code>curie test</code>, <code>curie list</code>, …) and a Git member's destination directory does not exist, Curie clones the repository automatically. If the directory already exists it is used as-is — Curie never overwrites an existing checkout.</p>
+
+    <p>This works recursively: if the cloned member is itself a workspace whose <code>Curie.toml</code> references other Git members, those are cloned too.</p>
+
+    <h3><code>missingMembers</code> policy</h3>
+    <p>The default behaviour is to clone automatically (<code>missingMembers = "clone"</code>). Set it to <code>"error"</code> to require manual cloning instead — Curie will fail with a copy-pasteable <code>git clone</code> command:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml — require manual cloning</span>
+      </header>
+<pre><span class="kw">[workspace]</span>
+<span class="kw">members</span> = [
+    <span class="str">"app"</span>,
+    { <span class="kw">path</span> = <span class="str">"shared-lib"</span>, <span class="kw">git</span> = <span class="str">"https://github.com/org/shared-lib.git"</span>, <span class="kw">branch</span> = <span class="str">"main"</span> },
+]
+<span class="kw">missingMembers</span> = <span class="str">"error"</span></pre>
+    </div>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build</span>
+      </header>
+<pre><span class="err">error:</span> workspace member "shared-lib" (from https://github.com/org/shared-lib.git) is missing.
+Run the following command from the workspace root:
+
+  git clone https://github.com/org/shared-lib.git --branch main shared-lib</pre>
+    </div>
+
+    <table>
+      <thead><tr><th>Value</th><th>Behaviour</th></tr></thead>
+      <tbody>
+        <tr><td><code>"clone"</code></td><td>Clone automatically when the directory is missing <em>(default)</em></td></tr>
+        <tr><td><code>"error"</code></td><td>Fail with a manual <code>git clone</code> instruction</td></tr>
+      </tbody>
+    </table>
+
     <h2>Parallel build and test</h2>
     <p>When a workspace has more than one member to build (or test/clean), Curie runs them in parallel — bounded by <code>--jobs</code> (default: CPU count) and respecting the dependency DAG so no member starts before its upstream dependencies are ready.</p>
 

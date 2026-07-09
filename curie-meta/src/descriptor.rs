@@ -284,10 +284,104 @@ pub struct Library {
 /// Workspace descriptor section: lists member directories whose own `Curie.toml`
 /// files are buildable modules.  Member paths are relative to the workspace
 /// `Curie.toml` directory.
+///
+/// Members can be plain directory names or tables with `path`, `git`, and
+/// optional `branch` fields for polyrepo setups where a member lives in a
+/// separate Git repository:
+///
+/// ```toml
+/// [workspace]
+/// members = [
+///     "local-lib",
+///     { path = "shared-lib", git = "https://github.com/org/shared-lib.git", branch = "main" },
+/// ]
+/// ```
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSection {
-    pub members: Vec<String>,
+    pub members: Vec<MemberEntry>,
+    /// Controls what happens when a Git-sourced member's directory does not
+    /// exist on disk:
+    ///
+    /// - `"clone"` (default) — clone the repository automatically.
+    /// - `"error"` — fail with a message telling the user how to clone manually.
+    ///
+    /// ```toml
+    /// [workspace]
+    /// members = [...]
+    /// missingMembers = "error"
+    /// ```
+    #[serde(rename = "missingMembers", default)]
+    pub missing_members: MissingMembers,
+}
+
+/// One entry in `[workspace.members]`.
+///
+/// Two shapes accepted, via serde's untagged enum:
+///
+/// ```toml
+/// # Shorthand: a plain string is a local directory name.
+/// "local-lib"
+///
+/// # Detailed: a table with `path`, `git`, and optional `branch`.
+/// { path = "shared-lib", git = "https://github.com/org/shared.git", branch = "main" }
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum MemberEntry {
+    /// `"name"` — local directory, same as today.
+    Local(String),
+    /// `{ path = "...", git = "...", branch = "..." }` — remote Git member.
+    Git(GitMember),
+}
+
+impl MemberEntry {
+    /// The filesystem path of this member, relative to the workspace root.
+    pub fn path(&self) -> &str {
+        match self {
+            MemberEntry::Local(s) => s,
+            MemberEntry::Git(g) => &g.path,
+        }
+    }
+
+    /// The Git remote URL, if this is a Git-sourced member.
+    pub fn git_url(&self) -> Option<&str> {
+        match self {
+            MemberEntry::Local(_) => None,
+            MemberEntry::Git(g) => Some(&g.git),
+        }
+    }
+
+    /// The branch to clone, if specified.
+    pub fn branch(&self) -> Option<&str> {
+        match self {
+            MemberEntry::Local(_) => None,
+            MemberEntry::Git(g) => g.branch.as_deref(),
+        }
+    }
+}
+
+/// A workspace member sourced from a remote Git repository.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct GitMember {
+    /// Destination directory relative to the workspace root.
+    pub path: String,
+    /// Git remote URL (HTTPS, SSH, or local path).
+    pub git: String,
+    /// Branch (or tag/ref) to check out.  Defaults to the remote's HEAD.
+    pub branch: Option<String>,
+}
+
+/// Policy for handling missing Git-sourced workspace members.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MissingMembers {
+    /// Clone the repository automatically (the default).
+    #[default]
+    Clone,
+    /// Fail with a message telling the user how to fetch manually.
+    Error,
 }
 
 /// BOM (Bill of Materials) descriptor: declares managed dependency versions
@@ -1988,15 +2082,22 @@ fn hint_for(message: &str, _file_name: &str) -> Option<String> {
     None
 }
 
+/// Test-only helper: parse a TOML string as if it were a Curie.toml.
+/// Not part of the public API — used by sibling crate-internal test modules.
+#[cfg(test)]
+pub(crate) fn load_str_for_test(content: &str) -> Result<Descriptor> {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Curie.toml"), content).unwrap();
+    load(dir.path())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Write `content` as Curie.toml under a fresh tempdir and call `load`.
     fn load_str(content: &str) -> Result<Descriptor> {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("Curie.toml"), content).unwrap();
-        load(dir.path())
+        load_str_for_test(content)
     }
 
     #[test]
@@ -2009,7 +2110,8 @@ members = ["a", "b", "nested/c"]
         assert!(d.is_workspace());
         assert_eq!(d.kind_label(), "workspace");
         let ws = d.workspace().expect("workspace section present");
-        assert_eq!(ws.members, vec!["a", "b", "nested/c"]);
+        let paths: Vec<&str> = ws.members.iter().map(|m| m.path()).collect();
+        assert_eq!(paths, vec!["a", "b", "nested/c"]);
         assert_eq!(d.project_name(), None);
         assert_eq!(d.project_version(), None);
     }

@@ -1,0 +1,26 @@
+# Polyrepo demo — workspace with a Git-sourced member that is itself a workspace
+# (with yet another level of git members inside).
+#
+# Simulated remotes are shipped as git *bundle* files (so the monorepo can
+# track them without nested `.git` directories):
+#   shared-lib-repo.bundle  → cloned to shared-lib/     (workspace)
+#   shared-util-repo.bundle → cloned to shared-lib/shared/
+#   shared-core-repo.bundle → cloned to shared-lib/shared/core/  (library)
+#
+# Curie recursively ensures git members of nested workspaces are cloned
+# (at any depth).
+#
+# Set `missingMembers = "error"` to disable auto-cloning and get a manual
+# instruction instead.
+
+[workspace]
+members = [
+    "app",
+    { path = "shared-lib", git = "./shared-lib-repo.bundle", branch = "master" },
+]
+
+# Uncomment to require manual cloning:
+#missingMembers = "error"
+
+[java]
+releaseVersion = "21"

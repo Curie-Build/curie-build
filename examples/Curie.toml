@@ -49,6 +49,7 @@ members = [
     "openapi-greeter",
     "resource-filtering-demo",
     "liquid-filtering-demo",
+    "polyrepo-demo",
 ]
 
 [bom-imports]

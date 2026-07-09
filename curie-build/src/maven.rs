@@ -618,7 +618,7 @@ pub fn build_workspace_project(desc: &Descriptor, project_root: &Path) -> Result
         artifact_id,
         version: GENERATED_VERSION.to_string(),
         packaging: "pom".to_string(),
-        modules: workspace.members.clone(),
+        modules: workspace.members.iter().map(|m| m.path().to_string()).collect(),
         ..Default::default()
     })
 }
@@ -2534,7 +2534,8 @@ fn sync_aggregators_recursive(workspace_root: &Path, force: bool, check: bool) -
     let workspace_section = desc
         .workspace()
         .expect("sync_aggregators_recursive: descriptor is not a [workspace]");
-    for name in &workspace_section.members {
+    for entry in &workspace_section.members {
+        let name = entry.path();
         let member_path = workspace_root.join(name);
         let member_desc = descriptor::load(&member_path)
             .with_context(|| format!("failed to load workspace member \"{name}\""))?;
@@ -2736,7 +2737,10 @@ mod tests {
 
     fn minimal_workspace(members: &[&str]) -> Descriptor {
         let mut desc = minimal_app("unused", None);
-        desc.kind = DescriptorKind::Workspace(WorkspaceSection { members: members.iter().map(|m| m.to_string()).collect() });
+        desc.kind = DescriptorKind::Workspace(WorkspaceSection {
+            members: members.iter().map(|m| curie_meta::MemberEntry::Local(m.to_string())).collect(),
+            missing_members: curie_meta::MissingMembers::default(),
+        });
         desc
     }
 

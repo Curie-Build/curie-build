@@ -1,4 +1,4 @@
-use crate::descriptor::{self, Descriptor, Resources};
+use crate::descriptor::{self, Descriptor, MemberEntry, MissingMembers, Resources};
 use anyhow::{bail, Context, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -152,6 +152,7 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
             .canonicalize()
             .unwrap_or_else(|_| workspace_root.to_path_buf()),
     );
+    ensure_git_members(workspace_root, &ws.members, &ws.missing_members)?;
     expand_members(
         workspace_root,
         &root_desc,
@@ -223,12 +224,13 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
 fn expand_members(
     ws_root: &Path,
     ws_desc: &Descriptor,
-    member_names: &[String],
+    member_entries: &[MemberEntry],
     prefix: &str,
     out: &mut Vec<Member>,
     seen: &mut HashSet<PathBuf>,
 ) -> Result<()> {
-    for name in member_names {
+    for entry in member_entries {
+        let name = entry.path();
         let path = ws_root.join(name);
         if !path.exists() {
             bail!(
@@ -261,6 +263,10 @@ fn expand_members(
                 format!("{}{}/", prefix, name)
             };
 
+            // Ensure git members of the nested workspace are cloned before
+            // expanding further.
+            ensure_git_members(&path, &inner_members, &inner_ws.missing_members)?;
+
             let before_len = out.len();
             expand_members(&path, &member_desc, &inner_members, &inner_prefix, out, seen)?;
 
@@ -279,7 +285,7 @@ fn expand_members(
                 .with_context(|| format!("invalid repository reference in member \"{}\"", name))?;
 
             let declared = if prefix.is_empty() {
-                name.clone()
+                name.to_string()
             } else {
                 format!("{}{}", prefix, name)
             };
@@ -293,6 +299,114 @@ fn expand_members(
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Git member cloning
+// ---------------------------------------------------------------------------
+
+/// Ensure all Git-sourced members whose directories do not exist are either
+/// cloned automatically or cause a descriptive error, depending on the
+/// workspace's [`MissingMembers`] policy.
+fn ensure_git_members(
+    ws_root: &Path,
+    members: &[MemberEntry],
+    policy: &MissingMembers,
+) -> Result<()> {
+    for entry in members {
+        if let MemberEntry::Git(git) = entry {
+            let dest = ws_root.join(&git.path);
+            if dest.exists() {
+                continue;
+            }
+            match policy {
+                MissingMembers::Clone => {
+                    clone_git_member(ws_root, &git.git, &git.path, git.branch.as_deref())
+                        .with_context(|| {
+                            format!(
+                                "failed to clone git member \"{}\" from {}",
+                                git.path, git.git,
+                            )
+                        })?;
+                }
+                MissingMembers::Error => {
+                    let mut cmd = format!("git clone {}", git.git);
+                    if let Some(branch) = &git.branch {
+                        cmd = format!("{} --branch {}", cmd, branch);
+                    }
+                    cmd = format!("{} {}", cmd, git.path);
+                    bail!(
+                        "workspace member \"{}\" (from {}) is missing.\n\
+                         Run the following command from the workspace root ({}):\n\n  {}\n",
+                        git.path,
+                        git.git,
+                        ws_root.display(),
+                        cmd,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Clone a single Git repository into `<ws_root>/<dest_path>`.
+fn clone_git_member(
+    ws_root: &Path,
+    url: &str,
+    dest_path: &str,
+    branch: Option<&str>,
+) -> Result<()> {
+    let dest = ws_root.join(dest_path);
+
+    // Make relative local git URLs (e.g. "./foo-repo" or "../bar") resolve relative
+    // to the declaring workspace directory. This makes `git = "..."` robust
+    // regardless of the process cwd (important when a sub-workspace with git
+    // members is expanded as part of a larger workspace).
+    let effective_url = if is_local_relative_git_url(url) {
+        ws_root.join(url).to_string_lossy().into_owned()
+    } else {
+        url.to_string()
+    };
+
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(ws_root);
+    cmd.arg("clone");
+    if let Some(b) = branch {
+        cmd.args(["--branch", b]);
+    }
+    cmd.arg(&effective_url);
+    cmd.arg(&dest);
+
+    eprintln!(
+        "Cloning member \"{}\" from {} …",
+        dest_path, url,
+    );
+
+    let output = cmd
+        .output()
+        .with_context(|| "failed to execute git — is git installed and on PATH?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "git clone failed (exit {}):\n{}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim(),
+        );
+    }
+    Ok(())
+}
+
+/// Heuristic: treat as a local relative path that should be resolved against
+/// the ws dir (not a URL scheme like https/git@).
+fn is_local_relative_git_url(u: &str) -> bool {
+    if u.contains("://") || u.starts_with("git@") || u.starts_with("ssh:") {
+        return false;
+    }
+    // Anything starting with . or / or not containing scheme chars is treated local.
+    // Simple check is sufficient for our supported cases.
+    u.starts_with('.') || u.starts_with('/') || !u.contains(':')
 }
 
 /// Merge workspace-level inheritable config into a member descriptor.
@@ -469,7 +583,8 @@ fn build_list_tree(root: &Path, parent_ws_abs: &Path, name: &str) -> Result<List
     if desc.is_workspace() {
         let ws = desc.workspace().unwrap();
         let mut children = Vec::new();
-        for member_name in &ws.members {
+        for entry in &ws.members {
+            let member_name = entry.path();
             let child_path = root.join(member_name);
             children.push(
                 build_list_tree(&child_path, &abs_path, member_name)
@@ -1900,5 +2015,461 @@ mod tests {
         .unwrap();
         // The member inherits no directories (layout is per-module).
         assert!(ws.members[0].descriptor.resources.directories.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Git member tests
+    // -----------------------------------------------------------------------
+
+    /// Create a bare git repository at `path` that contains a Curie.toml with
+    /// the given content.
+    fn init_bare_repo(path: &Path, curie_toml: &str) {
+        // 1. Create a temporary non-bare repo to commit into.
+        let staging = path.parent().unwrap().join(format!(
+            "{}-staging",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&staging).unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&staging)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&staging)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&staging)
+            .output()
+            .unwrap();
+        std::fs::write(staging.join("Curie.toml"), curie_toml).unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&staging)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&staging)
+            .output()
+            .unwrap();
+        // 2. Clone as bare into the destination.
+        std::process::Command::new("git")
+            .args(["clone", "--bare"])
+            .arg(&staging)
+            .arg(path)
+            .output()
+            .unwrap();
+        // Clean up staging.
+        std::fs::remove_dir_all(&staging).unwrap();
+    }
+
+    /// Create a bare git repo with a branch.
+    fn init_bare_repo_with_branch(path: &Path, curie_toml: &str, branch: &str) {
+        let staging = path.parent().unwrap().join(format!(
+            "{}-staging",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&staging).unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&staging)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&staging)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&staging)
+            .output()
+            .unwrap();
+        std::fs::write(staging.join("Curie.toml"), curie_toml).unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&staging)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&staging)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "-b", branch])
+            .current_dir(&staging)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["clone", "--bare"])
+            .arg(&staging)
+            .arg(path)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&staging).unwrap();
+    }
+
+    #[test]
+    fn git_member_auto_cloned_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+
+        // Create a bare git repo to use as the "remote".
+        let remote = r.join("remote-lib.git");
+        init_bare_repo(
+            &remote,
+            "[library]\nname = \"remote-lib\"\nversion = \"1.0.0\"\n",
+        );
+
+        // Write workspace Curie.toml that references the git member.
+        std::fs::write(
+            r.join("Curie.toml"),
+            format!(
+                "[workspace]\nmembers = [\n  {{ path = \"remote-lib\", git = \"{}\" }},\n]\n",
+                remote.display()
+            ),
+        )
+        .unwrap();
+
+        // remote-lib directory should NOT exist yet.
+        assert!(!r.join("remote-lib").exists());
+
+        // Loading the workspace should clone it automatically.
+        let ws = load(r).unwrap();
+        assert_eq!(ws.members.len(), 1);
+        assert_eq!(ws.members[0].declared, "remote-lib");
+        assert_eq!(
+            ws.members[0].descriptor.project_name(),
+            Some("remote-lib")
+        );
+        assert!(r.join("remote-lib").exists());
+    }
+
+    #[test]
+    fn git_member_with_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+
+        let remote = r.join("branched-lib.git");
+        init_bare_repo_with_branch(
+            &remote,
+            "[library]\nname = \"branched-lib\"\nversion = \"2.0.0\"\n",
+            "release",
+        );
+
+        std::fs::write(
+            r.join("Curie.toml"),
+            format!(
+                "[workspace]\nmembers = [\n  {{ path = \"branched-lib\", git = \"{}\", branch = \"release\" }},\n]\n",
+                remote.display()
+            ),
+        )
+        .unwrap();
+
+        let ws = load(r).unwrap();
+        assert_eq!(ws.members.len(), 1);
+        assert_eq!(ws.members[0].descriptor.project_name(), Some("branched-lib"));
+    }
+
+    #[test]
+    fn git_member_skipped_when_dir_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+
+        let remote = r.join("existing-lib.git");
+        init_bare_repo(
+            &remote,
+            "[library]\nname = \"should-not-clone\"\nversion = \"1.0.0\"\n",
+        );
+
+        // Pre-create the directory with a DIFFERENT Curie.toml.
+        let lib_dir = r.join("existing-lib");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        std::fs::write(
+            lib_dir.join("Curie.toml"),
+            "[library]\nname = \"pre-existing\"\nversion = \"9.9.9\"\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            r.join("Curie.toml"),
+            format!(
+                "[workspace]\nmembers = [\n  {{ path = \"existing-lib\", git = \"{}\" }},\n]\n",
+                remote.display()
+            ),
+        )
+        .unwrap();
+
+        let ws = load(r).unwrap();
+        // Should use the pre-existing directory, NOT the cloned one.
+        assert_eq!(ws.members[0].descriptor.project_name(), Some("pre-existing"));
+        assert_eq!(ws.members[0].descriptor.project_version(), Some("9.9.9"));
+    }
+
+    #[test]
+    fn git_member_error_policy_rejects_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+
+        std::fs::write(
+            r.join("Curie.toml"),
+            "[workspace]\nmembers = [\n  { path = \"missing-lib\", git = \"https://example.com/repo.git\" },\n]\nmissingMembers = \"error\"\n",
+        )
+        .unwrap();
+
+        let err = load(r).unwrap_err().to_string();
+        assert!(err.contains("missing-lib"), "got: {err}");
+        assert!(err.contains("https://example.com/repo.git"), "got: {err}");
+        assert!(err.contains("git clone"), "got: {err}");
+    }
+
+    #[test]
+    fn git_member_error_policy_includes_branch_in_instruction() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+
+        std::fs::write(
+            r.join("Curie.toml"),
+            "[workspace]\nmembers = [\n  { path = \"lib\", git = \"https://example.com/repo.git\", branch = \"develop\" },\n]\nmissingMembers = \"error\"\n",
+        )
+        .unwrap();
+
+        let err = load(r).unwrap_err().to_string();
+        assert!(err.contains("--branch develop"), "got: {err}");
+    }
+
+    #[test]
+    fn git_member_error_policy_allows_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+
+        // Pre-create the directory.
+        let lib_dir = r.join("lib");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        std::fs::write(
+            lib_dir.join("Curie.toml"),
+            "[library]\nname = \"lib\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            r.join("Curie.toml"),
+            "[workspace]\nmembers = [\n  { path = \"lib\", git = \"https://example.com/repo.git\" },\n]\nmissingMembers = \"error\"\n",
+        )
+        .unwrap();
+
+        // Should succeed because the dir already exists.
+        let ws = load(r).unwrap();
+        assert_eq!(ws.members.len(), 1);
+    }
+
+    #[test]
+    fn mixed_local_and_git_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+
+        // Local member.
+        let local = r.join("local-lib");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::write(
+            local.join("Curie.toml"),
+            "[library]\nname = \"local-lib\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+
+        // Remote member.
+        let remote = r.join("remote-lib.git");
+        init_bare_repo(
+            &remote,
+            "[library]\nname = \"remote-lib\"\nversion = \"2.0.0\"\n",
+        );
+
+        std::fs::write(
+            r.join("Curie.toml"),
+            format!(
+                "[workspace]\nmembers = [\n  \"local-lib\",\n  {{ path = \"remote-lib\", git = \"{}\" }},\n]\n",
+                remote.display()
+            ),
+        )
+        .unwrap();
+
+        let ws = load(r).unwrap();
+        assert_eq!(ws.members.len(), 2);
+        let names: Vec<&str> = ws.members.iter().map(|m| m.declared.as_str()).collect();
+        assert!(names.contains(&"local-lib"));
+        assert!(names.contains(&"remote-lib"));
+    }
+
+    #[test]
+    fn git_member_default_policy_is_clone() {
+        // When missingMembers is not set, it defaults to "clone".
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+
+        let remote = r.join("default-lib.git");
+        init_bare_repo(
+            &remote,
+            "[library]\nname = \"default-lib\"\nversion = \"1.0.0\"\n",
+        );
+
+        // No missingMembers = ... in the TOML.
+        std::fs::write(
+            r.join("Curie.toml"),
+            format!(
+                "[workspace]\nmembers = [\n  {{ path = \"default-lib\", git = \"{}\" }},\n]\n",
+                remote.display()
+            ),
+        )
+        .unwrap();
+
+        let ws = load(r).unwrap();
+        assert_eq!(ws.members.len(), 1);
+        assert!(r.join("default-lib").exists());
+    }
+
+    #[test]
+    fn nested_workspace_git_member_auto_cloned() {
+        // Test scenario: a cloned member is itself a workspace with members
+        // that need to be cloned.
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+
+        // Create the inner leaf member as a bare repo.
+        let leaf_remote = r.join("leaf.git");
+        init_bare_repo(
+            &leaf_remote,
+            "[library]\nname = \"leaf\"\nversion = \"1.0.0\"\n",
+        );
+
+        // Create the inner workspace as a bare repo.
+        // It has a git member pointing at leaf_remote.
+        let inner_remote = r.join("inner-ws.git");
+        let inner_staging = r.join("inner-ws-staging");
+        std::fs::create_dir_all(&inner_staging).unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&inner_staging)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&inner_staging)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&inner_staging)
+            .output()
+            .unwrap();
+        std::fs::write(
+            inner_staging.join("Curie.toml"),
+            format!(
+                "[workspace]\nmembers = [\n  {{ path = \"leaf\", git = \"{}\" }},\n]\n",
+                leaf_remote.display()
+            ),
+        )
+        .unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&inner_staging)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&inner_staging)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["clone", "--bare"])
+            .arg(&inner_staging)
+            .arg(&inner_remote)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&inner_staging).unwrap();
+
+        // Root workspace references inner-ws as a git member.
+        std::fs::write(
+            r.join("Curie.toml"),
+            format!(
+                "[workspace]\nmembers = [\n  {{ path = \"inner-ws\", git = \"{}\" }},\n]\n",
+                inner_remote.display()
+            ),
+        )
+        .unwrap();
+
+        // Neither inner-ws nor leaf should exist yet.
+        assert!(!r.join("inner-ws").exists());
+
+        let ws = load(r).unwrap();
+        // The inner workspace should have been cloned, and its git member
+        // (leaf) should also have been cloned recursively.
+        assert!(r.join("inner-ws").exists());
+        assert!(r.join("inner-ws").join("leaf").exists());
+        assert_eq!(ws.members.len(), 1);
+        assert_eq!(ws.members[0].declared, "inner-ws/leaf");
+        assert_eq!(ws.members[0].descriptor.project_name(), Some("leaf"));
+    }
+
+    #[test]
+    fn local_member_missing_with_no_git_fails_normally() {
+        // A local string member that doesn't exist should still fail with
+        // the original error message (not the git error path).
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        std::fs::write(
+            r.join("Curie.toml"),
+            "[workspace]\nmembers = [\"nonexistent\"]\n",
+        )
+        .unwrap();
+        let err = load(r).unwrap_err().to_string();
+        assert!(err.contains("nonexistent"), "got: {err}");
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn git_member_parse_roundtrip() {
+        // Verify the TOML parsing of the new MemberEntry variants.
+        let toml = r#"
+[workspace]
+members = [
+    "plain-local",
+    { path = "remote-a", git = "https://github.com/org/a.git" },
+    { path = "remote-b", git = "git@github.com:org/b.git", branch = "develop" },
+]
+missingMembers = "error"
+"#;
+        let d = crate::descriptor::load_str_for_test(toml).unwrap();
+        let ws = d.workspace().unwrap();
+        assert_eq!(ws.members.len(), 3);
+
+        assert_eq!(ws.members[0].path(), "plain-local");
+        assert!(ws.members[0].git_url().is_none());
+        assert!(ws.members[0].branch().is_none());
+
+        assert_eq!(ws.members[1].path(), "remote-a");
+        assert_eq!(ws.members[1].git_url(), Some("https://github.com/org/a.git"));
+        assert!(ws.members[1].branch().is_none());
+
+        assert_eq!(ws.members[2].path(), "remote-b");
+        assert_eq!(ws.members[2].git_url(), Some("git@github.com:org/b.git"));
+        assert_eq!(ws.members[2].branch(), Some("develop"));
+
+        assert_eq!(ws.missing_members, MissingMembers::Error);
+    }
+
+    #[test]
+    fn missing_members_defaults_to_clone() {
+        let toml = r#"
+[workspace]
+members = ["a"]
+"#;
+        let d = crate::descriptor::load_str_for_test(toml).unwrap();
+        let ws = d.workspace().unwrap();
+        assert_eq!(ws.missing_members, MissingMembers::Clone);
     }
 }
