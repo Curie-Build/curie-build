@@ -27,7 +27,7 @@ curie-deps = { version = "0.7.0", path = "../curie-deps" }
 curie-meta = { version = "0.7.0", path = "../curie-meta" }
 curie-plugin = { version = "0.7.0", path = "../curie-plugin" }
 indicatif = "0.18"
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls", "json"] }
 sha1 = "0.11"
 sha2 = "0.11"
 which = "8.0.3"
@@ -37,11 +37,14 @@ portable-pty = "0.9"
 crossterm = "0.29"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 ansi-to-tui = "8"
-time = { version = "0.3", features = ["local-offset"] }
+time = { version = "0.3", features = ["local-offset", "formatting", "parsing"] }
 terminal_size = "0.4"
 quick-xml = { version = "0.40", features = ["serialize"] }
 tempfile = "3"
 liquid = "0.26"
+tar = "0.4"
+flate2 = "1"
+base64 = "0.22"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 inotify = "0.10"

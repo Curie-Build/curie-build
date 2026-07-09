@@ -962,21 +962,94 @@ impl Delimiter {
     }
 }
 
+/// How Curie assembles container images for `[docker]` projects.
+///
+/// * [`Daemonless`](DockerBuilder::Daemonless) (default) — pull the base image
+///   from a registry and assemble an OCI image in-process (Jib-style). No
+///   Docker daemon required to *build*; output is `target/image/` +
+///   `target/image.tar`.
+/// * [`Docker`](DockerBuilder::Docker) — shell out to `docker build` with a
+///   generated (or user-provided) Dockerfile. Also forced automatically when
+///   a project-root `Dockerfile` is present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DockerBuilder {
+    #[default]
+    Daemonless,
+    Docker,
+}
+
+impl DockerBuilder {
+    /// Parse a TOML `builder` value. Accepts `daemonless` (default), `docker`,
+    /// and the alias `daemon` (= docker).
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "daemonless" => Ok(Self::Daemonless),
+            "docker" | "daemon" => Ok(Self::Docker),
+            other => Err(format!(
+                "unknown [docker] builder \"{other}\"; expected \"daemonless\" or \"docker\""
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Daemonless => "daemonless",
+            Self::Docker => "docker",
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DockerBuilder {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Docker {
-    /// Base image for the generated Dockerfile. When absent, the effective
-    /// default depends on which artifact the image packages: a JRE image for
-    /// a plain JAR, or a minimal glibc base for a native-image binary or a
-    /// jlink runtime image (neither needs a JRE) — resolved by
+    /// Image assembly strategy. Default: `daemonless` (no Docker daemon).
+    /// Set to `"docker"` to shell out to the Docker CLI instead.
+    /// A project-root `Dockerfile` always forces the docker path.
+    #[serde(default)]
+    pub builder: DockerBuilder,
+    /// Base image for the container. When absent, the effective default
+    /// depends on which artifact the image packages: a JRE image for a plain
+    /// JAR, or a minimal glibc base for a native-image binary or a jlink
+    /// runtime image (neither needs a JRE) — resolved by
     /// `docker::resolved_base_image` in curie-build, not here, since that
     /// decision depends on `[native-image]`/`[jlink]` section presence.
+    /// Accepts `name:tag` or `name@sha256:…` digest pins.
     #[serde(rename = "baseImage", default)]
     pub base_image: Option<String>,
     #[serde(rename = "imageName")]
     pub image_name: Option<String>,
     #[serde(rename = "imageTag")]
     pub image_tag: Option<String>,
+    /// Extra tags applied when pushing (daemonless builder). Optional.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Platform selected from a multi-arch base index (e.g. `linux/amd64`).
+    /// Default: `linux/amd64`. Daemonless builder only.
+    #[serde(default)]
+    pub platform: Option<String>,
+    /// `[[credentials]]` entry id used for registry pull/push auth.
+    #[serde(rename = "registryId", default)]
+    pub registry_id: Option<String>,
+    /// JVM flags spliced into the container entrypoint
+    /// (`java <jvmArgs…> -jar app.jar`). Daemonless builder only.
+    #[serde(rename = "jvmArgs", default)]
+    pub jvm_args: Vec<String>,
+    /// Environment variables set in the image config. Daemonless builder only.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// OCI labels set in the image config. Daemonless builder only.
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
+    /// Container user (`USER`). Daemonless builder only.
+    #[serde(default)]
+    pub user: Option<String>,
     /// Tracks whether the [docker] section was explicitly present in Curie.toml.
     /// Set by Descriptor::load after deserialisation via a raw TOML check.
     #[serde(skip)]
@@ -986,11 +1059,38 @@ pub struct Docker {
 impl Default for Docker {
     fn default() -> Self {
         Docker {
+            builder: DockerBuilder::default(),
             base_image: None,
             image_name: None,
             image_tag: None,
+            tags: Vec::new(),
+            platform: None,
+            registry_id: None,
+            jvm_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            labels: std::collections::BTreeMap::new(),
+            user: None,
             section_present: false,
         }
+    }
+}
+
+impl Docker {
+    /// Platform string used when selecting from a multi-arch base index.
+    pub fn resolved_platform(&self) -> &str {
+        self.platform.as_deref().unwrap_or("linux/amd64")
+    }
+
+    /// True when any daemonless-only field is set (used for validation when
+    /// `builder = "docker"`).
+    pub fn has_daemonless_only_fields(&self) -> bool {
+        !self.tags.is_empty()
+            || self.platform.is_some()
+            || self.registry_id.is_some()
+            || !self.jvm_args.is_empty()
+            || !self.env.is_empty()
+            || !self.labels.is_empty()
+            || self.user.is_some()
     }
 }
 
@@ -1820,6 +1920,8 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         );
     }
 
+    validate_docker_builder_fields(&descriptor.docker)?;
+
     if descriptor.is_library() && native_image_section_present {
         bail!(
             "library projects do not support native-image compilation: \
@@ -1998,6 +2100,31 @@ pub fn validate_dep_repo_refs(desc: &Descriptor) -> Result<()> {
 /// project root.
 pub fn docker_enabled(project_root: &Path, desc: &Descriptor) -> bool {
     desc.docker.section_present || project_root.join("Dockerfile").exists()
+}
+
+/// Which image builder to use for this project.
+///
+/// A project-root `Dockerfile` always forces the Docker CLI path (the
+/// daemonless builder cannot process Dockerfiles). Otherwise the
+/// `[docker] builder` setting is honoured (default: daemonless).
+pub fn effective_docker_builder(project_root: &Path, desc: &Descriptor) -> DockerBuilder {
+    if project_root.join("Dockerfile").exists() {
+        DockerBuilder::Docker
+    } else {
+        desc.docker.builder
+    }
+}
+
+/// Reject daemonless-only fields when `builder = "docker"`.
+fn validate_docker_builder_fields(docker: &Docker) -> Result<()> {
+    if docker.builder == DockerBuilder::Docker && docker.has_daemonless_only_fields() {
+        bail!(
+            "[docker] fields tags/platform/registryId/jvmArgs/env/labels/user \
+             require builder = \"daemonless\" (the default); remove them or \
+             set builder = \"daemonless\""
+        );
+    }
+    Ok(())
 }
 
 /// Native-image compilation is enabled when the `[native-image]` section is
@@ -3023,6 +3150,129 @@ mainClass = "X"
         let d = load_str(toml).unwrap();
         assert!(d.jlink.section_present);
         assert!(jlink_enabled(&d));
+    }
+
+    #[test]
+    fn docker_builder_defaults_to_daemonless() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[docker]
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.docker.builder, DockerBuilder::Daemonless);
+        assert_eq!(d.docker.resolved_platform(), "linux/amd64");
+    }
+
+    #[test]
+    fn docker_builder_docker_alias_daemon() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[docker]
+builder = "docker"
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.docker.builder, DockerBuilder::Docker);
+
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[docker]
+builder = "daemon"
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.docker.builder, DockerBuilder::Docker);
+    }
+
+    #[test]
+    fn docker_builder_unknown_rejected() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[docker]
+builder = "podman"
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("builder") || err.contains("podman"), "got: {err}");
+    }
+
+    #[test]
+    fn docker_daemonless_fields_with_docker_builder_rejected() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[docker]
+builder = "docker"
+jvmArgs = ["-Xmx1g"]
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("daemonless") || err.contains("jvmArgs"), "got: {err}");
+    }
+
+    #[test]
+    fn docker_daemonless_fields_accepted_with_default_builder() {
+        let toml = r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[docker]
+jvmArgs = ["-Xmx512m"]
+env = { TZ = "UTC" }
+user = "65532"
+labels = { "org.opencontainers.image.source" = "https://example.com" }
+platform = "linux/arm64"
+tags = ["latest"]
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.docker.builder, DockerBuilder::Daemonless);
+        assert_eq!(d.docker.jvm_args, vec!["-Xmx512m"]);
+        assert_eq!(d.docker.env.get("TZ").map(String::as_str), Some("UTC"));
+        assert_eq!(d.docker.user.as_deref(), Some("65532"));
+        assert_eq!(d.docker.resolved_platform(), "linux/arm64");
+        assert_eq!(d.docker.tags, vec!["latest"]);
+    }
+
+    #[test]
+    fn effective_docker_builder_forces_docker_when_dockerfile_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            r#"
+[application]
+name = "x"
+version = "0.1"
+mainClass = "X"
+
+[docker]
+builder = "daemonless"
+"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("Dockerfile"), "FROM scratch\n").unwrap();
+        let d = load(&dir.path().to_path_buf()).unwrap();
+        assert_eq!(d.docker.builder, DockerBuilder::Daemonless);
+        assert_eq!(
+            effective_docker_builder(dir.path(), &d),
+            DockerBuilder::Docker
+        );
     }
 
     #[test]

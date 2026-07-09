@@ -1,0 +1,27 @@
+# oci-demo — daemonless OCI image build (Jib-style).
+#
+# `curie build` pulls the base image from the registry, appends deterministic
+# dependency + app layers, and writes target/image/ + target/image.tar.
+# No Docker daemon is required for the build. Load and run with:
+#
+#   docker load -i target/image.tar
+#   docker run --rm oci-demo:0.1.0
+#
+# Or simply: curie run  (loads the tar then docker run)
+
+[application]
+name = "oci-demo"
+version = "0.1.0"
+mainClass = "com.example.oci.Main"
+
+[java]
+releaseVersion = "21"
+
+[dependencies]
+"com.google.guava:guava" = "33.4.0-jre"
+
+[docker]
+baseImage = "eclipse-temurin:21-jre-alpine"
+jvmArgs = ["-Xms16m", "-Xmx64m"]
+env = { DEMO_ENV = "oci" }
+labels = { "org.opencontainers.image.description" = "Curie daemonless OCI demo" }

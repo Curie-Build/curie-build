@@ -11,8 +11,16 @@ name = "json-greeter-flat"
 version = "0.1.0"
 mainClass = "com.example.JsonGreeter"
 
+[java]
+# Match the JRE in [docker] baseImage so the container can load our classes.
+releaseVersion = "21"
+
 [dependencies]
 "com.fasterxml.jackson.core:jackson-databind" = "2.17.2"
 
 [docker]
+# Default builder is daemonless (no Docker daemon needed to assemble the image).
+# Set builder = "docker" to shell out to `docker build` instead.
+# A project-root Dockerfile also forces the docker path.
 baseImage = "eclipse-temurin:21-jre-alpine"
+jvmArgs = ["-Xms32m"]

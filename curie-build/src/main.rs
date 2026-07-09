@@ -14,6 +14,7 @@ mod coverage;
 mod deps;
 mod descriptor;
 mod docker;
+mod oci;
 mod fat_jar;
 mod fetch;
 mod fmt;

@@ -1,5 +1,5 @@
 use crate::jar::classpath_string;
-use crate::{build, descriptor, docker, jlink, native};
+use crate::{build, descriptor, jlink, native, oci};
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
@@ -73,7 +73,14 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
         } else if descriptor::jlink_enabled(&desc) {
             jlink::build_jlink(project_root, &desc, effective_jar, &effective_deps)?;
         }
-        docker::docker_run(project_root, &desc, effective_jar, &effective_deps, extra_args)?;
+        oci::run_image(
+            project_root,
+            &desc,
+            effective_jar,
+            &effective_deps,
+            extra_args,
+            opts.offline,
+        )?;
     } else {
         let mut java = Command::new("java");
         if desc.java.preview_enabled() {

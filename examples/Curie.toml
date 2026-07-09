@@ -19,6 +19,7 @@ members = [
     "hello-world",
     "jackson-bom-greeter",
     "json-greeter",
+    "oci-demo",
     "string-utils",
     "string-utils-cli",
     "auto-value-demo",

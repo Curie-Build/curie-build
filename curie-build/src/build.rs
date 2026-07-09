@@ -4,8 +4,8 @@
 use crate::compile::compile;
 use crate::config;
 use crate::descriptor;
-use crate::docker;
 use crate::git;
+use crate::oci;
 use crate::incremental::{self, needs_repackage};
 use crate::jar::{get_manifest_header, populate_libs_dir, write_deterministic_jar};
 use crate::jlink;
@@ -132,7 +132,13 @@ pub fn build_with_desc(
     }
 
     if !desc.is_library() && !opts.no_docker && descriptor::docker_enabled(project_root, desc) {
-        docker::docker_build(project_root, desc, effective_jar, effective_deps)?;
+        oci::build_image(
+            project_root,
+            desc,
+            effective_jar,
+            effective_deps,
+            opts.offline,
+        )?;
     }
 
     Ok(output)
