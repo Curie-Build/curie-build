@@ -232,6 +232,116 @@
          └─ hello-app  application v0.1.0</pre>
     </div>
 
+    <h2>Foreign members</h2>
+    <p>Real workspaces often include projects built by other tools — a legacy Make library, a Rust CLI, an NPM frontend. Curie workspaces can list those as <strong>foreign members</strong>. <code>curie build</code>, <code>curie test</code>, and <code>curie clean</code> orchestrate them in dependency order alongside native Curie members.</p>
+    <p>Foreign projects carry no configuration of their own; everything is declared on the enclosing workspace. A directory listed in <code>[workspace] members</code> without a <code>Curie.toml</code> is auto-detected from marker files; optional <code>[workspace.foreign.&lt;path&gt;]</code> configures it further.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml — foreign members</span>
+      </header>
+<pre><span class="kw">[workspace]</span>
+<span class="kw">members</span> = [<span class="str">"greeter-lib"</span>, <span class="str">"app"</span>, <span class="str">"legacy-lib"</span>, <span class="str">"rust-tool"</span>, <span class="str">"isolated-app"</span>]
+
+<span class="kw">[workspace.foreign.legacy-lib]</span>            <span class="dim"># optional; legacy-lib has no Curie.toml → auto-detected</span>
+<span class="kw">type</span> = <span class="str">"make"</span>                             <span class="dim"># optional override</span>
+<span class="kw">dependencies</span> = [<span class="str">"greeter-lib"</span>]
+<span class="kw">command</span> = [<span class="str">"make"</span>, <span class="str">"jar"</span>]                 <span class="dim"># build argv override (no shell)</span>
+<span class="kw">test-command</span> = [<span class="str">"make"</span>, <span class="str">"check"</span>]
+<span class="kw">clean-command</span> = [<span class="str">"make"</span>, <span class="str">"distclean"</span>]
+<span class="kw">artifacts</span> = [<span class="str">"out/legacy-lib.jar"</span>]        <span class="dim"># globs → dependents' classpath</span>
+<span class="kw">env</span> = { <span class="kw">LEGACY_HOME</span> = <span class="str">"/opt/legacy"</span> }
+
+<span class="kw">[workspace.foreign.rust-tool]</span>
+<span class="kw">dependencies</span> = [<span class="str">"legacy-lib"</span>]            <span class="dim"># ordering only</span>
+
+<span class="kw">[workspace.foreign.isolated-app]</span>          <span class="dim"># has Curie.toml → foreign curie member</span>
+<span class="kw">env</span> = { <span class="kw">APP_PROFILE</span> = <span class="str">"ci"</span> }              <span class="dim"># built by a separate curie process</span></pre>
+    </div>
+
+    <h3>Registration rules</h3>
+    <ul>
+      <li>Every member — Curie or foreign — is listed in <code>members</code>. A <code>[workspace.foreign.X]</code> key where <code>X</code> is not in <code>members</code> is a hard error.</li>
+      <li>A <code>members</code> entry with a <code>Curie.toml</code> and <strong>no</strong> foreign entry is a native Curie member (built in-process).</li>
+      <li>A <code>members</code> entry <strong>without</strong> a <code>Curie.toml</code> is auto-detected as foreign from marker files; no markers either → hard error.</li>
+      <li>A foreign entry over a directory that has a <code>Curie.toml</code> makes it a <strong>foreign Curie member</strong> (<code>type = "curie"</code>): built by spawning the <code>curie</code> binary as a subprocess with the declared <code>env</code>. It gets no workspace inheritance, and if it is itself a workspace it is <strong>not</strong> flattened — the child process owns it.</li>
+    </ul>
+
+    <h3>Auto-detection markers</h3>
+    <p>Exactly one marker group must match (else hard error naming the found markers and suggesting <code>type = "..."</code>):</p>
+    <table>
+      <thead><tr><th>Marker</th><th>Tool</th></tr></thead>
+      <tbody>
+        <tr><td><code>Curie.toml</code></td><td>curie (only via <code>[workspace.foreign]</code>)</td></tr>
+        <tr><td><code>pom.xml</code></td><td>maven</td></tr>
+        <tr><td><code>build.gradle(.kts)</code> / <code>settings.gradle(.kts)</code></td><td>gradle</td></tr>
+        <tr><td><code>Cargo.toml</code></td><td>cargo</td></tr>
+        <tr><td><code>Makefile</code> / <code>GNUmakefile</code> / <code>makefile</code></td><td>make</td></tr>
+        <tr><td><code>package.json</code></td><td>npm (or bun/yarn via lockfile)</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Default commands</h3>
+    <p>Commands are executed directly (no shell), with cwd = the member directory. Maven/Gradle prefer <code>./mvnw</code> / <code>./gradlew</code> when present. Foreign Curie uses the same binary that is orchestrating (<code>std::env::current_exe()</code>), falling back to <code>curie</code> on <code>PATH</code>.</p>
+    <table>
+      <thead><tr><th>Tool</th><th>build</th><th>test</th><th>clean</th></tr></thead>
+      <tbody>
+        <tr><td>maven</td><td><code>mvn -B package</code></td><td><code>mvn -B test</code></td><td><code>mvn -B clean</code></td></tr>
+        <tr><td>gradle</td><td><code>gradle build</code></td><td><code>gradle test</code></td><td><code>gradle clean</code></td></tr>
+        <tr><td>cargo</td><td><code>cargo build</code></td><td><code>cargo test</code></td><td><code>cargo clean</code></td></tr>
+        <tr><td>make</td><td><code>make</code></td><td><code>make test</code>*</td><td><code>make clean</code>*</td></tr>
+        <tr><td>npm / bun / yarn</td><td><code>&lt;tool&gt; run build</code>*</td><td><code>&lt;tool&gt; test</code>*</td><td><code>&lt;tool&gt; run clean</code>*</td></tr>
+        <tr><td>curie</td><td><code>curie build</code></td><td><code>curie test</code></td><td><code>curie clean</code></td></tr>
+      </tbody>
+    </table>
+    <p>* Graceful skip when the target/script does not exist applies to <strong>default</strong> commands only (explicit overrides always run and fail loudly). For make, Curie probes with <code>make -n &lt;target&gt;</code>; for npm/bun/yarn it checks <code>scripts.&lt;name&gt;</code> in <code>package.json</code>. An override of <code>[]</code> skips explicitly.</p>
+
+    <h3>Key reference</h3>
+    <table>
+      <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>type</code></td><td>Optional tool override (<code>maven</code>, <code>gradle</code>, <code>cargo</code>, <code>make</code>, <code>npm</code>, <code>bun</code>, <code>yarn</code>, <code>curie</code>)</td></tr>
+        <tr><td><code>dependencies</code></td><td>Workspace-root-relative member paths for build ordering</td></tr>
+        <tr><td><code>command</code></td><td>Build argv override (non-empty)</td></tr>
+        <tr><td><code>test-command</code> / <code>clean-command</code></td><td>Test/clean argv; <code>[]</code> = skip</td></tr>
+        <tr><td><code>artifacts</code></td><td>Globs of files to put on dependents' classpaths after build</td></tr>
+        <tr><td><code>env</code></td><td>Environment variables applied to build/test/clean invocations</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Artifacts and classpath</h3>
+    <p>Foreign members have no <code>target/classes</code>. Dependents receive only the paths matched by <code>artifacts</code> (plus any transitive contribution). Each pattern must match at least one file after a successful build. Curie members can depend on foreign members via normal <code>[workspace-dependencies]</code> path entries.</p>
+
+    <h3>Execution semantics</h3>
+    <ul>
+      <li>cwd = member directory; no shell; <code>env</code> applied to the process.</li>
+      <li>Foreign build commands are always invoked — the foreign tool owns its own staleness.</li>
+      <li>In parallel builds, output is muxed like native members; logs land in <code>&lt;member&gt;/target/&lt;action&gt;.log</code> (Curie creates <code>target/</code> in foreign dirs for this).</li>
+    </ul>
+
+    <h3>Per-command behavior</h3>
+    <table>
+      <thead><tr><th>Command</th><th>Behavior</th></tr></thead>
+      <tbody>
+        <tr><td><code>build</code></td><td>Run build command; expand artifacts → classpath contribution</td></tr>
+        <tr><td><code>test</code></td><td>Build first, then run test command (skip rules above)</td></tr>
+        <tr><td><code>clean</code></td><td>Run tool clean, then remove Curie's <code>target/</code> logs</td></tr>
+        <tr><td><code>list</code></td><td>Shows foreign members with tool label, e.g. <code>foreign (make)</code></td></tr>
+        <tr><td><code>fmt</code> / <code>audit</code> / <code>update</code></td><td>Filtered out of workspace fan-out; explicit <code>--project &lt;foreign&gt;</code> → error</td></tr>
+        <tr><td><code>run</code> / <code>dev</code> / <code>publish</code> / …</td><td>Hard error: use the foreign tool directly</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Foreign Curie members</h3>
+    <p>When a member has both a <code>Curie.toml</code> and a <code>[workspace.foreign.X]</code> entry, Curie spawns itself as a child process. The child gets the declared <code>env</code>, no parent workspace inheritance, and is not flattened if it is a nested workspace. A <code>CURIE_FOREIGN_DEPTH</code> guard caps pathological recursion. Ordering-only <code>dependencies</code> on the parent do not put parent workspace jars on the child's classpath — declare <code>artifacts</code> if you need that.</p>
+
+    <h3>Maven sync limitation</h3>
+    <p>Foreign members never appear as Maven <code>&lt;module&gt;</code>s. A Curie member that depends on a foreign member cannot express that edge in a synced <code>pom.xml</code> — set <code>[maven] sync = false</code> on that member or the workspace. Nested workspaces under a syncing root may set <code>[maven] sync = false</code> to opt out of aggregator generation entirely (see <code>examples/foreign-projects-demo</code>).</p>
+
+    <h3>Nested workspaces</h3>
+    <p>Foreign members work inside nested workspaces: the recursive expand processes each level's <code>members</code> + <code>foreign</code> map with the inner path prefix. Inheritance still skips foreign leaves at every level.</p>
+
     <h2>Git members (polyrepo)</h2>
     <p>Workspace members can live in separate Git repositories. Instead of a plain directory name, declare a table with <code>path</code>, <code>git</code>, and an optional <code>branch</code>:</p>
 

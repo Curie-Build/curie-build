@@ -701,7 +701,7 @@ fn substitute(
 
 /// Match a glob `pattern` against a `/`-separated relative path.  `*` matches
 /// within a path segment, `**` crosses `/`, `?` matches one non-`/` char.
-fn glob_match(pattern: &str, text: &str) -> bool {
+pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
     glob_match_bytes(pattern.as_bytes(), text.as_bytes())
 }
 

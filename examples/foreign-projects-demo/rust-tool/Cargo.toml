@@ -1,0 +1,11 @@
+[package]
+name = "rust-tool"
+version = "0.1.0"
+edition = "2021"
+
+# Keep this crate out of the enclosing curie repo Cargo workspace.
+[workspace]
+
+[[bin]]
+name = "rust-tool"
+path = "src/main.rs"

@@ -87,6 +87,13 @@ pub fn build_with_desc(
     opts: BuildOptions,
     extra_cp: &[PathBuf],
 ) -> Result<BuildOutput> {
+    if desc.is_foreign() {
+        anyhow::bail!(
+            "internal error: build_with_desc called on foreign member at {} — \
+             use foreign::run_foreign instead",
+            project_root.display()
+        );
+    }
     crate::parallel::emit(&crate::style::headline(
         "Building", desc.buildable_name(), desc.buildable_version(),
     ));

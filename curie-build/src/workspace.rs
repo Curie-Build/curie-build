@@ -9,6 +9,7 @@ pub use curie_meta::workspace::{
 
 use crate::audit::{self, AuditOptions};
 use crate::descriptor;
+use crate::foreign::{self, ForeignAction};
 use crate::maven;
 use crate::update::{self, UpdateOptions};
 use crate::{build, compile, fmt, jar, run, test};
@@ -19,25 +20,35 @@ use std::process::Command;
 /// Per-member output recorded by `fan_out` and fed to downstream members'
 /// classpath construction.
 ///
-/// `classes_dir` is the natural workspace-dep classpath entry — using the
-/// compiled-classes directory (instead of waiting for the upstream JAR to
-/// be packaged) keeps the model symmetric with how a member sees its own
-/// classes during test runs, and means a downstream member can compile
-/// before any upstream member has been packaged.
+/// `classes_dir` is the natural workspace-dep classpath entry for Curie
+/// members — using the compiled-classes directory (instead of waiting for
+/// the upstream JAR to be packaged) keeps the model symmetric with how a
+/// member sees its own classes during test runs.  Foreign members have no
+/// `target/classes`; their contribution is solely via declared `artifacts`.
 ///
 /// `classpath_contribution` is the transitive closure of upstream
 /// classpath entries that a member depending on this one should inherit:
 /// every transitive workspace-dep's classes_dir plus every transitive
-/// Maven dep JAR.  Built bottom-up as the fan-out iterates.
+/// Maven dep JAR (or foreign artifact).  Built bottom-up as the fan-out iterates.
 struct MemberArtifact {
-    classes_dir: PathBuf,
+    classes_dir: Option<PathBuf>,
     classpath_contribution: Vec<PathBuf>,
+}
+
+/// Classes directory for a Curie member; `None` for foreign members.
+pub(crate) fn member_classes_dir(m: &Member) -> Option<PathBuf> {
+    if m.descriptor.is_foreign() {
+        None
+    } else {
+        Some(m.path.join("target").join("classes"))
+    }
 }
 
 /// Walk a member's resolved workspace-dep indices and return the classpath
 /// the depending member should append to its own deps.  Order-preserving
 /// dedup (paths already pulled in by an earlier upstream dep aren't
-/// repeated).
+/// repeated).  Skips `classes_dir: None` (foreign members contribute only
+/// via their artifact paths in `classpath_contribution`).
 ///
 /// Uses a HashMap rather than Vec for `artifacts` so a subset run (where
 /// some indices are skipped) still works — the deps slice only references
@@ -52,8 +63,10 @@ fn collect_dep_classpath(
         let a = artifacts
             .get(&i)
             .expect("subset must include all transitive workspace_deps of every member it builds");
-        if seen.insert(a.classes_dir.clone()) {
-            cp.push(a.classes_dir.clone());
+        if let Some(classes) = &a.classes_dir {
+            if seen.insert(classes.clone()) {
+                cp.push(classes.clone());
+            }
         }
         for entry in &a.classpath_contribution {
             if seen.insert(entry.clone()) {
@@ -62,6 +75,21 @@ fn collect_dep_classpath(
         }
     }
     cp
+}
+
+/// Dispatch a single member's build: foreign tools via [`foreign::run_foreign`],
+/// Curie members via [`build::build_with_desc`].  Returns jars/artifacts that
+/// should contribute to dependents' classpaths.
+fn build_one_member(
+    m: &Member,
+    opts: build::BuildOptions,
+    extra_cp: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    if let Some(f) = m.descriptor.foreign_project() {
+        foreign::run_foreign(&m.path, f, ForeignAction::Build)
+    } else {
+        build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
+    }
 }
 
 /// Compute the transitive closure of `target`'s workspace dependencies,
@@ -121,7 +149,7 @@ where
         let own_dep_jars = run(m, &extra_cp)
             .with_context(|| format!("workspace member \"{}\" failed", m.declared))?;
 
-        let classes_dir = m.path.join("target").join("classes");
+        let classes_dir = member_classes_dir(m);
         let mut contribution = extra_cp; // already deduped
         for j in own_dep_jars {
             contribution.push(j);
@@ -144,11 +172,11 @@ pub fn build_all(workspace_root: &Path, opts: build::BuildOptions, jobs: usize) 
     let subset: Vec<usize> = (0..ws.members.len()).collect();
     if subset.len() > 1 {
         return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, crate::parallel::TuiMode::Full, "Done", |m, extra_cp| {
-            build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
+            build_one_member(m, opts, extra_cp)
         });
     }
     fan_out(&ws, "build", &subset, |m, extra_cp| {
-        build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
+        build_one_member(m, opts, extra_cp)
     })
 }
 
@@ -166,11 +194,11 @@ pub fn build_one(
     }
     if subset.len() > 1 {
         return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, crate::parallel::TuiMode::Full, "Done", |m, extra_cp| {
-            build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
+            build_one_member(m, opts, extra_cp)
         });
     }
     fan_out(&ws, "build", &subset, |m, extra_cp| {
-        build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
+        build_one_member(m, opts, extra_cp)
     })
 }
 
@@ -188,11 +216,11 @@ pub fn build_subtree(
     }
     if subset.len() > 1 {
         return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, crate::parallel::TuiMode::Full, "Done", |m, extra_cp| {
-            build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
+            build_one_member(m, opts, extra_cp)
         });
     }
     fan_out(&ws, "build", &subset, |m, extra_cp| {
-        build::build_with_desc(&m.path, &m.descriptor, opts, extra_cp).map(|o| o.dep_jars)
+        build_one_member(m, opts, extra_cp)
     })
 }
 
@@ -253,8 +281,8 @@ pub fn test_subtree(
 }
 
 /// Compile + run tests for a single member with the given extra classpath.
-/// Returns the member's own Maven dep JARs for `fan_out`'s artifact
-/// accumulation.  Shared by `test_all` and `test_one`.
+/// Returns the member's own Maven dep JARs (or foreign artifacts) for
+/// `fan_out`'s artifact accumulation.  Shared by `test_all` and `test_one`.
 fn test_one_member(
     m: &Member,
     filter: Option<&str>,
@@ -265,6 +293,16 @@ fn test_one_member(
     if m.descriptor.is_bom() {
         crate::parallel::emit(&crate::style::neutral("Tests", "skipped for BOM"));
         return Ok(vec![]);
+    }
+    // Foreign: build first (dependents need artifacts), then run the tool's
+    // test command.  Filter/coverage flags do not apply to foreign tools.
+    if let Some(f) = m.descriptor.foreign_project() {
+        let _ = filter;
+        let _ = offline;
+        let _ = cli_coverage;
+        let arts = foreign::run_foreign(&m.path, f, ForeignAction::Build)?;
+        foreign::run_foreign(&m.path, f, ForeignAction::Test)?;
+        return Ok(arts);
     }
     crate::parallel::emit(&crate::style::headline(
         "Testing", m.descriptor.buildable_name(), m.descriptor.buildable_version(),
@@ -318,6 +356,18 @@ pub fn run_one(
     let ws = load(workspace_root)?;
     let target = &ws.members[member_index];
 
+    if target.descriptor.is_foreign() {
+        let tool = target
+            .descriptor
+            .foreign_project()
+            .map(|f| f.tool.label())
+            .unwrap_or("foreign");
+        bail!(
+            "`curie run` is not supported for foreign member {} ({tool}); \
+             use the foreign tool directly",
+            target.declared,
+        );
+    }
     if target.descriptor.is_library() {
         bail!("`curie run` is not supported for library projects");
     }
@@ -345,31 +395,45 @@ pub fn run_one(
 
     let mut artifacts: std::collections::HashMap<usize, MemberArtifact> =
         std::collections::HashMap::with_capacity(n);
-    // BuildOutput per built member, keyed by topo index.  Needed in the
-    // run phase to assemble the runtime classpath (jar + dep_jars +
-    // resources_dir) without re-walking the descriptors.
+    // BuildOutput per built Curie member.  Foreign upstreams store their
+    // artifact paths in `foreign_jars` instead (BuildOutput is Curie-only).
     let mut outputs: std::collections::HashMap<usize, build::BuildOutput> =
         std::collections::HashMap::with_capacity(n);
+    let mut foreign_jars: std::collections::HashMap<usize, Vec<PathBuf>> =
+        std::collections::HashMap::new();
 
     for (pos, &idx) in subset.iter().enumerate() {
         let m = &ws.members[idx];
         println!("[{}/{}] {}", pos + 1, n, m.declared);
         let extra_cp = collect_dep_classpath(&m.workspace_deps, &artifacts);
-        let output = build::build_with_desc(&m.path, &m.descriptor, build_opts, &extra_cp)
-            .with_context(|| format!("workspace member \"{}\" failed", m.declared))?;
 
-        let classes_dir = m.path.join("target").join("classes");
-        let mut contribution = extra_cp;
-        for j in output.dep_jars.iter().cloned() {
-            contribution.push(j);
+        if let Some(f) = m.descriptor.foreign_project() {
+            let arts = foreign::run_foreign(&m.path, f, ForeignAction::Build)
+                .with_context(|| format!("workspace member \"{}\" failed", m.declared))?;
+            let classes_dir = member_classes_dir(m);
+            let mut contribution = extra_cp;
+            contribution.extend(arts.iter().cloned());
+            artifacts.insert(idx, MemberArtifact { classes_dir, classpath_contribution: contribution });
+            foreign_jars.insert(idx, arts);
+        } else {
+            let output = build::build_with_desc(&m.path, &m.descriptor, build_opts, &extra_cp)
+                .with_context(|| format!("workspace member \"{}\" failed", m.declared))?;
+
+            let classes_dir = member_classes_dir(m);
+            let mut contribution = extra_cp;
+            for j in output.dep_jars.iter().cloned() {
+                contribution.push(j);
+            }
+            artifacts.insert(idx, MemberArtifact { classes_dir, classpath_contribution: contribution });
+            outputs.insert(idx, output);
         }
-        artifacts.insert(idx, MemberArtifact { classes_dir, classpath_contribution: contribution });
-        outputs.insert(idx, output);
         println!();
     }
 
     // ---- run phase --------------------------------------------------------
-    let target_output = &outputs[&member_index];
+    let target_output = outputs.get(&member_index).ok_or_else(|| {
+        anyhow::anyhow!("internal error: target member has no BuildOutput (foreign?)")
+    })?;
     let main_class = run::resolve_main_class(
         target_output.main_class.as_deref(),
         target.descriptor.buildable_name(),
@@ -383,7 +447,8 @@ pub fn run_one(
     println!();
 
     // Assemble the runtime classpath.  Use JARs (not classes_dir) for
-    // upstream members so their packaged resources are visible.  Order
+    // upstream Curie members so their packaged resources are visible;
+    // foreign upstreams contribute their declared artifact paths.  Order
     // mirrors a Java person's mental model: target first, then its own
     // deps, then upstream members in topo order with their deps.  Path
     // dedup is order-preserving.
@@ -411,10 +476,15 @@ pub fn run_one(
         if idx == member_index {
             continue;
         }
-        let out = &outputs[&idx];
-        push(&mut runtime_cp, &mut seen, out.jar.clone());
-        for j in &out.dep_jars {
-            push(&mut runtime_cp, &mut seen, j.clone());
+        if let Some(out) = outputs.get(&idx) {
+            push(&mut runtime_cp, &mut seen, out.jar.clone());
+            for j in &out.dep_jars {
+                push(&mut runtime_cp, &mut seen, j.clone());
+            }
+        } else if let Some(arts) = foreign_jars.get(&idx) {
+            for j in arts {
+                push(&mut runtime_cp, &mut seen, j.clone());
+            }
         }
     }
 
@@ -434,6 +504,15 @@ pub fn run_one(
     Ok(())
 }
 
+/// Clean a single member: foreign tool clean (if any), then curie's `target/`.
+fn clean_one_member(m: &Member) -> Result<Vec<PathBuf>> {
+    if let Some(f) = m.descriptor.foreign_project() {
+        foreign::run_foreign(&m.path, f, ForeignAction::Clean)?;
+    }
+    build::clean(&m.path)?;
+    Ok(Vec::new())
+}
+
 /// Fan `curie clean` out over every member.  Clean ignores DAG order and
 /// runs all members in parallel when `jobs > 1`.
 pub fn clean_all(workspace_root: &Path, jobs: usize) -> Result<()> {
@@ -441,12 +520,17 @@ pub fn clean_all(workspace_root: &Path, jobs: usize) -> Result<()> {
     let subset: Vec<usize> = (0..ws.members.len()).collect();
     if subset.len() > 1 {
         return crate::parallel::run_jobs(&ws, &subset, "clean", jobs, false, crate::parallel::TuiMode::StatusOnly, "Cleaned", |m, _extra_cp| {
-            build::clean(&m.path).map(|_| Vec::new())
+            clean_one_member(m)
         });
     }
-    fan_out(&ws, "clean", &subset, |m, _extra_cp| {
-        build::clean(&m.path).map(|_| Vec::new())
-    })
+    fan_out(&ws, "clean", &subset, |m, _extra_cp| clean_one_member(m))
+}
+
+/// Clean a single workspace member (by index), including foreign tool clean.
+pub fn clean_one(workspace_root: &Path, member_index: usize) -> Result<()> {
+    let ws = load(workspace_root)?;
+    clean_one_member(&ws.members[member_index])?;
+    Ok(())
 }
 
 /// Clean a nested workspace's own members (no transitive closure — only the
@@ -455,19 +539,27 @@ pub fn clean_subtree(workspace_root: &Path, member_indices: &[usize], jobs: usiz
     let ws = load(workspace_root)?;
     if member_indices.len() > 1 {
         return crate::parallel::run_jobs(&ws, member_indices, "clean", jobs, false, crate::parallel::TuiMode::StatusOnly, "Cleaned", |m, _: &[PathBuf]| {
-            build::clean(&m.path).map(|_| Vec::<PathBuf>::new())
+            clean_one_member(m)
         });
     }
-    fan_out(&ws, "clean", member_indices, |m, _extra_cp| {
-        build::clean(&m.path).map(|_| Vec::new())
-    })
+    fan_out(&ws, "clean", member_indices, |m, _extra_cp| clean_one_member(m))
 }
 
-/// Fan `curie audit` out over every member in topo order.
+/// Indices of non-foreign members within `indices` (preserves order).
+fn non_foreign_subset(ws: &Workspace, indices: &[usize]) -> Vec<usize> {
+    indices
+        .iter()
+        .copied()
+        .filter(|&i| !ws.members[i].descriptor.is_foreign())
+        .collect()
+}
+
+/// Fan `curie audit` out over every non-foreign member in topo order.
 /// Returns `true` when any member's result should cause a non-zero exit.
 pub fn audit_all(workspace_root: &Path, opts: &AuditOptions) -> Result<bool> {
     let ws = load(workspace_root)?;
-    let n = ws.members.len();
+    let subset = non_foreign_subset(&ws, &(0..ws.members.len()).collect::<Vec<_>>());
+    let n = subset.len();
     println!(
         "Workspace {} audit ({} member{})",
         ws.root.display(),
@@ -477,7 +569,8 @@ pub fn audit_all(workspace_root: &Path, opts: &AuditOptions) -> Result<bool> {
     println!();
 
     let mut exit_nonzero = false;
-    for (pos, m) in ws.members.iter().enumerate() {
+    for (pos, &idx) in subset.iter().enumerate() {
+        let m = &ws.members[idx];
         println!("[{}/{}] {}", pos + 1, n, m.declared);
         let member_opts = override_output(opts, &m.path);
         let report = audit::run_audit_with_desc(&m.path, &m.descriptor, &member_opts)
@@ -498,12 +591,20 @@ pub fn audit_one(
 ) -> Result<bool> {
     let ws = load(workspace_root)?;
     let m = &ws.members[member_index];
+    if m.descriptor.is_foreign() {
+        let tool = m.descriptor.foreign_project().map(|f| f.tool.label()).unwrap_or("foreign");
+        bail!(
+            "`curie audit` is not supported for foreign member {} ({tool}); \
+             use the foreign tool directly",
+            m.declared,
+        );
+    }
     let member_opts = override_output(opts, &m.path);
     let report = audit::run_audit_with_desc(&m.path, &m.descriptor, &member_opts)?;
     Ok(audit::should_exit_nonzero(&report, &member_opts))
 }
 
-/// Audit a nested workspace's own members (the subtree), not its
+/// Audit a nested workspace's own non-foreign members (the subtree), not its
 /// out-of-subtree workspace-deps.  Returns `true` when any member's result
 /// should cause a non-zero exit.
 pub fn audit_subtree(
@@ -512,7 +613,8 @@ pub fn audit_subtree(
     opts: &AuditOptions,
 ) -> Result<bool> {
     let ws = load(workspace_root)?;
-    let n = member_indices.len();
+    let subset = non_foreign_subset(&ws, member_indices);
+    let n = subset.len();
     println!(
         "Workspace {} audit ({} member{})",
         ws.root.display(),
@@ -522,7 +624,7 @@ pub fn audit_subtree(
     println!();
 
     let mut exit_nonzero = false;
-    for (pos, &idx) in member_indices.iter().enumerate() {
+    for (pos, &idx) in subset.iter().enumerate() {
         let m = &ws.members[idx];
         println!("[{}/{}] {}", pos + 1, n, m.declared);
         let member_opts = override_output(opts, &m.path);
@@ -536,11 +638,12 @@ pub fn audit_subtree(
     Ok(exit_nonzero)
 }
 
-/// Fan `curie update` out over every workspace member.
+/// Fan `curie update` out over every non-foreign workspace member.
 /// Returns `true` when `--check` mode finds any available updates.
 pub fn update_all(workspace_root: &Path, opts: &UpdateOptions) -> Result<bool> {
     let ws = load(workspace_root)?;
-    let n = ws.members.len();
+    let subset = non_foreign_subset(&ws, &(0..ws.members.len()).collect::<Vec<_>>());
+    let n = subset.len();
     println!(
         "Workspace {} update ({} member{})",
         ws.root.display(),
@@ -550,7 +653,8 @@ pub fn update_all(workspace_root: &Path, opts: &UpdateOptions) -> Result<bool> {
     println!();
 
     let mut any_updates = false;
-    for (pos, m) in ws.members.iter().enumerate() {
+    for (pos, &idx) in subset.iter().enumerate() {
+        let m = &ws.members[idx];
         println!("[{}/{}] {}", pos + 1, n, m.declared);
         let report = update::run_update_with_desc(&m.path, &m.descriptor, opts)
             .with_context(|| format!("update failed for workspace member \"{}\"", m.declared))?;
@@ -570,11 +674,19 @@ pub fn update_one(
 ) -> Result<bool> {
     let ws = load(workspace_root)?;
     let m = &ws.members[member_index];
+    if m.descriptor.is_foreign() {
+        let tool = m.descriptor.foreign_project().map(|f| f.tool.label()).unwrap_or("foreign");
+        bail!(
+            "`curie update` is not supported for foreign member {} ({tool}); \
+             use the foreign tool directly",
+            m.declared,
+        );
+    }
     let report = update::run_update_with_desc(&m.path, &m.descriptor, opts)?;
     Ok(report.has_updates())
 }
 
-/// Run `curie update` over a nested workspace's own members (the subtree).
+/// Run `curie update` over a nested workspace's own non-foreign members.
 /// Returns `true` when `--check` mode finds any available updates.
 pub fn update_subtree(
     workspace_root: &Path,
@@ -582,7 +694,8 @@ pub fn update_subtree(
     opts: &UpdateOptions,
 ) -> Result<bool> {
     let ws = load(workspace_root)?;
-    let n = member_indices.len();
+    let subset = non_foreign_subset(&ws, member_indices);
+    let n = subset.len();
     println!(
         "Workspace {} update ({} member{})",
         ws.root.display(),
@@ -592,7 +705,7 @@ pub fn update_subtree(
     println!();
 
     let mut any_updates = false;
-    for (pos, &idx) in member_indices.iter().enumerate() {
+    for (pos, &idx) in subset.iter().enumerate() {
         let m = &ws.members[idx];
         println!("[{}/{}] {}", pos + 1, n, m.declared);
         let report = update::run_update_with_desc(&m.path, &m.descriptor, opts)
@@ -633,6 +746,7 @@ pub fn fmt_subtree(
 
 /// Parallel-format a subset of workspace members, sharing one formatter
 /// resolution across all of them.  Shared by [`fmt_all`] and [`fmt_subtree`].
+/// Foreign members are filtered out (no Curie sources to format).
 fn fmt_members(
     ws: &Workspace,
     subset: &[usize],
@@ -640,6 +754,10 @@ fn fmt_members(
     offline: bool,
     jobs: usize,
 ) -> Result<()> {
+    let subset = non_foreign_subset(ws, subset);
+    if subset.is_empty() {
+        return Ok(());
+    }
     // Resolve both formatters exactly once for the whole workspace.
     // The per-member workers share these classpaths; if each resolved
     // independently, the parallel resolve() calls would race on the same
@@ -657,13 +775,13 @@ fn fmt_members(
     };
 
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(ws, subset, "fmt", jobs, false, crate::parallel::TuiMode::Full, "Formatted", |m, _| {
+        return crate::parallel::run_jobs(ws, &subset, "fmt", jobs, false, crate::parallel::TuiMode::Full, "Formatted", |m, _| {
             fmt::run_fmt_with_jars(&m.path, check_only, &pjf_jars, &ktfmt_jars)
                 .map(|_| Vec::<PathBuf>::new())
         });
     }
 
-    for &i in subset {
+    for &i in &subset {
         let m = &ws.members[i];
         fmt::run_fmt_with_jars(&m.path, check_only, &pjf_jars, &ktfmt_jars)?;
     }

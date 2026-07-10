@@ -1,3 +1,4 @@
+use crate::foreign::ForeignTool;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -159,7 +160,9 @@ impl AnnotationProcessor {
 }
 
 /// Which top-level section the descriptor declares.  Exactly one variant
-/// per descriptor — enforced by [`load`] at parse time.
+/// per descriptor — enforced by [`load`] at parse time for on-disk TOML.
+/// [`DescriptorKind::Foreign`] is never produced by [`load`]; workspace
+/// loading synthesises it for non-Curie (or process-isolated Curie) members.
 #[derive(Debug)]
 pub enum DescriptorKind {
     Application(Application),
@@ -169,6 +172,56 @@ pub enum DescriptorKind {
     /// BOM (Bill of Materials): publishes a POM-only artifact that declares
     /// managed versions for a set of dependencies.  No JAR is produced.
     Bom(Bom),
+    /// Foreign workspace member built by an external tool (or a separate
+    /// `curie` process).  Synthesised only by `workspace::load`.
+    Foreign(ForeignProject),
+}
+
+/// How a foreign member's test/clean command was resolved.
+///
+/// [`ForeignCommand::Default`] may be gracefully skipped when the target
+/// does not exist (make/`package.json` probes).  [`ForeignCommand::Explicit`]
+/// always runs and fails loudly.  [`ForeignCommand::Skip`] is an explicit
+/// empty override (`test-command = []`).
+#[derive(Debug, Clone)]
+pub enum ForeignCommand {
+    Default(Vec<String>),
+    Explicit(Vec<String>),
+    Skip,
+}
+
+/// Resolved foreign member — produced by workspace loading from a
+/// [`ForeignDecl`] plus auto-detection.
+#[derive(Debug, Clone)]
+pub struct ForeignProject {
+    pub name: String,
+    pub tool: ForeignTool,
+    pub build_command: Vec<String>,
+    pub test_command: ForeignCommand,
+    pub clean_command: ForeignCommand,
+    pub artifacts: Vec<String>,
+    pub env: BTreeMap<String, String>,
+}
+
+/// Declared configuration under `[workspace.foreign.<path>]`.  All fields
+/// optional; absent `type` triggers marker auto-detection.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ForeignDecl {
+    #[serde(default, rename = "type")]
+    pub tool: Option<ForeignTool>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+    #[serde(default, rename = "test-command")]
+    pub test_command: Option<Vec<String>>,
+    #[serde(default, rename = "clean-command")]
+    pub clean_command: Option<Vec<String>>,
+    #[serde(default)]
+    pub artifacts: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 /// Flat shape for serde — every section is `Option`, and [`load`]
@@ -313,6 +366,11 @@ pub struct WorkspaceSection {
     /// ```
     #[serde(rename = "missingMembers", default)]
     pub missing_members: MissingMembers,
+    /// Optional per-member configuration for foreign (non-Curie) projects.
+    /// Keys are workspace-root-relative member paths and must appear in
+    /// [`members`].  See `_design/foreign.md`.
+    #[serde(default)]
+    pub foreign: BTreeMap<String, ForeignDecl>,
 }
 
 /// One entry in `[workspace.members]`.
@@ -1457,6 +1515,65 @@ impl Descriptor {
         matches!(self.kind, DescriptorKind::Bom(_))
     }
 
+    /// Foreign workspace member built by an external tool.
+    pub fn is_foreign(&self) -> bool {
+        matches!(self.kind, DescriptorKind::Foreign(_))
+    }
+
+    /// View the foreign project if this descriptor is one.
+    pub fn foreign_project(&self) -> Option<&ForeignProject> {
+        match &self.kind {
+            DescriptorKind::Foreign(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// Construct a synthesised descriptor for a foreign workspace member.
+    ///
+    /// `workspace_dependencies` are the foreign member's declared
+    /// `dependencies` rewritten as absolute-path [`WorkspaceDep`] entries
+    /// so existing edge resolution re-anchors correctly (see workspace load).
+    pub fn for_foreign(
+        project: ForeignProject,
+        workspace_dependencies: BTreeMap<String, WorkspaceDep>,
+    ) -> Descriptor {
+        Descriptor {
+            kind: DescriptorKind::Foreign(project),
+            java: Java::default(),
+            test: Test::default(),
+            kotlin: Kotlin::default(),
+            groovy: Groovy::default(),
+            spock: Spock::default(),
+            native_image: NativeImage::default(),
+            jlink: Jlink::default(),
+            docker: Docker::default(),
+            build_info: BuildInfo::default(),
+            fat_jar: FatJar::default(),
+            dependencies: BTreeMap::new(),
+            test_dependencies: BTreeMap::new(),
+            repositories: Vec::new(),
+            bom_imports: BTreeMap::new(),
+            test_bom_imports: BTreeMap::new(),
+            inherited_bom_imports: BTreeMap::new(),
+            inherited_test_bom_imports: BTreeMap::new(),
+            workspace_dependencies,
+            annotation_processors: BTreeMap::new(),
+            test_annotation_processors: BTreeMap::new(),
+            inherited_annotation_processors: BTreeMap::new(),
+            inherited_test_annotation_processors: BTreeMap::new(),
+            annotation_processor_options: BTreeMap::new(),
+            test_annotation_processor_options: BTreeMap::new(),
+            inherited_annotation_processor_options: BTreeMap::new(),
+            inherited_test_annotation_processor_options: BTreeMap::new(),
+            publish: PublishConfig::default(),
+            plugins: BTreeMap::new(),
+            maven: MavenConfig::default(),
+            modules: ModulesConfig::default(),
+            resources: Resources::default(),
+            test_resources: Resources::default(),
+        }
+    }
+
     /// View the `[application]` section if this descriptor is one.
     pub fn application(&self) -> Option<&Application> {
         match &self.kind {
@@ -1480,6 +1597,7 @@ impl Descriptor {
             DescriptorKind::Library(_) => "library",
             DescriptorKind::Workspace(_) => "workspace",
             DescriptorKind::Bom(_) => "bom",
+            DescriptorKind::Foreign(_) => "foreign",
         }
     }
 
@@ -1491,6 +1609,7 @@ impl Descriptor {
             DescriptorKind::Library(l) => Some(&l.name),
             DescriptorKind::Workspace(_) => None,
             DescriptorKind::Bom(b) => Some(&b.name),
+            DescriptorKind::Foreign(f) => Some(&f.name),
         }
     }
 
@@ -1503,6 +1622,7 @@ impl Descriptor {
             DescriptorKind::Library(l) => l.group_id.as_deref(),
             DescriptorKind::Workspace(_) => None,
             DescriptorKind::Bom(b) => b.group_id.as_deref(),
+            DescriptorKind::Foreign(_) => None,
         }
     }
 
@@ -1513,6 +1633,7 @@ impl Descriptor {
             DescriptorKind::Library(l) => Some(&l.version),
             DescriptorKind::Workspace(_) => None,
             DescriptorKind::Bom(b) => Some(&b.version),
+            DescriptorKind::Foreign(_) => None,
         }
     }
 
@@ -1894,6 +2015,9 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
         if docker_section_present {
             bail!("workspace Curie.toml must not declare [docker] — declare it on each application member");
         }
+        if let Some(ws) = descriptor.workspace() {
+            validate_foreign_decls(&ws.foreign)?;
+        }
     }
 
     // [workspace-dependencies] entries must be version-less.  The
@@ -1950,6 +2074,78 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     validate_dep_repo_refs(&descriptor)?;
 
     Ok(descriptor)
+}
+
+/// Validate `[workspace.foreign.*]` declarations at load time (key shape,
+/// command/artifact rules).  Membership of keys in `members` is checked later
+/// by workspace expansion — load only sees the workspace root TOML.
+fn validate_foreign_decls(foreign: &BTreeMap<String, ForeignDecl>) -> Result<()> {
+    for (key, decl) in foreign {
+        validate_relative_no_dotdot(key, &format!("[workspace.foreign] key \"{key}\""))?;
+        if let Some(cmd) = &decl.command {
+            if cmd.is_empty() {
+                bail!(
+                    "[workspace.foreign.{key}] command must be non-empty when present \
+                     (use test-command/clean-command = [] to skip those actions)"
+                );
+            }
+            validate_command_entries(cmd, &format!("[workspace.foreign.{key}] command"))?;
+        }
+        if let Some(cmd) = &decl.test_command {
+            // Empty = explicit skip; non-empty entries must be non-empty strings.
+            validate_command_entries(cmd, &format!("[workspace.foreign.{key}] test-command"))?;
+        }
+        if let Some(cmd) = &decl.clean_command {
+            validate_command_entries(cmd, &format!("[workspace.foreign.{key}] clean-command"))?;
+        }
+        for art in &decl.artifacts {
+            if art.is_empty() {
+                bail!("[workspace.foreign.{key}] artifacts entry must not be empty");
+            }
+            validate_relative_no_dotdot(
+                art,
+                &format!("[workspace.foreign.{key}] artifact \"{art}\""),
+            )?;
+        }
+        for dep in &decl.dependencies {
+            if dep.is_empty() {
+                bail!("[workspace.foreign.{key}] dependencies entry must not be empty");
+            }
+            validate_relative_no_dotdot(
+                dep,
+                &format!("[workspace.foreign.{key}] dependency \"{dep}\""),
+            )?;
+        }
+        // env values are plain strings by type; nothing further to check.
+        let _ = &decl.env;
+    }
+    Ok(())
+}
+
+fn validate_command_entries(cmd: &[String], where_: &str) -> Result<()> {
+    for (i, part) in cmd.iter().enumerate() {
+        if part.is_empty() {
+            bail!("{where_} entry {i} must not be an empty string");
+        }
+    }
+    Ok(())
+}
+
+/// Reject absolute paths and `..` components in workspace-relative strings.
+fn validate_relative_no_dotdot(path: &str, where_: &str) -> Result<()> {
+    if path.is_empty() {
+        bail!("{where_} must not be empty");
+    }
+    let p = Path::new(path);
+    if p.is_absolute() {
+        bail!("{where_} must be a relative path, not absolute");
+    }
+    for comp in p.components() {
+        if let std::path::Component::ParentDir = comp {
+            bail!("{where_} must not contain '..'");
+        }
+    }
+    Ok(())
 }
 
 /// Validate one resource scope's filter stages.  `section` is `"resources"` or
@@ -4102,5 +4298,121 @@ foo = "bar"
         let toml = "[bom]\nname = \"x\"\nversion = \"1.0\"\ngroupId = \"g\"\n[resources]\ndirectories = [\"r\"]\n";
         let err = load_str(toml).unwrap_err().to_string();
         assert!(err.contains("BOM projects must not declare [resources]"), "got: {err}");
+    }
+
+    // -- foreign members ------------------------------------------------------
+
+    #[test]
+    fn parse_full_foreign_shape() {
+        let toml = r#"
+[workspace]
+members = ["legacy-lib", "rust-tool"]
+
+[workspace.foreign.legacy-lib]
+type = "make"
+dependencies = ["rust-tool"]
+command = ["make", "jar"]
+test-command = ["make", "check"]
+clean-command = ["make", "distclean"]
+artifacts = ["out/legacy-lib.jar"]
+env = { LEGACY_HOME = "/opt/legacy" }
+"#;
+        let d = load_str(toml).unwrap();
+        let ws = d.workspace().unwrap();
+        let decl = ws.foreign.get("legacy-lib").unwrap();
+        assert_eq!(decl.tool, Some(crate::foreign::ForeignTool::Make));
+        assert_eq!(decl.dependencies, vec!["rust-tool"]);
+        assert_eq!(decl.command.as_ref().unwrap(), &vec!["make", "jar"]);
+        assert_eq!(decl.test_command.as_ref().unwrap(), &vec!["make", "check"]);
+        assert_eq!(decl.clean_command.as_ref().unwrap(), &vec!["make", "distclean"]);
+        assert_eq!(decl.artifacts, vec!["out/legacy-lib.jar"]);
+        assert_eq!(decl.env.get("LEGACY_HOME").map(String::as_str), Some("/opt/legacy"));
+    }
+
+    #[test]
+    fn foreign_unknown_key_rejected() {
+        let toml = r#"
+[workspace]
+members = ["x"]
+[workspace.foreign.x]
+bogus = true
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("unknown field") || err.contains("bogus"), "got: {err}");
+    }
+
+    #[test]
+    fn foreign_bad_type_rejected() {
+        let toml = r#"
+[workspace]
+members = ["x"]
+[workspace.foreign.x]
+type = "bazel"
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("unknown variant") || err.contains("bazel"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn foreign_empty_build_command_rejected() {
+        let toml = r#"
+[workspace]
+members = ["x"]
+[workspace.foreign.x]
+command = []
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("command must be non-empty"), "got: {err}");
+    }
+
+    #[test]
+    fn foreign_absolute_artifact_rejected() {
+        let toml = r#"
+[workspace]
+members = ["x"]
+[workspace.foreign.x]
+artifacts = ["/abs/out.jar"]
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains("relative"), "got: {err}");
+    }
+
+    #[test]
+    fn foreign_dotdot_artifact_rejected() {
+        let toml = r#"
+[workspace]
+members = ["x"]
+[workspace.foreign.x]
+artifacts = ["../out.jar"]
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains(".."), "got: {err}");
+    }
+
+    #[test]
+    fn foreign_empty_test_command_parses_as_skip_intent() {
+        let toml = r#"
+[workspace]
+members = ["x"]
+[workspace.foreign.x]
+test-command = []
+"#;
+        let d = load_str(toml).unwrap();
+        let decl = d.workspace().unwrap().foreign.get("x").unwrap();
+        assert_eq!(decl.test_command.as_ref().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn foreign_key_with_dotdot_rejected() {
+        let toml = r#"
+[workspace]
+members = ["x"]
+[workspace.foreign."../x"]
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(err.contains(".."), "got: {err}");
     }
 }

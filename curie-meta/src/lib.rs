@@ -1,14 +1,16 @@
 pub mod descriptor;
+pub mod foreign;
 pub mod workspace;
 
 pub use descriptor::{
     AnnotationProcessor, AnnotationProcessorDetailed, Bom, BuildInfo, DependencyDetailed,
-    DependencyValue, Descriptor, DescriptorKind, Developer, Docker, GitMember, Groovy, Java,
-    Kotlin, MemberEntry, MissingMembers, NativeImage, PublishConfig, RepositoryEntry, Scm, Spock,
-    Test, WorkspaceDep, WorkspaceSection,
+    DependencyValue, Descriptor, DescriptorKind, Developer, Docker, ForeignCommand, ForeignDecl,
+    ForeignProject, GitMember, Groovy, Java, Kotlin, MemberEntry, MissingMembers, NativeImage,
+    PublishConfig, RepositoryEntry, Scm, Spock, Test, WorkspaceDep, WorkspaceSection,
     DEFAULT_GROOVY_VERSION, DEFAULT_JUNIT_PLATFORM_VERSION, DEFAULT_KOTLIN_VERSION,
     DEFAULT_SPOCK_VERSION,
 };
+pub use foreign::ForeignTool;
 pub use workspace::{Member, Workspace, WorkspaceContext};
 
 use std::path::Path;

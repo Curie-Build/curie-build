@@ -1,0 +1,29 @@
+# Foreign-projects demo — Curie workspace mixing Curie and foreign members.
+#
+# Members:
+#   greeter-lib   — Curie library
+#   app           — Curie application depending on greeter-lib + legacy-lib (foreign jar)
+#   legacy-lib    — foreign Make project (auto-detected; no Curie.toml)
+#   rust-tool     — foreign Cargo project (auto-detected)
+#   isolated-app  — Curie application built as a *foreign curie* member
+#                   (separate `curie` process, no workspace inheritance)
+#
+# [maven] sync is disabled: foreign members have no pom.xml, and a curie
+# member depending on a foreign jar cannot be expressed as a Maven module dep.
+
+[workspace]
+members = ["greeter-lib", "app", "legacy-lib", "rust-tool", "isolated-app"]
+
+[maven]
+sync = false
+
+[workspace.foreign.legacy-lib]
+artifacts = ["out/legacy-lib.jar"]
+env = { GREETING_SUFFIX = "!" }
+
+[workspace.foreign.rust-tool]
+dependencies = ["legacy-lib"]
+
+[workspace.foreign.isolated-app]
+dependencies = ["greeter-lib"]
+env = { APP_PROFILE = "foreign-curie" }

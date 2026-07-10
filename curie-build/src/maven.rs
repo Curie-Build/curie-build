@@ -16,7 +16,7 @@ use crate::compile::{flat_package_src_dirs, flat_package_test_dirs};
 use crate::descriptor::{self, Descriptor, DependencyValue, Relocation, Resources};
 use crate::incremental::walk_files;
 use crate::workspace;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::Writer;
 use sha2::{Digest, Sha256};
@@ -613,12 +613,20 @@ pub fn build_workspace_project(desc: &Descriptor, project_root: &Path) -> Result
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "workspace".to_string());
 
+    // Foreign members (no Curie.toml) must not appear as Maven <module>s.
+    let modules: Vec<String> = workspace
+        .members
+        .iter()
+        .filter(|m| project_root.join(m.path()).join("Curie.toml").exists())
+        .map(|m| m.path().to_string())
+        .collect();
+
     Ok(MavenProject {
         group_id: GENERATED_GROUP_ID.to_string(),
         artifact_id,
         version: GENERATED_VERSION.to_string(),
         packaging: "pom".to_string(),
-        modules: workspace.members.iter().map(|m| m.path().to_string()).collect(),
+        modules,
         ..Default::default()
     })
 }
@@ -2415,23 +2423,33 @@ fn production_sources(src_roots: &[PathBuf]) -> Vec<PathBuf> {
 /// `workspace_member_gavs` parameter. `member.descriptor.workspace_dependencies`
 /// (label-sorted, `BTreeMap`) and `member.workspace_deps` correspond
 /// entry-by-entry (see `curie-meta/src/workspace.rs::load`).
-fn workspace_member_gavs(ws: &workspace::Workspace, member_index: usize) -> BTreeMap<String, MavenCoordinate> {
+fn workspace_member_gavs(ws: &workspace::Workspace, member_index: usize) -> Result<BTreeMap<String, MavenCoordinate>> {
     let member = &ws.members[member_index];
-    member
-        .descriptor
-        .workspace_dependencies
-        .iter()
-        .enumerate()
-        .map(|(k, (_label, dep))| {
-            let target = &ws.members[member.workspace_deps[k]].descriptor;
-            let gav = MavenCoordinate {
-                group_id: target.group_id().unwrap_or(GENERATED_GROUP_ID).to_string(),
-                artifact_id: target.buildable_name().to_string(),
-                version: target.buildable_version().to_string(),
-            };
-            (dep.path.clone(), gav)
-        })
-        .collect()
+    let mut out = BTreeMap::new();
+    for (k, (_label, dep)) in member.descriptor.workspace_dependencies.iter().enumerate() {
+        let target_member = &ws.members[member.workspace_deps[k]];
+        let target = &target_member.descriptor;
+        if target.is_foreign() {
+            let tool = target
+                .foreign_project()
+                .map(|f| f.tool.label())
+                .unwrap_or("foreign");
+            bail!(
+                "member \"{}\" depends on foreign member \"{}\" ({tool}), which has no \
+                 Maven coordinates for pom.xml sync.  Set [maven] sync = false on this \
+                 member (or the workspace) when depending on foreign projects.",
+                member.declared,
+                target_member.declared,
+            );
+        }
+        let gav = MavenCoordinate {
+            group_id: target.group_id().unwrap_or(GENERATED_GROUP_ID).to_string(),
+            artifact_id: target.buildable_name().to_string(),
+            version: target.buildable_version().to_string(),
+        };
+        out.insert(dep.path.clone(), gav);
+    }
+    Ok(out)
 }
 
 /// Sync `pom.xml` for a single `[application]`/`[library]`/`[bom]` project
@@ -2504,7 +2522,10 @@ fn print_plugin_source_warning(desc: &Descriptor) {
 /// `_design/MAVEN-SYNC.md`).
 fn sync_one_workspace_member(ws: &workspace::Workspace, member_index: usize, force: bool, check: bool, offline: bool) -> Result<bool> {
     let member = &ws.members[member_index];
-    let gavs = workspace_member_gavs(ws, member_index);
+    if member.descriptor.is_foreign() {
+        return Ok(false);
+    }
+    let gavs = workspace_member_gavs(ws, member_index)?;
     let workspace_dir = member
         .path
         .parent()
@@ -2537,10 +2558,23 @@ fn sync_aggregators_recursive(workspace_root: &Path, force: bool, check: bool) -
     for entry in &workspace_section.members {
         let name = entry.path();
         let member_path = workspace_root.join(name);
+        // Skip foreign members (no Curie.toml) — they are not Maven modules.
+        if !member_path.join("Curie.toml").exists() {
+            continue;
+        }
         let member_desc = descriptor::load(&member_path)
             .with_context(|| format!("failed to load workspace member \"{name}\""))?;
-        if member_desc.is_workspace() && sync_aggregators_recursive(&member_path, force, check)? {
-            any_written = true;
+        // Skip nested workspaces that *explicitly* set `[maven] sync = false`
+        // so e.g. a foreign-projects demo under examples/ does not get an
+        // aggregator listing make/cargo members as <module>s.  Absent
+        // `[maven] sync` still recurses (parent-driven sync, as before).
+        if member_desc.is_workspace() {
+            if member_desc.maven.sync == Some(false) {
+                continue;
+            }
+            if sync_aggregators_recursive(&member_path, force, check)? {
+                any_written = true;
+            }
         }
     }
     Ok(any_written)
@@ -2639,8 +2673,11 @@ pub fn sync_for_build(project_root: &Path, desc: &Descriptor, offline: bool) -> 
 
 /// Sync `member_index`'s `pom.xml` at the start of `curie build`, when that
 /// member's effective (possibly inherited) `[maven] sync = true`. No-op
-/// otherwise.
+/// otherwise.  Foreign members are always skipped.
 pub fn sync_member_for_build(ws: &workspace::Workspace, member_index: usize, offline: bool) -> Result<()> {
+    if ws.members[member_index].descriptor.is_foreign() {
+        return Ok(());
+    }
     if !ws.members[member_index].descriptor.maven.sync_enabled() {
         return Ok(());
     }
@@ -2740,6 +2777,7 @@ mod tests {
         desc.kind = DescriptorKind::Workspace(WorkspaceSection {
             members: members.iter().map(|m| curie_meta::MemberEntry::Local(m.to_string())).collect(),
             missing_members: curie_meta::MissingMembers::default(),
+            foreign: BTreeMap::new(),
         });
         desc
     }
@@ -2979,6 +3017,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let workspace_root = dir.path().join("my-workspace");
         std::fs::create_dir_all(&workspace_root).unwrap();
+        // Modules without Curie.toml are foreign and omitted from <modules>.
+        for name in ["b-member", "a-member", "nested-workspace-demo"] {
+            let m = workspace_root.join(name);
+            std::fs::create_dir_all(&m).unwrap();
+            std::fs::write(m.join("Curie.toml"), "[library]\nname = \"x\"\nversion = \"0.1.0\"\n").unwrap();
+        }
         let desc = minimal_workspace(&["b-member", "a-member", "nested-workspace-demo"]);
 
         let project = build_workspace_project(&desc, &workspace_root).unwrap();

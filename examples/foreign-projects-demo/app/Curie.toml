@@ -1,0 +1,9 @@
+[application]
+name = "app"
+version = "0.1.0"
+groupId = "com.example"
+mainClass = "com.example.app.Main"
+
+[workspace-dependencies]
+greeter = { path = "../greeter-lib" }
+legacy = { path = "../legacy-lib" }

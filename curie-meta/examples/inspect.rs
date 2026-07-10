@@ -8,6 +8,10 @@ fn main() -> anyhow::Result<()> {
             curie_meta::DescriptorKind::Library(l) => (&l.name, &l.version),
             curie_meta::DescriptorKind::Bom(b) => (&b.name, &b.version),
             curie_meta::DescriptorKind::Workspace(_) => continue,
+            curie_meta::DescriptorKind::Foreign(f) => {
+                println!("  {} (foreign {})", f.name, f.tool.label());
+                continue;
+            }
         };
         println!("  {} {}", name, version);
         for (coord, val) in &m.descriptor.dependencies {

@@ -1,0 +1,5 @@
+[application]
+name = "isolated-app"
+version = "0.1.0"
+groupId = "com.example"
+mainClass = "com.example.isolated.Main"

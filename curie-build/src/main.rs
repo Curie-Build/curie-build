@@ -17,6 +17,7 @@ mod docker;
 mod oci;
 mod fat_jar;
 mod fetch;
+mod foreign;
 mod fmt;
 mod git;
 mod incremental;
@@ -404,6 +405,31 @@ fn main() {
         }
     };
 
+    // Foreign members only support build/test/clean/list.  Other commands
+    // get a clear error rather than a confusing "no Curie.toml" from a
+    // later descriptor::load.
+    if let workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } = &ctx {
+        if let Ok(ws) = workspace::load(workspace_root) {
+            if let Some(m) = ws.members.get(*member_index) {
+                if let Some(f) = m.descriptor.foreign_project() {
+                    let allowed = matches!(
+                        &cli.command,
+                        Cmd::Build { .. } | Cmd::Test { .. } | Cmd::Clean { .. } | Cmd::List { .. }
+                    );
+                    if !allowed {
+                        eprintln!(
+                            "error: not supported for foreign member {} ({}); \
+                             use the foreign tool directly",
+                            m.declared,
+                            f.tool.label()
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    }
+
     let result = match cli.command {
         Cmd::Build { no_docker, no_native, no_jlink, offline, jobs } => {
             let opts = build::BuildOptions { no_docker, no_native, no_jlink, offline, coverage: false };
@@ -487,8 +513,8 @@ fn main() {
                 workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
                     workspace::clean_subtree(workspace_root, member_indices, jobs)
                 }
-                workspace::WorkspaceContext::WorkspaceMember { .. } => {
-                    build::clean(&cli.project)
+                workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+                    workspace::clean_one(workspace_root, *member_index)
                 }
                 workspace::WorkspaceContext::Standalone(project) => build::clean(project),
             }

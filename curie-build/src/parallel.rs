@@ -326,7 +326,8 @@ impl Mux {
 // ── Classpath threading helper ─────────────────────────────────────────────
 
 struct Artifact {
-    classes_dir: PathBuf,
+    /// Curie members only; foreign members contribute solely via `contribution`.
+    classes_dir: Option<PathBuf>,
     /// Transitive classpath contribution for downstream members.
     contribution: Vec<PathBuf>,
 }
@@ -336,8 +337,10 @@ fn collect_extra_cp(deps: &[usize], artifacts: &HashMap<usize, Artifact>) -> Vec
     let mut seen: HashSet<PathBuf> = HashSet::new();
     for &i in deps {
         if let Some(a) = artifacts.get(&i) {
-            if seen.insert(a.classes_dir.clone()) {
-                cp.push(a.classes_dir.clone());
+            if let Some(classes) = &a.classes_dir {
+                if seen.insert(classes.clone()) {
+                    cp.push(classes.clone());
+                }
             }
             for e in &a.contribution {
                 if seen.insert(e.clone()) {
@@ -722,7 +725,7 @@ where
 
             match result {
                 Ok(dep_jars) => {
-                    let classes_dir = ws.members[idx].path.join("target").join("classes");
+                    let classes_dir = crate::workspace::member_classes_dir(&ws.members[idx]);
                     let extra_cp =
                         collect_extra_cp(&ws.members[idx].workspace_deps, &artifacts);
                     let mut contribution = extra_cp;

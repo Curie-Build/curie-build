@@ -1,0 +1,4 @@
+[library]
+name = "greeter-lib"
+version = "0.1.0"
+groupId = "com.example"

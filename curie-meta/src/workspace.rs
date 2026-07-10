@@ -1,6 +1,10 @@
-use crate::descriptor::{self, Descriptor, MemberEntry, MissingMembers, Resources};
+use crate::descriptor::{
+    self, Descriptor, ForeignCommand, ForeignDecl, ForeignProject, MemberEntry, MissingMembers,
+    Resources, WorkspaceDep, WorkspaceSection,
+};
+use crate::foreign;
 use anyhow::{bail, Context, Result};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// A single member of a workspace: its path on disk plus its loaded descriptor.
@@ -71,13 +75,42 @@ pub enum WorkspaceContext {
 ///   2. No enclosing workspace found, but `project` is itself a workspace
 ///      → `WorkspaceRoot`.
 ///   3. Otherwise → `Standalone`.
+///
+/// Foreign members (no `Curie.toml`) are tolerated: discovery walks upward
+/// and matches against the flattened member list by canonical path.
+///
+/// When `CURIE_FOREIGN_DEPTH` is set (foreign-curie child process), upward
+/// walk is skipped so the child does not re-enter the parent workspace as
+/// another foreign member and recurse forever.
 pub fn discover(project: &Path) -> Result<WorkspaceContext> {
-    let desc = descriptor::load(project)?;
-    let project_is_workspace = desc.is_workspace();
-
     let project_canon = project
         .canonicalize()
         .with_context(|| format!("failed to canonicalize {}", project.display()))?;
+
+    // Foreign-curie subprocesses: treat `project` as standalone / its own
+    // workspace root.  Do not walk up into the orchestrating parent.
+    if std::env::var_os("CURIE_FOREIGN_DEPTH").is_some() {
+        if project.join("Curie.toml").exists() {
+            let desc = descriptor::load(project)?;
+            if desc.is_workspace() {
+                return Ok(WorkspaceContext::WorkspaceRoot(project.to_path_buf()));
+            }
+            return Ok(WorkspaceContext::Standalone(project.to_path_buf()));
+        }
+        bail!(
+            "foreign curie child has no Curie.toml at {}",
+            project.display()
+        );
+    }
+
+    // Tolerate a missing Curie.toml so foreign members can be targeted with
+    // `--project <foreign-dir>`.  Load only when the file exists.
+    let project_is_workspace = if project.join("Curie.toml").exists() {
+        let desc = descriptor::load(project)?;
+        desc.is_workspace()
+    } else {
+        false
+    };
 
     let mut best: Option<WorkspaceContext> = None;
     let mut cur = project_canon.parent();
@@ -126,6 +159,14 @@ pub fn discover(project: &Path) -> Result<WorkspaceContext> {
     if project_is_workspace {
         return Ok(WorkspaceContext::WorkspaceRoot(project.to_path_buf()));
     }
+    // Standalone requires a Curie.toml; foreign dirs outside any workspace
+    // surface the usual "no Curie.toml" error from load.
+    if !project.join("Curie.toml").exists() {
+        bail!(
+            "no Curie.toml found in {} (and it is not a member of any enclosing workspace)",
+            project.display()
+        );
+    }
     Ok(WorkspaceContext::Standalone(project.to_path_buf()))
 }
 
@@ -156,7 +197,7 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
     expand_members(
         workspace_root,
         &root_desc,
-        &ws.members,
+        ws,
         "",
         &mut raw_members,
         &mut seen_canonical,
@@ -167,6 +208,12 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
         .map(|m| m.path.canonicalize().unwrap_or_else(|_| m.path.clone()))
         .collect();
 
+    // Edge building: `m.path.join(&dep.path)`.  For foreign members,
+    // `dependencies` are synthesised as *absolute* WorkspaceDep paths so
+    // that joining re-anchors onto the dep (Path::join of an absolute path
+    // replaces the base).  Curie members keep relative paths as today.
+    // Existing cycle detection, topo_sort, and the parallel scheduler work
+    // unchanged.
     let mut edges: Vec<Vec<usize>> = vec![Vec::new(); raw_members.len()];
     for (i, m) in raw_members.iter().enumerate() {
         for (label, dep) in &m.descriptor.workspace_dependencies {
@@ -179,7 +226,8 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
             })?;
             let target_idx = canon.iter().position(|c| c == &target_canon).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "workspace-dep \"{}\" of \"{}\" → {} is not a workspace member; add it to [workspace.members] in {}",
+                    "workspace-dep \"{}\" of \"{}\" → {} is not a workspace member; \
+                     add it to [workspace.members] (or [workspace.foreign]) in {}",
                     label, m.declared, target.display(), workspace_root.join("Curie.toml").display(),
                 )
             })?;
@@ -221,15 +269,23 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
 }
 
 /// Recursively expand workspace members, flattening nested workspaces.
+///
+/// Foreign members (auto-detected or declared under `[workspace.foreign]`)
+/// are synthesised as [`DescriptorKind::Foreign`] and never receive workspace
+/// inheritance.  A foreign curie member (has `Curie.toml` + a foreign entry)
+/// is **not** flattened even if it is itself a workspace — the child process
+/// owns it.
 fn expand_members(
     ws_root: &Path,
     ws_desc: &Descriptor,
-    member_entries: &[MemberEntry],
+    section: &WorkspaceSection,
     prefix: &str,
     out: &mut Vec<Member>,
     seen: &mut HashSet<PathBuf>,
 ) -> Result<()> {
-    for entry in member_entries {
+    let mut consumed_foreign: HashSet<String> = HashSet::new();
+
+    for entry in &section.members {
         let name = entry.path();
         let path = ws_root.join(name);
         if !path.exists() {
@@ -251,26 +307,59 @@ fn expand_members(
             );
         }
 
+        let has_foreign_entry = section.foreign.contains_key(name);
+        let has_curie_toml = path.join("Curie.toml").exists();
+
+        if has_foreign_entry {
+            // Declared foreign — Curie.toml (if present) only means tool=curie
+            // via detection; never load/flatten as a nested workspace.
+            consumed_foreign.insert(name.to_string());
+            let decl = &section.foreign[name];
+            out.push(resolve_foreign_member(ws_root, name, &path, prefix, decl)?);
+            continue;
+        }
+
+        if !has_curie_toml {
+            // Auto-detect foreign from marker files.
+            if !foreign::has_markers(&path) {
+                bail!(
+                    "workspace member \"{}\" at {} has no Curie.toml and no foreign \
+                     project markers (looked for pom.xml, build.gradle[.kts]/settings.gradle[.kts], \
+                     Cargo.toml, Makefile/GNUmakefile/makefile, package.json). \
+                     Add a Curie.toml or a foreign marker, or set type under [workspace.foreign.{}].",
+                    name,
+                    path.display(),
+                    name,
+                );
+            }
+            let decl = ForeignDecl::default();
+            out.push(resolve_foreign_member(ws_root, name, &path, prefix, &decl)?);
+            continue;
+        }
+
+        // Native curie member (or nested workspace).
         let mut member_desc = descriptor::load(&path)
             .with_context(|| format!("failed to load workspace member \"{}\"", name))?;
 
         if member_desc.is_workspace() {
             let inner_ws = member_desc.workspace().unwrap();
-            let inner_members = inner_ws.members.clone();
             let inner_prefix = if prefix.is_empty() {
                 format!("{}/", name)
             } else {
                 format!("{}{}/", prefix, name)
             };
 
-            // Ensure git members of the nested workspace are cloned before
-            // expanding further.
-            ensure_git_members(&path, &inner_members, &inner_ws.missing_members)?;
+            ensure_git_members(&path, &inner_ws.members, &inner_ws.missing_members)?;
 
             let before_len = out.len();
-            expand_members(&path, &member_desc, &inner_members, &inner_prefix, out, seen)?;
+            expand_members(&path, &member_desc, inner_ws, &inner_prefix, out, seen)?;
 
+            // Skip inheritance for foreign members so e.g. [maven] sync = true
+            // at a workspace root does not leak onto make/cargo/npm projects.
             for m in &mut out[before_len..] {
+                if m.descriptor.is_foreign() {
+                    continue;
+                }
                 inherit_from_workspace(&mut m.descriptor, ws_desc);
                 descriptor::validate_dep_repo_refs(&m.descriptor).with_context(|| {
                     format!(
@@ -298,7 +387,106 @@ fn expand_members(
             });
         }
     }
+
+    // Every [workspace.foreign.X] key must match a members entry.
+    for key in section.foreign.keys() {
+        if !consumed_foreign.contains(key) {
+            bail!(
+                "[workspace.foreign.{key}] is declared but \"{key}\" is not listed in \
+                 [workspace] members"
+            );
+        }
+    }
+
     Ok(())
+}
+
+/// Resolve a foreign member from its optional `[workspace.foreign]` decl.
+fn resolve_foreign_member(
+    ws_root: &Path,
+    name: &str,
+    path: &Path,
+    prefix: &str,
+    decl: &ForeignDecl,
+) -> Result<Member> {
+    let tool = match &decl.tool {
+        Some(t) => *t,
+        None => foreign::detect_tool(path).with_context(|| {
+            format!("failed to detect foreign project type for member \"{name}\"")
+        })?,
+    };
+
+    let build_command = match &decl.command {
+        Some(cmd) => cmd.clone(), // non-empty validated at load time
+        None => tool.default_build_command(path),
+    };
+
+    let test_command = resolve_optional_command(&decl.test_command, || {
+        tool.default_test_command(path)
+    });
+    let clean_command = resolve_optional_command(&decl.clean_command, || {
+        tool.default_clean_command(path)
+    });
+
+    // Synthesise workspace_dependencies with *absolute* paths so that
+    // `m.path.join(&dep.path)` in edge building re-anchors onto the dep
+    // (joining an absolute path replaces the base).  Labels are the
+    // declared dependency paths for readable cycle errors.
+    let mut workspace_dependencies: BTreeMap<String, WorkspaceDep> = BTreeMap::new();
+    for dep in &decl.dependencies {
+        let abs = ws_root
+            .join(dep)
+            .canonicalize()
+            .with_context(|| {
+                format!(
+                    "foreign member \"{name}\" dependency \"{dep}\" does not exist at {}",
+                    ws_root.join(dep).display()
+                )
+            })?
+            .to_string_lossy()
+            .into_owned();
+        workspace_dependencies.insert(
+            dep.clone(),
+            WorkspaceDep {
+                path: abs,
+                version: None,
+            },
+        );
+    }
+
+    let project = ForeignProject {
+        name: name.to_string(),
+        tool,
+        build_command,
+        test_command,
+        clean_command,
+        artifacts: decl.artifacts.clone(),
+        env: decl.env.clone(),
+    };
+
+    let declared = if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}{}", prefix, name)
+    };
+
+    Ok(Member {
+        path: path.to_path_buf(),
+        declared,
+        descriptor: Descriptor::for_foreign(project, workspace_dependencies),
+        workspace_deps: Vec::new(),
+    })
+}
+
+fn resolve_optional_command(
+    override_cmd: &Option<Vec<String>>,
+    default: impl FnOnce() -> Vec<String>,
+) -> ForeignCommand {
+    match override_cmd {
+        Some(cmd) if cmd.is_empty() => ForeignCommand::Skip,
+        Some(cmd) => ForeignCommand::Explicit(cmd.clone()),
+        None => ForeignCommand::Default(default()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -558,7 +746,7 @@ pub(crate) fn topo_sort(n: usize, edges: &[Vec<usize>]) -> std::result::Result<V
 #[derive(Debug)]
 enum ListKind {
     Workspace,
-    Project { label: &'static str, version: String },
+    Project { label: String, version: String },
 }
 
 /// A node in the list-tree hierarchy.
@@ -573,21 +761,66 @@ pub struct ListNode {
 }
 
 /// Recursively build the list-tree rooted at `root`.
-fn build_list_tree(root: &Path, parent_ws_abs: &Path, name: &str) -> Result<ListNode> {
+///
+/// When `foreign_decl` is `Some`, `root` is treated as a foreign member of
+/// the enclosing workspace (even if it has a `Curie.toml`).  When the
+/// enclosing workspace lists a toml-less member, call with `foreign_decl =
+/// Some(&default)` so marker detection still runs via resolution helpers.
+fn build_list_tree(
+    root: &Path,
+    parent_ws_abs: &Path,
+    name: &str,
+    foreign_decl: Option<&ForeignDecl>,
+) -> Result<ListNode> {
     let abs_path = root
         .canonicalize()
         .with_context(|| format!("failed to canonicalize {}", root.display()))?;
+
+    // Foreign path: either an explicit [workspace.foreign] entry, or a
+    // member without Curie.toml (caller passes Some(default decl)).
+    if let Some(decl) = foreign_decl {
+        let tool = match &decl.tool {
+            Some(t) => *t,
+            None => foreign::detect_tool(root)?,
+        };
+        let dep_targets: Vec<PathBuf> = decl
+            .dependencies
+            .iter()
+            .filter_map(|d| parent_ws_abs.join(d).canonicalize().ok())
+            .collect();
+        return Ok(ListNode {
+            name: name.to_string(),
+            abs_path,
+            parent_ws_abs: parent_ws_abs.to_path_buf(),
+            kind: ListKind::Project {
+                label: format!("foreign ({})", tool.label()),
+                version: String::new(),
+            },
+            dep_targets,
+            children: Vec::new(),
+        });
+    }
+
     let desc = descriptor::load(root)
         .with_context(|| format!("failed to load {}", root.display()))?;
 
     if desc.is_workspace() {
         let ws = desc.workspace().unwrap();
         let mut children = Vec::new();
+        let default_foreign = ForeignDecl::default();
         for entry in &ws.members {
             let member_name = entry.path();
             let child_path = root.join(member_name);
+            let child_decl = if let Some(d) = ws.foreign.get(member_name) {
+                Some(d)
+            } else if !child_path.join("Curie.toml").exists() {
+                // Auto-detected foreign leaf — do not try descriptor::load.
+                Some(&default_foreign)
+            } else {
+                None
+            };
             children.push(
-                build_list_tree(&child_path, &abs_path, member_name)
+                build_list_tree(&child_path, &abs_path, member_name, child_decl)
                     .with_context(|| format!("loading member \"{}\"", member_name))?,
             );
         }
@@ -613,7 +846,7 @@ fn build_list_tree(root: &Path, parent_ws_abs: &Path, name: &str) -> Result<List
             abs_path,
             parent_ws_abs: parent_ws_abs.to_path_buf(),
             kind: ListKind::Project {
-                label: desc.kind_label(),
+                label: desc.kind_label().to_string(),
                 version: desc
                     .project_version()
                     .unwrap_or("?")
@@ -810,7 +1043,14 @@ fn render_node(
             }
         }
         ListKind::Project { label, version } => {
-            let meta = if color {
+            let meta = if version.is_empty() {
+                // Foreign members: "legacy-lib  foreign (make)" — no version.
+                if color {
+                    format!("  {DIM}{label}{RESET}")
+                } else {
+                    format!("  {label}")
+                }
+            } else if color {
                 format!("  {DIM}{label} v{version}{RESET}")
             } else {
                 format!("  {label} v{version}")
@@ -889,7 +1129,7 @@ pub fn list(root: &Path, current: &Path, all: bool, color: bool) -> Result<()> {
         .canonicalize()
         .with_context(|| format!("failed to canonicalize {}", root.display()))?;
 
-    let tree = build_list_tree(root, &root_abs, &root_name)?;
+    let tree = build_list_tree(root, &root_abs, &root_name, None)?;
     let view = compute_view(&tree, &current_canon, all);
 
     render_node(&tree, &view, "", "", color);
@@ -1825,7 +2065,7 @@ mod tests {
         let dir = make_nested_workspace();
         let root = dir.path();
         let root_abs = root.canonicalize().unwrap();
-        let tree = build_list_tree(root, &root_abs, "root").unwrap();
+        let tree = build_list_tree(root, &root_abs, "root", None).unwrap();
 
         assert!(matches!(tree.kind, ListKind::Workspace));
         assert_eq!(tree.children.len(), 2);
@@ -1843,7 +2083,7 @@ mod tests {
         let root_abs = root.canonicalize().unwrap();
         let services_abs = root.join("services").canonicalize().unwrap();
         let core_abs = root.join("core-lib").canonicalize().unwrap();
-        let tree = build_list_tree(root, &root_abs, "root").unwrap();
+        let tree = build_list_tree(root, &root_abs, "root", None).unwrap();
         let view = compute_view(&tree, &services_abs, false);
 
         assert!(view.kept.contains(&root_abs));
@@ -1863,7 +2103,7 @@ mod tests {
         let core_abs = root.join("core-lib").canonicalize().unwrap();
         let mid_abs = root.join("services").join("mid-lib").canonicalize().unwrap();
         let leaf_abs = root.join("services").join("apps").join("leaf-app").canonicalize().unwrap();
-        let tree = build_list_tree(root, &root_abs, "root").unwrap();
+        let tree = build_list_tree(root, &root_abs, "root", None).unwrap();
         let view = compute_view(&tree, &root_abs, false);
 
         let core_reqs = view.required_by.get(&core_abs).expect("core-lib must have required_by");
@@ -1883,7 +2123,7 @@ mod tests {
         let dir = make_nested_workspace();
         let root = dir.path();
         let root_abs = root.canonicalize().unwrap();
-        let tree = build_list_tree(root, &root_abs, "root").unwrap();
+        let tree = build_list_tree(root, &root_abs, "root", None).unwrap();
         let view = compute_view(&tree, &root_abs, true);
 
         assert_eq!(view.kept.len(), 6);
@@ -2471,5 +2711,307 @@ members = ["a"]
         let d = crate::descriptor::load_str_for_test(toml).unwrap();
         let ws = d.workspace().unwrap();
         assert_eq!(ws.missing_members, MissingMembers::Clone);
+    }
+
+    // -- foreign members ------------------------------------------------------
+
+    fn write_lib(dir: &Path, name: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("Curie.toml"),
+            format!("[library]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn foreign_auto_detect_makefile_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            "[workspace]\nmembers = [\"legacy-lib\"]\n",
+        )
+        .unwrap();
+        let legacy = root.join("legacy-lib");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("Makefile"), "all:\n\t@true\n").unwrap();
+
+        let ws = load(root).unwrap();
+        assert_eq!(ws.members.len(), 1);
+        assert!(ws.members[0].descriptor.is_foreign());
+        let f = ws.members[0].descriptor.foreign_project().unwrap();
+        assert_eq!(f.tool, crate::foreign::ForeignTool::Make);
+        assert_eq!(ws.members[0].declared, "legacy-lib");
+        assert_eq!(f.build_command, vec!["make"]);
+        assert!(matches!(f.test_command, ForeignCommand::Default(_)));
+    }
+
+    #[test]
+    fn foreign_key_not_in_members_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            "[workspace]\nmembers = [\"a\"]\n[workspace.foreign.orphan]\n",
+        )
+        .unwrap();
+        write_lib(&root.join("a"), "a");
+        let err = load(root).unwrap_err().to_string();
+        assert!(err.contains("orphan"), "got: {err}");
+        assert!(err.contains("not listed"), "got: {err}");
+    }
+
+    #[test]
+    fn foreign_entry_over_curie_toml_is_foreign_curie_not_flattened() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            concat!(
+                "[workspace]\n",
+                "members = [\"isolated-app\"]\n",
+                "[workspace.foreign.isolated-app]\n",
+                "env = { APP_PROFILE = \"ci\" }\n",
+            ),
+        )
+        .unwrap();
+        // isolated-app is itself a workspace with a nested leaf — must NOT flatten.
+        let iso = root.join("isolated-app");
+        std::fs::create_dir_all(iso.join("leaf")).unwrap();
+        std::fs::write(
+            iso.join("Curie.toml"),
+            "[workspace]\nmembers = [\"leaf\"]\n",
+        )
+        .unwrap();
+        write_lib(&iso.join("leaf"), "leaf");
+
+        let ws = load(root).unwrap();
+        assert_eq!(ws.members.len(), 1, "foreign curie must not flatten");
+        let f = ws.members[0].descriptor.foreign_project().unwrap();
+        assert_eq!(f.tool, crate::foreign::ForeignTool::Curie);
+        assert_eq!(f.env.get("APP_PROFILE").map(String::as_str), Some("ci"));
+    }
+
+    #[test]
+    fn foreign_toml_less_no_markers_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            "[workspace]\nmembers = [\"empty\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        let err = load(root).unwrap_err().to_string();
+        assert!(err.contains("no Curie.toml") || err.contains("no foreign"), "got: {err}");
+    }
+
+    #[test]
+    fn foreign_dependencies_drive_topo_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            concat!(
+                "[workspace]\n",
+                "members = [\"app\", \"legacy-lib\"]\n",
+                "[workspace.foreign.legacy-lib]\n",
+                "artifacts = [\"out/x.jar\"]\n",
+            ),
+        )
+        .unwrap();
+        // app depends on legacy-lib via workspace-dependencies
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::write(
+            root.join("app").join("Curie.toml"),
+            concat!(
+                "[application]\nname = \"app\"\nversion = \"0.1.0\"\nmainClass = \"M\"\n\n",
+                "[workspace-dependencies]\nlegacy = { path = \"../legacy-lib\" }\n",
+            ),
+        )
+        .unwrap();
+        let legacy = root.join("legacy-lib");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("Makefile"), "").unwrap();
+
+        let ws = load(root).unwrap();
+        assert_eq!(ws.members.len(), 2);
+        // legacy-lib must come before app
+        assert_eq!(ws.members[0].declared, "legacy-lib");
+        assert_eq!(ws.members[1].declared, "app");
+        assert_eq!(ws.members[1].workspace_deps, vec![0]);
+    }
+
+    #[test]
+    fn foreign_to_foreign_dep_ordering() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            concat!(
+                "[workspace]\n",
+                "members = [\"rust-tool\", \"legacy-lib\"]\n",
+                "[workspace.foreign.rust-tool]\n",
+                "dependencies = [\"legacy-lib\"]\n",
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("legacy-lib")).unwrap();
+        std::fs::write(root.join("legacy-lib").join("Makefile"), "").unwrap();
+        std::fs::create_dir_all(root.join("rust-tool")).unwrap();
+        std::fs::write(root.join("rust-tool").join("Cargo.toml"), "[package]\nname=\"t\"\nversion=\"0.1.0\"\nedition=\"2021\"\n").unwrap();
+
+        let ws = load(root).unwrap();
+        assert_eq!(ws.members[0].declared, "legacy-lib");
+        assert_eq!(ws.members[1].declared, "rust-tool");
+        assert_eq!(ws.members[1].workspace_deps, vec![0]);
+    }
+
+    #[test]
+    fn foreign_curie_cycle_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            concat!(
+                "[workspace]\n",
+                "members = [\"a\", \"b\"]\n",
+                "[workspace.foreign.a]\ndependencies = [\"b\"]\n",
+                "[workspace.foreign.b]\ndependencies = [\"a\"]\n",
+            ),
+        )
+        .unwrap();
+        for name in ["a", "b"] {
+            let p = root.join(name);
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("Makefile"), "").unwrap();
+        }
+        let err = load(root).unwrap_err().to_string();
+        assert!(err.contains("cycle"), "got: {err}");
+    }
+
+    #[test]
+    fn foreign_unknown_dep_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            concat!(
+                "[workspace]\n",
+                "members = [\"legacy-lib\"]\n",
+                "[workspace.foreign.legacy-lib]\n",
+                "dependencies = [\"ghost\"]\n",
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("legacy-lib")).unwrap();
+        std::fs::write(root.join("legacy-lib").join("Makefile"), "").unwrap();
+        let err = load(root).unwrap_err().to_string();
+        assert!(
+            err.contains("ghost") || err.contains("does not exist"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn foreign_skips_workspace_inheritance() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            concat!(
+                "[workspace]\nmembers = [\"legacy-lib\", \"app\"]\n",
+                "[maven]\nsync = true\n",
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("legacy-lib")).unwrap();
+        std::fs::write(root.join("legacy-lib").join("Makefile"), "").unwrap();
+        write_lib(&root.join("app"), "app");
+
+        let ws = load(root).unwrap();
+        let foreign = ws.members.iter().find(|m| m.declared == "legacy-lib").unwrap();
+        assert!(foreign.descriptor.is_foreign());
+        // Foreign must not inherit maven.sync from the workspace root.
+        assert!(foreign.descriptor.maven.sync.is_none());
+        let app = ws.members.iter().find(|m| m.declared == "app").unwrap();
+        assert_eq!(app.descriptor.maven.sync, Some(true));
+    }
+
+    #[test]
+    fn discover_on_foreign_dir_yields_workspace_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            "[workspace]\nmembers = [\"legacy-lib\"]\n",
+        )
+        .unwrap();
+        let legacy = root.join("legacy-lib");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("Makefile"), "").unwrap();
+
+        let ctx = discover(&legacy).unwrap();
+        match ctx {
+            WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+                assert_eq!(
+                    workspace_root.canonicalize().unwrap(),
+                    root.canonicalize().unwrap()
+                );
+                assert_eq!(member_index, 0);
+            }
+            other => panic!("expected WorkspaceMember, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_tree_shows_foreign_tool_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            "[workspace]\nmembers = [\"legacy-lib\"]\n",
+        )
+        .unwrap();
+        let legacy = root.join("legacy-lib");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("Makefile"), "").unwrap();
+
+        let root_abs = root.canonicalize().unwrap();
+        let tree = build_list_tree(root, &root_abs, "root", None).unwrap();
+        assert_eq!(tree.children.len(), 1);
+        match &tree.children[0].kind {
+            ListKind::Project { label, version } => {
+                assert_eq!(label, "foreign (make)");
+                assert!(version.is_empty());
+            }
+            other => panic!("expected Project, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_workspace_foreign_flattening_with_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Curie.toml"),
+            "[workspace]\nmembers = [\"inner\"]\n",
+        )
+        .unwrap();
+        let inner = root.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(
+            inner.join("Curie.toml"),
+            "[workspace]\nmembers = [\"legacy-lib\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(inner.join("legacy-lib")).unwrap();
+        std::fs::write(inner.join("legacy-lib").join("Makefile"), "").unwrap();
+
+        let ws = load(root).unwrap();
+        assert_eq!(ws.members.len(), 1);
+        assert_eq!(ws.members[0].declared, "inner/legacy-lib");
+        assert!(ws.members[0].descriptor.is_foreign());
     }
 }
