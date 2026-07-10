@@ -648,6 +648,55 @@ section { padding: var(--gap-lg) 0; }
 .compare td.curie { color: var(--accent); }
 .compare tr:last-child td { border-bottom: 0; }
 
+/* ---------- 8b. Reference / prose data tables ---------- */
+
+.prose table:not(.compare) {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin-block: 1.5rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  background: var(--bg-elev-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.prose table:not(.compare) th,
+.prose table:not(.compare) td {
+  padding: 0.6rem 0.9rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+}
+.prose table:not(.compare) th {
+  background: var(--bg-elev-2);
+  font-weight: 500;
+  font-size: 0.82rem;
+  color: var(--text-lo);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.prose table:not(.compare) td:first-child {
+  color: var(--text-hi);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.prose table:not(.compare) tr:last-child td { border-bottom: 0; }
+.prose table:not(.compare) tbody tr:hover td { background: rgba(167, 200, 220, 0.03); }
+.prose table:not(.compare) code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--text-hi);
+  font-size: 0.9em;
+}
+
+@media (max-width: 720px) {
+  /* keep wide reference tables usable: scroll horizontally instead of overflowing */
+  .prose table:not(.compare) { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+}
+
 /* ---------- 9. Responsive ---------- */
 
 @media (max-width: 880px) {
