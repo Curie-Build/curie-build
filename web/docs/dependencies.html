@@ -295,6 +295,62 @@ curie add --annotation-processor org.projectlombok:lombok@1.18.32</pre>
 
     <p>BOM imports can also be inherited from a workspace root — see <a href="/docs/workspaces.html">Workspaces</a>.</p>
 
+    <h2 id="update">Keeping dependencies up to date</h2>
+    <p><code>curie update</code> checks every <em>pinned</em> version in <code>Curie.toml</code> against Maven metadata and, by default, rewrites the file in place with the latest stable release. It edits via <code>toml_edit</code>, so your comments, ordering, and formatting are preserved.</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie update</span>
+      </header>
+<pre>  <span class="pkg">com.fasterxml.jackson.core:jackson-databind</span>  <span class="dim">2.17.2 →</span> <span class="ok">2.18.2</span>
+  <span class="pkg">com.google.guava:guava</span>  <span class="dim">33.2 →</span> <span class="ok">33.4.0</span>
+  <span class="pkg">org.junit:junit-bom</span>  <span class="dim">5.11.0 →</span> <span class="ok">5.11.4</span>
+
+  <span class="ok">Updated 3 entries in Curie.toml</span></pre>
+    </div>
+
+    <p>It looks at five sections — <code>[dependencies]</code>, <code>[test-dependencies]</code>, <code>[bom-imports]</code>, <code>[test-bom-imports]</code>, and <code>[annotation-processors]</code>. Entries with an empty version string are BOM-managed and skipped: they follow whatever the BOM pins, so there is nothing to bump. Only <strong>stable</strong> releases are considered — <code>SNAPSHOT</code>, alpha, beta, RC/CR, and milestone versions are ignored.</p>
+
+    <h3>Flags</h3>
+    <ul>
+      <li><code>--check</code> — report available updates but don't touch <code>Curie.toml</code>, and exit <code>1</code> when any update exists. Drop-in for a CI job that fails when dependencies drift out of date.</li>
+      <li><code>--no-test</code> — skip <code>[test-dependencies]</code> and <code>[test-bom-imports]</code>.</li>
+      <li><code>--offline</code> — skip the check entirely; makes no network calls.</li>
+    </ul>
+
+    <h2 id="fetch">Pre-downloading for offline builds</h2>
+    <p><code>curie fetch</code> downloads dependency artifacts into your local Maven cache (<code>~/.m2/repository</code>) ahead of time, so a later <code>--offline</code> build has everything it needs. With no arguments it fetches everything declared in <code>Curie.toml</code> — <code>[dependencies]</code>, <code>[test-dependencies]</code>, and both annotation-processor sections:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie fetch</span>
+      </header>
+<pre>  <span class="dim">Fetching dependencies into ~/.m2/repository</span>
+  Resolve deps    <span class="pkg">42 JAR(s)</span>
+  <span class="ok">✔ all artifacts cached</span></pre>
+    </div>
+
+    <p>Pass one or more <code>"group:artifact:version"</code> coordinates to fetch just those — plus their transitive closure, unless <code>--no-transitive</code>. (Supplying a coordinate that a transitive version range needs also pins that range.)</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie fetch com.google.guava:guava:33.4.0</span>
+      </header>
+<pre>  <span class="ok">✔ fetched com.google.guava:guava:33.4.0 (+ 6 transitive)</span></pre>
+    </div>
+
+    <h3>Flags</h3>
+    <ul>
+      <li><code>--file &lt;path&gt;</code> — read coordinates from a file, one <code>group:artifact:version</code> per line (blank lines and <code>#</code> comments ignored). Mutually exclusive with inline coordinates.</li>
+      <li><code>--no-transitive</code> — with coordinates, download only those artifacts and skip their transitive dependencies. Requires at least one coordinate.</li>
+      <li><code>--offline</code> — don't touch the network; instead verify every artifact is already cached and fail if one is missing. Handy as a gate before an offline build.</li>
+    </ul>
+
+    <p><code>curie fetch</code> targets a single project, not a workspace root — point it at a member with <code>--project &lt;dir&gt;</code>.</p>
+
     <p>For how Curie resolves transitive dependencies, applies nearest-wins conflict resolution, verifies checksums, and handles offline mode, see <a href="/docs/resolver.html">Resolver &amp; checksums</a>.</p>
 
     <div class="pager">
