@@ -193,6 +193,40 @@
     <p>The flag works on <code>[dependencies]</code> too, for agents that must be active at
     application runtime (<code>curie run</code> / <code>curie dev</code>).</p>
 
+    <h2 id="code-coverage">Code coverage</h2>
+    <p>Curie has built-in <a href="https://www.jacoco.org/jacoco/" target="_blank" rel="noopener">JaCoCo</a> coverage — no plugin to wire up. Turn it on for a single run with <code>--coverage</code>:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie test --coverage</span>
+      </header>
+<pre><span class="dim">Testing string-utils-flat v0.1.0</span>
+  Tests           <span class="ok">✔ 8 tests successful</span>
+  Coverage        <span class="ok">87.3%</span> lines, <span class="ok">74.1%</span> branches  <span class="dim">→ target/coverage/html/index.html</span></pre>
+    </div>
+
+    <p>Or enable it for every run in <code>[test]</code>, so <code>curie test</code> and <code>curie build</code> always collect it:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[test]</span>
+<span class="kw">coverage</span> = <span class="kw">true</span></pre>
+    </div>
+
+    <p>Under the hood Curie resolves the JaCoCo agent from Maven Central, attaches it to the test JVM, and — once the tests pass — runs the JaCoCo CLI to render the report. The agent and CLI are fetched once and cached in <code>~/.m2</code>, so later runs work offline. Everything lands under <code>target/coverage/</code>:</p>
+
+    <ul>
+      <li><code>target/coverage/html/index.html</code> — the browsable HTML report (open this one)</li>
+      <li><code>target/coverage/coverage.csv</code> — machine-readable per-class totals</li>
+      <li><code>target/coverage/jacoco.exec</code> — the raw JaCoCo execution data</li>
+    </ul>
+
+    <p>The report is generated only after the tests pass, so a failing suite never leaves a stale report behind. The <code>coverage</code> key is workspace-inheritable — set it once in a root <code>Curie.toml</code> and every member reports coverage. Under <a href="/docs/maven.html">Maven sync</a> it maps to the <code>jacoco-maven-plugin</code> <code>prepare-agent</code> and <code>report</code> goals, so <code>mvn verify</code> produces an equivalent report.</p>
+
     <h2>Incremental test runs</h2>
     <p>Curie stamps the test classes directory + the dep JARs + the test resources, and skips the JVM round-trip when none of those have changed since the last green run. A pure <code>curie test</code> on an unchanged tree exits in milliseconds with <code>Tests up to date</code>.</p>
 
