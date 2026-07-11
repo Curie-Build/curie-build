@@ -337,7 +337,7 @@
     <p>When a member has both a <code>Curie.toml</code> and a <code>[workspace.foreign.X]</code> entry, Curie spawns itself as a child process. The child gets the declared <code>env</code>, no parent workspace inheritance, and is not flattened if it is a nested workspace. A <code>CURIE_FOREIGN_DEPTH</code> guard caps pathological recursion. Ordering-only <code>dependencies</code> on the parent do not put parent workspace jars on the child's classpath — declare <code>artifacts</code> if you need that.</p>
 
     <h3>Maven sync limitation</h3>
-    <p>Foreign members never appear as Maven <code>&lt;module&gt;</code>s. A Curie member that depends on a foreign member cannot express that edge in a synced <code>pom.xml</code> — set <code>[maven] sync = false</code> on that member or the workspace. Nested workspaces under a syncing root may set <code>[maven] sync = false</code> to opt out of aggregator generation entirely (see <code>examples/foreign-projects-demo</code>).</p>
+    <p>Foreign members never appear as Maven <code>&lt;module&gt;</code>s. A Curie member that depends on a foreign member cannot express that edge in a synced <code>pom.xml</code> — set <code>[maven] sync = false</code> on that member or the workspace. Nested workspaces under a syncing root may set <code>[maven] sync = false</code> to opt out of aggregator generation entirely (see <code>examples/foreign-projects-demo</code>, which mixes Make, Maven, Gradle, Cargo, npm, and foreign-Curie members).</p>
 
     <h3>Nested workspaces</h3>
     <p>Foreign members work inside nested workspaces: the recursive expand processes each level's <code>members</code> + <code>foreign</code> map with the inner path prefix. Inheritance still skips foreign leaves at every level.</p>

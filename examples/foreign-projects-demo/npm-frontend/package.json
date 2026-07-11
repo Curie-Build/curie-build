@@ -1,0 +1,11 @@
+{
+  "name": "npm-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Foreign npm frontend in the Curie foreign-projects demo",
+  "scripts": {
+    "build": "mkdir -p dist && cp src/index.js dist/index.js && echo 'npm-frontend: built'",
+    "test": "node -e \"const fs=require('fs'); const s=fs.readFileSync('src/index.js','utf8'); if(!s.includes('npm-frontend')) process.exit(1); console.log('npm-frontend: ok')\"",
+    "clean": "rm -rf dist && echo 'npm-frontend: cleaned'"
+  }
+}

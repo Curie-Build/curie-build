@@ -1,18 +1,31 @@
 # Foreign-projects demo — Curie workspace mixing Curie and foreign members.
 #
-# Members:
+# Curie members:
 #   greeter-lib   — Curie library
-#   app           — Curie application depending on greeter-lib + legacy-lib (foreign jar)
-#   legacy-lib    — foreign Make project (auto-detected; no Curie.toml)
-#   rust-tool     — foreign Cargo project (auto-detected)
-#   isolated-app  — Curie application built as a *foreign curie* member
-#                   (separate `curie` process, no workspace inheritance)
+#   app           — Curie application (depends on greeter-lib + foreign jars)
+#   isolated-app  — Curie app built as a *foreign curie* member (child process)
 #
-# [maven] sync is disabled: foreign members have no pom.xml, and a curie
-# member depending on a foreign jar cannot be expressed as a Maven module dep.
+# Foreign members (auto-detected from markers unless noted):
+#   legacy-lib    — Make  (Makefile)
+#   maven-lib     — Maven (pom.xml)
+#   gradle-lib    — Gradle (build.gradle / settings.gradle)
+#   rust-tool     — Cargo (Cargo.toml)
+#   npm-frontend  — npm   (package.json)
+#
+# [maven] sync is disabled: foreign members have no Curie pom sync story, and
+# a Curie member depending on foreign jars cannot be expressed as Maven modules.
 
 [workspace]
-members = ["greeter-lib", "app", "legacy-lib", "rust-tool", "isolated-app"]
+members = [
+    "greeter-lib",
+    "app",
+    "legacy-lib",
+    "maven-lib",
+    "gradle-lib",
+    "rust-tool",
+    "npm-frontend",
+    "isolated-app",
+]
 
 [maven]
 sync = false
@@ -21,8 +34,19 @@ sync = false
 artifacts = ["out/legacy-lib.jar"]
 env = { GREETING_SUFFIX = "!" }
 
+[workspace.foreign.maven-lib]
+artifacts = ["target/maven-lib-0.1.0.jar"]
+
+[workspace.foreign.gradle-lib]
+artifacts = ["build/libs/gradle-lib-0.1.0.jar"]
+
 [workspace.foreign.rust-tool]
-dependencies = ["legacy-lib"]
+# Ordering-only: wait for make + maven before cargo.
+dependencies = ["legacy-lib", "maven-lib"]
+
+[workspace.foreign.npm-frontend]
+# Ordering-only: frontend after backend foreign libs.
+dependencies = ["rust-tool", "gradle-lib"]
 
 [workspace.foreign.isolated-app]
 dependencies = ["greeter-lib"]

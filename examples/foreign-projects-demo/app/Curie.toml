@@ -7,3 +7,5 @@ mainClass = "com.example.app.Main"
 [workspace-dependencies]
 greeter = { path = "../greeter-lib" }
 legacy = { path = "../legacy-lib" }
+mavenlib = { path = "../maven-lib" }
+gradlelib = { path = "../gradle-lib" }
