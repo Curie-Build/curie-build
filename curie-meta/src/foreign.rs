@@ -9,6 +9,9 @@ use anyhow::{bail, Result};
 use serde::Deserialize;
 use std::path::Path;
 
+/// Out-of-source directory used by default CMake build/test/clean commands.
+pub const CMAKE_DEFAULT_BUILD_DIR: &str = "build";
+
 /// External build tool that owns a foreign workspace member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -18,6 +21,7 @@ pub enum ForeignTool {
     Gradle,
     Cargo,
     Make,
+    CMake,
     Npm,
     Bun,
     Yarn,
@@ -32,6 +36,7 @@ impl ForeignTool {
             ForeignTool::Gradle => "gradle",
             ForeignTool::Cargo => "cargo",
             ForeignTool::Make => "make",
+            ForeignTool::CMake => "cmake",
             ForeignTool::Npm => "npm",
             ForeignTool::Bun => "bun",
             ForeignTool::Yarn => "yarn",
@@ -40,17 +45,39 @@ impl ForeignTool {
 
     /// Default build argv (no shell).  `dir` is used for wrapper detection
     /// (`mvnw`/`gradlew`) and for resolving the curie binary.
+    ///
+    /// For CMake this is only the *build* step (`cmake --build build`); the
+    /// runner runs `cmake -S . -B build` first when this default is used.
     pub fn default_build_command(self, dir: &Path) -> Vec<String> {
         match self {
             ForeignTool::Maven => vec![maven_bin(dir), "-B".into(), "package".into()],
             ForeignTool::Gradle => vec![gradle_bin(dir), "build".into()],
             ForeignTool::Cargo => vec!["cargo".into(), "build".into()],
             ForeignTool::Make => vec!["make".into()],
+            ForeignTool::CMake => vec![
+                "cmake".into(),
+                "--build".into(),
+                CMAKE_DEFAULT_BUILD_DIR.into(),
+            ],
             ForeignTool::Npm => vec!["npm".into(), "run".into(), "build".into()],
             ForeignTool::Bun => vec!["bun".into(), "run".into(), "build".into()],
             ForeignTool::Yarn => vec!["yarn".into(), "run".into(), "build".into()],
             ForeignTool::Curie => vec![curie_bin(), "build".into()],
         }
+    }
+
+    /// Configure argv for the default out-of-source CMake tree.
+    ///
+    /// Invoked by the build runner before [`Self::default_build_command`] when
+    /// the member uses the stock CMake build command (two steps, no shell).
+    pub fn cmake_configure_command() -> Vec<String> {
+        vec![
+            "cmake".into(),
+            "-S".into(),
+            ".".into(),
+            "-B".into(),
+            CMAKE_DEFAULT_BUILD_DIR.into(),
+        ]
     }
 
     /// Default test argv.
@@ -60,6 +87,12 @@ impl ForeignTool {
             ForeignTool::Gradle => vec![gradle_bin(dir), "test".into()],
             ForeignTool::Cargo => vec!["cargo".into(), "test".into()],
             ForeignTool::Make => vec!["make".into(), "test".into()],
+            ForeignTool::CMake => vec![
+                "ctest".into(),
+                "--test-dir".into(),
+                CMAKE_DEFAULT_BUILD_DIR.into(),
+                "--output-on-failure".into(),
+            ],
             ForeignTool::Npm => vec!["npm".into(), "test".into()],
             ForeignTool::Bun => vec!["bun".into(), "test".into()],
             ForeignTool::Yarn => vec!["yarn".into(), "test".into()],
@@ -74,6 +107,13 @@ impl ForeignTool {
             ForeignTool::Gradle => vec![gradle_bin(dir), "clean".into()],
             ForeignTool::Cargo => vec!["cargo".into(), "clean".into()],
             ForeignTool::Make => vec!["make".into(), "clean".into()],
+            ForeignTool::CMake => vec![
+                "cmake".into(),
+                "--build".into(),
+                CMAKE_DEFAULT_BUILD_DIR.into(),
+                "--target".into(),
+                "clean".into(),
+            ],
             ForeignTool::Npm => vec!["npm".into(), "run".into(), "clean".into()],
             ForeignTool::Bun => vec!["bun".into(), "run".into(), "clean".into()],
             ForeignTool::Yarn => vec!["yarn".into(), "run".into(), "clean".into()],
@@ -115,6 +155,7 @@ enum MarkerGroup {
     Gradle,
     Cargo,
     Make,
+    CMake,
     Node,
 }
 
@@ -126,6 +167,7 @@ impl MarkerGroup {
             MarkerGroup::Gradle => "build.gradle / settings.gradle",
             MarkerGroup::Cargo => "Cargo.toml",
             MarkerGroup::Make => "Makefile",
+            MarkerGroup::CMake => "CMakeLists.txt",
             MarkerGroup::Node => "package.json",
         }
     }
@@ -146,6 +188,7 @@ impl MarkerGroup {
                     || dir.join("GNUmakefile").exists()
                     || dir.join("makefile").exists()
             }
+            MarkerGroup::CMake => dir.join("CMakeLists.txt").exists(),
             MarkerGroup::Node => dir.join("package.json").exists(),
         }
     }
@@ -157,6 +200,7 @@ const ALL_GROUPS: &[MarkerGroup] = &[
     MarkerGroup::Gradle,
     MarkerGroup::Cargo,
     MarkerGroup::Make,
+    MarkerGroup::CMake,
     MarkerGroup::Node,
 ];
 
@@ -180,7 +224,7 @@ pub fn detect_tool(dir: &Path) -> Result<ForeignTool> {
         [] => bail!(
             "cannot detect foreign project type in {}: no marker files found \
              (looked for Curie.toml, pom.xml, build.gradle[.kts]/settings.gradle[.kts], \
-             Cargo.toml, Makefile/GNUmakefile/makefile, package.json). \
+             Cargo.toml, Makefile/GNUmakefile/makefile, CMakeLists.txt, package.json). \
              Set type = \"...\" under [workspace.foreign] to override.",
             dir.display(),
         ),
@@ -189,6 +233,7 @@ pub fn detect_tool(dir: &Path) -> Result<ForeignTool> {
         [MarkerGroup::Gradle] => Ok(ForeignTool::Gradle),
         [MarkerGroup::Cargo] => Ok(ForeignTool::Cargo),
         [MarkerGroup::Make] => Ok(ForeignTool::Make),
+        [MarkerGroup::CMake] => Ok(ForeignTool::CMake),
         [MarkerGroup::Node] => Ok(detect_node_tool(dir)),
         many => {
             let names: Vec<&str> = many.iter().map(|g| g.name()).collect();
@@ -234,6 +279,7 @@ mod tests {
             ("Makefile", ForeignTool::Make),
             ("GNUmakefile", ForeignTool::Make),
             ("makefile", ForeignTool::Make),
+            ("CMakeLists.txt", ForeignTool::CMake),
             ("package.json", ForeignTool::Npm),
         ];
         for (marker, expected) in cases {
@@ -317,6 +363,22 @@ mod tests {
             ForeignTool::Npm.default_build_command(dir.path()),
             vec!["npm", "run", "build"]
         );
+        assert_eq!(
+            ForeignTool::CMake.default_build_command(dir.path()),
+            vec!["cmake", "--build", "build"]
+        );
+        assert_eq!(
+            ForeignTool::CMake.default_test_command(dir.path()),
+            vec!["ctest", "--test-dir", "build", "--output-on-failure"]
+        );
+        assert_eq!(
+            ForeignTool::CMake.default_clean_command(dir.path()),
+            vec!["cmake", "--build", "build", "--target", "clean"]
+        );
+        assert_eq!(
+            ForeignTool::cmake_configure_command(),
+            vec!["cmake", "-S", ".", "-B", "build"]
+        );
         let curie_build = ForeignTool::Curie.default_build_command(dir.path());
         assert_eq!(curie_build.len(), 2);
         assert_eq!(curie_build[1], "build");
@@ -341,6 +403,7 @@ mod tests {
     #[test]
     fn label_is_lowercase() {
         assert_eq!(ForeignTool::Make.label(), "make");
+        assert_eq!(ForeignTool::CMake.label(), "cmake");
         assert_eq!(ForeignTool::Curie.label(), "curie");
     }
 }

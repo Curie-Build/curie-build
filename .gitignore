@@ -11,3 +11,6 @@ examples/**/dependency-reduced-pom.xml
 
 # polyrepo demo: auto-cloned members (recreated by curie from .bundle files)
 examples/polyrepo-demo/shared-lib/
+
+# foreign-projects-demo: CMake out-of-source tree
+examples/foreign-projects-demo/cmake-lib/build/

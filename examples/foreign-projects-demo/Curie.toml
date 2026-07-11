@@ -10,6 +10,7 @@
 #   maven-lib     — Maven (pom.xml)
 #   gradle-lib    — Gradle (build.gradle / settings.gradle)
 #   rust-tool     — Cargo (Cargo.toml)
+#   cmake-lib     — CMake (CMakeLists.txt)
 #   npm-frontend  — npm   (package.json)
 #
 # [maven] sync is disabled: foreign members have no Curie pom sync story, and
@@ -23,6 +24,7 @@ members = [
     "maven-lib",
     "gradle-lib",
     "rust-tool",
+    "cmake-lib",
     "npm-frontend",
     "isolated-app",
 ]
@@ -44,9 +46,14 @@ artifacts = ["build/libs/gradle-lib-0.1.0.jar"]
 # Ordering-only: wait for make + maven before cargo.
 dependencies = ["legacy-lib", "maven-lib"]
 
+[workspace.foreign.cmake-lib]
+# Ordering-only: native lib after Java foreign libs.
+dependencies = ["legacy-lib"]
+artifacts = ["build/libcmake_lib.a"]
+
 [workspace.foreign.npm-frontend]
 # Ordering-only: frontend after backend foreign libs.
-dependencies = ["rust-tool", "gradle-lib"]
+dependencies = ["rust-tool", "gradle-lib", "cmake-lib"]
 
 [workspace.foreign.isolated-app]
 dependencies = ["greeter-lib"]

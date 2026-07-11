@@ -55,6 +55,18 @@ pub fn run_foreign(
             run_command(member_dir, f, argv, action)?;
         }
         ForeignCommand::Explicit(argv) => {
+            // CMake default build is two steps (configure then build); no shell.
+            // Only when the stock default is in use — explicit overrides run as-is.
+            if action == ForeignAction::Build
+                && f.tool == ForeignTool::CMake
+                && argv.as_slice()
+                    == ForeignTool::CMake
+                        .default_build_command(member_dir)
+                        .as_slice()
+            {
+                let configure = ForeignTool::cmake_configure_command();
+                run_command(member_dir, f, &configure, action)?;
+            }
             run_command(member_dir, f, argv, action)?;
         }
     }
@@ -166,6 +178,21 @@ fn should_skip_default(
                 crate::parallel::emit(&crate::style::neutral(
                     "Foreign",
                     &format!("skipped: no `{target}` target"),
+                ));
+                return Ok(true);
+            }
+            Ok(false)
+        }
+        (ForeignTool::CMake, ForeignAction::Test | ForeignAction::Clean) => {
+            // Default ctest / cmake --build build --target clean need a
+            // configured out-of-source tree.  Skip when never configured.
+            let cache = member_dir
+                .join(curie_meta::foreign::CMAKE_DEFAULT_BUILD_DIR)
+                .join("CMakeCache.txt");
+            if !cache.exists() {
+                crate::parallel::emit(&crate::style::neutral(
+                    "Foreign",
+                    "skipped: no configured CMake build directory",
                 ));
                 return Ok(true);
             }
@@ -409,5 +436,43 @@ mod tests {
             env: BTreeMap::new(),
         };
         run_foreign(root, &f, ForeignAction::Test).unwrap();
+    }
+
+    #[test]
+    fn cmake_default_test_skips_without_build_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("CMakeLists.txt"), "cmake_minimum_required(VERSION 3.16)\n").unwrap();
+        let f = ForeignProject {
+            name: "native".into(),
+            tool: ForeignTool::CMake,
+            build_command: ForeignTool::CMake.default_build_command(root),
+            test_command: ForeignCommand::Default(
+                ForeignTool::CMake.default_test_command(root),
+            ),
+            clean_command: ForeignCommand::Skip,
+            artifacts: vec![],
+            env: BTreeMap::new(),
+        };
+        // Never configured → skip, do not fail.
+        run_foreign(root, &f, ForeignAction::Test).unwrap();
+    }
+
+    #[test]
+    fn cmake_default_clean_skips_without_build_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let f = ForeignProject {
+            name: "native".into(),
+            tool: ForeignTool::CMake,
+            build_command: ForeignTool::CMake.default_build_command(root),
+            test_command: ForeignCommand::Skip,
+            clean_command: ForeignCommand::Default(
+                ForeignTool::CMake.default_clean_command(root),
+            ),
+            artifacts: vec![],
+            env: BTreeMap::new(),
+        };
+        run_foreign(root, &f, ForeignAction::Clean).unwrap();
     }
 }

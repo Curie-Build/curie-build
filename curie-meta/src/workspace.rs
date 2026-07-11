@@ -325,7 +325,7 @@ fn expand_members(
                 bail!(
                     "workspace member \"{}\" at {} has no Curie.toml and no foreign \
                      project markers (looked for pom.xml, build.gradle[.kts]/settings.gradle[.kts], \
-                     Cargo.toml, Makefile/GNUmakefile/makefile, package.json). \
+                     Cargo.toml, Makefile/GNUmakefile/makefile, CMakeLists.txt, package.json). \
                      Add a Curie.toml or a foreign marker, or set type under [workspace.foreign.{}].",
                     name,
                     path.display(),

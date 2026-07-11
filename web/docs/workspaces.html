@@ -233,7 +233,7 @@
     </div>
 
     <h2>Foreign members</h2>
-    <p>Real workspaces often include projects built by other tools — a legacy Make library, a Rust CLI, an NPM frontend. Curie workspaces can list those as <strong>foreign members</strong>. <code>curie build</code>, <code>curie test</code>, and <code>curie clean</code> orchestrate them in dependency order alongside native Curie members.</p>
+    <p>Real workspaces often include projects built by other tools — a legacy Make library, a Rust CLI, a CMake native library, an NPM frontend. Curie workspaces can list those as <strong>foreign members</strong>. <code>curie build</code>, <code>curie test</code>, and <code>curie clean</code> orchestrate them in dependency order alongside native Curie members.</p>
     <p>Foreign projects carry no configuration of their own; everything is declared on the enclosing workspace. A directory listed in <code>[workspace] members</code> without a <code>Curie.toml</code> is auto-detected from marker files; optional <code>[workspace.foreign.&lt;path&gt;]</code> configures it further.</p>
 
     <div class="code">
@@ -278,6 +278,7 @@
         <tr><td><code>build.gradle(.kts)</code> / <code>settings.gradle(.kts)</code></td><td>gradle</td></tr>
         <tr><td><code>Cargo.toml</code></td><td>cargo</td></tr>
         <tr><td><code>Makefile</code> / <code>GNUmakefile</code> / <code>makefile</code></td><td>make</td></tr>
+        <tr><td><code>CMakeLists.txt</code></td><td>cmake</td></tr>
         <tr><td><code>package.json</code></td><td>npm (or bun/yarn via lockfile)</td></tr>
       </tbody>
     </table>
@@ -291,17 +292,18 @@
         <tr><td>gradle</td><td><code>gradle build</code></td><td><code>gradle test</code></td><td><code>gradle clean</code></td></tr>
         <tr><td>cargo</td><td><code>cargo build</code></td><td><code>cargo test</code></td><td><code>cargo clean</code></td></tr>
         <tr><td>make</td><td><code>make</code></td><td><code>make test</code>*</td><td><code>make clean</code>*</td></tr>
+        <tr><td>cmake</td><td><code>cmake -S . -B build</code> then <code>cmake --build build</code></td><td><code>ctest --test-dir build</code>*</td><td><code>cmake --build build --target clean</code>*</td></tr>
         <tr><td>npm / bun / yarn</td><td><code>&lt;tool&gt; run build</code>*</td><td><code>&lt;tool&gt; test</code>*</td><td><code>&lt;tool&gt; run clean</code>*</td></tr>
         <tr><td>curie</td><td><code>curie build</code></td><td><code>curie test</code></td><td><code>curie clean</code></td></tr>
       </tbody>
     </table>
-    <p>* Graceful skip when the target/script does not exist applies to <strong>default</strong> commands only (explicit overrides always run and fail loudly). For make, Curie probes with <code>make -n &lt;target&gt;</code>; for npm/bun/yarn it checks <code>scripts.&lt;name&gt;</code> in <code>package.json</code>. An override of <code>[]</code> skips explicitly.</p>
+    <p>* Graceful skip when the target/script does not exist applies to <strong>default</strong> commands only (explicit overrides always run and fail loudly). For make, Curie probes with <code>make -n &lt;target&gt;</code>; for npm/bun/yarn it checks <code>scripts.&lt;name&gt;</code> in <code>package.json</code>; for cmake, default test/clean skip when <code>build/CMakeCache.txt</code> is missing. An override of <code>[]</code> skips explicitly. CMake's default build always configures an out-of-source <code>build/</code> tree first, then builds it (two direct invocations — no shell).</p>
 
     <h3>Key reference</h3>
     <table>
       <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
       <tbody>
-        <tr><td><code>type</code></td><td>Optional tool override (<code>maven</code>, <code>gradle</code>, <code>cargo</code>, <code>make</code>, <code>npm</code>, <code>bun</code>, <code>yarn</code>, <code>curie</code>)</td></tr>
+        <tr><td><code>type</code></td><td>Optional tool override (<code>maven</code>, <code>gradle</code>, <code>cargo</code>, <code>make</code>, <code>cmake</code>, <code>npm</code>, <code>bun</code>, <code>yarn</code>, <code>curie</code>)</td></tr>
         <tr><td><code>dependencies</code></td><td>Workspace-root-relative member paths for build ordering</td></tr>
         <tr><td><code>command</code></td><td>Build argv override (non-empty)</td></tr>
         <tr><td><code>test-command</code> / <code>clean-command</code></td><td>Test/clean argv; <code>[]</code> = skip</td></tr>
@@ -337,7 +339,7 @@
     <p>When a member has both a <code>Curie.toml</code> and a <code>[workspace.foreign.X]</code> entry, Curie spawns itself as a child process. The child gets the declared <code>env</code>, no parent workspace inheritance, and is not flattened if it is a nested workspace. A <code>CURIE_FOREIGN_DEPTH</code> guard caps pathological recursion. Ordering-only <code>dependencies</code> on the parent do not put parent workspace jars on the child's classpath — declare <code>artifacts</code> if you need that.</p>
 
     <h3>Maven sync limitation</h3>
-    <p>Foreign members never appear as Maven <code>&lt;module&gt;</code>s. A Curie member that depends on a foreign member cannot express that edge in a synced <code>pom.xml</code> — set <code>[maven] sync = false</code> on that member or the workspace. Nested workspaces under a syncing root may set <code>[maven] sync = false</code> to opt out of aggregator generation entirely (see <code>examples/foreign-projects-demo</code>, which mixes Make, Maven, Gradle, Cargo, npm, and foreign-Curie members).</p>
+    <p>Foreign members never appear as Maven <code>&lt;module&gt;</code>s. A Curie member that depends on a foreign member cannot express that edge in a synced <code>pom.xml</code> — set <code>[maven] sync = false</code> on that member or the workspace. Nested workspaces under a syncing root may set <code>[maven] sync = false</code> to opt out of aggregator generation entirely (see <code>examples/foreign-projects-demo</code>, which mixes Make, Maven, Gradle, Cargo, CMake, npm, and foreign-Curie members).</p>
 
     <h3>Nested workspaces</h3>
     <p>Foreign members work inside nested workspaces: the recursive expand processes each level's <code>members</code> + <code>foreign</code> map with the inner path prefix. Inheritance still skips foreign leaves at every level.</p>
