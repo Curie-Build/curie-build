@@ -67,7 +67,7 @@ pub mod plugin_versions {
     pub const DEPENDENCY: &str = "3.11.0";
     pub const BUILD_HELPER: &str = "3.6.0";
     pub const GMAVENPLUS: &str = "4.2.0";
-    pub const JACOCO: &str = "0.8.13";
+    pub const JACOCO: &str = "0.8.15";
     pub const RESOURCES: &str = "3.3.1";
     /// The ascopes protobuf-maven-plugin wrapper version (not the protoc
     /// version, which comes from `[plugin.protobuf].version` in Curie.toml).

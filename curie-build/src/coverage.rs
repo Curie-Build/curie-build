@@ -15,7 +15,7 @@ use curie_deps::resolver::{resolve, DepEntry, ResolveOptions};
 use std::path::{Path, PathBuf};
 
 /// Default JaCoCo version resolved from Maven Central.
-pub const DEFAULT_JACOCO_VERSION: &str = "0.8.13";
+pub const DEFAULT_JACOCO_VERSION: &str = "0.8.15";
 
 /// Maven coordinate for the JaCoCo agent JAR.
 const JACOCO_AGENT_COORD: &str = "org.jacoco:org.jacoco.agent";

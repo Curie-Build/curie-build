@@ -68,7 +68,7 @@ org.apache.maven.plugins:maven-dependency-plugin:3.11.0
 org.apache.maven.plugins:maven-shade-plugin:3.6.2
 org.codehaus.gmavenplus:gmavenplus-plugin:4.2.0
 org.codehaus.mojo:build-helper-maven-plugin:3.6.0
-org.jacoco:jacoco-maven-plugin:0.8.13
+org.jacoco:jacoco-maven-plugin:0.8.15
 org.jetbrains.kotlin:kotlin-maven-plugin:2.1.21
 
 # ── Maven lifecycle plugins (Maven 3.9.9 super-POM defaults) ─────────────────
@@ -84,9 +84,9 @@ org.junit.platform:junit-platform-launcher:1.11.0
 org.eclipse.sisu:org.eclipse.sisu.plexus:1.0.0
 org.ow2.asm:asm:9.10
 org.apache.maven.reporting:maven-reporting-api:3.0
-org.jacoco:org.jacoco.agent:0.8.13:jar:runtime
-org.jacoco:org.jacoco.core:0.8.13
-org.jacoco:org.jacoco.report:0.8.13
+org.jacoco:org.jacoco.agent:0.8.15:jar:runtime
+org.jacoco:org.jacoco.core:0.8.15
+org.jacoco:org.jacoco.report:0.8.15
 
 # Formatters
 com.palantir.javaformat:palantir-java-format:2.90.0

@@ -15,6 +15,10 @@
 # Install GraalVM from https://www.graalvm.org/downloads/ or via sdkman:
 #   sdk install java 25.0.1-graal
 #
+# releaseVersion is pinned to 25 so the class files match GraalVM 25's
+# native-image (which rejects bytecode newer than its own major version).
+# Bump both together if you move to a newer GraalVM.
+#
 # Since [docker] is also enabled below, `curie build` additionally produces
 # a Docker image that bundles the native binary directly (no JVM at all) and
 # runs it as its entrypoint.
@@ -23,6 +27,9 @@
 name = "graalvm-hello"
 version = "0.1.0"
 mainClass = "com.example.Hello"
+
+[java]
+releaseVersion = "25"
 
 # Opt in to GraalVM native-image compilation.
 # The section must be explicitly present to trigger the native step.
