@@ -137,23 +137,25 @@
     <p>Selecting <strong>all jobs</strong> at the top of the tree shows the merged log for every member.</p>
 
     <h2 id="coverage">Coverage</h2>
-    <p>When a member was tested with coverage enabled (<code>[test] coverage = true</code> or <code>curie test --coverage</code>), inspect reads the existing <code>target/coverage/coverage.csv</code> — it does not recompute anything. Two places surface that data:</p>
+    <p>When a member was tested with coverage enabled (<code>[test] coverage = true</code> or <code>curie test --coverage</code>), inspect reads the existing report under <code>target/coverage/</code> — the CSV for totals and the JaCoCo HTML source pages for per-line hits. Nothing is recomputed.</p>
     <ul>
       <li><strong>Members badge</strong> — the job row shows a compact line/branch figure next to the outcome, e.g. <code>87.3% / 74.1%</code>.</li>
-      <li><strong>Coverage panel</strong> — selecting that member prepends a short panel above its log: overall line/branch totals, then the worst uncovered classes (most missed lines first) so you can see where the gaps are without opening the HTML report.</li>
+      <li><strong>Coverage panel</strong> — selecting that member prepends a short panel above its log with overall totals and the worst source files.</li>
+      <li><strong>Source drill-down</strong> — expand the job (<kbd>Enter</kbd>/<kbd>→</kbd>), open the <code>Coverage</code> group, then select a source file. The log pane shows the file with per-line colouring: green fully covered, yellow partial (branch gaps), red missed, grey non-executable. Partial lines include JaCoCo's branch tooltip.</li>
     </ul>
-    <p>Members without a coverage CSV simply omit the badge and panel. See <a href="/docs/testing.html#code-coverage">Code coverage</a> for how to enable reports.</p>
+    <p>Members without a coverage report simply omit the badge, panel, and Coverage group. See <a href="/docs/testing.html#code-coverage">Code coverage</a> for how to enable reports.</p>
 
     <div class="term">
       <header>
         <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-        <span>curie inspect — coverage</span>
+        <span>curie inspect — coverage drill-down</span>
       </header>
-<pre>│   string-utils <span class="ok">100.0% / 92.9%</span> <span class="ok">✓ 0.8s</span> ││<span class="ok">▌</span> <span class="ok">string-utils  started 09:12:02  ✓ 0.8s</span>        │
-│                                   ││<span class="ok">▌</span> <span class="ok">Coverage  100.0% lines, 92.9% branches</span>       │
-│                                   ││<span class="ok">▌</span>   all classes fully covered                   │
-│                                   ││  Resolve deps    1 JAR(s)                      │
-│                                   ││  Compile         2 source file(s)              │</pre>
+<pre>│   string-utils ▾ <span class="ok">96.5% / 92.9%</span> <span class="ok">✓ 0.8s</span> ││ Log: string-utils › Coverage › StringUtils.java  │
+│     Coverage ▾ <span class="ok">96.5% / 92.9%</span>         ││<span class="ok">▌</span> <span class="ok">com.example…StringUtils.java  96.5% / 92.9%</span>   │
+│ <span class="em">▶   StringUtils.java 96.5% / 92.9%</span>  ││<span class="ok">█</span>   13         return s == null || s.isBlank(); │
+│                                   ││<span class="em">▒</span>   24         if (s == null) return null;      │
+│                                   ││               // 1 of 2 branches missed.       │
+│                                   ││<span class="ok">█</span>   25         return new StringBuilder(s)…     │</pre>
     </div>
 
     <h2>Log pane</h2>
