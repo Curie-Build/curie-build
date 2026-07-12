@@ -101,31 +101,38 @@
     </div>
 
     <h2>Layout</h2>
-    <p>The UI is split into two panes. The <strong>Members</strong> pane on the left lists every project; the <strong>Log</strong> pane on the right shows the merged output:</p>
+    <p>The UI has a mode tab bar, a members tree on the left, and a detail pane on the right. Colours follow the <strong>One Dark</strong> palette on a pure black background.</p>
 
     <div class="term">
       <header>
         <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
         <span>curie inspect</span>
       </header>
-<pre><span class="dim">curie inspect  ↑↓/jk select  Enter/→ expand  ← collapse  Tab log  m hide  / grep  f job  r reload  q quit</span>
+<pre><span class="dim">curie inspect  ↑↓/jk select  Enter/→ expand  ← collapse  Tab detail  m hide  / grep  f job  r reload  q quit</span>
+  <span class="ok"> Logs </span> │ Tests │ Coverage    1/2/3 or [/] switch mode
 ┌ Members ──────────────────┐┌ Log: all jobs ──────────────────────────────────────────┐
 │ all jobs                  ││<span class="ok">▌</span> <span class="ok">hello-world  started 09:12:01  ✓ 1.2s</span>                  │
 │   hello-world  <span class="ok">✓ 1.2s</span>     ││  Resolve deps    3 JAR(s)                               │
 │   string-utils <span class="ok">✓ 0.8s</span>     ││  Compile         4 source file(s)                       │
-│ <span class="em">▶ json-greeter  ✗ 0.4s</span>    ││  Tests  <span class="ok">✔ 6 tests successful</span>                            │
-│                           ││  Package  hello-world-0.1.0.jar                         │
-│                           ││<span class="ok">▌</span> <span class="ok">string-utils  started 09:12:02  ✓ 0.8s</span>                 │
-│                           ││  Resolve deps    1 JAR(s)                               │
-│                           ││  Compile         2 source file(s)                       │
-│                           ││<span class="em">▌</span> <span class="em">json-greeter  started 09:12:03  ✗ 0.4s</span>                 │
-│                           ││  Resolve deps    1 JAR(s)                               │
-│                           ││  error: cannot find symbol                              │
-│                           ││        import com.example.Missing;                      │
+│ <span class="em">▶ json-greeter  ✗ 0.4s</span>    ││  error: cannot find symbol                              │
 └───────────────────────────┘└─────────────────────────────────────────────────────────┘</pre>
     </div>
 
-    <h2>Members pane</h2>
+    <h2 id="modes">View modes</h2>
+    <p>A top-level mode switch chooses what the tree and detail pane show. More modes may be added later; today there are three:</p>
+    <table>
+      <thead>
+        <tr><th>Mode</th><th>Key</th><th>Tree</th><th>Detail pane</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>Logs</strong></td><td><kbd>1</kbd></td><td>Members with build outcome badges</td><td>Merged build logs</td></tr>
+        <tr><td><strong>Tests</strong></td><td><kbd>2</kbd></td><td>Members with pass/fail counts; expand to classes → methods</td><td>Test summary or per-test output</td></tr>
+        <tr><td><strong>Coverage</strong></td><td><kbd>3</kbd></td><td>Members with line/branch %; expand to source files</td><td>Coverage panel or per-line source</td></tr>
+      </tbody>
+    </table>
+    <p>Press <kbd>[</kbd> / <kbd>]</kbd> to cycle modes, or <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> to jump. Switching modes keeps the current member selected when possible.</p>
+
+    <h2>Members pane (Logs mode)</h2>
     <p>The left pane lists every workspace member in a tree that mirrors the member path hierarchy. Each entry shows a right-aligned badge:</p>
     <ul>
       <li><code>✓ 1.2s</code> — build succeeded, duration in seconds</li>
@@ -136,48 +143,51 @@
     <p>When a workspace build has been run more than once, jobs from an older run are dimmed and marked <code>(prev)</code> so you can tell at a glance which results are current.</p>
     <p>Selecting <strong>all jobs</strong> at the top of the tree shows the merged log for every member.</p>
 
-    <h2 id="coverage">Coverage</h2>
-    <p>When a member was tested with coverage enabled (<code>[test] coverage = true</code> or <code>curie test --coverage</code>), inspect reads the existing report under <code>target/coverage/</code> — the CSV for totals and the JaCoCo HTML source pages for per-line hits. Nothing is recomputed.</p>
+    <h2 id="tests">Tests mode</h2>
+    <p>Switch to <strong>Tests</strong> (<kbd>2</kbd>) to browse <code>target/build.tests.json</code>. Job badges show pass/fail counts (e.g. <code>5✓ 1✗</code>). Expand a job to open test classes, then methods:</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>curie inspect — Tests mode</span>
+      </header>
+<pre>  Logs │ <span class="ok"> Tests </span> │ Coverage
+┌ Tests ────────────────────┐┌ Tests: json-greeter › GreeterTest › testMissing ─────┐
+│ all tests                 ││<span class="em">▌</span> <span class="em">expected &lt;true&gt; but was &lt;false&gt;</span>                      │
+│   string-utils  <span class="ok">6✓</span>        ││  … stack / System.out …                               │
+│ <span class="em">▶ json-greeter ▾  5✓ 1✗</span>   ││                                                        │
+│     GreeterTest ▾         ││                                                        │
+│       testGreeting <span class="ok">✓ 12ms</span> ││                                                        │
+│       testMissing  <span class="em">✗ 8ms</span>  ││                                                        │</pre>
+    </div>
+
+    <p>Select a test method to open that test's captured output — failure message first, then any <code>System.out</code> lines. Press <kbd>←</kbd> to collapse. After a failed build, inspect opens in Tests mode on the first failing test.</p>
+
+    <h2 id="coverage">Coverage mode</h2>
+    <p>Switch to <strong>Coverage</strong> (<kbd>3</kbd>) when a member was tested with coverage enabled (<code>[test] coverage = true</code> or <code>curie test --coverage</code>). Inspect reads the existing report under <code>target/coverage/</code> — CSV for totals and JaCoCo HTML source pages for per-line hits. Nothing is recomputed.</p>
     <ul>
-      <li><strong>Members badge</strong> — the job row shows a compact line/branch figure next to the outcome, e.g. <code>87.3% / 74.1%</code>.</li>
-      <li><strong>Coverage panel</strong> — selecting that member prepends a short panel above its log with overall totals and the worst source files.</li>
-      <li><strong>Source drill-down</strong> — expand the job (<kbd>Enter</kbd>/<kbd>→</kbd>), open the <code>Coverage</code> group, then select a source file. The log pane shows the file with per-line colouring: green fully covered, yellow partial (branch gaps), red missed, grey non-executable. Partial lines include JaCoCo's branch tooltip.</li>
+      <li><strong>Job badge</strong> — line/branch figure, e.g. <code>87.3% / 74.1%</code>.</li>
+      <li><strong>Coverage panel</strong> — selecting a member shows overall totals and the worst source files.</li>
+      <li><strong>Source drill-down</strong> — expand the job, select a source file. The detail pane shows per-line colouring: green fully covered, yellow partial (branch gaps), red missed, grey non-executable. Partial lines include JaCoCo's branch tooltip.</li>
     </ul>
-    <p>Members without a coverage report simply omit the badge, panel, and Coverage group. See <a href="/docs/testing.html#code-coverage">Code coverage</a> for how to enable reports.</p>
+    <p>Members without a coverage report simply omit the badge and expand marker. See <a href="/docs/testing.html#code-coverage">Code coverage</a> for how to enable reports.</p>
 
     <div class="term">
       <header>
         <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-        <span>curie inspect — coverage drill-down</span>
+        <span>curie inspect — Coverage mode</span>
       </header>
-<pre>│   string-utils ▾ <span class="ok">96.5% / 92.9%</span> <span class="ok">✓ 0.8s</span> ││ Log: string-utils › Coverage › StringUtils.java  │
-│     Coverage ▾ <span class="ok">96.5% / 92.9%</span>         ││<span class="ok">▌</span> <span class="ok">com.example…StringUtils.java  96.5% / 92.9%</span>   │
-│ <span class="em">▶   StringUtils.java 96.5% / 92.9%</span>  ││<span class="ok">█</span>   13         return s == null || s.isBlank(); │
-│                                   ││<span class="em">▒</span>   24         if (s == null) return null;      │
-│                                   ││               // 1 of 2 branches missed.       │
-│                                   ││<span class="ok">█</span>   25         return new StringBuilder(s)…     │</pre>
+<pre>  Logs │ Tests │ <span class="ok"> Coverage </span>
+┌ Coverage ─────────────────┐┌ Coverage: string-utils › StringUtils.java ───────────┐
+│ all coverage              ││<span class="ok">▌</span> <span class="ok">com.example…StringUtils.java  96.5% / 92.9%</span>          │
+│   string-utils ▾ <span class="ok">96.5%/…</span>  ││<span class="ok">█</span>   13         return s == null || s.isBlank();        │
+│ <span class="em">▶ StringUtils.java 96.5%</span>  ││<span class="em">▒</span>   24         if (s == null) return null;             │
+│                           ││               // 1 of 2 branches missed.              │
+│                           ││<span class="ok">█</span>   25         return new StringBuilder(s)…            │</pre>
     </div>
 
-    <h2>Log pane</h2>
-    <p>The right pane streams all log lines from the selected member (or all members) sorted by build-start time. Each job's output is preceded by a coloured header line showing the member name, start time, and outcome badge. ANSI colour codes from compiler output and test reporters are rendered faithfully.</p>
-
-    <h2>Test tree</h2>
-    <p>When a member has test results recorded in <code>target/build.tests.json</code>, the job node shows a <code>▸</code> marker. Press <kbd>Enter</kbd> or <kbd>→</kbd> to expand:</p>
-
-    <div class="term">
-      <header>
-        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
-        <span>curie inspect — test tree expanded</span>
-      </header>
-<pre>│   string-utils <span class="ok">✓ 0.8s</span>               │
-│ <span class="em">▶ json-greeter ▾ ✗ 0.4s</span>             │
-│     <span class="dim">GreeterTest ▾</span>                   │
-│       testGreeting     <span class="ok">✓ 12ms</span>       │
-│       testMissingClass <span class="em">✗ 8ms</span>        │</pre>
-    </div>
-
-    <p>Select a test method and press <kbd>Enter</kbd> to open that test's captured output in the log pane — including the failure message at the top and any <code>System.out</code> lines below. Press <kbd>←</kbd> to collapse back to the class, then the job.</p>
-    <p>When <code>curie inspect</code> opens after a failed build it automatically jumps to the first failing test to minimise time-to-feedback.</p>
+    <h2>Detail pane</h2>
+    <p>The right pane content depends on the active mode: merged logs (Logs), test summaries or per-test output (Tests), coverage panel or annotated source (Coverage). ANSI colour codes from compiler output and test reporters are rendered faithfully.</p>
 
     <h2>Keyboard shortcuts</h2>
     <table>
@@ -185,8 +195,10 @@
         <tr><th>Key</th><th>Effect</th><th>Where</th></tr>
       </thead>
       <tbody>
+        <tr><td><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></td><td>Switch mode: Logs / Tests / Coverage</td><td>Both</td></tr>
+        <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>Previous / next mode</td><td>Both</td></tr>
         <tr><td><kbd>↑</kbd> <kbd>↓</kbd> / <kbd>j</kbd> <kbd>k</kbd></td><td>Move selection up / down</td><td>Members</td></tr>
-        <tr><td><kbd>Enter</kbd> / <kbd>→</kbd></td><td>Expand job → classes → test methods</td><td>Members</td></tr>
+        <tr><td><kbd>Enter</kbd> / <kbd>→</kbd></td><td>Expand (Tests / Coverage modes)</td><td>Members</td></tr>
         <tr><td><kbd>←</kbd></td><td>Collapse test method → class → job</td><td>Members</td></tr>
         <tr><td><kbd>Tab</kbd></td><td>Cycle focus: Members → Log → Members</td><td>Both</td></tr>
         <tr><td><kbd>m</kbd></td><td>Toggle Members pane visibility</td><td>Both</td></tr>

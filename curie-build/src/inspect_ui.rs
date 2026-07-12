@@ -1,8 +1,8 @@
-//! Interactive TUI for browsing merged build logs (`curie inspect`).
+//! Interactive TUI for browsing build results (`curie inspect`).
 //!
-//! By default shows a single full-width log pane with every job's output merged
-//! and sorted by job start time.  An optional members pane (toggled with Tab/m)
-//! lets the user filter the merged log to a single workspace subtree or project.
+//! Top-level view modes switch what the members tree and detail pane show:
+//! **Logs**, **Tests**, and **Coverage** (more modes may be added later).
+//! Colours follow the One Dark palette on a pure black background.
 
 use std::collections::HashSet;
 use std::io::Stdout;
@@ -30,6 +30,32 @@ use crate::coverage::{
     SourceFileCoverage, SourceLine,
 };
 use crate::parallel::parse_meta;
+
+// ── One Dark palette (black background) ───────────────────────────────────
+//
+// Accents match the classic One Dark / `onedark.vim` theme; the canvas stays
+// pure black so the TUI sits cleanly on a dark terminal.
+
+mod theme {
+    use ratatui::style::Color;
+
+    pub const BG: Color = Color::Black;
+    pub const FG: Color = Color::Rgb(0xab, 0xb2, 0xbf);
+    pub const COMMENT: Color = Color::Rgb(0x5c, 0x63, 0x70);
+    pub const RED: Color = Color::Rgb(0xe0, 0x6c, 0x75);
+    pub const GREEN: Color = Color::Rgb(0x98, 0xc3, 0x79);
+    pub const YELLOW: Color = Color::Rgb(0xe5, 0xc0, 0x7b);
+    pub const BLUE: Color = Color::Rgb(0x61, 0xaf, 0xef);
+    #[allow(dead_code)] // reserved for future modes / accents
+    pub const MAGENTA: Color = Color::Rgb(0xc6, 0x78, 0xdd);
+    pub const CYAN: Color = Color::Rgb(0x56, 0xb6, 0xc2);
+    #[allow(dead_code)]
+    pub const ORANGE: Color = Color::Rgb(0xd1, 0x9a, 0x66);
+    /// Near-black strip behind headers / annotations (not pure black so it reads).
+    pub const SURFACE: Color = Color::Rgb(0x14, 0x16, 0x1b);
+    /// Selected row background.
+    pub const SELECTION: Color = Color::Rgb(0x2c, 0x31, 0x3c);
+}
 
 // ── Public types ──────────────────────────────────────────────────────────
 
@@ -133,6 +159,59 @@ enum Row {
 #[derive(PartialEq, Clone)]
 enum ActivePane { Members, Log, Search }
 
+/// Top-level view: what the members tree and detail pane present.
+#[derive(PartialEq, Clone, Copy, Debug)]
+enum ViewMode {
+    Logs,
+    Tests,
+    Coverage,
+}
+
+impl ViewMode {
+    const ALL: [ViewMode; 3] = [ViewMode::Logs, ViewMode::Tests, ViewMode::Coverage];
+
+    fn label(self) -> &'static str {
+        match self {
+            ViewMode::Logs => "Logs",
+            ViewMode::Tests => "Tests",
+            ViewMode::Coverage => "Coverage",
+        }
+    }
+
+    fn detail_title_prefix(self) -> &'static str {
+        match self {
+            ViewMode::Logs => "Log",
+            ViewMode::Tests => "Tests",
+            ViewMode::Coverage => "Coverage",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            ViewMode::Logs => ViewMode::Tests,
+            ViewMode::Tests => ViewMode::Coverage,
+            ViewMode::Coverage => ViewMode::Logs,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            ViewMode::Logs => ViewMode::Coverage,
+            ViewMode::Tests => ViewMode::Logs,
+            ViewMode::Coverage => ViewMode::Tests,
+        }
+    }
+
+    fn from_digit(c: char) -> Option<Self> {
+        match c {
+            '1' => Some(ViewMode::Logs),
+            '2' => Some(ViewMode::Tests),
+            '3' => Some(ViewMode::Coverage),
+            _ => None,
+        }
+    }
+}
+
 #[derive(PartialEq, Clone)]
 enum InputMode {
     Normal,
@@ -154,9 +233,11 @@ struct InspectState {
     scroll:       usize,
     show_members: bool,
     active_pane:  ActivePane,
+    /// Logs / Tests / Coverage (extensible).
+    mode:         ViewMode,
     filter:       Filter,
     log_title:    String,
-    /// Terminal height minus the header row; kept in sync from the event loop.
+    /// Terminal height minus chrome rows; kept in sync from the event loop.
     pane_h:       u16,
     /// Visible log height (inner block rows); updated each frame for scroll clamping.
     log_vis_h:    usize,
@@ -166,7 +247,7 @@ struct InspectState {
     grep:         String,
     /// Current job-name search pattern.
     job_search:   String,
-    /// Job indices that have been expanded to show class group rows.
+    /// Job indices that have been expanded (tests or sources, depending on mode).
     expanded_jobs: HashSet<usize>,
     /// `(job_idx, class_name)` pairs that have been expanded to show test method rows.
     expanded_classes: HashSet<(usize, String)>,
@@ -174,8 +255,6 @@ struct InspectState {
     test_lines:        Vec<String>,
     /// Annotated source lines when a coverage source file is selected.
     source_lines:      Vec<SourceLine>,
-    /// Job indices whose Coverage group is expanded.
-    expanded_coverage: HashSet<usize>,
     /// Pane to return to when the search bar is dismissed with Enter or Esc.
     pre_search_pane:   ActivePane,
     /// Job indices whose log lines contain the current grep pattern (empty when grep inactive).
@@ -200,10 +279,10 @@ pub(crate) fn run_inspect_ui(
 
     let jobs   = load_jobs(targets, action, utc_offset);
     let stale_jobs   = collect_stale_jobs(&jobs);
-    let expanded_jobs:     HashSet<usize>           = HashSet::new();
-    let expanded_classes:  HashSet<(usize, String)> = HashSet::new();
-    let expanded_coverage: HashSet<usize>           = HashSet::new();
-    let nodes  = build_tree_nodes(&jobs, &expanded_jobs, &expanded_classes, &expanded_coverage);
+    let expanded_jobs:    HashSet<usize>           = HashSet::new();
+    let expanded_classes: HashSet<(usize, String)> = HashSet::new();
+    let mode   = ViewMode::Logs;
+    let nodes  = build_tree_nodes(&jobs, mode, &expanded_jobs, &expanded_classes);
     let filter = Filter::All;
     let rows   = build_rows(&jobs, &filter, "", "");
 
@@ -218,6 +297,7 @@ pub(crate) fn run_inspect_ui(
         scroll:          0,
         show_members:    true,
         active_pane:     ActivePane::Members,
+        mode,
         filter,
         log_title:       "all jobs".to_string(),
         pane_h:          24,
@@ -228,7 +308,6 @@ pub(crate) fn run_inspect_ui(
         job_search:      String::new(),
         expanded_jobs,
         expanded_classes,
-        expanded_coverage,
         test_lines:       Vec::new(),
         source_lines:     Vec::new(),
         pre_search_pane:  ActivePane::Members,
@@ -237,7 +316,7 @@ pub(crate) fn run_inspect_ui(
         h_scroll:         0,
     };
 
-    // Auto-focus first failure; fall back to explicit preselect index.
+    // Auto-focus first failure (switches to Tests when a failing test exists).
     if !auto_select_failed(&mut state) {
         if let Some(idx) = preselect {
             if idx < state.jobs.len() {
@@ -365,12 +444,17 @@ fn load_log(path: &std::path::Path) -> Vec<String> {
 // ── Tree construction ─────────────────────────────────────────────────────
 
 fn build_tree_nodes(
-    jobs:              &[Job],
-    expanded_jobs:     &HashSet<usize>,
-    expanded_classes:  &HashSet<(usize, String)>,
-    expanded_coverage: &HashSet<usize>,
+    jobs:             &[Job],
+    mode:             ViewMode,
+    expanded_jobs:    &HashSet<usize>,
+    expanded_classes: &HashSet<(usize, String)>,
 ) -> Vec<TreeNode> {
-    let mut nodes = vec![tree_node_plain("all jobs", "all jobs", Filter::All)];
+    let root_label = match mode {
+        ViewMode::Logs => "all jobs",
+        ViewMode::Tests => "all tests",
+        ViewMode::Coverage => "all coverage",
+    };
+    let mut nodes = vec![tree_node_plain(root_label, root_label, Filter::All)];
 
     let mut current_dirs: Vec<String> = Vec::new();
 
@@ -400,130 +484,190 @@ fn build_tree_nodes(
 
         let depth  = dirs.len();
         let indent = "  ".repeat(depth + 1);
-        let has_tests = !job.tests.is_empty();
-        let has_coverage = job.coverage.as_ref().is_some_and(|c| !c.sources.is_empty() || !c.report.classes.is_empty());
-        let has_children = has_tests || has_coverage;
-        let expand_marker = if has_children {
-            if expanded_jobs.contains(&job_idx) { " ▾" } else { " ▸" }
-        } else { "" };
-        let coverage_badge = job.coverage.as_ref().map(|c| c.report.summary.badge());
-        nodes.push(TreeNode {
-            label:      format!("{indent}{name}{expand_marker}"),
-            title:      job.declared.clone(),
-            filter:     Filter::Prefix(job.declared.clone()),
-            state:      Some(job.state.clone()),
-            selectable: true,
-            test_ref:   None,
-            test_badge: None,
-            class_ref:  None,
-            job_idx:    Some(job_idx),
-            coverage_badge,
-            coverage_group_ref:  None,
-            coverage_source_ref: None,
-        });
-
-        // When job is expanded: test class groups + Coverage group.
-        if has_children && expanded_jobs.contains(&job_idx) {
-            let class_indent = "  ".repeat(depth + 2);
-            let test_indent  = "  ".repeat(depth + 3);
-
-            if has_tests {
-                for (class_name, tests_in_class) in group_by_class(&job.tests) {
-                    let class_expanded = expanded_classes.contains(&(job_idx, class_name.clone()));
-                    let class_marker   = if class_expanded { " ▾" } else { " ▸" };
-                    let short_class = class_name.rsplit('.').next().unwrap_or(&class_name);
-                    nodes.push(TreeNode {
-                        label:      format!("{class_indent}{short_class}{class_marker}"),
-                        title:      format!("{} › {}", job.declared, class_name),
-                        filter:     Filter::Prefix(job.declared.clone()),
-                        state:      None,
-                        selectable: true,
-                        test_ref:   None,
-                        test_badge: None,
-                        class_ref:  Some((job_idx, class_name.clone())),
-                        job_idx:    Some(job_idx),
-                        coverage_badge: None,
-                        coverage_group_ref:  None,
-                        coverage_source_ref: None,
-                    });
-
-                    if class_expanded {
-                        for &test_idx in &tests_in_class {
-                            let test = &job.tests[test_idx];
-                            let badge = test_badge(&test.status, test.duration_ms);
-                            nodes.push(TreeNode {
-                                label:      format!("{test_indent}{}", test.name),
-                                title:      format!("{} › {} › {}", job.declared, class_name, test.name),
-                                filter:     Filter::Prefix(job.declared.clone()),
-                                state:      None,
-                                selectable: true,
-                                test_ref:   Some((job_idx, test_idx)),
-                                test_badge: Some((badge, test.status.clone())),
-                                class_ref:  None,
-                                job_idx:    Some(job_idx),
-                                coverage_badge: None,
-                                coverage_group_ref:  None,
-                                coverage_source_ref: None,
-                            });
-                        }
-                    }
-                }
-            }
-
-            if has_coverage {
-                if let Some(cov) = job.coverage.as_ref() {
-                    let cov_expanded = expanded_coverage.contains(&job_idx);
-                    let cov_marker = if cov_expanded { " ▾" } else { " ▸" };
-                    nodes.push(TreeNode {
-                        label:      format!("{class_indent}Coverage{cov_marker}"),
-                        title:      format!("{} › Coverage", job.declared),
-                        filter:     Filter::Prefix(job.declared.clone()),
-                        state:      None,
-                        selectable: true,
-                        test_ref:   None,
-                        test_badge: None,
-                        class_ref:  None,
-                        job_idx:    Some(job_idx),
-                        coverage_badge: Some(cov.report.summary.badge()),
-                        coverage_group_ref:  Some(job_idx),
-                        coverage_source_ref: None,
-                    });
-
-                    if cov_expanded {
-                        let source_indent = "  ".repeat(depth + 3);
-                        // Prefer HTML source files; fall back to CSV class list.
-                        if !cov.sources.is_empty() {
-                            for (src_idx, src) in cov.sources.iter().enumerate() {
-                                nodes.push(coverage_source_node(
-                                    &source_indent,
-                                    job,
-                                    job_idx,
-                                    src_idx,
-                                    &src.file_name,
-                                    src.badge(),
-                                ));
-                            }
-                        } else {
-                            for (src_idx, class) in cov.report.classes.iter().enumerate() {
-                                nodes.push(coverage_source_node(
-                                    &source_indent,
-                                    job,
-                                    job_idx,
-                                    src_idx,
-                                    &class.class_name,
-                                    class_badge(class),
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        push_job_nodes(
+            &mut nodes,
+            job,
+            job_idx,
+            name,
+            depth,
+            &indent,
+            mode,
+            expanded_jobs,
+            expanded_classes,
+        );
 
         current_dirs = dirs.iter().map(|s| s.to_string()).collect();
     }
 
     nodes
+}
+
+fn push_job_nodes(
+    nodes:            &mut Vec<TreeNode>,
+    job:              &Job,
+    job_idx:          usize,
+    name:             &str,
+    depth:            usize,
+    indent:           &str,
+    mode:             ViewMode,
+    expanded_jobs:    &HashSet<usize>,
+    expanded_classes: &HashSet<(usize, String)>,
+) {
+    let has_tests = !job.tests.is_empty();
+    let has_coverage = job.coverage.as_ref()
+        .is_some_and(|c| !c.sources.is_empty() || !c.report.classes.is_empty());
+
+    let (expandable, coverage_badge, test_summary) = match mode {
+        ViewMode::Logs => (false, None, None),
+        ViewMode::Tests => (
+            has_tests,
+            None,
+            if has_tests { Some(test_summary_badge(&job.tests)) } else { None },
+        ),
+        ViewMode::Coverage => (
+            has_coverage,
+            job.coverage.as_ref().map(|c| c.report.summary.badge()),
+            None,
+        ),
+    };
+
+    let expand_marker = if expandable {
+        if expanded_jobs.contains(&job_idx) { " ▾" } else { " ▸" }
+    } else {
+        ""
+    };
+
+    // In Tests mode, surface the pass/fail summary as the right badge instead of duration.
+    // In Coverage mode, surface the coverage %. Logs keeps the build outcome badge via `state`.
+    let (state, job_cov_badge, job_test_badge) = match mode {
+        ViewMode::Logs => (Some(job.state.clone()), None, None),
+        ViewMode::Tests => {
+            if let Some(summary) = test_summary {
+                let status = if job.tests.iter().any(|t| t.status == TestStatus::Failed) {
+                    TestStatus::Failed
+                } else if job.tests.iter().any(|t| t.status == TestStatus::Skipped)
+                    && job.tests.iter().all(|t| t.status != TestStatus::Failed)
+                    && !job.tests.iter().any(|t| t.status == TestStatus::Passed)
+                {
+                    TestStatus::Skipped
+                } else {
+                    TestStatus::Passed
+                };
+                (None, None, Some((summary, status)))
+            } else {
+                (Some(job.state.clone()), None, None)
+            }
+        }
+        ViewMode::Coverage => (Some(job.state.clone()), coverage_badge, None),
+    };
+
+    nodes.push(TreeNode {
+        label:      format!("{indent}{name}{expand_marker}"),
+        title:      job.declared.clone(),
+        filter:     Filter::Prefix(job.declared.clone()),
+        state,
+        selectable: true,
+        test_ref:   None,
+        test_badge: job_test_badge,
+        class_ref:  None,
+        job_idx:    Some(job_idx),
+        coverage_badge: job_cov_badge,
+        coverage_group_ref:  None,
+        coverage_source_ref: None,
+    });
+
+    if !expandable || !expanded_jobs.contains(&job_idx) {
+        return;
+    }
+
+    let child_indent = "  ".repeat(depth + 2);
+    let leaf_indent  = "  ".repeat(depth + 3);
+
+    match mode {
+        ViewMode::Logs => {}
+        ViewMode::Tests => {
+            for (class_name, tests_in_class) in group_by_class(&job.tests) {
+                let class_expanded = expanded_classes.contains(&(job_idx, class_name.clone()));
+                let class_marker   = if class_expanded { " ▾" } else { " ▸" };
+                let short_class = class_name.rsplit('.').next().unwrap_or(&class_name);
+                nodes.push(TreeNode {
+                    label:      format!("{child_indent}{short_class}{class_marker}"),
+                    title:      format!("{} › {}", job.declared, class_name),
+                    filter:     Filter::Prefix(job.declared.clone()),
+                    state:      None,
+                    selectable: true,
+                    test_ref:   None,
+                    test_badge: None,
+                    class_ref:  Some((job_idx, class_name.clone())),
+                    job_idx:    Some(job_idx),
+                    coverage_badge: None,
+                    coverage_group_ref:  None,
+                    coverage_source_ref: None,
+                });
+
+                if class_expanded {
+                    for &test_idx in &tests_in_class {
+                        let test = &job.tests[test_idx];
+                        let badge = test_badge(&test.status, test.duration_ms);
+                        nodes.push(TreeNode {
+                            label:      format!("{leaf_indent}{}", test.name),
+                            title:      format!("{} › {} › {}", job.declared, class_name, test.name),
+                            filter:     Filter::Prefix(job.declared.clone()),
+                            state:      None,
+                            selectable: true,
+                            test_ref:   Some((job_idx, test_idx)),
+                            test_badge: Some((badge, test.status.clone())),
+                            class_ref:  None,
+                            job_idx:    Some(job_idx),
+                            coverage_badge: None,
+                            coverage_group_ref:  None,
+                            coverage_source_ref: None,
+                        });
+                    }
+                }
+            }
+        }
+        ViewMode::Coverage => {
+            if let Some(cov) = job.coverage.as_ref() {
+                if !cov.sources.is_empty() {
+                    for (src_idx, src) in cov.sources.iter().enumerate() {
+                        nodes.push(coverage_source_node(
+                            &child_indent,
+                            job,
+                            job_idx,
+                            src_idx,
+                            &src.file_name,
+                            src.badge(),
+                        ));
+                    }
+                } else {
+                    for (src_idx, class) in cov.report.classes.iter().enumerate() {
+                        nodes.push(coverage_source_node(
+                            &child_indent,
+                            job,
+                            job_idx,
+                            src_idx,
+                            &class.class_name,
+                            class_badge(class),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn test_summary_badge(tests: &[TestEntry]) -> String {
+    let passed  = tests.iter().filter(|t| t.status == TestStatus::Passed).count();
+    let failed  = tests.iter().filter(|t| t.status == TestStatus::Failed).count();
+    let skipped = tests.iter().filter(|t| t.status == TestStatus::Skipped).count();
+    if failed > 0 {
+        format!("{passed}✓ {failed}✗")
+    } else if skipped > 0 {
+        format!("{passed}✓ {skipped}⊘")
+    } else {
+        format!("{passed}✓")
+    }
 }
 
 fn class_badge(class: &crate::coverage::ClassCoverage) -> String {
@@ -540,7 +684,7 @@ fn coverage_source_node(
 ) -> TreeNode {
     TreeNode {
         label:      format!("{indent}{name}"),
-        title:      format!("{} › Coverage › {}", job.declared, name),
+        title:      format!("{} › {}", job.declared, name),
         filter:     Filter::Prefix(job.declared.clone()),
         state:      None,
         selectable: true,
@@ -681,7 +825,7 @@ fn load_source_view(state: &mut InspectState, job_idx: usize, src_idx: usize) {
         state.source_lines.clear();
         state.rows = vec![Row::CoverageLine {
             text: "(no coverage data)".to_string(),
-            color: Color::DarkGray,
+            color: theme::COMMENT,
         }];
         state.scroll = 0;
         return;
@@ -701,7 +845,7 @@ fn load_source_view(state: &mut InspectState, job_idx: usize, src_idx: usize) {
         if state.source_lines.is_empty() {
             rows.push(Row::CoverageLine {
                 text: format!("(could not read {})", src.html_path.display()),
-                color: Color::DarkGray,
+                color: theme::COMMENT,
             });
         } else {
             for i in 0..state.source_lines.len() {
@@ -718,14 +862,14 @@ fn load_source_view(state: &mut InspectState, job_idx: usize, src_idx: usize) {
             },
             Row::CoverageLine {
                 text: "(no source HTML — re-run tests with coverage to generate the report)".to_string(),
-                color: Color::DarkGray,
+                color: theme::COMMENT,
             },
         ];
     } else {
         state.source_lines.clear();
         state.rows = vec![Row::CoverageLine {
             text: "(unknown source)".to_string(),
-            color: Color::DarkGray,
+            color: theme::COMMENT,
         }];
     }
     let max = state.rows.len().saturating_sub(state.log_vis_h.max(1));
@@ -743,16 +887,16 @@ fn load_test_view(state: &mut InspectState, job_idx: usize, test_idx: usize) {
 
     let mut rows: Vec<Row> = Vec::new();
     if let Some(msg) = failure {
-        rows.push(Row::TestAnnotation { text: msg, color: Color::Red });
+        rows.push(Row::TestAnnotation { text: msg, color: theme::RED });
     }
     for li in 0..state.test_lines.len() {
         rows.push(Row::TestBody { line: li });
     }
     if rows.is_empty() {
         let placeholder_color = match status {
-            TestStatus::Passed  => Color::Green,
-            TestStatus::Failed  => Color::Red,
-            TestStatus::Skipped => Color::Yellow,
+            TestStatus::Passed  => theme::GREEN,
+            TestStatus::Failed  => theme::RED,
+            TestStatus::Skipped => theme::YELLOW,
         };
         rows.push(Row::TestAnnotation { text: "(no output captured)".to_string(), color: placeholder_color });
     }
@@ -784,38 +928,125 @@ fn rebuild_rows(state: &mut InspectState) {
     }
     state.test_lines.clear();
     state.source_lines.clear();
-    let mut rows = build_rows(&state.jobs, &state.filter, &state.grep, &state.job_search);
-    // When a job or Coverage group is selected and has coverage, show a panel.
-    if let Some(cov_rows) = coverage_panel_for_selection(state) {
-        // Insert after the first job header when present, otherwise at the top.
-        let insert_at = rows.iter().position(|r| matches!(r, Row::Header { .. }))
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        for (offset, row) in cov_rows.into_iter().enumerate() {
-            rows.insert(insert_at + offset, row);
+
+    match state.mode {
+        ViewMode::Logs => {
+            state.rows = build_rows(&state.jobs, &state.filter, &state.grep, &state.job_search);
+        }
+        ViewMode::Tests => {
+            if let Some(rows) = tests_panel_for_selection(state) {
+                state.rows = rows;
+            } else {
+                // Directory / "all tests": list matching jobs' test summaries.
+                state.rows = build_tests_overview_rows(state);
+            }
+        }
+        ViewMode::Coverage => {
+            let mut rows = build_rows(&state.jobs, &state.filter, &state.grep, &state.job_search);
+            if let Some(cov_rows) = coverage_panel_for_selection(state) {
+                let insert_at = rows.iter().position(|r| matches!(r, Row::Header { .. }))
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                for (offset, row) in cov_rows.into_iter().enumerate() {
+                    rows.insert(insert_at + offset, row);
+                }
+            }
+            state.rows = rows;
         }
     }
-    state.rows   = rows;
     let max      = state.rows.len().saturating_sub(state.log_vis_h.max(1));
     state.scroll = state.scroll.min(max);
 }
 
-/// Coverage panel rows when the selected node is a job member or Coverage group.
+fn tests_panel_for_selection(state: &InspectState) -> Option<Vec<Row>> {
+    let node = state.nodes.get(state.selected_idx)?;
+    if node.test_ref.is_some() || node.class_ref.is_some() {
+        return None;
+    }
+    let job_idx = node.job_idx?;
+    let Filter::Prefix(p) = &node.filter else { return None; };
+    let job = state.jobs.get(job_idx)?;
+    if job.declared != *p {
+        return None;
+    }
+    Some(build_tests_panel_rows(job))
+}
+
+fn build_tests_panel_rows(job: &Job) -> Vec<Row> {
+    let mut rows = Vec::new();
+    if job.tests.is_empty() {
+        rows.push(Row::CoverageLine {
+            text: "No test results recorded (target/build.tests.json absent)".to_string(),
+            color: theme::COMMENT,
+        });
+        return rows;
+    }
+    let passed  = job.tests.iter().filter(|t| t.status == TestStatus::Passed).count();
+    let failed  = job.tests.iter().filter(|t| t.status == TestStatus::Failed).count();
+    let skipped = job.tests.iter().filter(|t| t.status == TestStatus::Skipped).count();
+    let color = if failed > 0 { theme::RED } else if skipped > 0 { theme::YELLOW } else { theme::GREEN };
+    rows.push(Row::CoverageLine {
+        text: format!(
+            "Tests  {} passed  {} failed  {} skipped  — expand job ▸ class ▸ method for output",
+            passed, failed, skipped
+        ),
+        color,
+    });
+    for (class_name, idxs) in group_by_class(&job.tests) {
+        let f = idxs.iter().filter(|&&i| job.tests[i].status == TestStatus::Failed).count();
+        let p = idxs.iter().filter(|&&i| job.tests[i].status == TestStatus::Passed).count();
+        let s = idxs.len() - f - p;
+        let c = if f > 0 { theme::RED } else if s > 0 { theme::YELLOW } else { theme::GREEN };
+        rows.push(Row::CoverageLine {
+            text: format!("  {class_name}  {p}✓ {f}✗ {s}⊘"),
+            color: c,
+        });
+    }
+    rows
+}
+
+fn build_tests_overview_rows(state: &InspectState) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for (ji, job) in state.jobs.iter().enumerate() {
+        if !job_matches(&state.filter, &job.declared) {
+            continue;
+        }
+        if !job_search_matches(&job.declared, &state.job_search) {
+            continue;
+        }
+        if job.tests.is_empty() {
+            continue;
+        }
+        let _ = ji;
+        rows.extend(build_tests_panel_rows(job));
+    }
+    if rows.is_empty() {
+        rows.push(Row::CoverageLine {
+            text: "No test results in this selection".to_string(),
+            color: theme::COMMENT,
+        });
+    }
+    rows
+}
+
+/// Coverage panel rows when the selected node is a job member (Coverage mode).
 const COVERAGE_PANEL_LIMIT: usize = 8;
 
 fn coverage_panel_for_selection(state: &InspectState) -> Option<Vec<Row>> {
+    if state.mode != ViewMode::Coverage {
+        return None;
+    }
     let node = state.nodes.get(state.selected_idx)?;
-    // Job-level or Coverage group; skip test/class/source leaves and containers.
+    // Job-level only; skip source leaves, test nodes, and pure containers.
     if node.test_ref.is_some() || node.class_ref.is_some() || node.coverage_source_ref.is_some() {
         return None;
     }
-    let job_idx = if node.coverage_group_ref.is_some() {
-        node.coverage_group_ref
-    } else if node.state.is_some() {
-        node.job_idx
-    } else {
-        None
-    }?;
+    let job_idx = node.job_idx?;
+    // Exact job node (filter matches declared path), not a directory prefix container.
+    let Filter::Prefix(p) = &node.filter else { return None; };
+    if state.jobs.get(job_idx)?.declared != *p {
+        return None;
+    }
     let cov = state.jobs.get(job_idx)?.coverage.as_ref()?;
     Some(build_coverage_panel_rows(cov))
 }
@@ -826,7 +1057,7 @@ fn build_coverage_panel_rows(cov: &MemberCoverage) -> Vec<Row> {
     let summary_color = coverage_color(report.summary.line_pct());
     rows.push(Row::CoverageLine {
         text: format!(
-            "Coverage  {}  — expand Coverage › source to see per-line hits",
+            "Coverage  {}  — expand job ▸ source file for per-line hits",
             report.summary.summary_line()
         ),
         color: summary_color,
@@ -852,7 +1083,7 @@ fn build_coverage_panel_rows(cov: &MemberCoverage) -> Vec<Row> {
         if cov.sources.len() > COVERAGE_PANEL_LIMIT {
             rows.push(Row::CoverageLine {
                 text: format!("  … and {} more source files", cov.sources.len() - COVERAGE_PANEL_LIMIT),
-                color: Color::DarkGray,
+                color: theme::COMMENT,
             });
         }
     } else {
@@ -860,7 +1091,7 @@ fn build_coverage_panel_rows(cov: &MemberCoverage) -> Vec<Row> {
         if uncovered.is_empty() {
             rows.push(Row::CoverageLine {
                 text: "  all classes fully covered".to_string(),
-                color: Color::Green,
+                color: theme::GREEN,
             });
         } else {
             for class in uncovered {
@@ -892,12 +1123,49 @@ fn build_coverage_panel_rows(cov: &MemberCoverage) -> Vec<Row> {
 
 fn coverage_color(line_pct: f64) -> Color {
     if line_pct >= 80.0 {
-        Color::Green
+        theme::GREEN
     } else if line_pct >= 50.0 {
-        Color::Yellow
+        theme::YELLOW
     } else {
-        Color::Red
+        theme::RED
     }
+}
+
+fn rebuild_tree(state: &mut InspectState) {
+    state.nodes = build_tree_nodes(
+        &state.jobs,
+        state.mode,
+        &state.expanded_jobs,
+        &state.expanded_classes,
+    );
+}
+
+fn switch_mode(state: &mut InspectState, mode: ViewMode) {
+    if state.mode == mode {
+        return;
+    }
+    let prev_job = state.nodes.get(state.selected_idx).and_then(|n| n.job_idx);
+    state.mode = mode;
+    // Expansion state is mode-specific enough that a clean slate is clearer.
+    state.expanded_jobs.clear();
+    state.expanded_classes.clear();
+    state.test_lines.clear();
+    state.source_lines.clear();
+    state.scroll = 0;
+    state.h_scroll = 0;
+    rebuild_tree(state);
+    // Prefer the same job if it still exists in the new tree.
+    if let Some(ji) = prev_job {
+        if let Some(declared) = state.jobs.get(ji).map(|j| j.declared.clone()) {
+            if let Some(ni) = find_node_for_declared(&state.nodes, &declared) {
+                state.selected_idx = ni;
+                apply_selection(state);
+                return;
+            }
+        }
+    }
+    state.selected_idx = 0;
+    apply_selection(state);
 }
 
 fn reload(state: &mut InspectState) {
@@ -906,18 +1174,13 @@ fn reload(state: &mut InspectState) {
     let utc_offset = state.utc_offset;
     state.jobs       = load_jobs(&targets, &action, utc_offset);
     state.stale_jobs = collect_stale_jobs(&state.jobs);
-    state.nodes    = build_tree_nodes(
-        &state.jobs,
-        &state.expanded_jobs,
-        &state.expanded_classes,
-        &state.expanded_coverage,
-    );
+    rebuild_tree(state);
     state.selected_idx = state.selected_idx.min(state.nodes.len().saturating_sub(1));
     rebuild_rows(state);
 }
 
-/// Focus the first failing job.  If it has failing tests, expand the job+class
-/// and select the first failing test.  Returns `true` when a failure was found.
+/// Focus the first failing job.  If it has failing tests, switch to Tests mode,
+/// expand the job+class, and select the first failing test.
 fn auto_select_failed(state: &mut InspectState) -> bool {
     let failed_job = state.jobs.iter().enumerate()
         .find(|(_, j)| matches!(j.state, LogState::Failed { .. }));
@@ -933,14 +1196,10 @@ fn auto_select_failed(state: &mut InspectState) -> bool {
         });
 
     if let Some((test_idx, class_name)) = first_failing_test {
+        state.mode = ViewMode::Tests;
         state.expanded_jobs.insert(job_idx);
         state.expanded_classes.insert((job_idx, class_name.clone()));
-        state.nodes = build_tree_nodes(
-            &state.jobs,
-            &state.expanded_jobs,
-            &state.expanded_classes,
-            &state.expanded_coverage,
-        );
+        rebuild_tree(state);
 
         if let Some(ni) = state.nodes.iter().position(|n| n.test_ref == Some((job_idx, test_idx))) {
             state.selected_idx = ni;
@@ -949,7 +1208,7 @@ fn auto_select_failed(state: &mut InspectState) -> bool {
         }
     }
 
-    // No failing test: just select the failed job node.
+    // No failing test: stay on Logs and select the failed job node.
     let declared = state.jobs[job_idx].declared.clone();
     if let Some(ni) = find_node_for_declared(&state.nodes, &declared) {
         state.selected_idx = ni;
@@ -959,7 +1218,7 @@ fn auto_select_failed(state: &mut InspectState) -> bool {
 }
 
 fn sync_tree_scroll(state: &mut InspectState) {
-    let visible = (state.pane_h as usize).saturating_sub(2);
+    let visible = (state.pane_h as usize).saturating_sub(2); // borders
     let sel     = state.selected_idx;
     if sel < state.tree_scroll {
         state.tree_scroll = sel;
@@ -990,10 +1249,10 @@ fn prev_node(nodes: &[TreeNode], from: usize) -> usize {
 
 fn gutter_color(state: &LogState) -> Color {
     match state {
-        LogState::Ok         { .. } => Color::Green,
-        LogState::Failed     { .. } => Color::Red,
-        LogState::NoMetadata        => Color::Yellow,
-        LogState::NoLog             => Color::DarkGray,
+        LogState::Ok         { .. } => theme::GREEN,
+        LogState::Failed     { .. } => theme::RED,
+        LogState::NoMetadata        => theme::YELLOW,
+        LogState::NoLog             => theme::COMMENT,
     }
 }
 
@@ -1008,9 +1267,9 @@ fn badge_str(state: &LogState) -> String {
 
 fn badge_style(state: &LogState) -> Style {
     match state {
-        LogState::Ok         { .. } => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-        LogState::Failed     { .. } => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        LogState::NoMetadata        => Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM),
+        LogState::Ok         { .. } => Style::default().fg(theme::GREEN).add_modifier(Modifier::BOLD),
+        LogState::Failed     { .. } => Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+        LogState::NoMetadata        => Style::default().fg(theme::YELLOW).add_modifier(Modifier::DIM),
         LogState::NoLog             => Style::default().add_modifier(Modifier::DIM),
     }
 }
@@ -1026,9 +1285,9 @@ fn test_badge(status: &TestStatus, duration_ms: u64) -> String {
 #[allow(dead_code)]
 fn test_badge_style(status: &TestStatus) -> Style {
     match status {
-        TestStatus::Passed  => Style::default().fg(Color::Green),
-        TestStatus::Failed  => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        TestStatus::Skipped => Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM),
+        TestStatus::Passed  => Style::default().fg(theme::GREEN),
+        TestStatus::Failed  => Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+        TestStatus::Skipped => Style::default().fg(theme::YELLOW).add_modifier(Modifier::DIM),
     }
 }
 
@@ -1059,10 +1318,20 @@ fn render_frame(f: &mut Frame, state: &InspectState) {
     let total    = f.area();
     let in_input = state.input_mode != InputMode::Normal;
 
+    // hint | mode tabs | body [| search]
     let constraints: Vec<Constraint> = if in_input {
-        vec![Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)]
+        vec![
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ]
     } else {
-        vec![Constraint::Length(1), Constraint::Min(0)]
+        vec![
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ]
     };
 
     let vchunks = Layout::default()
@@ -1071,24 +1340,53 @@ fn render_frame(f: &mut Frame, state: &InspectState) {
         .split(total);
 
     f.render_widget(
-        Paragraph::new(hint_text(state)).style(Style::default().add_modifier(Modifier::DIM)),
+        Paragraph::new(hint_text(state)).style(Style::default().fg(theme::COMMENT).bg(theme::BG)),
         vchunks[0],
     );
+    f.render_widget(mode_tabs_line(state.mode), vchunks[1]);
+
+    let body = vchunks[2];
+    // Fill body background black.
+    f.render_widget(Block::default().style(Style::default().bg(theme::BG)), body);
 
     if state.show_members {
         let hchunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-            .split(vchunks[1]);
+            .split(body);
         render_members_block(f, state, hchunks[0]);
         render_log_block(f, state, hchunks[1]);
     } else {
-        render_log_block(f, state, vchunks[1]);
+        render_log_block(f, state, body);
     }
 
     if in_input {
-        render_status_bar(f, state, vchunks[2]);
+        render_status_bar(f, state, vchunks[3]);
     }
+}
+
+fn mode_tabs_line(mode: ViewMode) -> Paragraph<'static> {
+    let mut spans = vec![Span::styled("  ", Style::default().fg(theme::COMMENT).bg(theme::BG))];
+    for (i, m) in ViewMode::ALL.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" │ ", Style::default().fg(theme::COMMENT).bg(theme::BG)));
+        }
+        let label = format!(" {} ", m.label());
+        let style = if *m == mode {
+            Style::default()
+                .fg(theme::BG)
+                .bg(theme::BLUE)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::COMMENT).bg(theme::BG)
+        };
+        spans.push(Span::styled(label, style));
+    }
+    spans.push(Span::styled(
+        "   1/2/3 or [/] switch mode",
+        Style::default().fg(theme::COMMENT).bg(theme::BG),
+    ));
+    Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::BG))
 }
 
 fn hint_text(state: &InspectState) -> &'static str {
@@ -1100,7 +1398,7 @@ fn hint_text(state: &InspectState) -> &'static str {
             if state.input_mode != InputMode::Normal {
                 "curie inspect  \u{2191}\u{2193}/jk select  Tab switch  Esc clear search  q quit"
             } else {
-                "curie inspect  \u{2191}\u{2193}/jk select  Enter/\u{2192} expand  \u{2190} collapse  Tab log  m hide  / grep  f job  r reload  q quit"
+                "curie inspect  \u{2191}\u{2193}/jk select  Enter/\u{2192} expand  \u{2190} collapse  Tab detail  m hide  / grep  f job  r reload  q quit"
             }
         }
         ActivePane::Log => {
@@ -1116,12 +1414,22 @@ fn hint_text(state: &InspectState) -> &'static str {
 fn render_members_block(f: &mut Frame, state: &InspectState, area: Rect) {
     // Only highlight border when Members pane itself is focused (not when Search is active).
     let is_active    = state.active_pane == ActivePane::Members;
-    let border_style = if is_active { Style::default().fg(Color::Cyan) } else { Style::default() };
+    let border_style = if is_active {
+        Style::default().fg(theme::CYAN).bg(theme::BG)
+    } else {
+        Style::default().fg(theme::COMMENT).bg(theme::BG)
+    };
+    let title = match state.mode {
+        ViewMode::Logs => "Members",
+        ViewMode::Tests => "Tests",
+        ViewMode::Coverage => "Coverage",
+    };
 
     let block = Block::default()
-        .title("Members")
+        .title(title)
         .borders(Borders::ALL)
-        .border_style(border_style);
+        .border_style(border_style)
+        .style(Style::default().bg(theme::BG));
 
     let inner   = block.inner(area);
     let vis_h   = inner.height as usize;
@@ -1166,7 +1474,7 @@ fn member_line(
                 badge_str(log_state)
             };
             let bstyle = if is_stale || search_dim {
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+                Style::default().fg(theme::COMMENT)
             } else {
                 badge_style(log_state)
             };
@@ -1179,14 +1487,14 @@ fn member_line(
             let label:  String = node.label.chars().take(label_w).collect();
             let padding = " ".repeat(label_w.saturating_sub(label.chars().count()) + 1);
             let label_style = if is_stale || search_dim {
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+                Style::default().fg(theme::COMMENT)
             } else {
-                Style::default()
+                Style::default().fg(theme::FG)
             };
             let cov_style = if is_stale || search_dim {
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+                Style::default().fg(theme::COMMENT)
             } else {
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(theme::CYAN)
             };
 
             let mut spans = vec![
@@ -1199,32 +1507,31 @@ fn member_line(
             spans.push(Span::styled(state_badge, bstyle));
             let mut line = Line::from(spans);
             if is_selected {
-                line = line.patch_style(Style::default().add_modifier(Modifier::REVERSED));
+                line = line.patch_style(Style::default().bg(theme::SELECTION));
             }
             line
         }
         None => {
             if let Some((badge_text, status)) = &node.test_badge {
-                // Test leaf node: right-aligned coloured badge.
+                // Test leaf / Tests-mode job summary: right-aligned coloured badge.
                 let badge_color = match status {
-                    TestStatus::Passed  => Color::Green,
-                    TestStatus::Failed  => Color::Red,
-                    TestStatus::Skipped => Color::Yellow,
+                    TestStatus::Passed  => theme::GREEN,
+                    TestStatus::Failed  => theme::RED,
+                    TestStatus::Skipped => theme::YELLOW,
                 };
                 let badge_modifier = if *status == TestStatus::Failed { Modifier::BOLD } else { Modifier::empty() };
                 let bstyle  = Style::default().fg(badge_color).add_modifier(badge_modifier);
                 right_aligned_badge_line(&node.label, badge_text, bstyle, inner_w, is_selected)
             } else if let Some(badge_text) = &node.coverage_badge {
-                // Coverage group or source file: cyan badge with line/branch %.
-                let bstyle = Style::default().fg(Color::Cyan);
+                // Coverage source file: cyan badge with line/branch %.
+                let bstyle = Style::default().fg(theme::CYAN);
                 right_aligned_badge_line(&node.label, badge_text, bstyle, inner_w, is_selected)
             } else {
                 // Class group node or directory container: dimmed.
-                let base_style = Style::default().add_modifier(Modifier::DIM);
                 let style = if is_selected {
-                    base_style.add_modifier(Modifier::REVERSED)
+                    Style::default().fg(theme::FG).bg(theme::SELECTION)
                 } else {
-                    base_style
+                    Style::default().fg(theme::COMMENT)
                 };
                 Line::styled(node.label.clone(), style)
             }
@@ -1243,13 +1550,14 @@ fn right_aligned_badge_line(
     let label_w = inner_w.saturating_sub(badge_w + 1);
     let label: String = label_raw.chars().take(label_w).collect();
     let padding = " ".repeat(label_w.saturating_sub(label.chars().count()) + 1);
+    let label_style = Style::default().fg(theme::FG);
     let mut line = Line::from(vec![
-        Span::raw(label),
-        Span::raw(padding),
+        Span::styled(label, label_style),
+        Span::styled(padding, label_style),
         Span::styled(badge_text.to_string(), badge_style),
     ]);
     if is_selected {
-        line = line.patch_style(Style::default().add_modifier(Modifier::REVERSED));
+        line = line.patch_style(Style::default().bg(theme::SELECTION));
     }
     line
 }
@@ -1258,13 +1566,18 @@ fn right_aligned_badge_line(
 fn render_log_block(f: &mut Frame, state: &InspectState, area: Rect) {
     // Only highlight border when Log pane itself is focused (not when Search is active).
     let is_active = !state.show_members || state.active_pane == ActivePane::Log;
-    let border_style = if is_active { Style::default().fg(Color::Cyan) } else { Style::default() };
+    let border_style = if is_active {
+        Style::default().fg(theme::CYAN).bg(theme::BG)
+    } else {
+        Style::default().fg(theme::COMMENT).bg(theme::BG)
+    };
 
-    let title = format!("Log: {}", state.log_title);
+    let title = format!("{}: {}", state.mode.detail_title_prefix(), state.log_title);
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(border_style);
+        .border_style(border_style)
+        .style(Style::default().bg(theme::BG));
 
     let inner = block.inner(area);
     let vis_h = inner.height as usize;
@@ -1325,16 +1638,16 @@ fn render_row(
         Row::TestAnnotation { text, color } => {
             let gutter = Span::styled("▌ ", Style::default().fg(*color).add_modifier(Modifier::BOLD));
             let msg    = Span::styled(text.clone(), Style::default().fg(*color).add_modifier(Modifier::BOLD));
-            Line::from(vec![gutter, msg]).style(Style::default().bg(Color::Indexed(236)))
+            Line::from(vec![gutter, msg]).style(Style::default().bg(theme::SURFACE))
         }
         Row::TestBody { line } => {
             let text = test_lines.get(*line).map(String::as_str).unwrap_or("");
-            body_line(text, Color::Cyan, grep)
+            body_line(text, theme::CYAN, grep)
         }
         Row::CoverageLine { text, color } => {
             let gutter = Span::styled("▌ ", Style::default().fg(*color).add_modifier(Modifier::BOLD));
             let msg    = Span::styled(text.clone(), Style::default().fg(*color));
-            Line::from(vec![gutter, msg]).style(Style::default().bg(Color::Indexed(236)))
+            Line::from(vec![gutter, msg]).style(Style::default().bg(theme::SURFACE))
         }
         Row::SourceBody { line } => {
             render_source_line(source_lines.get(*line), grep)
@@ -1347,10 +1660,10 @@ fn render_source_line(src: Option<&SourceLine>, grep: &str) -> Line<'static> {
         return Line::from("");
     };
     let (gutter_color, text_style, marker) = match src.hit {
-        LineHit::Full    => (Color::Green,  Style::default().fg(Color::Green),  "█"),
-        LineHit::Partial => (Color::Yellow, Style::default().fg(Color::Yellow), "▒"),
-        LineHit::Missed  => (Color::Red,    Style::default().fg(Color::Red),    "█"),
-        LineHit::None    => (Color::DarkGray, Style::default().fg(Color::Gray), "·"),
+        LineHit::Full    => (theme::GREEN,  Style::default().fg(theme::GREEN),  "█"),
+        LineHit::Partial => (theme::YELLOW, Style::default().fg(theme::YELLOW), "▒"),
+        LineHit::Missed  => (theme::RED,    Style::default().fg(theme::RED),    "█"),
+        LineHit::None    => (theme::COMMENT, Style::default().fg(theme::COMMENT), "·"),
     };
     let gutter = Span::styled(
         format!("{marker} {:>4} ", src.number),
@@ -1385,7 +1698,7 @@ fn header_line(job: &Job, color: Color) -> Line<'static> {
     };
     let text = Span::styled(content, Style::default().fg(color).add_modifier(Modifier::BOLD));
     Line::from(vec![gutter, text])
-        .style(Style::default().bg(Color::Indexed(236)))
+        .style(Style::default().bg(theme::SURFACE))
 }
 
 fn body_line(text: &str, color: Color, grep: &str) -> Line<'static> {
@@ -1403,7 +1716,7 @@ fn body_line(text: &str, color: Color, grep: &str) -> Line<'static> {
 /// Split `spans` at occurrences of `pattern` and apply a yellow highlight to each match.
 fn highlight_spans(spans: Vec<Span<'static>>, pattern: &str) -> Vec<Span<'static>> {
     let pattern_lower = pattern.to_lowercase();
-    let highlight     = Style::default().bg(Color::Yellow).fg(Color::Black);
+    let highlight     = Style::default().bg(theme::YELLOW).fg(theme::BG);
     let mut result    = Vec::new();
 
     for span in spans {
@@ -1465,9 +1778,9 @@ fn render_status_bar(f: &mut Frame, state: &InspectState, area: Rect) {
     };
     // Cyan background when the search bar has keyboard focus; dimmer when a pane does.
     let style = if state.active_pane == ActivePane::Search {
-        Style::default().fg(Color::Black).bg(Color::Cyan)
+        Style::default().fg(theme::BG).bg(theme::CYAN)
     } else {
-        Style::default().fg(Color::DarkGray).bg(Color::Black)
+        Style::default().fg(theme::COMMENT).bg(theme::BG)
     };
     f.render_widget(Paragraph::new(content).style(style), area);
 }
@@ -1484,7 +1797,9 @@ fn event_loop(
         terminal.draw(|f| render_frame(f, state))?;
 
         let size      = terminal.size()?;
-        state.pane_h  = size.height.saturating_sub(1);
+        // Chrome: hint row + mode tabs (+ optional search bar).
+        let chrome = if state.input_mode != InputMode::Normal { 3 } else { 2 };
+        state.pane_h  = size.height.saturating_sub(chrome);
         state.log_vis_h = (state.pane_h as usize).saturating_sub(2);
 
         match crossterm::event::read()? {
@@ -1571,6 +1886,15 @@ fn handle_key(state: &mut InspectState, key: KeyEvent) -> bool {
 
         KeyCode::Char('r') => reload(state),
 
+        // Top-level view mode: Logs / Tests / Coverage.
+        KeyCode::Char(c @ '1'..='3') if !searching => {
+            if let Some(mode) = ViewMode::from_digit(c) {
+                switch_mode(state, mode);
+            }
+        }
+        KeyCode::Char(']') if !searching => switch_mode(state, state.mode.next()),
+        KeyCode::Char('[') if !searching => switch_mode(state, state.mode.prev()),
+
         KeyCode::Char('/') => {
             state.pre_search_pane = state.active_pane.clone();
             state.input_mode      = InputMode::Grep;
@@ -1640,22 +1964,15 @@ fn handle_key_search(state: &mut InspectState, key: KeyEvent) -> bool {
     true
 }
 
-/// Toggle expansion at the current tree level (job → children, class → tests, Coverage → sources).
+/// Toggle expansion at the current tree level (job → children, class → tests).
 fn toggle_test_expansion(state: &mut InspectState) {
+    if state.mode == ViewMode::Logs {
+        return;
+    }
     let node = &state.nodes[state.selected_idx];
 
     if node.test_ref.is_some() || node.coverage_source_ref.is_some() {
         // Already at a leaf; Enter/→ has no further expansion.
-        return;
-    }
-
-    if let Some(job_idx) = node.coverage_group_ref {
-        if state.expanded_coverage.contains(&job_idx) {
-            state.expanded_coverage.remove(&job_idx);
-        } else {
-            state.expanded_coverage.insert(job_idx);
-        }
-        rebuild_tree_and_reselect_coverage_group(state, job_idx);
         return;
     }
 
@@ -1684,6 +2001,9 @@ fn toggle_test_expansion(state: &mut InspectState) {
 
 /// Collapse: ← on a leaf → collapse parent; on a group → collapse parent job.
 fn collapse_test_node(state: &mut InspectState) {
+    if state.mode == ViewMode::Logs {
+        return;
+    }
     let node = &state.nodes[state.selected_idx];
 
     if let Some((job_idx, test_idx)) = node.test_ref {
@@ -1692,11 +2012,7 @@ fn collapse_test_node(state: &mut InspectState) {
         state.expanded_classes.remove(&(job_idx, class_name.clone()));
         rebuild_tree_and_reselect_class(state, job_idx, &class_name);
     } else if let Some((job_idx, _)) = node.coverage_source_ref {
-        // On a coverage source: collapse the Coverage group.
-        state.expanded_coverage.remove(&job_idx);
-        rebuild_tree_and_reselect_coverage_group(state, job_idx);
-    } else if let Some(job_idx) = node.coverage_group_ref {
-        // On Coverage group: collapse the parent job.
+        // On a coverage source: collapse the parent job.
         state.expanded_jobs.remove(&job_idx);
         rebuild_tree_and_reselect(state, Some(job_idx));
     } else if let Some((job_idx, _)) = node.class_ref.clone() {
@@ -1709,7 +2025,9 @@ fn collapse_test_node(state: &mut InspectState) {
 /// Find the job index that the current node maps to (for job-level nodes only).
 fn job_idx_for_node(state: &InspectState) -> Option<usize> {
     let node = &state.nodes[state.selected_idx];
-    if node.test_ref.is_some() { return None; }
+    if node.test_ref.is_some() || node.coverage_source_ref.is_some() || node.class_ref.is_some() {
+        return None;
+    }
     let Filter::Prefix(p) = &node.filter else { return None; };
     state.jobs.iter().position(|j| &j.declared == p)
 }
@@ -1717,12 +2035,7 @@ fn job_idx_for_node(state: &InspectState) -> Option<usize> {
 /// Rebuild tree nodes and re-select the job node for `job_idx` (or keep current selection).
 fn rebuild_tree_and_reselect(state: &mut InspectState, job_idx: Option<usize>) {
     let prev_declared = job_idx.map(|i| state.jobs[i].declared.clone());
-    state.nodes = build_tree_nodes(
-        &state.jobs,
-        &state.expanded_jobs,
-        &state.expanded_classes,
-        &state.expanded_coverage,
-    );
+    rebuild_tree(state);
     if let Some(declared) = prev_declared {
         if let Some(ni) = find_node_for_declared(&state.nodes, &declared) {
             state.selected_idx = ni;
@@ -1732,29 +2045,9 @@ fn rebuild_tree_and_reselect(state: &mut InspectState, job_idx: Option<usize>) {
     apply_selection(state);
 }
 
-/// Rebuild tree nodes and re-select the Coverage group for `job_idx`.
-fn rebuild_tree_and_reselect_coverage_group(state: &mut InspectState, job_idx: usize) {
-    state.nodes = build_tree_nodes(
-        &state.jobs,
-        &state.expanded_jobs,
-        &state.expanded_classes,
-        &state.expanded_coverage,
-    );
-    if let Some(ni) = state.nodes.iter().position(|n| n.coverage_group_ref == Some(job_idx)) {
-        state.selected_idx = ni;
-    }
-    state.selected_idx = state.selected_idx.min(state.nodes.len().saturating_sub(1));
-    apply_selection(state);
-}
-
 /// Rebuild tree nodes and re-select the class node for `(job_idx, class_name)`.
 fn rebuild_tree_and_reselect_class(state: &mut InspectState, job_idx: usize, class_name: &str) {
-    state.nodes = build_tree_nodes(
-        &state.jobs,
-        &state.expanded_jobs,
-        &state.expanded_classes,
-        &state.expanded_coverage,
-    );
+    rebuild_tree(state);
     if let Some(ni) = state.nodes.iter().position(|n| {
         n.class_ref.as_ref().map_or(false, |(ji, cn)| *ji == job_idx && cn == class_name)
     }) {
@@ -1907,7 +2200,7 @@ mod tests {
     #[test]
     fn tree_root_then_flat_members() {
         let jobs  = vec![make_job("alpha", None, Some(0)), make_job("beta", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(nodes[0].title, "all jobs");
         assert!(matches!(nodes[0].filter, Filter::All));
         assert_eq!(nodes[1].label.trim(), "alpha");
@@ -1921,7 +2214,7 @@ mod tests {
             make_job("services/api", None, Some(0)),
             make_job("services/web", None, Some(0)),
         ];
-        let nodes = build_tree_nodes(&jobs, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(nodes.len(), 4);
         assert!(nodes[1].label.contains("services/"));
         assert!(matches!(&nodes[1].filter, Filter::Prefix(p) if p == "services"));
@@ -1932,7 +2225,7 @@ mod tests {
     #[test]
     fn tree_single_member() {
         let jobs  = vec![make_job("mylib", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(nodes.len(), 2);
         assert!(matches!(&nodes[1].filter, Filter::Prefix(p) if p == "mylib"));
     }
@@ -1940,7 +2233,7 @@ mod tests {
     #[test]
     fn tree_deep_nesting() {
         let jobs  = vec![make_job("a/b/c/leaf", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(nodes.len(), 5);
         assert!(matches!(&nodes[4].filter, Filter::Prefix(p) if p == "a/b/c/leaf"));
     }
@@ -1951,7 +2244,7 @@ mod tests {
             make_job("svc/api", None, Some(0)),
             make_job("svc/web", None, Some(0)),
         ];
-        let nodes = build_tree_nodes(&jobs, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         let svc   = nodes.iter().find(|n| n.label.contains("svc/")).unwrap();
         assert!(matches!(&svc.filter, Filter::Prefix(p) if p == "svc"));
     }
@@ -2105,14 +2398,14 @@ mod tests {
     #[test]
     fn next_node_wraps() {
         let jobs  = vec![make_job("a", None, Some(0)), make_job("b", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(next_node(&nodes, 2), 0);
     }
 
     #[test]
     fn prev_node_wraps() {
         let jobs  = vec![make_job("a", None, Some(0)), make_job("b", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(prev_node(&nodes, 0), 2);
     }
 
@@ -2178,7 +2471,7 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].content, "hello ");
         assert_eq!(result[1].content, "world");
-        assert_eq!(result[1].style, Style::default().bg(Color::Yellow).fg(Color::Black));
+        assert_eq!(result[1].style, Style::default().bg(theme::YELLOW).fg(theme::BG));
     }
 
     #[test]
@@ -2204,7 +2497,7 @@ mod tests {
     fn tree_job_node_carries_coverage_badge() {
         let mut job = make_job("lib", None, Some(0));
         job.coverage = Some(sample_coverage_report());
-        let nodes = build_tree_nodes(&[job], &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&[job], ViewMode::Coverage, &HashSet::new(), &HashSet::new());
         let lib = nodes.iter().find(|n| n.title == "lib").unwrap();
         assert_eq!(lib.coverage_badge.as_deref(), Some("80.0% / 60.0%"));
     }
@@ -2212,7 +2505,7 @@ mod tests {
     #[test]
     fn tree_job_without_coverage_has_no_badge() {
         let job = make_job("lib", None, Some(0));
-        let nodes = build_tree_nodes(&[job], &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&[job], ViewMode::Logs, &HashSet::new(), &HashSet::new());
         let lib = nodes.iter().find(|n| n.title == "lib").unwrap();
         assert!(lib.coverage_badge.is_none());
     }
@@ -2288,10 +2581,10 @@ mod tests {
 
     #[test]
     fn coverage_color_thresholds() {
-        assert_eq!(coverage_color(90.0), Color::Green);
-        assert_eq!(coverage_color(80.0), Color::Green);
-        assert_eq!(coverage_color(50.0), Color::Yellow);
-        assert_eq!(coverage_color(49.9), Color::Red);
+        assert_eq!(coverage_color(90.0), theme::GREEN);
+        assert_eq!(coverage_color(80.0), theme::GREEN);
+        assert_eq!(coverage_color(50.0), theme::YELLOW);
+        assert_eq!(coverage_color(49.9), theme::RED);
     }
 
     #[test]
@@ -2310,10 +2603,8 @@ mod tests {
         job.coverage = Some(sample_member_with_sources(html));
         let mut expanded_jobs = HashSet::new();
         expanded_jobs.insert(0);
-        let mut expanded_cov = HashSet::new();
-        expanded_cov.insert(0);
-        let nodes = build_tree_nodes(&[job], &expanded_jobs, &HashSet::new(), &expanded_cov);
-        assert!(nodes.iter().any(|n| n.coverage_group_ref == Some(0)));
+        let nodes = build_tree_nodes(&[job], ViewMode::Coverage, &expanded_jobs, &HashSet::new());
+        assert!(!nodes.iter().any(|n| n.coverage_group_ref.is_some()));
         let src = nodes.iter().find(|n| n.coverage_source_ref == Some((0, 0))).unwrap();
         assert!(src.label.contains("Foo.java"), "got: {}", src.label);
         assert_eq!(src.coverage_badge.as_deref(), Some("90.0% / 75.0%"));
@@ -2335,10 +2626,8 @@ mod tests {
         job.coverage = Some(sample_member_with_sources(html));
         let mut expanded_jobs = HashSet::new();
         expanded_jobs.insert(0);
-        let mut expanded_cov = HashSet::new();
-        expanded_cov.insert(0);
         let jobs = vec![job];
-        let nodes = build_tree_nodes(&jobs, &expanded_jobs, &HashSet::new(), &expanded_cov);
+        let nodes = build_tree_nodes(&jobs, ViewMode::Coverage, &expanded_jobs, &HashSet::new());
         let src_idx = nodes.iter().position(|n| n.coverage_source_ref == Some((0, 0))).unwrap();
 
         let mut state = InspectState {
@@ -2352,6 +2641,7 @@ mod tests {
             scroll: 0,
             show_members: true,
             active_pane: ActivePane::Members,
+            mode: ViewMode::Coverage,
             filter: Filter::All,
             log_title: String::new(),
             pane_h: 24,
@@ -2362,7 +2652,6 @@ mod tests {
             job_search: String::new(),
             expanded_jobs,
             expanded_classes: HashSet::new(),
-            expanded_coverage: expanded_cov,
             test_lines: vec![],
             source_lines: vec![],
             pre_search_pane: ActivePane::Members,
@@ -2376,6 +2665,64 @@ mod tests {
         assert_eq!(state.source_lines[2].hit, LineHit::Missed);
         assert!(state.rows.iter().any(|r| matches!(r, Row::SourceBody { line: 1 })));
         assert!(state.rows.iter().any(|r| matches!(r, Row::SourceBody { line: 2 })));
+    }
+
+    #[test]
+    fn view_mode_cycles() {
+        assert_eq!(ViewMode::Logs.next(), ViewMode::Tests);
+        assert_eq!(ViewMode::Tests.next(), ViewMode::Coverage);
+        assert_eq!(ViewMode::Coverage.next(), ViewMode::Logs);
+        assert_eq!(ViewMode::Logs.prev(), ViewMode::Coverage);
+        assert_eq!(ViewMode::from_digit('2'), Some(ViewMode::Tests));
+        assert_eq!(ViewMode::from_digit('9'), None);
+    }
+
+    #[test]
+    fn tree_tests_mode_shows_test_summary_not_coverage() {
+        let mut job = make_job("lib", None, Some(0));
+        job.tests = vec![
+            TestEntry {
+                name: "a".into(),
+                class_name: "T".into(),
+                duration_ms: 1,
+                status: TestStatus::Passed,
+                failure: None,
+                output_file: None,
+            },
+            TestEntry {
+                name: "b".into(),
+                class_name: "T".into(),
+                duration_ms: 2,
+                status: TestStatus::Failed,
+                failure: None,
+                output_file: None,
+            },
+        ];
+        job.coverage = Some(sample_coverage_report());
+        let nodes = build_tree_nodes(&[job], ViewMode::Tests, &HashSet::new(), &HashSet::new());
+        let lib = nodes.iter().find(|n| n.title == "lib").unwrap();
+        assert!(lib.coverage_badge.is_none());
+        assert_eq!(lib.test_badge.as_ref().map(|(s, _)| s.as_str()), Some("1✓ 1✗"));
+        assert!(lib.label.contains("▸"));
+    }
+
+    #[test]
+    fn tree_logs_mode_has_no_expand_for_tests() {
+        let mut job = make_job("lib", None, Some(0));
+        job.tests = vec![TestEntry {
+            name: "a".into(),
+            class_name: "T".into(),
+            duration_ms: 1,
+            status: TestStatus::Passed,
+            failure: None,
+            output_file: None,
+        }];
+        let mut expanded = HashSet::new();
+        expanded.insert(0);
+        let nodes = build_tree_nodes(&[job], ViewMode::Logs, &expanded, &HashSet::new());
+        // Even when "expanded", Logs mode never shows test children.
+        assert!(nodes.iter().all(|n| n.test_ref.is_none() && n.class_ref.is_none()));
+        assert!(!nodes[1].label.contains("▸"));
     }
 
     #[test]
