@@ -184,28 +184,99 @@ pub struct CoverageSummary {
 impl CoverageSummary {
     /// Line coverage percentage (0–100).
     pub fn line_pct(&self) -> f64 {
-        let total = self.line_covered + self.line_missed;
-        if total == 0 {
-            100.0
-        } else {
-            (self.line_covered as f64 / total as f64) * 100.0
-        }
+        pct(self.line_covered, self.line_missed)
     }
 
     /// Branch coverage percentage (0–100).
     pub fn branch_pct(&self) -> f64 {
-        let total = self.branch_covered + self.branch_missed;
-        if total == 0 {
-            100.0
-        } else {
-            (self.branch_covered as f64 / total as f64) * 100.0
-        }
+        pct(self.branch_covered, self.branch_missed)
     }
 
     /// One-line human-readable summary, e.g. "72.5% lines, 55.0% branches".
     pub fn summary_line(&self) -> String {
         format!("{:.1}% lines, {:.1}% branches", self.line_pct(), self.branch_pct())
     }
+
+    /// Compact badge for the members pane, e.g. `"87.3% / 74.1%"`.
+    pub fn badge(&self) -> String {
+        format!("{:.1}% / {:.1}%", self.line_pct(), self.branch_pct())
+    }
+}
+
+/// Per-class coverage row from the JaCoCo CSV.
+#[derive(Debug, Clone)]
+pub struct ClassCoverage {
+    pub package: String,
+    pub class_name: String,
+    pub line_covered: u64,
+    pub line_missed: u64,
+    pub branch_covered: u64,
+    pub branch_missed: u64,
+}
+
+impl ClassCoverage {
+    /// Fully-qualified class name (`package.Class` or bare `Class`).
+    pub fn qualified_name(&self) -> String {
+        if self.package.is_empty() {
+            self.class_name.clone()
+        } else {
+            format!("{}.{}", self.package, self.class_name)
+        }
+    }
+
+    /// Line coverage percentage (0–100).
+    pub fn line_pct(&self) -> f64 {
+        pct(self.line_covered, self.line_missed)
+    }
+
+    /// Branch coverage percentage (0–100).
+    pub fn branch_pct(&self) -> f64 {
+        pct(self.branch_covered, self.branch_missed)
+    }
+
+    /// True when the class has any branch instrumentation data.
+    pub fn has_branches(&self) -> bool {
+        self.branch_covered + self.branch_missed > 0
+    }
+}
+
+/// Full CSV report: aggregate summary plus per-class rows.
+#[derive(Debug, Clone)]
+pub struct CoverageReport {
+    pub summary: CoverageSummary,
+    pub classes: Vec<ClassCoverage>,
+}
+
+impl CoverageReport {
+    /// Classes with missed lines, worst first, capped at `limit`.
+    pub fn top_uncovered(&self, limit: usize) -> Vec<&ClassCoverage> {
+        let mut rows: Vec<&ClassCoverage> = self.classes.iter()
+            .filter(|c| c.line_missed > 0)
+            .collect();
+        rows.sort_by(|a, b| {
+            b.line_missed.cmp(&a.line_missed)
+                .then_with(|| a.line_pct().partial_cmp(&b.line_pct()).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| a.qualified_name().cmp(&b.qualified_name()))
+        });
+        rows.into_iter().take(limit).collect()
+    }
+}
+
+fn pct(covered: u64, missed: u64) -> f64 {
+    let total = covered + missed;
+    if total == 0 {
+        100.0
+    } else {
+        (covered as f64 / total as f64) * 100.0
+    }
+}
+
+/// Load a JaCoCo CSV report. Returns `None` when the file is missing or unreadable.
+///
+/// Used by `curie inspect` to surface coverage without recomputing it.
+pub fn try_load_coverage_csv(csv_path: &Path) -> Option<CoverageReport> {
+    let content = std::fs::read_to_string(csv_path).ok()?;
+    parse_csv_content(&content).ok()
 }
 
 /// Parse the JaCoCo CSV report and aggregate totals.
@@ -227,11 +298,15 @@ impl CoverageSummary {
 fn parse_csv_summary(csv_path: &Path) -> Result<CoverageSummary> {
     let content = std::fs::read_to_string(csv_path)
         .with_context(|| format!("failed to read {}", csv_path.display()))?;
+    Ok(parse_csv_content(&content)?.summary)
+}
 
+fn parse_csv_content(content: &str) -> Result<CoverageReport> {
     let mut line_covered: u64 = 0;
     let mut line_missed: u64 = 0;
     let mut branch_covered: u64 = 0;
     let mut branch_missed: u64 = 0;
+    let mut classes = Vec::new();
 
     for (i, line) in content.lines().enumerate() {
         if i == 0 {
@@ -241,17 +316,34 @@ fn parse_csv_summary(csv_path: &Path) -> Result<CoverageSummary> {
         if cols.len() < 9 {
             continue;
         }
-        branch_missed  += cols[5].parse::<u64>().unwrap_or(0);
-        branch_covered += cols[6].parse::<u64>().unwrap_or(0);
-        line_missed    += cols[7].parse::<u64>().unwrap_or(0);
-        line_covered   += cols[8].parse::<u64>().unwrap_or(0);
+        let b_missed  = cols[5].parse::<u64>().unwrap_or(0);
+        let b_covered = cols[6].parse::<u64>().unwrap_or(0);
+        let l_missed  = cols[7].parse::<u64>().unwrap_or(0);
+        let l_covered = cols[8].parse::<u64>().unwrap_or(0);
+
+        branch_missed  += b_missed;
+        branch_covered += b_covered;
+        line_missed    += l_missed;
+        line_covered   += l_covered;
+
+        classes.push(ClassCoverage {
+            package: cols[1].to_string(),
+            class_name: cols[2].to_string(),
+            line_covered: l_covered,
+            line_missed: l_missed,
+            branch_covered: b_covered,
+            branch_missed: b_missed,
+        });
     }
 
-    Ok(CoverageSummary {
-        line_covered,
-        line_missed,
-        branch_covered,
-        branch_missed,
+    Ok(CoverageReport {
+        summary: CoverageSummary {
+            line_covered,
+            line_missed,
+            branch_covered,
+            branch_missed,
+        },
+        classes,
     })
 }
 
@@ -348,6 +440,50 @@ mod tests {
         let summary = parse_csv_summary(&csv).unwrap();
         assert_eq!(summary.line_covered, 0);
         assert_eq!(summary.line_missed, 0);
+    }
+
+    #[test]
+    fn coverage_summary_badge_format() {
+        let s = CoverageSummary {
+            line_covered: 873,
+            line_missed: 127,
+            branch_covered: 741,
+            branch_missed: 259,
+        };
+        assert_eq!(s.badge(), "87.3% / 74.1%");
+    }
+
+    #[test]
+    fn try_load_coverage_csv_missing_returns_none() {
+        assert!(try_load_coverage_csv(Path::new("/nonexistent/coverage.csv")).is_none());
+    }
+
+    #[test]
+    fn try_load_coverage_csv_parses_classes() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("coverage.csv");
+        std::fs::write(
+            &csv,
+            "GROUP,PACKAGE,CLASS,INSTRUCTION_MISSED,INSTRUCTION_COVERED,\
+             BRANCH_MISSED,BRANCH_COVERED,LINE_MISSED,LINE_COVERED,\
+             COMPLEXITY_MISSED,COMPLEXITY_COVERED,METHOD_MISSED,METHOD_COVERED\n\
+             g,com.example,Foo,10,20,2,4,5,5,1,2,0,1\n\
+             g,com.example,Bar,0,30,0,6,0,10,0,1,0,1\n\
+             g,com.example,Baz,8,2,3,1,8,2,1,0,1,0\n",
+        )
+        .unwrap();
+
+        let report = try_load_coverage_csv(&csv).unwrap();
+        assert_eq!(report.classes.len(), 3);
+        assert_eq!(report.summary.line_missed, 13);
+        assert_eq!(report.classes[0].qualified_name(), "com.example.Foo");
+
+        let top = report.top_uncovered(2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].class_name, "Baz"); // 8 missed
+        assert_eq!(top[1].class_name, "Foo"); // 5 missed
+        // Fully-covered Bar is excluded.
+        assert!(top.iter().all(|c| c.class_name != "Bar"));
     }
 
     #[test]

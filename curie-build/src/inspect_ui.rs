@@ -25,6 +25,7 @@ use ratatui::{
     Frame, Terminal,
 };
 
+use crate::coverage::{try_load_coverage_csv, CoverageReport};
 use crate::parallel::parse_meta;
 
 // ── Public types ──────────────────────────────────────────────────────────
@@ -60,6 +61,8 @@ struct Job {
     build_id:  Option<String>,
     /// Per-test results from `target/build.tests.json`; empty when absent.
     tests:     Vec<TestEntry>,
+    /// Coverage from `target/coverage/coverage.csv`; `None` when absent.
+    coverage:  Option<CoverageReport>,
 }
 
 #[derive(Clone)]
@@ -102,6 +105,8 @@ struct TreeNode {
     class_ref:  Option<(usize, String)>,
     /// Index into `jobs` for every node that belongs to a specific job (leaf or child).
     job_idx:    Option<usize>,
+    /// Compact coverage badge (`"87.3% / 74.1%"`) for job nodes; `None` when no CSV.
+    coverage_badge: Option<String>,
 }
 
 enum Row {
@@ -112,6 +117,8 @@ enum Row {
     TestAnnotation { text: String, color: Color },
     /// `line` is an index into `InspectState::test_lines`.
     TestBody       { line: usize },
+    /// Coverage summary or uncovered-class line shown above a job's log.
+    CoverageLine   { text: String, color: Color },
 }
 
 #[derive(PartialEq, Clone)]
@@ -263,9 +270,25 @@ fn load_jobs(targets: &[LogTarget], action: &str, utc_offset: time::UtcOffset) -
         let build_id = meta.as_ref().map(|m| m.build_id.clone());
         let lines    = if log_path.exists() { load_log(&log_path) } else { Vec::new() };
         let tests    = parse_test_sidecar(&t.path);
+        let coverage = parse_coverage_sidecar(&t.path);
 
-        Job { declared: t.declared.clone(), state, started_ms, started_disp, lines, build_id, tests }
+        Job {
+            declared: t.declared.clone(),
+            state,
+            started_ms,
+            started_disp,
+            lines,
+            build_id,
+            tests,
+            coverage,
+        }
     }).collect()
+}
+
+/// Load `target/coverage/coverage.csv` when present (gracefully absent otherwise).
+fn parse_coverage_sidecar(member_root: &std::path::Path) -> Option<CoverageReport> {
+    let path = member_root.join("target").join("coverage").join("coverage.csv");
+    try_load_coverage_csv(&path)
 }
 
 /// Return the set of job indices whose build_id is older than the latest seen.
@@ -370,6 +393,7 @@ fn build_tree_nodes(
         let expand_marker = if has_tests {
             if expanded_jobs.contains(&job_idx) { " ▾" } else { " ▸" }
         } else { "" };
+        let coverage_badge = job.coverage.as_ref().map(|c| c.summary.badge());
         nodes.push(TreeNode {
             label:      format!("{indent}{name}{expand_marker}"),
             title:      job.declared.clone(),
@@ -380,6 +404,7 @@ fn build_tree_nodes(
             test_badge: None,
             class_ref:  None,
             job_idx:    Some(job_idx),
+            coverage_badge,
         });
 
         // When job is expanded: add one class-group node per unique class, then
@@ -402,6 +427,7 @@ fn build_tree_nodes(
                     test_badge: None,
                     class_ref:  Some((job_idx, class_name.clone())),
                     job_idx:    Some(job_idx),
+                    coverage_badge: None,
                 });
 
                 if class_expanded {
@@ -418,6 +444,7 @@ fn build_tree_nodes(
                             test_badge: Some((badge, test.status.clone())),
                             class_ref:  None,
                             job_idx:    Some(job_idx),
+                            coverage_badge: None,
                         });
                     }
                 }
@@ -453,6 +480,7 @@ fn tree_node_plain(label: &str, title: &str, filter: Filter) -> TreeNode {
         test_badge: None,
         class_ref:  None,
         job_idx:    None,
+        coverage_badge: None,
     }
 }
 
@@ -590,9 +618,84 @@ fn rebuild_rows(state: &mut InspectState) {
         return;
     }
     state.test_lines.clear();
-    state.rows   = build_rows(&state.jobs, &state.filter, &state.grep, &state.job_search);
+    let mut rows = build_rows(&state.jobs, &state.filter, &state.grep, &state.job_search);
+    // When a job member (not a class/test child) is selected and has coverage, show a panel.
+    if let Some(cov_rows) = coverage_panel_for_selection(state) {
+        // Insert after the first job header when present, otherwise at the top.
+        let insert_at = rows.iter().position(|r| matches!(r, Row::Header { .. }))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        for (offset, row) in cov_rows.into_iter().enumerate() {
+            rows.insert(insert_at + offset, row);
+        }
+    }
+    state.rows   = rows;
     let max      = state.rows.len().saturating_sub(state.log_vis_h.max(1));
     state.scroll = state.scroll.min(max);
+}
+
+/// Coverage panel rows when the selected node is a job member with a CSV report.
+const COVERAGE_PANEL_LIMIT: usize = 8;
+
+fn coverage_panel_for_selection(state: &InspectState) -> Option<Vec<Row>> {
+    let node = state.nodes.get(state.selected_idx)?;
+    // Only job-level nodes (have log state); skip class groups and containers.
+    if node.state.is_none() || node.test_ref.is_some() || node.class_ref.is_some() {
+        return None;
+    }
+    let job_idx = node.job_idx?;
+    let report  = state.jobs.get(job_idx)?.coverage.as_ref()?;
+    Some(build_coverage_panel_rows(report))
+}
+
+fn build_coverage_panel_rows(report: &CoverageReport) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let summary_color = coverage_color(report.summary.line_pct());
+    rows.push(Row::CoverageLine {
+        text: format!("Coverage  {}", report.summary.summary_line()),
+        color: summary_color,
+    });
+    let uncovered = report.top_uncovered(COVERAGE_PANEL_LIMIT);
+    if uncovered.is_empty() {
+        rows.push(Row::CoverageLine {
+            text: "  all classes fully covered".to_string(),
+            color: Color::Green,
+        });
+    } else {
+        for class in uncovered {
+            let text = if class.has_branches() {
+                format!(
+                    "  {}  {:.1}% lines ({} missed), {:.1}% branches",
+                    class.qualified_name(),
+                    class.line_pct(),
+                    class.line_missed,
+                    class.branch_pct(),
+                )
+            } else {
+                format!(
+                    "  {}  {:.1}% lines ({} missed)",
+                    class.qualified_name(),
+                    class.line_pct(),
+                    class.line_missed,
+                )
+            };
+            rows.push(Row::CoverageLine {
+                text,
+                color: coverage_color(class.line_pct()),
+            });
+        }
+    }
+    rows
+}
+
+fn coverage_color(line_pct: f64) -> Color {
+    if line_pct >= 80.0 {
+        Color::Green
+    } else if line_pct >= 50.0 {
+        Color::Yellow
+    } else {
+        Color::Red
+    }
 }
 
 fn reload(state: &mut InspectState) {
@@ -845,7 +948,7 @@ fn member_line(
             let is_stale = ji.map_or(false, |i| stale_jobs.contains(&i));
             let search_dim = job_search_dim || grep_dim;
 
-            let badge = if is_stale {
+            let state_badge = if is_stale {
                 format!("{} (prev)", badge_str(log_state))
             } else {
                 badge_str(log_state)
@@ -855,7 +958,11 @@ fn member_line(
             } else {
                 badge_style(log_state)
             };
-            let badge_w = badge.chars().count();
+
+            // Right-aligned: optional coverage badge, then state badge.
+            let cov = node.coverage_badge.as_deref().unwrap_or("");
+            let cov_w = if cov.is_empty() { 0 } else { cov.chars().count() + 1 };
+            let badge_w = state_badge.chars().count() + cov_w;
             let label_w = inner_w.saturating_sub(badge_w + 1);
             let label:  String = node.label.chars().take(label_w).collect();
             let padding = " ".repeat(label_w.saturating_sub(label.chars().count()) + 1);
@@ -864,12 +971,21 @@ fn member_line(
             } else {
                 Style::default()
             };
+            let cov_style = if is_stale || search_dim {
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
 
-            let mut line = Line::from(vec![
+            let mut spans = vec![
                 Span::styled(label, label_style),
                 Span::styled(padding, label_style),
-                Span::styled(badge, bstyle),
-            ]);
+            ];
+            if !cov.is_empty() {
+                spans.push(Span::styled(format!("{cov} "), cov_style));
+            }
+            spans.push(Span::styled(state_badge, bstyle));
+            let mut line = Line::from(spans);
             if is_selected {
                 line = line.patch_style(Style::default().add_modifier(Modifier::REVERSED));
             }
@@ -982,6 +1098,11 @@ fn render_row(row: &Row, jobs: &[Job], test_lines: &[String], grep: &str) -> Lin
         Row::TestBody { line } => {
             let text = test_lines.get(*line).map(String::as_str).unwrap_or("");
             body_line(text, Color::Cyan, grep)
+        }
+        Row::CoverageLine { text, color } => {
+            let gutter = Span::styled("▌ ", Style::default().fg(*color).add_modifier(Modifier::BOLD));
+            let msg    = Span::styled(text.clone(), Style::default().fg(*color));
+            Line::from(vec![gutter, msg]).style(Style::default().bg(Color::Indexed(236)))
         }
     }
 }
@@ -1401,6 +1522,37 @@ mod tests {
             lines:    vec!["line one".to_string(), "line two".to_string()],
             build_id: None,
             tests:    vec![],
+            coverage: None,
+        }
+    }
+
+    fn sample_coverage_report() -> CoverageReport {
+        use crate::coverage::{ClassCoverage, CoverageSummary};
+        CoverageReport {
+            summary: CoverageSummary {
+                line_covered: 80,
+                line_missed: 20,
+                branch_covered: 6,
+                branch_missed: 4,
+            },
+            classes: vec![
+                ClassCoverage {
+                    package: "com.example".into(),
+                    class_name: "Foo".into(),
+                    line_covered: 5,
+                    line_missed: 15,
+                    branch_covered: 1,
+                    branch_missed: 3,
+                },
+                ClassCoverage {
+                    package: "com.example".into(),
+                    class_name: "Bar".into(),
+                    line_covered: 75,
+                    line_missed: 5,
+                    branch_covered: 5,
+                    branch_missed: 1,
+                },
+            ],
         }
     }
 
@@ -1698,5 +1850,98 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].content, "abc");
         assert_eq!(result[1].content, "abc");
+    }
+
+    // ── coverage in inspect ──────────────────────────────────────────────
+
+    #[test]
+    fn tree_job_node_carries_coverage_badge() {
+        let mut job = make_job("lib", None, Some(0));
+        job.coverage = Some(sample_coverage_report());
+        let nodes = build_tree_nodes(&[job], &HashSet::new(), &HashSet::new());
+        let lib = nodes.iter().find(|n| n.title == "lib").unwrap();
+        assert_eq!(lib.coverage_badge.as_deref(), Some("80.0% / 60.0%"));
+    }
+
+    #[test]
+    fn tree_job_without_coverage_has_no_badge() {
+        let job = make_job("lib", None, Some(0));
+        let nodes = build_tree_nodes(&[job], &HashSet::new(), &HashSet::new());
+        let lib = nodes.iter().find(|n| n.title == "lib").unwrap();
+        assert!(lib.coverage_badge.is_none());
+    }
+
+    #[test]
+    fn coverage_panel_lists_worst_classes_first() {
+        let report = sample_coverage_report();
+        let rows = build_coverage_panel_rows(&report);
+        assert!(matches!(&rows[0], Row::CoverageLine { text, .. } if text.contains("80.0% lines")));
+        // Foo has more missed lines than Bar.
+        match (&rows[1], &rows[2]) {
+            (Row::CoverageLine { text: a, .. }, Row::CoverageLine { text: b, .. }) => {
+                assert!(a.contains("com.example.Foo"), "got: {a}");
+                assert!(a.contains("15 missed"), "got: {a}");
+                assert!(b.contains("com.example.Bar"), "got: {b}");
+            }
+            _ => panic!("expected two class CoverageLine rows"),
+        }
+    }
+
+    #[test]
+    fn coverage_panel_all_covered_message() {
+        use crate::coverage::{ClassCoverage, CoverageSummary};
+        let report = CoverageReport {
+            summary: CoverageSummary {
+                line_covered: 10,
+                line_missed: 0,
+                branch_covered: 4,
+                branch_missed: 0,
+            },
+            classes: vec![ClassCoverage {
+                package: "p".into(),
+                class_name: "A".into(),
+                line_covered: 10,
+                line_missed: 0,
+                branch_covered: 4,
+                branch_missed: 0,
+            }],
+        };
+        let rows = build_coverage_panel_rows(&report);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(&rows[1], Row::CoverageLine { text, .. }
+            if text.contains("fully covered")));
+    }
+
+    #[test]
+    fn parse_coverage_sidecar_loads_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let cov_dir = dir.path().join("target").join("coverage");
+        std::fs::create_dir_all(&cov_dir).unwrap();
+        std::fs::write(
+            cov_dir.join("coverage.csv"),
+            "GROUP,PACKAGE,CLASS,INSTRUCTION_MISSED,INSTRUCTION_COVERED,\
+             BRANCH_MISSED,BRANCH_COVERED,LINE_MISSED,LINE_COVERED,\
+             COMPLEXITY_MISSED,COMPLEXITY_COVERED,METHOD_MISSED,METHOD_COVERED\n\
+             g,p,A,0,10,0,2,1,9,0,1,0,1\n",
+        )
+        .unwrap();
+        let report = parse_coverage_sidecar(dir.path()).unwrap();
+        assert_eq!(report.summary.line_covered, 9);
+        assert_eq!(report.summary.line_missed, 1);
+        assert_eq!(report.classes.len(), 1);
+    }
+
+    #[test]
+    fn parse_coverage_sidecar_absent_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(parse_coverage_sidecar(dir.path()).is_none());
+    }
+
+    #[test]
+    fn coverage_color_thresholds() {
+        assert_eq!(coverage_color(90.0), Color::Green);
+        assert_eq!(coverage_color(80.0), Color::Green);
+        assert_eq!(coverage_color(50.0), Color::Yellow);
+        assert_eq!(coverage_color(49.9), Color::Red);
     }
 }

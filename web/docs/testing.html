@@ -226,6 +226,7 @@
     </ul>
 
     <p>The report is generated only after the tests pass, so a failing suite never leaves a stale report behind. The <code>coverage</code> key is workspace-inheritable — set it once in a root <code>Curie.toml</code> and every member reports coverage. Under <a href="/docs/maven.html">Maven sync</a> it maps to the <code>jacoco-maven-plugin</code> <code>prepare-agent</code> and <code>report</code> goals, so <code>mvn verify</code> produces an equivalent report.</p>
+    <p>After a coverage run, <a href="/docs/inspect.html#coverage"><code>curie inspect</code></a> shows the line/branch badge on the member and a short uncovered-classes panel when that member is selected — reading the CSV only, no recomputation.</p>
 
     <h2>Incremental test runs</h2>
     <p>Curie stamps the test classes directory + the dep JARs + the test resources, and skips the JVM round-trip when none of those have changed since the last green run. A pure <code>curie test</code> on an unchanged tree exits in milliseconds with <code>Tests up to date</code>.</p>
