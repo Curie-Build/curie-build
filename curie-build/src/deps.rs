@@ -179,59 +179,14 @@ pub fn resolve_ap_versions_for_sync(desc: &descriptor::Descriptor, offline: bool
 // Inspect: declared dependency view + resolved tree lines
 // ---------------------------------------------------------------------------
 
-/// One scope under a member in the inspect Dependencies tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DepScope {
-    /// `[dependencies]` (or managed deps for a BOM project).
-    Compile,
-    /// `[test-dependencies]`.
-    Test,
-    /// `[workspace-dependencies]`.
-    Workspace,
-    /// Production annotation processors (own + workspace-inherited).
-    Ap,
-    /// Test-only annotation processors.
-    TestAp,
-    /// BOM imports (own + workspace-inherited).
-    Bom,
-    /// Test-only BOM imports.
-    TestBom,
-}
-
-impl DepScope {
-    /// Human label for the scope group.  BOM projects use "Managed" for
-    /// their `[dependencies]` table (version pins, not a compile classpath).
-    pub fn label(self, is_bom_project: bool) -> &'static str {
-        match self {
-            DepScope::Compile if is_bom_project => "Managed",
-            DepScope::Compile => "Compile",
-            DepScope::Test => "Test",
-            DepScope::Workspace => "Workspace",
-            DepScope::Ap => "Annotation processors",
-            DepScope::TestAp => "Test annotation processors",
-            DepScope::Bom => "BOM imports",
-            DepScope::TestBom => "Test BOM imports",
-        }
-    }
-
-    /// Whether this scope can be resolved into a transitive Maven tree.
-    pub fn is_resolvable(self) -> bool {
-        matches!(
-            self,
-            DepScope::Compile | DepScope::Test | DepScope::Ap | DepScope::TestAp
-        )
-    }
-}
-
-/// One declared dependency / processor / BOM / workspace entry for display.
+/// One declared compile/test dependency for display (and resolve fallback).
 #[derive(Debug, Clone)]
 pub struct DepItem {
-    /// Coordinate key (`group:artifact`) or workspace label.
+    /// Coordinate key (`group:artifact`).
     pub coord: String,
-    /// Version string as declared; empty means BOM-managed.  For workspace
-    /// deps this is the path.
+    /// Version string as declared; empty means BOM-managed.
     pub version: String,
-    /// Optional note shown after the coordinate (e.g. `workspace`, `javaAgent`).
+    /// Optional note shown after the coordinate (e.g. `javaAgent`).
     pub note: String,
 }
 
@@ -240,9 +195,6 @@ impl DepItem {
     pub fn display_line(&self) -> String {
         let base = if self.version.is_empty() {
             format!("{}  (BOM)", self.coord)
-        } else if self.version.contains('/') || self.version.starts_with('.') {
-            // Workspace path form.
-            format!("{} → {}", self.coord, self.version)
         } else {
             format!("{}:{}", self.coord, self.version)
         };
@@ -254,20 +206,17 @@ impl DepItem {
     }
 }
 
-/// Declared dependency surface of one project / workspace member.
+/// Declared compile/test dependency surface of one project / workspace member.
+///
+/// BOM imports are not listed separately: they only feed version resolution
+/// when building the compile/test trees in the detail pane.
 #[derive(Debug, Clone)]
 pub struct MemberDepsView {
     pub kind_label: String,
     pub name: String,
     pub version: String,
-    pub is_bom: bool,
     pub compile: Vec<DepItem>,
     pub test: Vec<DepItem>,
-    pub workspace: Vec<DepItem>,
-    pub ap: Vec<DepItem>,
-    pub test_ap: Vec<DepItem>,
-    pub bom: Vec<DepItem>,
-    pub test_bom: Vec<DepItem>,
 }
 
 impl MemberDepsView {
@@ -309,166 +258,26 @@ impl MemberDepsView {
             })
             .collect();
 
-        let workspace = desc
-            .workspace_dependencies
-            .iter()
-            .map(|(label, dep)| DepItem {
-                coord: label.clone(),
-                version: dep.path.clone(),
-                note: "workspace".to_string(),
-            })
-            .collect();
-
-        let ap = ap_items_merged(
-            &desc.inherited_annotation_processors,
-            &desc.annotation_processors,
-        );
-        let test_ap = ap_items_merged(
-            &desc.inherited_test_annotation_processors,
-            &desc.test_annotation_processors,
-        );
-
-        let mut bom = bom_items(&desc.inherited_bom_imports, "workspace");
-        bom.extend(bom_items(&desc.bom_imports, ""));
-        let mut test_bom = bom_items(&desc.inherited_test_bom_imports, "workspace");
-        test_bom.extend(bom_items(&desc.test_bom_imports, ""));
-
         Self {
             kind_label: desc.kind_label().to_string(),
             name,
             version,
-            is_bom: desc.is_bom(),
             compile,
             test,
-            workspace,
-            ap,
-            test_ap,
-            bom,
-            test_bom,
         }
     }
 
-    pub fn total_count(&self) -> usize {
-        self.compile.len()
-            + self.test.len()
-            + self.workspace.len()
-            + self.ap.len()
-            + self.test_ap.len()
-            + self.bom.len()
-            + self.test_bom.len()
-    }
-
-    /// Non-empty scopes in display order.
-    pub fn non_empty_scopes(&self) -> Vec<(DepScope, usize)> {
-        let candidates = [
-            (DepScope::Compile, self.compile.len()),
-            (DepScope::Test, self.test.len()),
-            (DepScope::Workspace, self.workspace.len()),
-            (DepScope::Ap, self.ap.len()),
-            (DepScope::TestAp, self.test_ap.len()),
-            (DepScope::Bom, self.bom.len()),
-            (DepScope::TestBom, self.test_bom.len()),
-        ];
-        candidates.into_iter().filter(|(_, n)| *n > 0).collect()
-    }
-
-    pub fn items(&self, scope: DepScope) -> &[DepItem] {
-        match scope {
-            DepScope::Compile => &self.compile,
-            DepScope::Test => &self.test,
-            DepScope::Workspace => &self.workspace,
-            DepScope::Ap => &self.ap,
-            DepScope::TestAp => &self.test_ap,
-            DepScope::Bom => &self.bom,
-            DepScope::TestBom => &self.test_bom,
-        }
-    }
-
-    pub fn has_any(&self) -> bool {
-        self.total_count() > 0
-    }
-}
-
-fn bom_items(map: &BTreeMap<String, String>, note: &str) -> Vec<DepItem> {
-    map.iter()
-        .map(|(k, v)| DepItem {
-            coord: k.clone(),
-            version: v.clone(),
-            note: note.to_string(),
-        })
-        .collect()
-}
-
-fn ap_items_merged(
-    inherited: &BTreeMap<String, descriptor::AnnotationProcessor>,
-    own: &BTreeMap<String, descriptor::AnnotationProcessor>,
-) -> Vec<DepItem> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    // Own first for display priority, but list inherited-only too.
-    for (k, v) in own {
-        seen.insert(k.as_str());
-        let mut note = String::new();
-        if v.on_compile_classpath() {
-            note.push_str("on-compile-classpath");
-        }
-        out.push(DepItem {
-            coord: k.clone(),
-            version: v.version().to_string(),
-            note,
-        });
-    }
-    for (k, v) in inherited {
-        if seen.contains(k.as_str()) {
-            continue;
-        }
-        let mut note = "workspace".to_string();
-        if v.on_compile_classpath() {
-            note.push_str(", on-compile-classpath");
-        }
-        out.push(DepItem {
-            coord: k.clone(),
-            version: v.version().to_string(),
-            note,
-        });
-    }
-    out
-}
-
-/// Resolve a scope to tree-formatted lines (offline-friendly for inspect).
-///
-/// Non-resolvable scopes (workspace paths, BOM import lists) return the
-/// declared list.  Resolvable scopes call the Maven resolver; on failure
-/// the error message is returned as a single line so the TUI can still show
-/// the declared entries separately.
-pub fn resolve_scope_tree_lines(
-    desc: &descriptor::Descriptor,
-    scope: DepScope,
-    offline: bool,
-) -> Result<Vec<String>> {
-    match scope {
-        DepScope::Workspace | DepScope::Bom | DepScope::TestBom => {
-            let view = MemberDepsView::from_descriptor(desc);
-            Ok(view
-                .items(scope)
-                .iter()
-                .map(|i| i.display_line())
-                .collect())
-        }
-        DepScope::Compile | DepScope::Test => {
-            let tests = matches!(scope, DepScope::Test);
-            let tree = resolve_dep_tree(desc, tests, offline)?;
-            Ok(format_tree_lines(&tree))
-        }
-        DepScope::Ap | DepScope::TestAp => {
-            let tests = matches!(scope, DepScope::TestAp);
-            let tree = resolve_ap_tree(desc, tests, offline)?;
-            Ok(format_tree_lines(&tree))
-        }
+    /// Count of declared compile + test dependencies (inspect badge).
+    pub fn compile_test_count(&self) -> usize {
+        self.compile.len() + self.test.len()
     }
 }
 
 /// Resolve production or test `[dependencies]` into a full tree.
+///
+/// BOM imports from the descriptor (including workspace-inherited ones) are
+/// passed to the resolver so version-less coordinates get concrete versions —
+/// they are not emitted as a separate tree section.
 pub fn resolve_dep_tree(
     desc: &descriptor::Descriptor,
     tests: bool,
@@ -501,51 +310,6 @@ pub fn resolve_dep_tree(
             allow_version_conflict: v.allow_version_conflict(),
         })
         .collect();
-    let opts = ResolveOptions {
-        default_repos: central_repos(),
-        named_repos: extra_repos(desc),
-        progress: false,
-        bom_imports: bom_gavs,
-        offline,
-        skip_version_ranges: false,
-        error_on_version_conflict: false,
-    };
-    curie_deps::resolve_tree(&entries, &opts)
-}
-
-/// Resolve annotation processors (prod or test) into a tree.
-pub fn resolve_ap_tree(
-    desc: &descriptor::Descriptor,
-    tests: bool,
-    offline: bool,
-) -> Result<DepTree> {
-    let pairs = if tests {
-        desc.test_ap_pairs()
-    } else {
-        desc.ap_pairs()
-    };
-    if pairs.is_empty() {
-        return Ok(DepTree {
-            resolved: vec![],
-            skipped: std::collections::HashMap::new(),
-        });
-    }
-    let entries: Vec<DepEntry> = pairs
-        .iter()
-        .map(|(coord, version)| DepEntry {
-            key: coord,
-            version,
-            repo_id: None,
-            exclusions: vec![],
-            classifier: None,
-            allow_version_conflict: false,
-        })
-        .collect();
-    let bom_gavs = if tests {
-        desc.test_bom_gavs()?
-    } else {
-        desc.prod_bom_gavs()?
-    };
     let opts = ResolveOptions {
         default_repos: central_repos(),
         named_repos: extra_repos(desc),
@@ -820,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn member_deps_view_from_descriptor_collects_scopes() {
+    fn member_deps_view_from_descriptor_compile_and_test_only() {
         let mut desc = minimal_app();
         desc.dependencies.insert(
             "com.example:foo".into(),
@@ -830,6 +594,7 @@ mod tests {
             "org.junit.jupiter:junit-jupiter".into(),
             DependencyValue::Version("5.10.0".into()),
         );
+        // BOMs / workspace / APs must not appear as separate lists.
         desc.workspace_dependencies.insert(
             "core".into(),
             WorkspaceDep {
@@ -843,21 +608,14 @@ mod tests {
         );
         desc.bom_imports
             .insert("com.fasterxml.jackson:jackson-bom".into(), "2.17.2".into());
-        desc.inherited_bom_imports
-            .insert("org.junit:junit-bom".into(), "5.10.0".into());
 
         let view = MemberDepsView::from_descriptor(&desc);
         assert_eq!(view.kind_label, "application");
         assert_eq!(view.compile.len(), 1);
         assert_eq!(view.test.len(), 1);
-        assert_eq!(view.workspace.len(), 1);
-        assert_eq!(view.ap.len(), 1);
-        assert_eq!(view.bom.len(), 2); // inherited + own
-        assert!(view.bom.iter().any(|i| i.note == "workspace"));
-        assert_eq!(view.total_count(), 6);
-        let scopes = view.non_empty_scopes();
-        assert!(scopes.iter().any(|(s, _)| *s == DepScope::Compile));
-        assert!(scopes.iter().any(|(s, _)| *s == DepScope::Bom));
+        assert_eq!(view.compile_test_count(), 2);
+        assert_eq!(view.compile[0].coord, "com.example:foo");
+        assert_eq!(view.test[0].coord, "org.junit.jupiter:junit-jupiter");
     }
 
     #[test]
@@ -888,19 +646,18 @@ mod tests {
     }
 
     #[test]
-    fn dep_item_display_bom_and_workspace() {
+    fn dep_item_display_bom_managed() {
         let bom = DepItem {
             coord: "com.foo:bar".into(),
             version: String::new(),
             note: String::new(),
         };
         assert!(bom.display_line().contains("(BOM)"));
-        let ws = DepItem {
-            coord: "core".into(),
-            version: "../core".into(),
-            note: "workspace".into(),
+        let pinned = DepItem {
+            coord: "com.foo:bar".into(),
+            version: "1.2.3".into(),
+            note: "javaAgent".into(),
         };
-        assert!(ws.display_line().contains("→"));
-        assert!(ws.display_line().contains("workspace"));
+        assert_eq!(pinned.display_line(), "com.foo:bar:1.2.3  (javaAgent)");
     }
 }

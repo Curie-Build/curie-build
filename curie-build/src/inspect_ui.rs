@@ -29,7 +29,7 @@ use crate::coverage::{
     load_source_lines, try_load_member_coverage, CoverageReport, LineHit, MemberCoverage,
     SourceFileCoverage, SourceLine,
 };
-use crate::deps::{self, DepScope, MemberDepsView};
+use crate::deps::{self, MemberDepsView};
 use crate::descriptor;
 use crate::parallel::parse_meta;
 use crate::workspace;
@@ -144,10 +144,6 @@ struct TreeNode {
     coverage_group_ref: Option<usize>,
     /// `Some((job_idx, source_idx))` for a source-file leaf under Coverage.
     coverage_source_ref: Option<(usize, usize)>,
-    /// `Some((job_idx, scope))` for a dependency-scope group under Deps mode.
-    dep_scope_ref: Option<(usize, DepScope)>,
-    /// `Some((job_idx, scope, entry_idx))` for a declared dependency leaf.
-    dep_entry_ref: Option<(usize, DepScope, usize)>,
     /// Right-aligned badge for Deps mode (e.g. dep counts).
     deps_badge: Option<String>,
 }
@@ -274,12 +270,10 @@ struct InspectState {
     expanded_jobs: HashSet<usize>,
     /// `(job_idx, class_name)` pairs that have been expanded to show test method rows.
     expanded_classes: HashSet<(usize, String)>,
-    /// `(job_idx, scope)` pairs expanded to show declared dependency entries.
-    expanded_dep_scopes: HashSet<(usize, DepScope)>,
     /// Descriptors keyed by member `declared` path (workspace inheritance applied).
     descriptors:       HashMap<String, descriptor::Descriptor>,
-    /// Cached resolved tree lines for `(job_idx, scope)`.
-    resolved_deps:     HashMap<(usize, DepScope), Result<Vec<String>, String>>,
+    /// Cached resolved tree lines for `(job_idx, tests)` — compile (`false`) / test (`true`).
+    resolved_deps:     HashMap<(usize, bool), Result<Vec<String>, String>>,
     /// Lines from the currently selected test's output file (empty when not in test view).
     test_lines:        Vec<String>,
     /// Annotated source lines when a coverage source file is selected.
@@ -311,14 +305,12 @@ pub(crate) fn run_inspect_ui(
     let stale_jobs   = collect_stale_jobs(&jobs);
     let expanded_jobs:    HashSet<usize>           = HashSet::new();
     let expanded_classes: HashSet<(usize, String)> = HashSet::new();
-    let expanded_dep_scopes: HashSet<(usize, DepScope)> = HashSet::new();
     let mode   = ViewMode::Logs;
     let nodes  = build_tree_nodes(
         &jobs,
         mode,
         &expanded_jobs,
         &expanded_classes,
-        &expanded_dep_scopes,
     );
     let filter = Filter::All;
     let rows   = build_rows(&jobs, &filter, "", "");
@@ -346,7 +338,6 @@ pub(crate) fn run_inspect_ui(
         job_search:      String::new(),
         expanded_jobs,
         expanded_classes,
-        expanded_dep_scopes,
         descriptors,
         resolved_deps:    HashMap::new(),
         test_lines:       Vec::new(),
@@ -523,11 +514,10 @@ fn load_log(path: &std::path::Path) -> Vec<String> {
 // ── Tree construction ─────────────────────────────────────────────────────
 
 fn build_tree_nodes(
-    jobs:                &[Job],
-    mode:                ViewMode,
-    expanded_jobs:       &HashSet<usize>,
-    expanded_classes:    &HashSet<(usize, String)>,
-    expanded_dep_scopes: &HashSet<(usize, DepScope)>,
+    jobs:             &[Job],
+    mode:             ViewMode,
+    expanded_jobs:    &HashSet<usize>,
+    expanded_classes: &HashSet<(usize, String)>,
 ) -> Vec<TreeNode> {
     let root_label = match mode {
         ViewMode::Logs => "all jobs",
@@ -575,7 +565,6 @@ fn build_tree_nodes(
             mode,
             expanded_jobs,
             expanded_classes,
-            expanded_dep_scopes,
         );
 
         current_dirs = dirs.iter().map(|s| s.to_string()).collect();
@@ -585,22 +574,21 @@ fn build_tree_nodes(
 }
 
 fn push_job_nodes(
-    nodes:               &mut Vec<TreeNode>,
-    job:                 &Job,
-    job_idx:             usize,
-    name:                &str,
-    depth:               usize,
-    indent:              &str,
-    mode:                ViewMode,
-    expanded_jobs:       &HashSet<usize>,
-    expanded_classes:    &HashSet<(usize, String)>,
-    expanded_dep_scopes: &HashSet<(usize, DepScope)>,
+    nodes:            &mut Vec<TreeNode>,
+    job:              &Job,
+    job_idx:          usize,
+    name:             &str,
+    depth:            usize,
+    indent:           &str,
+    mode:             ViewMode,
+    expanded_jobs:    &HashSet<usize>,
+    expanded_classes: &HashSet<(usize, String)>,
 ) {
     let has_tests = !job.tests.is_empty();
     let has_coverage = job.coverage.as_ref()
         .is_some_and(|c| !c.sources.is_empty() || !c.report.classes.is_empty());
-    let has_deps = job.deps.as_ref().is_some_and(|d| d.has_any());
 
+    // Deps mode never expands past the project — compile/test trees live in the detail pane.
     let (expandable, coverage_badge, test_summary, deps_badge) = match mode {
         ViewMode::Logs => (false, None, None, None),
         ViewMode::Tests => (
@@ -617,14 +605,14 @@ fn push_job_nodes(
         ),
         ViewMode::Deps => {
             let badge = job.deps.as_ref().map(|d| {
-                let n = d.total_count();
+                let n = d.compile_test_count();
                 if n == 1 {
                     "1 dep".to_string()
                 } else {
                     format!("{n} deps")
                 }
             });
-            (has_deps, None, None, badge)
+            (false, None, None, badge)
         }
     };
 
@@ -672,8 +660,6 @@ fn push_job_nodes(
         coverage_badge: job_cov_badge,
         coverage_group_ref:  None,
         coverage_source_ref: None,
-        dep_scope_ref: None,
-        dep_entry_ref: None,
         deps_badge,
     });
 
@@ -685,7 +671,7 @@ fn push_job_nodes(
     let leaf_indent  = "  ".repeat(depth + 3);
 
     match mode {
-        ViewMode::Logs => {}
+        ViewMode::Logs | ViewMode::Deps => {}
         ViewMode::Tests => {
             for (class_name, tests_in_class) in group_by_class(&job.tests) {
                 let class_expanded = expanded_classes.contains(&(job_idx, class_name.clone()));
@@ -704,8 +690,6 @@ fn push_job_nodes(
                     coverage_badge: None,
                     coverage_group_ref:  None,
                     coverage_source_ref: None,
-                    dep_scope_ref: None,
-                    dep_entry_ref: None,
                     deps_badge: None,
                 });
 
@@ -726,8 +710,6 @@ fn push_job_nodes(
                             coverage_badge: None,
                             coverage_group_ref:  None,
                             coverage_source_ref: None,
-                            dep_scope_ref: None,
-                            dep_entry_ref: None,
                             deps_badge: None,
                         });
                     }
@@ -761,72 +743,7 @@ fn push_job_nodes(
                 }
             }
         }
-        ViewMode::Deps => {
-            if let Some(view) = job.deps.as_ref() {
-                for (scope, count) in view.non_empty_scopes() {
-                    let scope_expanded = expanded_dep_scopes.contains(&(job_idx, scope));
-                    let scope_marker = if scope_expanded { " ▾" } else { " ▸" };
-                    let scope_label = scope.label(view.is_bom);
-                    nodes.push(TreeNode {
-                        label: format!("{child_indent}{scope_label}{scope_marker}"),
-                        title: format!("{} › {}", job.declared, scope_label),
-                        filter: Filter::Prefix(job.declared.clone()),
-                        state: None,
-                        selectable: true,
-                        test_ref: None,
-                        test_badge: None,
-                        class_ref: None,
-                        job_idx: Some(job_idx),
-                        coverage_badge: None,
-                        coverage_group_ref: None,
-                        coverage_source_ref: None,
-                        dep_scope_ref: Some((job_idx, scope)),
-                        dep_entry_ref: None,
-                        deps_badge: Some(format!("{count}")),
-                    });
-                    if scope_expanded {
-                        for (entry_idx, item) in view.items(scope).iter().enumerate() {
-                            let short = short_dep_label(&item.coord);
-                            nodes.push(TreeNode {
-                                label: format!("{leaf_indent}{short}"),
-                                title: format!(
-                                    "{} › {} › {}",
-                                    job.declared, scope_label, item.coord
-                                ),
-                                filter: Filter::Prefix(job.declared.clone()),
-                                state: None,
-                                selectable: true,
-                                test_ref: None,
-                                test_badge: None,
-                                class_ref: None,
-                                job_idx: Some(job_idx),
-                                coverage_badge: None,
-                                coverage_group_ref: None,
-                                coverage_source_ref: None,
-                                dep_scope_ref: None,
-                                dep_entry_ref: Some((job_idx, scope, entry_idx)),
-                                deps_badge: if item.version.is_empty() {
-                                    Some("(BOM)".to_string())
-                                } else if item.version.len() <= 12 {
-                                    Some(item.version.clone())
-                                } else {
-                                    None
-                                },
-                            });
-                        }
-                    }
-                }
-            }
-        }
     }
-}
-
-fn short_dep_label(coord: &str) -> String {
-    // Prefer artifactId for compact tree labels.
-    coord
-        .rsplit_once(':')
-        .map(|(_, a)| a.to_string())
-        .unwrap_or_else(|| coord.to_string())
 }
 
 fn test_summary_badge(tests: &[TestEntry]) -> String {
@@ -867,8 +784,6 @@ fn coverage_source_node(
         coverage_badge: Some(badge),
         coverage_group_ref:  None,
         coverage_source_ref: Some((job_idx, src_idx)),
-        dep_scope_ref: None,
-        dep_entry_ref: None,
         deps_badge: None,
     }
 }
@@ -899,8 +814,6 @@ fn tree_node_plain(label: &str, title: &str, filter: Filter) -> TreeNode {
         coverage_badge: None,
         coverage_group_ref:  None,
         coverage_source_ref: None,
-        dep_scope_ref: None,
-        dep_entry_ref: None,
         deps_badge: None,
     }
 }
@@ -976,8 +889,6 @@ fn apply_selection(state: &mut InspectState) {
     let node     = &state.nodes[state.selected_idx];
     let test_ref = node.test_ref;
     let cov_src  = node.coverage_source_ref;
-    let dep_scope = node.dep_scope_ref;
-    let dep_entry = node.dep_entry_ref;
     let title    = node.title.clone();
     let filter   = node.filter.clone();
 
@@ -991,14 +902,6 @@ fn apply_selection(state: &mut InspectState) {
     } else if let Some((job_idx, src_idx)) = cov_src {
         state.test_lines.clear();
         load_source_view(state, job_idx, src_idx);
-    } else if let Some((job_idx, scope, entry_idx)) = dep_entry {
-        state.test_lines.clear();
-        state.source_lines.clear();
-        load_dep_entry_view(state, job_idx, scope, entry_idx);
-    } else if let Some((job_idx, scope)) = dep_scope {
-        state.test_lines.clear();
-        state.source_lines.clear();
-        load_dep_scope_view(state, job_idx, scope);
     } else {
         state.test_lines.clear();
         state.source_lines.clear();
@@ -1114,14 +1017,6 @@ fn rebuild_rows(state: &mut InspectState) {
         load_source_view(state, job_idx, src_idx);
         return;
     }
-    if let Some((job_idx, scope, entry_idx)) = state.nodes.get(state.selected_idx).and_then(|n| n.dep_entry_ref) {
-        load_dep_entry_view(state, job_idx, scope, entry_idx);
-        return;
-    }
-    if let Some((job_idx, scope)) = state.nodes.get(state.selected_idx).and_then(|n| n.dep_scope_ref) {
-        load_dep_scope_view(state, job_idx, scope);
-        return;
-    }
     state.test_lines.clear();
     state.source_lines.clear();
 
@@ -1150,8 +1045,8 @@ fn rebuild_rows(state: &mut InspectState) {
             state.rows = rows;
         }
         ViewMode::Deps => {
-            if let Some(rows) = deps_panel_for_selection(state) {
-                state.rows = rows;
+            if let Some(job_idx) = deps_selected_job(state) {
+                state.rows = build_deps_panel_rows(state, job_idx);
             } else {
                 state.rows = build_deps_overview_rows(state);
             }
@@ -1161,65 +1056,107 @@ fn rebuild_rows(state: &mut InspectState) {
     state.scroll = state.scroll.min(max);
 }
 
-fn deps_panel_for_selection(state: &InspectState) -> Option<Vec<Row>> {
+/// Exact project node selected in Deps mode (not a directory container or root).
+fn deps_selected_job(state: &InspectState) -> Option<usize> {
     let node = state.nodes.get(state.selected_idx)?;
-    if node.dep_scope_ref.is_some() || node.dep_entry_ref.is_some() {
-        return None;
-    }
     let job_idx = node.job_idx?;
     let Filter::Prefix(p) = &node.filter else { return None; };
     let job = state.jobs.get(job_idx)?;
     if job.declared != *p {
         return None;
     }
-    Some(build_deps_panel_rows(job))
+    Some(job_idx)
 }
 
-fn build_deps_panel_rows(job: &Job) -> Vec<Row> {
-    let mut rows = Vec::new();
-    let Some(view) = job.deps.as_ref() else {
-        rows.push(Row::CoverageLine {
-            text: "No Curie.toml descriptor loaded for this member".to_string(),
-            color: theme::COMMENT,
-        });
-        return rows;
+/// Detail pane for one project: compile tree then test tree.
+/// BOM imports are not listed separately — they only feed version resolution.
+fn build_deps_panel_rows(state: &mut InspectState, job_idx: usize) -> Vec<Row> {
+    let (header, compile_n, test_n) = {
+        let Some(job) = state.jobs.get(job_idx) else {
+            return vec![Row::CoverageLine {
+                text: "(unknown job)".to_string(),
+                color: theme::COMMENT,
+            }];
+        };
+        let Some(view) = job.deps.as_ref() else {
+            return vec![Row::CoverageLine {
+                text: "No Curie.toml descriptor loaded for this member".to_string(),
+                color: theme::COMMENT,
+            }];
+        };
+        (
+            format!("{}  {} v{}", view.kind_label, view.name, view.version),
+            view.compile.len(),
+            view.test.len(),
+        )
     };
-    rows.push(Row::CoverageLine {
-        text: format!(
-            "{}  {} v{}  — {} declared  (expand scopes for trees)",
-            view.kind_label,
-            view.name,
-            view.version,
-            view.total_count(),
-        ),
+
+    let mut rows = vec![Row::CoverageLine {
+        text: header,
         color: theme::CYAN,
-    });
-    if !view.has_any() {
+    }];
+
+    append_resolved_scope_section(&mut rows, state, job_idx, false, "Compile", compile_n);
+    append_resolved_scope_section(&mut rows, state, job_idx, true, "Test", test_n);
+
+    if compile_n == 0 && test_n == 0 {
         rows.push(Row::CoverageLine {
-            text: "  (no dependencies, processors, BOMs, or workspace deps)".to_string(),
+            text: "  (no compile or test dependencies)".to_string(),
             color: theme::COMMENT,
         });
-        return rows;
-    }
-    for (scope, count) in view.non_empty_scopes() {
-        rows.push(Row::CoverageLine {
-            text: format!("  {}  {count}", scope.label(view.is_bom)),
-            color: theme::FG,
-        });
-        for item in view.items(scope).iter().take(6) {
-            rows.push(Row::CoverageLine {
-                text: format!("    {}", item.display_line()),
-                color: theme::COMMENT,
-            });
-        }
-        if view.items(scope).len() > 6 {
-            rows.push(Row::CoverageLine {
-                text: format!("    … and {} more", view.items(scope).len() - 6),
-                color: theme::COMMENT,
-            });
-        }
     }
     rows
+}
+
+fn append_resolved_scope_section(
+    rows: &mut Vec<Row>,
+    state: &mut InspectState,
+    job_idx: usize,
+    tests: bool,
+    label: &str,
+    declared_n: usize,
+) {
+    rows.push(Row::CoverageLine {
+        text: format!("{label}  ({declared_n} declared)"),
+        color: theme::YELLOW,
+    });
+    if declared_n == 0 {
+        rows.push(Row::CoverageLine {
+            text: "  (none)".to_string(),
+            color: theme::COMMENT,
+        });
+        return;
+    }
+    match ensure_resolved_deps(state, job_idx, tests) {
+        Ok(lines) => {
+            for line in lines {
+                rows.push(Row::CoverageLine {
+                    text: line,
+                    color: theme::FG,
+                });
+            }
+        }
+        Err(err) => {
+            // Fall back to declared coordinates when offline resolve fails.
+            if let Some(view) = state.jobs.get(job_idx).and_then(|j| j.deps.as_ref()) {
+                let items = if tests { &view.test } else { &view.compile };
+                for item in items {
+                    rows.push(Row::CoverageLine {
+                        text: format!("  {}", item.display_line()),
+                        color: theme::FG,
+                    });
+                }
+            }
+            rows.push(Row::CoverageLine {
+                text: format!("  (resolve offline failed: {err})"),
+                color: theme::RED,
+            });
+            rows.push(Row::CoverageLine {
+                text: "  Tip: run a build so ~/.m2 is populated, or use `curie deps`.".to_string(),
+                color: theme::COMMENT,
+            });
+        }
+    }
 }
 
 fn build_deps_overview_rows(state: &InspectState) -> Vec<Row> {
@@ -1232,217 +1169,42 @@ fn build_deps_overview_rows(state: &InspectState) -> Vec<Row> {
             continue;
         }
         let Some(view) = job.deps.as_ref() else { continue; };
-        if !view.has_any() {
-            continue;
-        }
+        let n = view.compile_test_count();
         rows.push(Row::CoverageLine {
             text: format!(
-                "{}  {}  ({} deps)",
+                "{}  {}  — {} compile, {} test",
                 job.declared,
                 view.kind_label,
-                view.total_count(),
+                view.compile.len(),
+                view.test.len(),
             ),
-            color: theme::CYAN,
+            color: if n > 0 { theme::CYAN } else { theme::COMMENT },
         });
-        for (scope, count) in view.non_empty_scopes() {
-            rows.push(Row::CoverageLine {
-                text: format!("  {}  {count}", scope.label(view.is_bom)),
-                color: theme::FG,
-            });
-        }
     }
     if rows.is_empty() {
         rows.push(Row::CoverageLine {
-            text: "No dependencies in this selection".to_string(),
+            text: "No projects in this selection".to_string(),
             color: theme::COMMENT,
         });
+    } else {
+        rows.insert(
+            0,
+            Row::CoverageLine {
+                text: "Select a project to view compile and test dependency trees".to_string(),
+                color: theme::COMMENT,
+            },
+        );
     }
     rows
 }
 
-fn load_dep_scope_view(state: &mut InspectState, job_idx: usize, scope: DepScope) {
-    let (declared_name, is_bom, declared_lines) = {
-        let Some(job) = state.jobs.get(job_idx) else {
-            state.rows = vec![Row::CoverageLine {
-                text: "(unknown job)".to_string(),
-                color: theme::COMMENT,
-            }];
-            return;
-        };
-        let Some(view) = job.deps.as_ref() else {
-            state.rows = vec![Row::CoverageLine {
-                text: "(no descriptor)".to_string(),
-                color: theme::COMMENT,
-            }];
-            return;
-        };
-        let lines: Vec<String> = view.items(scope).iter().map(|i| i.display_line()).collect();
-        (job.declared.clone(), view.is_bom, lines)
-    };
-    let scope_label = scope.label(is_bom);
-
-    let mut rows = vec![Row::CoverageLine {
-        text: format!(
-            "{declared_name}  {scope_label}  ({} declared)",
-            declared_lines.len(),
-        ),
-        color: theme::CYAN,
-    }];
-
-    // Declared list first so the pane is useful even before / without resolve.
-    rows.push(Row::CoverageLine {
-        text: "Declared:".to_string(),
-        color: theme::YELLOW,
-    });
-    if declared_lines.is_empty() {
-        rows.push(Row::CoverageLine {
-            text: "  (none)".to_string(),
-            color: theme::COMMENT,
-        });
-    } else {
-        for line in &declared_lines {
-            rows.push(Row::CoverageLine {
-                text: format!("  {line}"),
-                color: theme::FG,
-            });
-        }
-    }
-
-    if scope.is_resolvable() {
-        let tree_lines = ensure_resolved_deps(state, job_idx, scope);
-        rows.push(Row::CoverageLine {
-            text: "Resolved tree (offline cache):".to_string(),
-            color: theme::YELLOW,
-        });
-        match tree_lines {
-            Ok(lines) => {
-                for line in lines {
-                    rows.push(Row::CoverageLine {
-                        text: line,
-                        color: theme::FG,
-                    });
-                }
-            }
-            Err(err) => {
-                rows.push(Row::CoverageLine {
-                    text: format!("  (resolve failed: {err})"),
-                    color: theme::RED,
-                });
-                rows.push(Row::CoverageLine {
-                    text: "  Tip: run a build first so ~/.m2 is populated, or use `curie deps`.".to_string(),
-                    color: theme::COMMENT,
-                });
-            }
-        }
-    }
-
-    state.rows = rows;
-    let max = state.rows.len().saturating_sub(state.log_vis_h.max(1));
-    state.scroll = state.scroll.min(max);
-}
-
-fn load_dep_entry_view(
-    state: &mut InspectState,
-    job_idx: usize,
-    scope: DepScope,
-    entry_idx: usize,
-) {
-    let (declared_name, is_bom, display_line, note, ga) = {
-        let Some(job) = state.jobs.get(job_idx) else {
-            state.rows = vec![Row::CoverageLine {
-                text: "(unknown job)".to_string(),
-                color: theme::COMMENT,
-            }];
-            return;
-        };
-        let Some(view) = job.deps.as_ref() else {
-            state.rows = vec![Row::CoverageLine {
-                text: "(no descriptor)".to_string(),
-                color: theme::COMMENT,
-            }];
-            return;
-        };
-        let Some(item) = view.items(scope).get(entry_idx) else {
-            state.rows = vec![Row::CoverageLine {
-                text: "(unknown entry)".to_string(),
-                color: theme::COMMENT,
-            }];
-            return;
-        };
-        (
-            job.declared.clone(),
-            view.is_bom,
-            item.display_line(),
-            item.note.clone(),
-            item.coord.clone(),
-        )
-    };
-    let scope_label = scope.label(is_bom);
-    let mut rows = vec![
-        Row::CoverageLine {
-            text: format!("{declared_name}  ›  {scope_label}"),
-            color: theme::CYAN,
-        },
-        Row::CoverageLine {
-            text: display_line,
-            color: theme::FG,
-        },
-    ];
-    if !note.is_empty() {
-        rows.push(Row::CoverageLine {
-            text: format!("  note: {note}"),
-            color: theme::COMMENT,
-        });
-    }
-    if scope.is_resolvable() {
-        let tree_lines = ensure_resolved_deps(state, job_idx, scope);
-        rows.push(Row::CoverageLine {
-            text: "Resolved tree (entries matching this coordinate):".to_string(),
-            color: theme::YELLOW,
-        });
-        match tree_lines {
-            Ok(lines) => {
-                let matching: Vec<String> = lines
-                    .iter()
-                    .filter(|l| l.contains(&ga))
-                    .cloned()
-                    .collect();
-                if matching.is_empty() {
-                    for line in lines {
-                        rows.push(Row::CoverageLine {
-                            text: line,
-                            color: theme::COMMENT,
-                        });
-                    }
-                } else {
-                    for line in matching {
-                        rows.push(Row::CoverageLine {
-                            text: line,
-                            color: theme::FG,
-                        });
-                    }
-                }
-            }
-            Err(err) => {
-                rows.push(Row::CoverageLine {
-                    text: format!("  (resolve failed: {err})"),
-                    color: theme::RED,
-                });
-            }
-        }
-    }
-    state.rows = rows;
-    let max = state.rows.len().saturating_sub(state.log_vis_h.max(1));
-    state.scroll = state.scroll.min(max);
-}
-
-/// Resolve (or fetch from cache) the offline dependency tree for a scope.
+/// Resolve (or fetch from cache) the offline dependency tree for compile/test.
 fn ensure_resolved_deps(
     state: &mut InspectState,
     job_idx: usize,
-    scope: DepScope,
+    tests: bool,
 ) -> Result<Vec<String>, String> {
-    if let Some(cached) = state.resolved_deps.get(&(job_idx, scope)) {
+    if let Some(cached) = state.resolved_deps.get(&(job_idx, tests)) {
         return cached.clone();
     }
     let declared = state
@@ -1451,11 +1213,12 @@ fn ensure_resolved_deps(
         .map(|j| j.declared.clone())
         .unwrap_or_default();
     let result = match state.descriptors.get(&declared) {
-        Some(desc) => deps::resolve_scope_tree_lines(desc, scope, true /* offline */)
+        Some(desc) => deps::resolve_dep_tree(desc, tests, true /* offline */)
+            .map(|tree| deps::format_tree_lines(&tree))
             .map_err(|e| e.to_string()),
         None => Err("descriptor not loaded".to_string()),
     };
-    state.resolved_deps.insert((job_idx, scope), result.clone());
+    state.resolved_deps.insert((job_idx, tests), result.clone());
     result
 }
 
@@ -1638,7 +1401,6 @@ fn rebuild_tree(state: &mut InspectState) {
         state.mode,
         &state.expanded_jobs,
         &state.expanded_classes,
-        &state.expanded_dep_scopes,
     );
 }
 
@@ -1651,7 +1413,6 @@ fn switch_mode(state: &mut InspectState, mode: ViewMode) {
     // Expansion state is mode-specific enough that a clean slate is clearer.
     state.expanded_jobs.clear();
     state.expanded_classes.clear();
-    state.expanded_dep_scopes.clear();
     state.test_lines.clear();
     state.source_lines.clear();
     state.scroll = 0;
@@ -2476,17 +2237,14 @@ fn handle_key_search(state: &mut InspectState, key: KeyEvent) -> bool {
     true
 }
 
-/// Toggle expansion at the current tree level (job → children, class → tests, scope → entries).
+/// Toggle expansion at the current tree level (job → children, class → tests).
 fn toggle_test_expansion(state: &mut InspectState) {
-    if state.mode == ViewMode::Logs {
+    if state.mode == ViewMode::Logs || state.mode == ViewMode::Deps {
         return;
     }
     let node = &state.nodes[state.selected_idx];
 
-    if node.test_ref.is_some()
-        || node.coverage_source_ref.is_some()
-        || node.dep_entry_ref.is_some()
-    {
+    if node.test_ref.is_some() || node.coverage_source_ref.is_some() {
         // Already at a leaf; Enter/→ has no further expansion.
         return;
     }
@@ -2503,17 +2261,6 @@ fn toggle_test_expansion(state: &mut InspectState) {
         return;
     }
 
-    if let Some((job_idx, scope)) = node.dep_scope_ref {
-        let key = (job_idx, scope);
-        if state.expanded_dep_scopes.contains(&key) {
-            state.expanded_dep_scopes.remove(&key);
-        } else {
-            state.expanded_dep_scopes.insert(key);
-        }
-        rebuild_tree_and_reselect_dep_scope(state, job_idx, scope);
-        return;
-    }
-
     // Job node: toggle job expansion.
     if let Some(job_idx) = job_idx_for_node(state) {
         if state.expanded_jobs.contains(&job_idx) {
@@ -2527,7 +2274,7 @@ fn toggle_test_expansion(state: &mut InspectState) {
 
 /// Collapse: ← on a leaf → collapse parent; on a group → collapse parent job.
 fn collapse_test_node(state: &mut InspectState) {
-    if state.mode == ViewMode::Logs {
+    if state.mode == ViewMode::Logs || state.mode == ViewMode::Deps {
         return;
     }
     let node = &state.nodes[state.selected_idx];
@@ -2537,16 +2284,8 @@ fn collapse_test_node(state: &mut InspectState) {
         let class_name = state.jobs[job_idx].tests[test_idx].class_name.clone();
         state.expanded_classes.remove(&(job_idx, class_name.clone()));
         rebuild_tree_and_reselect_class(state, job_idx, &class_name);
-    } else if let Some((job_idx, scope, _)) = node.dep_entry_ref {
-        // On a declared dep leaf: collapse the parent scope.
-        state.expanded_dep_scopes.remove(&(job_idx, scope));
-        rebuild_tree_and_reselect_dep_scope(state, job_idx, scope);
     } else if let Some((job_idx, _)) = node.coverage_source_ref {
         // On a coverage source: collapse the parent job.
-        state.expanded_jobs.remove(&job_idx);
-        rebuild_tree_and_reselect(state, Some(job_idx));
-    } else if let Some((job_idx, _)) = node.dep_scope_ref {
-        // On a dep scope: collapse the parent job.
         state.expanded_jobs.remove(&job_idx);
         rebuild_tree_and_reselect(state, Some(job_idx));
     } else if let Some((job_idx, _)) = node.class_ref.clone() {
@@ -2559,12 +2298,7 @@ fn collapse_test_node(state: &mut InspectState) {
 /// Find the job index that the current node maps to (for job-level nodes only).
 fn job_idx_for_node(state: &InspectState) -> Option<usize> {
     let node = &state.nodes[state.selected_idx];
-    if node.test_ref.is_some()
-        || node.coverage_source_ref.is_some()
-        || node.class_ref.is_some()
-        || node.dep_scope_ref.is_some()
-        || node.dep_entry_ref.is_some()
-    {
+    if node.test_ref.is_some() || node.coverage_source_ref.is_some() || node.class_ref.is_some() {
         return None;
     }
     let Filter::Prefix(p) = &node.filter else { return None; };
@@ -2590,16 +2324,6 @@ fn rebuild_tree_and_reselect_class(state: &mut InspectState, job_idx: usize, cla
     if let Some(ni) = state.nodes.iter().position(|n| {
         n.class_ref.as_ref().map_or(false, |(ji, cn)| *ji == job_idx && cn == class_name)
     }) {
-        state.selected_idx = ni;
-    }
-    state.selected_idx = state.selected_idx.min(state.nodes.len().saturating_sub(1));
-    apply_selection(state);
-}
-
-/// Rebuild tree and re-select a dependency scope group.
-fn rebuild_tree_and_reselect_dep_scope(state: &mut InspectState, job_idx: usize, scope: DepScope) {
-    rebuild_tree(state);
-    if let Some(ni) = state.nodes.iter().position(|n| n.dep_scope_ref == Some((job_idx, scope))) {
         state.selected_idx = ni;
     }
     state.selected_idx = state.selected_idx.min(state.nodes.len().saturating_sub(1));
@@ -2686,7 +2410,6 @@ mod tests {
             kind_label: "application".into(),
             name: "lib".into(),
             version: "1.0.0".into(),
-            is_bom: false,
             compile: vec![
                 crate::deps::DepItem {
                     coord: "com.example:core".into(),
@@ -2704,23 +2427,6 @@ mod tests {
                 version: String::new(),
                 note: String::new(),
             }],
-            workspace: vec![crate::deps::DepItem {
-                coord: "string-utils".into(),
-                version: "../string-utils".into(),
-                note: "workspace".into(),
-            }],
-            ap: vec![crate::deps::DepItem {
-                coord: "org.projectlombok:lombok".into(),
-                version: "1.18.30".into(),
-                note: "on-compile-classpath".into(),
-            }],
-            test_ap: vec![],
-            bom: vec![crate::deps::DepItem {
-                coord: "com.fasterxml.jackson:jackson-bom".into(),
-                version: "2.17.2".into(),
-                note: "workspace".into(),
-            }],
-            test_bom: vec![],
         }
     }
 
@@ -2793,7 +2499,7 @@ mod tests {
     #[test]
     fn tree_root_then_flat_members() {
         let jobs  = vec![make_job("alpha", None, Some(0)), make_job("beta", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(nodes[0].title, "all jobs");
         assert!(matches!(nodes[0].filter, Filter::All));
         assert_eq!(nodes[1].label.trim(), "alpha");
@@ -2807,7 +2513,7 @@ mod tests {
             make_job("services/api", None, Some(0)),
             make_job("services/web", None, Some(0)),
         ];
-        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(nodes.len(), 4);
         assert!(nodes[1].label.contains("services/"));
         assert!(matches!(&nodes[1].filter, Filter::Prefix(p) if p == "services"));
@@ -2818,7 +2524,7 @@ mod tests {
     #[test]
     fn tree_single_member() {
         let jobs  = vec![make_job("mylib", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(nodes.len(), 2);
         assert!(matches!(&nodes[1].filter, Filter::Prefix(p) if p == "mylib"));
     }
@@ -2826,7 +2532,7 @@ mod tests {
     #[test]
     fn tree_deep_nesting() {
         let jobs  = vec![make_job("a/b/c/leaf", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(nodes.len(), 5);
         assert!(matches!(&nodes[4].filter, Filter::Prefix(p) if p == "a/b/c/leaf"));
     }
@@ -2837,7 +2543,7 @@ mod tests {
             make_job("svc/api", None, Some(0)),
             make_job("svc/web", None, Some(0)),
         ];
-        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         let svc   = nodes.iter().find(|n| n.label.contains("svc/")).unwrap();
         assert!(matches!(&svc.filter, Filter::Prefix(p) if p == "svc"));
     }
@@ -2991,14 +2697,14 @@ mod tests {
     #[test]
     fn next_node_wraps() {
         let jobs  = vec![make_job("a", None, Some(0)), make_job("b", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(next_node(&nodes, 2), 0);
     }
 
     #[test]
     fn prev_node_wraps() {
         let jobs  = vec![make_job("a", None, Some(0)), make_job("b", None, Some(0))];
-        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(prev_node(&nodes, 0), 2);
     }
 
@@ -3090,7 +2796,7 @@ mod tests {
     fn tree_job_node_carries_coverage_badge() {
         let mut job = make_job("lib", None, Some(0));
         job.coverage = Some(sample_coverage_report());
-        let nodes = build_tree_nodes(&[job], ViewMode::Coverage, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&[job], ViewMode::Coverage, &HashSet::new(), &HashSet::new());
         let lib = nodes.iter().find(|n| n.title == "lib").unwrap();
         assert_eq!(lib.coverage_badge.as_deref(), Some("80.0% / 60.0%"));
     }
@@ -3098,7 +2804,7 @@ mod tests {
     #[test]
     fn tree_job_without_coverage_has_no_badge() {
         let job = make_job("lib", None, Some(0));
-        let nodes = build_tree_nodes(&[job], ViewMode::Logs, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&[job], ViewMode::Logs, &HashSet::new(), &HashSet::new());
         let lib = nodes.iter().find(|n| n.title == "lib").unwrap();
         assert!(lib.coverage_badge.is_none());
     }
@@ -3196,7 +2902,7 @@ mod tests {
         job.coverage = Some(sample_member_with_sources(html));
         let mut expanded_jobs = HashSet::new();
         expanded_jobs.insert(0);
-        let nodes = build_tree_nodes(&[job], ViewMode::Coverage, &expanded_jobs, &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&[job], ViewMode::Coverage, &expanded_jobs, &HashSet::new());
         assert!(!nodes.iter().any(|n| n.coverage_group_ref.is_some()));
         let src = nodes.iter().find(|n| n.coverage_source_ref == Some((0, 0))).unwrap();
         assert!(src.label.contains("Foo.java"), "got: {}", src.label);
@@ -3220,7 +2926,7 @@ mod tests {
         let mut expanded_jobs = HashSet::new();
         expanded_jobs.insert(0);
         let jobs = vec![job];
-        let nodes = build_tree_nodes(&jobs, ViewMode::Coverage, &expanded_jobs, &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&jobs, ViewMode::Coverage, &expanded_jobs, &HashSet::new());
         let src_idx = nodes.iter().position(|n| n.coverage_source_ref == Some((0, 0))).unwrap();
 
         let mut state = InspectState {
@@ -3246,7 +2952,6 @@ mod tests {
             job_search: String::new(),
             expanded_jobs,
             expanded_classes: HashSet::new(),
-            expanded_dep_scopes: HashSet::new(),
             descriptors: HashMap::new(),
             resolved_deps: HashMap::new(),
             test_lines: vec![],
@@ -3283,65 +2988,74 @@ mod tests {
     }
 
     #[test]
-    fn tree_deps_mode_scopes_and_entries() {
-        let empty_jobs: HashSet<usize> = HashSet::new();
-        let empty_classes: HashSet<(usize, String)> = HashSet::new();
-        let empty_scopes: HashSet<(usize, DepScope)> = HashSet::new();
-        let nodes = build_tree_nodes(
-            &[make_deps_job()],
-            ViewMode::Deps,
-            &empty_jobs,
-            &empty_classes,
-            &empty_scopes,
-        );
-        let lib = nodes.iter().find(|n| n.title == "lib").unwrap();
-        assert_eq!(lib.deps_badge.as_deref(), Some("6 deps"));
-        assert!(lib.label.contains("▸"));
-        assert!(nodes.iter().all(|n| n.dep_scope_ref.is_none()));
-
+    fn tree_deps_mode_ends_at_project() {
+        // Even if expanded_jobs is set, Deps mode must not grow past the project.
         let mut expanded_jobs = HashSet::new();
         expanded_jobs.insert(0);
         let nodes = build_tree_nodes(
             &[make_deps_job()],
             ViewMode::Deps,
             &expanded_jobs,
-            &empty_classes,
-            &empty_scopes,
+            &HashSet::new(),
         );
-        let scopes: Vec<_> = nodes.iter().filter_map(|n| n.dep_scope_ref).collect();
-        assert!(scopes.contains(&(0, DepScope::Compile)));
-        assert!(scopes.contains(&(0, DepScope::Test)));
-        assert!(scopes.contains(&(0, DepScope::Workspace)));
-        assert!(scopes.contains(&(0, DepScope::Ap)));
-        assert!(scopes.contains(&(0, DepScope::Bom)));
-        assert!(nodes.iter().all(|n| n.dep_entry_ref.is_none()));
-
-        let mut expanded_scopes = HashSet::new();
-        expanded_scopes.insert((0, DepScope::Compile));
-        let nodes = build_tree_nodes(
-            &[make_deps_job()],
-            ViewMode::Deps,
-            &expanded_jobs,
-            &empty_classes,
-            &expanded_scopes,
-        );
-        let entries: Vec<_> = nodes.iter().filter_map(|n| n.dep_entry_ref).collect();
-        assert_eq!(entries.len(), 2);
-        assert!(entries.contains(&(0, DepScope::Compile, 0)));
-        assert!(entries.contains(&(0, DepScope::Compile, 1)));
-        // BOM-managed entry shows (BOM) badge.
-        let bom_leaf = nodes
-            .iter()
-            .find(|n| n.dep_entry_ref == Some((0, DepScope::Compile, 1)))
-            .unwrap();
-        assert_eq!(bom_leaf.deps_badge.as_deref(), Some("(BOM)"));
+        assert_eq!(nodes.len(), 2); // root + project
+        let lib = nodes.iter().find(|n| n.title == "lib").unwrap();
+        // sample_deps_view: 2 compile + 1 test = 3 (workspace/AP/BOM not in badge)
+        assert_eq!(lib.deps_badge.as_deref(), Some("3 deps"));
+        assert!(!lib.label.contains("▸"));
+        assert!(!lib.label.contains("▾"));
     }
 
     #[test]
-    fn deps_panel_lists_scopes() {
-        let mut job = make_job("lib", None, Some(0));
-        job.deps = Some(sample_deps_view());
-        let rows = build_deps_panel_rows(&job);
+    fn deps_panel_shows_compile_and_test_only() {
+        let nodes = build_tree_nodes(
+            &[make_deps_job()],
+            ViewMode::Deps,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        let mut state = InspectState {
+            targets: vec![],
+            ws_root: PathBuf::from("."),
+            action: "build".into(),
+            jobs: vec![make_deps_job()],
+            nodes,
+            selected_idx: 1,
+            tree_scroll: 0,
+            rows: vec![],
+            scroll: 0,
+            show_members: true,
+            active_pane: ActivePane::Members,
+            mode: ViewMode::Deps,
+            filter: Filter::Prefix("lib".into()),
+            log_title: "lib".into(),
+            pane_h: 24,
+            log_vis_h: 20,
+            utc_offset: time::UtcOffset::UTC,
+            input_mode: InputMode::Normal,
+            grep: String::new(),
+            job_search: String::new(),
+            expanded_jobs: HashSet::new(),
+            expanded_classes: HashSet::new(),
+            descriptors: HashMap::new(),
+            resolved_deps: HashMap::new(),
+            test_lines: vec![],
+            source_lines: vec![],
+            pre_search_pane: ActivePane::Members,
+            grep_job_matches: HashSet::new(),
+            stale_jobs: HashSet::new(),
+            h_scroll: 0,
+        };
+        // Pre-seed resolve cache so the panel does not hit the network/resolver.
+        state.resolved_deps.insert(
+            (0, false),
+            Ok(vec!["└─ com.example:core:1.2.3".into()]),
+        );
+        state.resolved_deps.insert(
+            (0, true),
+            Ok(vec!["└─ org.junit.jupiter:junit-jupiter:5.10.0".into()]),
+        );
+        let rows = build_deps_panel_rows(&mut state, 0);
         let texts: Vec<_> = rows
             .iter()
             .filter_map(|r| match r {
@@ -3350,45 +3064,14 @@ mod tests {
             })
             .collect();
         assert!(texts[0].contains("application"));
-        assert!(texts.iter().any(|t| t.contains("Compile")));
-        assert!(texts.iter().any(|t| t.contains("Workspace")));
-        assert!(texts.iter().any(|t| t.contains("Annotation processors")));
-        assert!(texts.iter().any(|t| t.contains("BOM imports")));
-        assert!(texts.iter().any(|t| t.contains("jackson-databind")));
-    }
-
-    #[test]
-    fn bom_project_uses_managed_label() {
-        let view = MemberDepsView {
-            kind_label: "bom".into(),
-            name: "platform".into(),
-            version: "1.0".into(),
-            is_bom: true,
-            compile: vec![crate::deps::DepItem {
-                coord: "com.example:lib".into(),
-                version: "2.0".into(),
-                note: String::new(),
-            }],
-            test: vec![],
-            workspace: vec![],
-            ap: vec![],
-            test_ap: vec![],
-            bom: vec![],
-            test_bom: vec![],
-        };
-        assert_eq!(DepScope::Compile.label(true), "Managed");
-        let mut job = make_job("platform", None, Some(0));
-        job.deps = Some(view);
-        let mut expanded = HashSet::new();
-        expanded.insert(0);
-        let nodes = build_tree_nodes(
-            &[job],
-            ViewMode::Deps,
-            &expanded,
-            &HashSet::new(),
-            &HashSet::new(),
-        );
-        assert!(nodes.iter().any(|n| n.label.contains("Managed")));
+        assert!(texts.iter().any(|t| t.starts_with("Compile")));
+        assert!(texts.iter().any(|t| t.starts_with("Test")));
+        assert!(texts.iter().any(|t| t.contains("com.example:core")));
+        assert!(texts.iter().any(|t| t.contains("junit-jupiter")));
+        // BOM imports / processors must not appear as separate sections.
+        assert!(texts.iter().all(|t| !t.contains("BOM imports")));
+        assert!(texts.iter().all(|t| !t.contains("Annotation processors")));
+        assert!(texts.iter().all(|t| !t.starts_with("Workspace")));
     }
 
     #[test]
@@ -3413,7 +3096,7 @@ mod tests {
             },
         ];
         job.coverage = Some(sample_coverage_report());
-        let nodes = build_tree_nodes(&[job], ViewMode::Tests, &HashSet::new(), &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&[job], ViewMode::Tests, &HashSet::new(), &HashSet::new());
         let lib = nodes.iter().find(|n| n.title == "lib").unwrap();
         assert!(lib.coverage_badge.is_none());
         assert_eq!(lib.test_badge.as_ref().map(|(s, _)| s.as_str()), Some("1✓ 1✗"));
@@ -3433,7 +3116,7 @@ mod tests {
         }];
         let mut expanded = HashSet::new();
         expanded.insert(0);
-        let nodes = build_tree_nodes(&[job], ViewMode::Logs, &expanded, &HashSet::new(), &HashSet::new());
+        let nodes = build_tree_nodes(&[job], ViewMode::Logs, &expanded, &HashSet::new());
         // Even when "expanded", Logs mode never shows test children.
         assert!(nodes.iter().all(|n| n.test_ref.is_none() && n.class_ref.is_none()));
         assert!(!nodes[1].label.contains("▸"));
