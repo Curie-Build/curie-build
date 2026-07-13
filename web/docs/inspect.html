@@ -109,7 +109,7 @@
         <span>curie inspect</span>
       </header>
 <pre><span class="dim">curie inspect  ↑↓/jk select  Enter/→ expand  ← collapse  Tab detail  m hide  / grep  f job  r reload  q quit</span>
-  <span class="ok"> Logs </span> │ Tests │ Coverage    1/2/3 or [/] switch mode
+  <span class="ok"> Logs </span> │ Tests │ Coverage │ Deps    1/2/3/4 or [/] switch mode
 ┌ Members ──────────────────┐┌ Log: all jobs ──────────────────────────────────────────┐
 │ all jobs                  ││<span class="ok">▌</span> <span class="ok">hello-world  started 09:12:01  ✓ 1.2s</span>                  │
 │   hello-world  <span class="ok">✓ 1.2s</span>     ││  Resolve deps    3 JAR(s)                               │
@@ -119,7 +119,7 @@
     </div>
 
     <h2 id="modes">View modes</h2>
-    <p>A top-level mode switch chooses what the tree and detail pane show. More modes may be added later; today there are three:</p>
+    <p>A top-level mode switch chooses what the tree and detail pane show:</p>
     <table>
       <thead>
         <tr><th>Mode</th><th>Key</th><th>Tree</th><th>Detail pane</th></tr>
@@ -128,9 +128,10 @@
         <tr><td><strong>Logs</strong></td><td><kbd>1</kbd></td><td>Members with build outcome badges</td><td>Merged build logs</td></tr>
         <tr><td><strong>Tests</strong></td><td><kbd>2</kbd></td><td>Members with pass/fail counts; expand to classes → methods</td><td>Test summary or per-test output</td></tr>
         <tr><td><strong>Coverage</strong></td><td><kbd>3</kbd></td><td>Members with line/branch %; expand to source files</td><td>Coverage panel or per-line source</td></tr>
+        <tr><td><strong>Deps</strong></td><td><kbd>4</kbd></td><td>Members with dep counts; expand to scopes → declared entries</td><td>Declared list and resolved trees</td></tr>
       </tbody>
     </table>
-    <p>Press <kbd>[</kbd> / <kbd>]</kbd> to cycle modes, or <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> to jump. Switching modes keeps the current member selected when possible.</p>
+    <p>Press <kbd>[</kbd> / <kbd>]</kbd> to cycle modes, or <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> to jump. Switching modes keeps the current member selected when possible.</p>
 
     <h2>Members pane (Logs mode)</h2>
     <p>The left pane lists every workspace member in a tree that mirrors the member path hierarchy. Each entry shows a right-aligned badge:</p>
@@ -177,7 +178,7 @@
         <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
         <span>curie inspect — Coverage mode</span>
       </header>
-<pre>  Logs │ Tests │ <span class="ok"> Coverage </span>
+<pre>  Logs │ Tests │ <span class="ok"> Coverage </span> │ Deps
 ┌ Coverage ─────────────────┐┌ Coverage: string-utils › StringUtils.java ───────────┐
 │ all coverage              ││<span class="ok">▌</span> <span class="ok">com.example…StringUtils.java  96.5% / 92.9%</span>          │
 │   string-utils ▾ <span class="ok">96.5%/…</span>  ││<span class="ok">█</span>   13         return s == null || s.isBlank();        │
@@ -186,8 +187,41 @@
 │                           ││<span class="ok">█</span>   25         return new StringBuilder(s)…            │</pre>
     </div>
 
+    <h2 id="deps">Deps mode</h2>
+    <p>Switch to <strong>Deps</strong> (<kbd>4</kbd>) to browse each member's dependency surface from its <code>Curie.toml</code>. Workspace inheritance is applied the same way as a build, so inherited BOM imports and annotation processors appear under the member that receives them.</p>
+    <ul>
+      <li><strong>Job badge</strong> — total declared count, e.g. <code>12 deps</code>.</li>
+      <li><strong>Scopes</strong> — expand a member to open non-empty scopes:
+        <strong>Compile</strong> (or <strong>Managed</strong> for BOM projects),
+        <strong>Test</strong>,
+        <strong>Workspace</strong>,
+        <strong>Annotation processors</strong>,
+        <strong>Test annotation processors</strong>,
+        <strong>BOM imports</strong>, and
+        <strong>Test BOM imports</strong>.</li>
+      <li><strong>Declared entries</strong> — expand a scope to list coordinates. BOM-managed versions show <code>(BOM)</code>; workspace deps show the path; processors may note <code>on-compile-classpath</code>.</li>
+      <li><strong>Detail pane</strong> — selecting a job summarises every scope. Selecting a resolvable scope (compile / test / processors) also runs an offline resolve against <code>~/.m2</code> and prints the full transitive tree (same engine as <code>curie deps</code>). Workspace paths and BOM import lists stay declared-only.</li>
+    </ul>
+    <p>Resolution is offline so the TUI never blocks on the network. If a coordinate is not yet cached, the declared list still appears and the tree section shows a short error with a tip to run a build first. For online resolution and <code>--why</code> explanations, use <a href="/docs/deps.html"><code>curie deps</code></a>.</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>curie inspect — Deps mode</span>
+      </header>
+<pre>  Logs │ Tests │ Coverage │ <span class="ok"> Deps </span>
+┌ Dependencies ─────────────┐┌ Deps: jackson-bom-greeter › Compile ─────────────────┐
+│ all dependencies          ││<span class="ok">▌</span> <span class="ok">jackson-bom-greeter  Compile  (1 declared)</span>           │
+│   string-utils   <span class="em">3 deps</span>   ││Declared:                                              │
+│ <span class="em">▶ jackson-bom… ▾  4 deps</span>  ││  com.fasterxml.jackson.core:jackson-databind  (BOM)   │
+│     Compile ▾      <span class="em">1</span>      ││Resolved tree (offline cache):                         │
+│       jackson-databind <span class="em">(BOM)</span>││└─ com.fasterxml.jackson.core:jackson-databind:2.17.2 │
+│     Test           <span class="em">2</span>      ││   ├─ …jackson-annotations:2.17.2                     │
+│     BOM imports    <span class="em">1</span>      ││   └─ …jackson-core:2.17.2                            │</pre>
+    </div>
+
     <h2>Detail pane</h2>
-    <p>The right pane content depends on the active mode: merged logs (Logs), test summaries or per-test output (Tests), coverage panel or annotated source (Coverage). ANSI colour codes from compiler output and test reporters are rendered faithfully.</p>
+    <p>The right pane content depends on the active mode: merged logs (Logs), test summaries or per-test output (Tests), coverage panel or annotated source (Coverage), declared lists and resolved trees (Deps). ANSI colour codes from compiler output and test reporters are rendered faithfully.</p>
 
     <h2>Keyboard shortcuts</h2>
     <table>
@@ -195,11 +229,11 @@
         <tr><th>Key</th><th>Effect</th><th>Where</th></tr>
       </thead>
       <tbody>
-        <tr><td><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></td><td>Switch mode: Logs / Tests / Coverage</td><td>Both</td></tr>
+        <tr><td><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd></td><td>Switch mode: Logs / Tests / Coverage / Deps</td><td>Both</td></tr>
         <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>Previous / next mode</td><td>Both</td></tr>
         <tr><td><kbd>↑</kbd> <kbd>↓</kbd> / <kbd>j</kbd> <kbd>k</kbd></td><td>Move selection up / down</td><td>Members</td></tr>
-        <tr><td><kbd>Enter</kbd> / <kbd>→</kbd></td><td>Expand (Tests / Coverage modes)</td><td>Members</td></tr>
-        <tr><td><kbd>←</kbd></td><td>Collapse test method → class → job</td><td>Members</td></tr>
+        <tr><td><kbd>Enter</kbd> / <kbd>→</kbd></td><td>Expand (Tests / Coverage / Deps modes)</td><td>Members</td></tr>
+        <tr><td><kbd>←</kbd></td><td>Collapse leaf → group → job</td><td>Members</td></tr>
         <tr><td><kbd>Tab</kbd></td><td>Cycle focus: Members → Log → Members</td><td>Both</td></tr>
         <tr><td><kbd>m</kbd></td><td>Toggle Members pane visibility</td><td>Both</td></tr>
         <tr><td><kbd>j</kbd> <kbd>k</kbd> / <kbd>↑</kbd> <kbd>↓</kbd></td><td>Scroll log one line</td><td>Log</td></tr>
