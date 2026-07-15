@@ -12,13 +12,16 @@ use ansi_to_tui::IntoText;
 use anyhow::Result;
 use crossterm::{
     cursor,
-    event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal,
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
@@ -162,7 +165,7 @@ enum Row {
     SourceBody     { line: usize },
 }
 
-#[derive(PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 enum ActivePane { Members, Log, Search }
 
 /// Top-level view: what the members tree and detail pane present.
@@ -362,7 +365,12 @@ pub(crate) fn run_inspect_ui(
 
     terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
+    execute!(
+        stdout,
+        terminal::EnterAlternateScreen,
+        cursor::Hide,
+        EnableMouseCapture,
+    )?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut term = Terminal::new(backend)?;
@@ -370,7 +378,12 @@ pub(crate) fn run_inspect_ui(
     let result = event_loop(&mut term, &mut state);
 
     let _ = terminal::disable_raw_mode();
-    let _ = execute!(term.backend_mut(), terminal::LeaveAlternateScreen, cursor::Show);
+    let _ = execute!(
+        term.backend_mut(),
+        DisableMouseCapture,
+        terminal::LeaveAlternateScreen,
+        cursor::Show,
+    );
     let _ = term.show_cursor();
     result
 }
@@ -1582,11 +1595,17 @@ fn format_hms_utc(epoch_ms: u64) -> String {
 
 // ── Rendering ─────────────────────────────────────────────────────────────
 
-fn render_frame(f: &mut Frame, state: &InspectState) {
-    let total    = f.area();
-    let in_input = state.input_mode != InputMode::Normal;
+/// Screen regions for hit-testing mouse events (mirrors `render_frame` layout).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PaneLayout {
+    tabs: Rect,
+    members: Option<Rect>,
+    detail: Rect,
+    search: Option<Rect>,
+}
 
-    // hint | mode tabs | body [| search]
+/// Compute pane rectangles for a terminal area. Kept in lockstep with `render_frame`.
+fn compute_layout(area: Rect, show_members: bool, in_input: bool) -> PaneLayout {
     let constraints: Vec<Constraint> = if in_input {
         vec![
             Constraint::Length(1),
@@ -1605,31 +1624,105 @@ fn render_frame(f: &mut Frame, state: &InspectState) {
     let vchunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
-        .split(total);
-
-    f.render_widget(
-        Paragraph::new(hint_text(state)).style(Style::default().fg(theme::COMMENT).bg(theme::BG)),
-        vchunks[0],
-    );
-    f.render_widget(mode_tabs_line(state.mode), vchunks[1]);
+        .split(area);
 
     let body = vchunks[2];
-    // Fill body background black.
-    f.render_widget(Block::default().style(Style::default().bg(theme::BG)), body);
-
-    if state.show_members {
+    let (members, detail) = if show_members {
         let hchunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
             .split(body);
-        render_members_block(f, state, hchunks[0]);
-        render_log_block(f, state, hchunks[1]);
+        (Some(hchunks[0]), hchunks[1])
     } else {
-        render_log_block(f, state, body);
+        (None, body)
+    };
+
+    PaneLayout {
+        tabs: vchunks[1],
+        members,
+        detail,
+        search: if in_input { Some(vchunks[3]) } else { None },
+    }
+}
+
+/// Inner content area of a single-line border box (matches `Block::borders(ALL).inner`).
+fn bordered_inner(area: Rect) -> Rect {
+    Block::default().borders(Borders::ALL).inner(area)
+}
+
+/// Column ranges for mode tabs, matching the text layout of `mode_tabs_line`.
+/// Returns half-open `[start, end)` columns relative to the start of the tabs row.
+fn mode_tab_ranges() -> Vec<(ViewMode, u16, u16)> {
+    let mut ranges = Vec::with_capacity(ViewMode::ALL.len());
+    // Leading "  " padding in mode_tabs_line.
+    let mut col: u16 = 2;
+    for (i, mode) in ViewMode::ALL.iter().enumerate() {
+        if i > 0 {
+            col = col.saturating_add(3); // " │ "
+        }
+        let label_w = (mode.label().chars().count() + 2) as u16; // " {label} "
+        let end = col.saturating_add(label_w);
+        ranges.push((*mode, col, end));
+        col = end;
+    }
+    ranges
+}
+
+/// Which mode tab contains absolute terminal column `column` on the tabs row.
+fn mode_tab_at(tabs: Rect, column: u16) -> Option<ViewMode> {
+    if column < tabs.x || column >= tabs.x.saturating_add(tabs.width) {
+        return None;
+    }
+    let rel = column - tabs.x;
+    for (mode, start, end) in mode_tab_ranges() {
+        if rel >= start && rel < end {
+            return Some(mode);
+        }
+    }
+    None
+}
+
+fn render_frame(f: &mut Frame, state: &InspectState) {
+    let total = f.area();
+    let in_input = state.input_mode != InputMode::Normal;
+    let layout = compute_layout(total, state.show_members, in_input);
+
+    // hint row is always y=0 (Length 1); recompute only for rendering.
+    let hint_area = Rect {
+        x: total.x,
+        y: total.y,
+        width: total.width,
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(hint_text(state)).style(Style::default().fg(theme::COMMENT).bg(theme::BG)),
+        hint_area,
+    );
+    f.render_widget(mode_tabs_line(state.mode), layout.tabs);
+
+    // Body fills between tabs and optional search bar.
+    let body_y = layout.tabs.y.saturating_add(layout.tabs.height);
+    let body_bottom = layout
+        .search
+        .map(|s| s.y)
+        .unwrap_or_else(|| total.y.saturating_add(total.height));
+    let body = Rect {
+        x: total.x,
+        y: body_y,
+        width: total.width,
+        height: body_bottom.saturating_sub(body_y),
+    };
+    f.render_widget(Block::default().style(Style::default().bg(theme::BG)), body);
+
+    if let Some(members) = layout.members {
+        render_members_block(f, state, members);
+        render_log_block(f, state, layout.detail);
+    } else {
+        render_log_block(f, state, layout.detail);
     }
 
-    if in_input {
-        render_status_bar(f, state, vchunks[3]);
+    if let Some(search) = layout.search {
+        render_status_bar(f, state, search);
     }
 }
 
@@ -1660,20 +1753,20 @@ fn mode_tabs_line(mode: ViewMode) -> Paragraph<'static> {
 fn hint_text(state: &InspectState) -> &'static str {
     match &state.active_pane {
         ActivePane::Search => {
-            "curie inspect  type to filter  Enter apply  Tab switch pane  Esc clear"
+            "curie inspect  type to filter  Enter apply  Tab switch pane  Esc clear  · mouse ok"
         }
         ActivePane::Members => {
             if state.input_mode != InputMode::Normal {
-                "curie inspect  \u{2191}\u{2193}/jk select  Tab switch  Esc clear search  q quit"
+                "curie inspect  \u{2191}\u{2193}/jk select  Tab switch  Esc clear search  q quit  · click/wheel"
             } else {
-                "curie inspect  \u{2191}\u{2193}/jk select  Enter/\u{2192} expand  \u{2190} collapse  Tab detail  m hide  / grep  f job  r reload  q quit"
+                "curie inspect  \u{2191}\u{2193}/jk select  Enter/\u{2192} expand  click select  wheel scroll  Tab detail  q quit"
             }
         }
         ActivePane::Log => {
             if state.input_mode != InputMode::Normal {
-                "curie inspect  PgUp/Dn scroll  Tab switch  Esc clear search  q quit"
+                "curie inspect  PgUp/Dn scroll  Tab switch  Esc clear search  q quit  · click/wheel"
             } else {
-                "curie inspect  jk/PgUp/Dn scroll  g/G top/bot  Tab members  m toggle  / grep  f job  r reload  q quit"
+                "curie inspect  jk/PgUp/Dn scroll  wheel scroll  click focus  Tab members  / grep  q quit"
             }
         }
     }
@@ -2059,6 +2152,8 @@ fn render_status_bar(f: &mut Frame, state: &InspectState, area: Rect) {
 }
 
 const H_SCROLL_STEP: usize = 4;
+/// Lines scrolled per mouse-wheel notch.
+const MOUSE_SCROLL_STEP: usize = 3;
 
 // ── Event loop ────────────────────────────────────────────────────────────
 
@@ -2069,11 +2164,18 @@ fn event_loop(
     loop {
         terminal.draw(|f| render_frame(f, state))?;
 
-        let size      = terminal.size()?;
+        let size = terminal.size()?;
         // Chrome: hint row + mode tabs (+ optional search bar).
-        let chrome = if state.input_mode != InputMode::Normal { 3 } else { 2 };
-        state.pane_h  = size.height.saturating_sub(chrome);
+        let in_input = state.input_mode != InputMode::Normal;
+        let chrome = if in_input { 3 } else { 2 };
+        state.pane_h = size.height.saturating_sub(chrome);
         state.log_vis_h = (state.pane_h as usize).saturating_sub(2);
+
+        let layout = compute_layout(
+            Rect::new(0, 0, size.width, size.height),
+            state.show_members,
+            in_input,
+        );
 
         match crossterm::event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -2081,9 +2183,116 @@ fn event_loop(
                     return Ok(());
                 }
             }
+            Event::Mouse(mouse) => {
+                handle_mouse(state, mouse, &layout);
+            }
             Event::Resize(_, _) => {}
             _ => {}
         }
+    }
+}
+
+/// Handle a mouse event against the current pane layout. Always continues the loop.
+fn handle_mouse(state: &mut InspectState, mouse: MouseEvent, layout: &PaneLayout) {
+    let pos = Position {
+        x: mouse.column,
+        y: mouse.row,
+    };
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => handle_mouse_click(state, pos, layout),
+        MouseEventKind::ScrollUp => handle_mouse_scroll(state, pos, layout, -1),
+        MouseEventKind::ScrollDown => handle_mouse_scroll(state, pos, layout, 1),
+        MouseEventKind::ScrollLeft => {
+            if layout.detail.contains(pos) {
+                state.h_scroll = state.h_scroll.saturating_sub(H_SCROLL_STEP);
+            }
+        }
+        MouseEventKind::ScrollRight => {
+            if layout.detail.contains(pos) {
+                state.h_scroll += H_SCROLL_STEP;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_mouse_click(state: &mut InspectState, pos: Position, layout: &PaneLayout) {
+    // Mode tabs.
+    if layout.tabs.contains(pos) {
+        if let Some(mode) = mode_tab_at(layout.tabs, pos.x) {
+            switch_mode(state, mode);
+        }
+        return;
+    }
+
+    // Search bar (when visible).
+    if let Some(search) = layout.search {
+        if search.contains(pos) {
+            state.active_pane = ActivePane::Search;
+            return;
+        }
+    }
+
+    // Members tree.
+    if let Some(members) = layout.members {
+        if members.contains(pos) {
+            state.active_pane = ActivePane::Members;
+            state.show_members = true;
+            let inner = bordered_inner(members);
+            if !inner.contains(pos) {
+                return;
+            }
+            let row = state.tree_scroll + (pos.y - inner.y) as usize;
+            if row >= state.nodes.len() || !state.nodes[row].selectable {
+                return;
+            }
+            // Second click on the same expandable node toggles expand/collapse.
+            if row == state.selected_idx {
+                toggle_test_expansion(state);
+            } else {
+                state.selected_idx = row;
+                apply_selection(state);
+            }
+            return;
+        }
+    }
+
+    // Detail / log pane.
+    if layout.detail.contains(pos) {
+        state.active_pane = ActivePane::Log;
+    }
+}
+
+fn handle_mouse_scroll(state: &mut InspectState, pos: Position, layout: &PaneLayout, direction: i32) {
+    let step = MOUSE_SCROLL_STEP as i32 * direction;
+    if let Some(members) = layout.members {
+        if members.contains(pos) {
+            scroll_tree(state, step);
+            return;
+        }
+    }
+    // Default: scroll the detail pane (also when members are hidden).
+    if layout.detail.contains(pos) || layout.members.is_none() {
+        scroll_detail(state, step);
+    }
+}
+
+fn scroll_tree(state: &mut InspectState, delta: i32) {
+    let visible = (state.pane_h as usize).saturating_sub(2).max(1);
+    let max_scroll = state.nodes.len().saturating_sub(visible);
+    if delta < 0 {
+        state.tree_scroll = state.tree_scroll.saturating_sub((-delta) as usize);
+    } else {
+        state.tree_scroll = (state.tree_scroll + delta as usize).min(max_scroll);
+    }
+}
+
+fn scroll_detail(state: &mut InspectState, delta: i32) {
+    let max = state.rows.len().saturating_sub(1);
+    if delta < 0 {
+        state.scroll = state.scroll.saturating_sub((-delta) as usize);
+    } else {
+        state.scroll = (state.scroll + delta as usize).min(max);
     }
 }
 
@@ -3140,5 +3349,272 @@ mod tests {
         assert!(line.spans[0].content.contains("10"));
         let line = render_source_line(Some(&missed), "");
         assert!(line.spans.iter().any(|s| s.content.contains("return 0;")));
+    }
+
+    // ── mouse support ────────────────────────────────────────────────────
+
+    fn make_state(jobs: Vec<Job>, mode: ViewMode) -> InspectState {
+        let nodes = build_tree_nodes(&jobs, mode, &HashSet::new(), &HashSet::new());
+        InspectState {
+            targets: vec![],
+            ws_root: PathBuf::from("."),
+            action: "build".into(),
+            jobs,
+            nodes,
+            selected_idx: 0,
+            tree_scroll: 0,
+            rows: vec![],
+            scroll: 0,
+            show_members: true,
+            active_pane: ActivePane::Members,
+            mode,
+            filter: Filter::All,
+            log_title: "all jobs".into(),
+            pane_h: 24,
+            log_vis_h: 20,
+            utc_offset: time::UtcOffset::UTC,
+            input_mode: InputMode::Normal,
+            grep: String::new(),
+            job_search: String::new(),
+            expanded_jobs: HashSet::new(),
+            expanded_classes: HashSet::new(),
+            descriptors: HashMap::new(),
+            resolved_deps: HashMap::new(),
+            test_lines: vec![],
+            source_lines: vec![],
+            pre_search_pane: ActivePane::Members,
+            grep_job_matches: HashSet::new(),
+            stale_jobs: HashSet::new(),
+            h_scroll: 0,
+        }
+    }
+
+    fn term_layout(w: u16, h: u16, show_members: bool, in_input: bool) -> PaneLayout {
+        compute_layout(Rect::new(0, 0, w, h), show_members, in_input)
+    }
+
+    fn click(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn wheel(column: u16, row: u16, up: bool) -> MouseEvent {
+        MouseEvent {
+            kind: if up {
+                MouseEventKind::ScrollUp
+            } else {
+                MouseEventKind::ScrollDown
+            },
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn layout_splits_members_and_detail() {
+        let layout = term_layout(100, 30, true, false);
+        assert_eq!(layout.tabs.y, 1);
+        assert!(layout.members.is_some());
+        let members = layout.members.unwrap();
+        assert!(members.width < layout.detail.width);
+        assert_eq!(members.y, layout.detail.y);
+        assert!(layout.search.is_none());
+    }
+
+    #[test]
+    fn layout_hides_members_and_shows_search() {
+        let layout = term_layout(80, 20, false, true);
+        assert!(layout.members.is_none());
+        assert_eq!(layout.detail.x, 0);
+        assert!(layout.search.is_some());
+        assert_eq!(layout.search.unwrap().y, 19);
+    }
+
+    #[test]
+    fn mode_tab_ranges_cover_all_modes_in_order() {
+        let ranges = mode_tab_ranges();
+        assert_eq!(ranges.len(), 4);
+        assert_eq!(ranges[0].0, ViewMode::Logs);
+        assert_eq!(ranges[1].0, ViewMode::Tests);
+        assert_eq!(ranges[2].0, ViewMode::Coverage);
+        assert_eq!(ranges[3].0, ViewMode::Deps);
+        // Ranges are contiguous labels with separators between them.
+        for i in 0..ranges.len() - 1 {
+            assert!(ranges[i].2 <= ranges[i + 1].1);
+        }
+    }
+
+    #[test]
+    fn mode_tab_at_hits_each_label() {
+        let layout = term_layout(80, 24, true, false);
+        for (mode, start, end) in mode_tab_ranges() {
+            let mid = layout.tabs.x + (start + end) / 2;
+            assert_eq!(mode_tab_at(layout.tabs, mid), Some(mode), "mode={mode:?}");
+        }
+        // Padding before first tab is not a hit.
+        assert_eq!(mode_tab_at(layout.tabs, layout.tabs.x), None);
+    }
+
+    #[test]
+    fn mouse_click_mode_tab_switches_mode() {
+        let jobs = vec![make_job("lib", Some(1000), Some(0))];
+        let mut state = make_state(jobs, ViewMode::Logs);
+        let layout = term_layout(80, 24, true, false);
+        let (_, start, end) = mode_tab_ranges()
+            .into_iter()
+            .find(|(m, _, _)| *m == ViewMode::Tests)
+            .unwrap();
+        let col = layout.tabs.x + (start + end) / 2;
+        handle_mouse(&mut state, click(col, layout.tabs.y), &layout);
+        assert_eq!(state.mode, ViewMode::Tests);
+    }
+
+    #[test]
+    fn mouse_click_members_selects_row() {
+        let jobs = vec![
+            make_job("alpha", Some(1000), Some(0)),
+            make_job("beta", Some(2000), Some(0)),
+        ];
+        let mut state = make_state(jobs, ViewMode::Logs);
+        state.active_pane = ActivePane::Log;
+        let layout = term_layout(80, 24, true, false);
+        let members = layout.members.unwrap();
+        let inner = bordered_inner(members);
+        // Row 0 is "all jobs"; row 1 is alpha; row 2 is beta.
+        let beta_y = inner.y + 2;
+        handle_mouse(&mut state, click(inner.x + 1, beta_y), &layout);
+        assert_eq!(state.active_pane, ActivePane::Members);
+        assert_eq!(state.selected_idx, 2);
+        assert_eq!(state.log_title, "beta");
+    }
+
+    #[test]
+    fn mouse_click_same_expandable_toggles_expansion() {
+        let mut job = make_job("lib", None, Some(0));
+        job.tests = vec![TestEntry {
+            name: "a".into(),
+            class_name: "T".into(),
+            duration_ms: 1,
+            status: TestStatus::Passed,
+            failure: None,
+            output_file: None,
+        }];
+        let mut state = make_state(vec![job], ViewMode::Tests);
+        // Select the job node (index 1: root + job).
+        state.selected_idx = 1;
+        let layout = term_layout(80, 24, true, false);
+        let members = layout.members.unwrap();
+        let inner = bordered_inner(members);
+        let job_y = inner.y + 1;
+        assert!(state.expanded_jobs.is_empty());
+        handle_mouse(&mut state, click(inner.x + 1, job_y), &layout);
+        assert!(state.expanded_jobs.contains(&0));
+        // Click again collapses.
+        handle_mouse(&mut state, click(inner.x + 1, job_y), &layout);
+        assert!(!state.expanded_jobs.contains(&0));
+    }
+
+    #[test]
+    fn mouse_click_detail_focuses_log_pane() {
+        let mut state = make_state(vec![make_job("lib", None, Some(0))], ViewMode::Logs);
+        state.active_pane = ActivePane::Members;
+        let layout = term_layout(80, 24, true, false);
+        let d = layout.detail;
+        handle_mouse(&mut state, click(d.x + d.width / 2, d.y + 2), &layout);
+        assert_eq!(state.active_pane, ActivePane::Log);
+    }
+
+    #[test]
+    fn mouse_click_search_bar_focuses_search() {
+        let mut state = make_state(vec![make_job("lib", None, Some(0))], ViewMode::Logs);
+        state.input_mode = InputMode::Grep;
+        state.active_pane = ActivePane::Log;
+        let layout = term_layout(80, 24, true, true);
+        let search = layout.search.expect("search bar visible");
+        handle_mouse(&mut state, click(search.x + 1, search.y), &layout);
+        assert_eq!(state.active_pane, ActivePane::Search);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_detail_pane() {
+        let mut state = make_state(vec![make_job("lib", None, Some(0))], ViewMode::Logs);
+        // Enough rows to scroll.
+        state.rows = (0..50)
+            .map(|i| Row::CoverageLine {
+                text: format!("line {i}"),
+                color: theme::FG,
+            })
+            .collect();
+        state.scroll = 10;
+        let layout = term_layout(80, 24, true, false);
+        let d = layout.detail;
+        let cx = d.x + d.width / 2;
+        let cy = d.y + 2;
+        handle_mouse(&mut state, wheel(cx, cy, true), &layout);
+        assert_eq!(state.scroll, 10 - MOUSE_SCROLL_STEP);
+        handle_mouse(&mut state, wheel(cx, cy, false), &layout);
+        assert_eq!(state.scroll, 10);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_members_tree() {
+        let jobs: Vec<_> = (0..40).map(|i| make_job(&format!("m{i:02}"), None, Some(0))).collect();
+        let mut state = make_state(jobs, ViewMode::Logs);
+        state.tree_scroll = 5;
+        state.pane_h = 10; // small visible window
+        let layout = term_layout(80, 12, true, false);
+        let m = layout.members.unwrap();
+        handle_mouse(&mut state, wheel(m.x + 2, m.y + 2, false), &layout);
+        assert_eq!(state.tree_scroll, 5 + MOUSE_SCROLL_STEP);
+        handle_mouse(&mut state, wheel(m.x + 2, m.y + 2, true), &layout);
+        assert_eq!(state.tree_scroll, 5);
+    }
+
+    #[test]
+    fn mouse_wheel_horizontal_scrolls_detail() {
+        let mut state = make_state(vec![make_job("lib", None, Some(0))], ViewMode::Logs);
+        state.h_scroll = H_SCROLL_STEP;
+        let layout = term_layout(80, 24, true, false);
+        let d = layout.detail;
+        handle_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::ScrollLeft,
+                column: d.x + 1,
+                row: d.y + 1,
+                modifiers: KeyModifiers::NONE,
+            },
+            &layout,
+        );
+        assert_eq!(state.h_scroll, 0);
+        handle_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::ScrollRight,
+                column: d.x + 1,
+                row: d.y + 1,
+                modifiers: KeyModifiers::NONE,
+            },
+            &layout,
+        );
+        assert_eq!(state.h_scroll, H_SCROLL_STEP);
+    }
+
+    #[test]
+    fn scroll_tree_clamps_to_content() {
+        let mut state = make_state(vec![make_job("a", None, Some(0))], ViewMode::Logs);
+        state.pane_h = 24;
+        state.tree_scroll = 0;
+        scroll_tree(&mut state, -5);
+        assert_eq!(state.tree_scroll, 0);
+        scroll_tree(&mut state, 100);
+        let visible = (state.pane_h as usize).saturating_sub(2).max(1);
+        let max = state.nodes.len().saturating_sub(visible);
+        assert_eq!(state.tree_scroll, max);
     }
 }

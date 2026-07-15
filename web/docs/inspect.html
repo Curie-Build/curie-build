@@ -240,6 +240,25 @@
       </tbody>
     </table>
 
+    <h2 id="mouse">Mouse</h2>
+    <p>Mouse capture is enabled while the TUI is open. Actions map to the pane under the pointer:</p>
+    <table>
+      <thead>
+        <tr><th>Action</th><th>Effect</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Click a mode tab</td><td>Switch to Logs / Tests / Coverage / Deps</td></tr>
+        <tr><td>Click a tree row</td><td>Select that member (and focus the Members pane)</td></tr>
+        <tr><td>Click the selected expandable row again</td><td>Expand or collapse (Tests / Coverage)</td></tr>
+        <tr><td>Click the detail pane</td><td>Focus the detail pane</td></tr>
+        <tr><td>Click the search bar</td><td>Focus the grep / job filter input</td></tr>
+        <tr><td>Wheel over the tree</td><td>Scroll the members list</td></tr>
+        <tr><td>Wheel over the detail pane</td><td>Scroll logs / tests / coverage / deps</td></tr>
+        <tr><td>Horizontal wheel over detail</td><td>Scroll the detail pane sideways</td></tr>
+      </tbody>
+    </table>
+    <p>Keyboard shortcuts keep working alongside the mouse. Mouse capture is released when you quit so the terminal returns to normal selection behaviour.</p>
+
     <h2>Grep</h2>
     <p>Press <kbd>/</kbd> to open the grep bar at the bottom of the screen. As you type, the log pane filters to only jobs whose output contains the pattern (case-insensitive) and highlights every match in yellow. The Members pane dims jobs with no matching lines so you can spot the relevant member at a glance.</p>
 
