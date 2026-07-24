@@ -225,16 +225,23 @@ pub fn build_subtree(
 }
 
 /// Fan `curie test` out over every member in topo order (or in parallel).
-pub fn test_all(workspace_root: &Path, filter: Option<&str>, offline: bool, cli_coverage: bool, jobs: usize) -> Result<()> {
+pub fn test_all(
+    workspace_root: &Path,
+    filter: Option<&str>,
+    offline: bool,
+    cli_coverage: bool,
+    update_snapshots: bool,
+    jobs: usize,
+) -> Result<()> {
     let ws = load(workspace_root)?;
     let subset: Vec<usize> = (0..ws.members.len()).collect();
     if subset.len() > 1 {
         return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, crate::parallel::TuiMode::Full, "Done", |m, extra_cp| {
-            test_one_member(m, filter, offline, cli_coverage, extra_cp)
+            test_one_member(m, filter, offline, cli_coverage, update_snapshots, extra_cp)
         });
     }
     fan_out(&ws, "test", &subset, |m, extra_cp| {
-        test_one_member(m, filter, offline, cli_coverage, extra_cp)
+        test_one_member(m, filter, offline, cli_coverage, update_snapshots, extra_cp)
     })
 }
 
@@ -245,17 +252,18 @@ pub fn test_one(
     filter: Option<&str>,
     offline: bool,
     cli_coverage: bool,
+    update_snapshots: bool,
     jobs: usize,
 ) -> Result<()> {
     let ws = load(workspace_root)?;
     let subset = transitive_closure(&ws, member_index);
     if subset.len() > 1 {
         return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, crate::parallel::TuiMode::Full, "Done", |m, extra_cp| {
-            test_one_member(m, filter, offline, cli_coverage, extra_cp)
+            test_one_member(m, filter, offline, cli_coverage, update_snapshots, extra_cp)
         });
     }
     fan_out(&ws, "test", &subset, |m, extra_cp| {
-        test_one_member(m, filter, offline, cli_coverage, extra_cp)
+        test_one_member(m, filter, offline, cli_coverage, update_snapshots, extra_cp)
     })
 }
 
@@ -266,17 +274,18 @@ pub fn test_subtree(
     filter: Option<&str>,
     offline: bool,
     cli_coverage: bool,
+    update_snapshots: bool,
     jobs: usize,
 ) -> Result<()> {
     let ws = load(workspace_root)?;
     let subset = transitive_closure_multi(&ws, member_indices);
     if subset.len() > 1 {
         return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, crate::parallel::TuiMode::Full, "Done", |m, extra_cp| {
-            test_one_member(m, filter, offline, cli_coverage, extra_cp)
+            test_one_member(m, filter, offline, cli_coverage, update_snapshots, extra_cp)
         });
     }
     fan_out(&ws, "test", &subset, |m, extra_cp| {
-        test_one_member(m, filter, offline, cli_coverage, extra_cp)
+        test_one_member(m, filter, offline, cli_coverage, update_snapshots, extra_cp)
     })
 }
 
@@ -288,6 +297,7 @@ fn test_one_member(
     filter: Option<&str>,
     offline: bool,
     cli_coverage: bool,
+    update_snapshots: bool,
     extra_cp: &[PathBuf],
 ) -> Result<Vec<PathBuf>> {
     if m.descriptor.is_bom() {
@@ -300,6 +310,7 @@ fn test_one_member(
         let _ = filter;
         let _ = offline;
         let _ = cli_coverage;
+        let _ = update_snapshots;
         let arts = foreign::run_foreign(&m.path, f, ForeignAction::Build)?;
         foreign::run_foreign(&m.path, f, ForeignAction::Test)?;
         return Ok(arts);
@@ -307,7 +318,13 @@ fn test_one_member(
     crate::parallel::emit(&crate::style::headline(
         "Testing", m.descriptor.buildable_name(), m.descriptor.buildable_version(),
     ));
-    let compiled = compile::compile(&m.path, &m.descriptor, offline, extra_cp)?;
+    let compiled = compile::compile_with_options(
+        &m.path,
+        &m.descriptor,
+        offline,
+        update_snapshots,
+        extra_cp,
+    )?;
     let enable_coverage = cli_coverage || m.descriptor.test.coverage_enabled();
     let target_dir = compiled.classes_dir.parent().unwrap_or(&m.path);
     let (eff_main, eff_test) = crate::resources::effective_test_dirs(
@@ -317,7 +334,7 @@ fn test_one_member(
         compiled.test_resources_dir.as_deref(),
         target_dir,
     )?;
-    test::run_tests(
+    test::run_tests_with_options(
         &m.path,
         &m.descriptor,
         &compiled.classes_dir,
@@ -330,6 +347,7 @@ fn test_one_member(
         offline,
         enable_coverage,
         extra_cp,
+        update_snapshots,
     )?;
     Ok(compiled.dep_jars)
 }
@@ -382,7 +400,14 @@ pub fn run_one(
 
     // ---- build phase ------------------------------------------------------
     let subset = transitive_closure(&ws, member_index);
-    let build_opts = build::BuildOptions { no_docker: opts.no_docker, no_native: false, no_jlink: false, offline: opts.offline, coverage: false };
+    let build_opts = build::BuildOptions {
+        no_docker: opts.no_docker,
+        no_native: false,
+        no_jlink: false,
+        offline: opts.offline,
+        coverage: false,
+        update_snapshots: false,
+    };
 
     let n = subset.len();
     println!(

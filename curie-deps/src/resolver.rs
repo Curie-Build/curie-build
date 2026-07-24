@@ -46,15 +46,16 @@
 use crate::gav::Gav;
 use crate::pom::{self, BomRef, Pom};
 use crate::repo::{default_repositories, Repository};
+use crate::snapshot_meta::{self, SnapshotUpdatePolicy};
 use reqwest::blocking::Client;
 use anyhow::{bail, Context, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 // ---------------------------------------------------------------------------
 // In-process coordination for concurrent artifact downloads (bug #2 fix).
@@ -141,6 +142,18 @@ pub struct ResolveOptions {
     /// classpaths (formatters, kotlinc, etc.) resolve curated dep sets the user
     /// cannot annotate, so they leave it `false`.
     pub error_on_version_conflict: bool,
+    /// Snapshot pins from `Curie.lock`: keys are
+    /// `group:artifact:baseVersion` (e.g. `com.ex:foo:1.0-SNAPSHOT`), values
+    /// are the unique timestamped filename version
+    /// (`1.0-20260610.123456-3`). When present and
+    /// [`Self::update_snapshots`] is `false`, metadata is not re-fetched.
+    pub snapshot_pins: HashMap<String, String>,
+    /// Force re-resolution of SNAPSHOT metadata (`curie build -U`), ignoring
+    /// existing pins and cache freshness policy.
+    pub update_snapshots: bool,
+    /// How often to re-check snapshot metadata when no lock pin applies.
+    /// Default: [`SnapshotUpdatePolicy::Daily`]. Offline mode forces `Never`.
+    pub snapshot_update_policy: SnapshotUpdatePolicy,
 }
 
 impl Default for ResolveOptions {
@@ -153,8 +166,23 @@ impl Default for ResolveOptions {
             offline: false,
             skip_version_ranges: false,
             error_on_version_conflict: false,
+            snapshot_pins: HashMap::new(),
+            update_snapshots: false,
+            snapshot_update_policy: SnapshotUpdatePolicy::Daily,
         }
     }
+}
+
+/// Full result of dependency resolution, including SNAPSHOT pins for
+/// `Curie.lock`.
+#[derive(Debug)]
+pub struct ResolveResult {
+    /// Resolved JAR paths in BFS order (classpath order).
+    pub jars: Vec<PathBuf>,
+    /// Snapshot pins discovered during this resolve:
+    /// `group:artifact:baseVersion` → unique timestamped version.
+    /// Empty when no SNAPSHOT dependencies were resolved to a unique form.
+    pub snapshot_pins: BTreeMap<String, String>,
 }
 
 /// One entry in the dependency list passed to [`resolve`].
@@ -381,6 +409,7 @@ fn curie_toml_gav() -> Gav {
         version: String::new(),
         classifier: None,
         extension: None,
+        snapshot_version: None,
     }
 }
 
@@ -428,7 +457,7 @@ fn merge_parent_chain(
     child: &Gav,
     repos: &[Repository],
     client: &reqwest::blocking::Client,
-    offline: bool,
+    opts: &ResolveOptions,
 ) -> Result<()> {
     let mut depth = 0;
     let mut current_parent = pom.parent.clone();
@@ -440,15 +469,25 @@ fn merge_parent_chain(
             break;
         }
 
-        let parent_gav = Gav {
+        let mut parent_gav = Gav {
             group: parent_ref.group_id.clone(),
             artifact: parent_ref.artifact_id.clone(),
             version: parent_ref.version.clone(),
             classifier: None,
             extension: None,
+            snapshot_version: None,
         };
+        prepare_snapshot_gav(&mut parent_gav, repos, client, opts)?;
 
-        let pom_path = ensure_artifact(&parent_gav, repos, client, ArtifactKind::Pom, offline, None, None)
+        let pom_path = ensure_artifact(
+            &parent_gav,
+            repos,
+            client,
+            ArtifactKind::Pom,
+            opts.offline,
+            None,
+            None,
+        )
             .with_context(|| format!("failed to fetch parent POM {parent_gav} (parent of {child})"))?;
         let xml = std::fs::read_to_string(&pom_path)
             .with_context(|| format!("failed to read parent POM {} (parent of {child})", pom_path.display()))?;
@@ -507,15 +546,25 @@ fn fetch_and_parse_pom(
     gav: &Gav,
     repos: &[Repository],
     client: &reqwest::blocking::Client,
-    offline: bool,
+    opts: &ResolveOptions,
 ) -> Result<Pom> {
-    let pom_path = ensure_artifact(gav, repos, client, ArtifactKind::Pom, offline, None, None)
+    let mut resolved = gav.clone();
+    prepare_snapshot_gav(&mut resolved, repos, client, opts)?;
+    let pom_path = ensure_artifact(
+        &resolved,
+        repos,
+        client,
+        ArtifactKind::Pom,
+        opts.offline,
+        None,
+        None,
+    )
         .with_context(|| format!("failed to fetch POM for {}", gav))?;
     let xml = std::fs::read_to_string(&pom_path)
         .with_context(|| format!("failed to read POM {}", pom_path.display()))?;
     let mut pom = pom::parse(&xml)
         .with_context(|| format!("failed to parse POM for {}", gav))?;
-    merge_parent_chain(&mut pom, gav, repos, client, offline)?;
+    merge_parent_chain(&mut pom, gav, repos, client, opts)?;
 
     // Resolve the POM's own <dependencyManagement> BOM imports so that
     // dependencies declared without an explicit version (e.g. spock-core's
@@ -535,9 +584,18 @@ fn fetch_and_parse_pom(
             // any placeholder remains keeps an unresolved `${...}` from ever
             // reaching the filesystem (which previously created junk cache
             // directories literally named e.g. `${idp.groupId}`).
-            let Some(bom_gav) = resolve_bom_ref_gav(bom_ref, &pom) else { continue; };
+            let Some(mut bom_gav) = resolve_bom_ref_gav(bom_ref, &pom) else { continue; };
+            let _ = prepare_snapshot_gav(&mut bom_gav, repos, client, opts);
             // Fetch the BOM POM directly without further BOM-import expansion.
-            if let Ok(path) = ensure_artifact(&bom_gav, repos, client, ArtifactKind::Pom, offline, None, None) {
+            if let Ok(path) = ensure_artifact(
+                &bom_gav,
+                repos,
+                client,
+                ArtifactKind::Pom,
+                opts.offline,
+                None,
+                None,
+            ) {
                 if let Ok(xml) = std::fs::read_to_string(&path) {
                     if let Ok(bom_pom) = pom::parse(&xml) {
                         for (k, v) in &bom_pom.managed_versions {
@@ -578,7 +636,7 @@ fn effective_repos(default_repos: &[Repository]) -> Vec<Repository> {
 fn parallel_pom_fetch(
     level: &[BfsWork],
     client: &Client,
-    offline: bool,
+    opts: &ResolveOptions,
 ) -> Vec<Option<Result<Pom>>> {
     const PARALLEL_POM_FETCHES: usize = 8;
     let level_n = level.len();
@@ -598,7 +656,7 @@ fn parallel_pom_fetch(
                         if i >= level_n { break; }
                         let work = &level[i];
                         local.push((i, fetch_and_parse_pom(
-                            &work.gav, &work.fetch_repos, client, offline,
+                            &work.gav, &work.fetch_repos, client, opts,
                         )));
                     }
                     local
@@ -624,6 +682,19 @@ pub fn resolve_boms(
     client: &reqwest::blocking::Client,
     offline: bool,
 ) -> Result<HashMap<String, String>> {
+    let opts = ResolveOptions {
+        offline,
+        ..ResolveOptions::default()
+    };
+    resolve_boms_with_opts(bom_gavs, repos, client, &opts)
+}
+
+fn resolve_boms_with_opts(
+    bom_gavs: &[Gav],
+    repos: &[Repository],
+    client: &reqwest::blocking::Client,
+    opts: &ResolveOptions,
+) -> Result<HashMap<String, String>> {
     let mut managed: HashMap<String, String> = HashMap::new();
     let mut visited: HashSet<String> = HashSet::new();
 
@@ -647,7 +718,7 @@ pub fn resolve_boms(
                     continue; // already processed — prevent cycles
                 }
 
-                let pom = fetch_and_parse_pom(&gav, repos, client, offline)
+                let pom = fetch_and_parse_pom(&gav, repos, client, opts)
                     .with_context(|| format!("failed to fetch BOM POM for {}", gav))?;
 
                 // Collect this BOM's own managed versions for deferred application.
@@ -695,6 +766,7 @@ fn resolve_bom_ref_gav(bom_ref: &BomRef, importing_pom: &Pom) -> Option<Gav> {
         version,
         classifier: None,
         extension: None,
+        snapshot_version: None,
     })
 }
 
@@ -744,7 +816,7 @@ pub fn resolve_tree(
 
     let client = build_http_client()?;
 
-    let global_managed = resolve_boms(&opts.bom_imports, &central, &client, opts.offline)?;
+    let global_managed = resolve_boms_with_opts(&opts.bom_imports, &central, &client, opts)?;
 
     let mut visited: HashSet<String> = HashSet::new();
     let mut resolved: Vec<ResolvedDep> = Vec::new();
@@ -799,7 +871,7 @@ pub fn resolve_tree(
     }
 
     while !current_level.is_empty() {
-        let pom_results = parallel_pom_fetch(&current_level, &client, opts.offline);
+        let pom_results = parallel_pom_fetch(&current_level, &client, opts);
 
         // A POM that failed to fetch/read/parse (including any parent in its
         // chain) is fatal: silently skipping it would drop its transitive
@@ -866,6 +938,7 @@ pub fn resolve_tree(
                         version: raw_version,
                         classifier: dep.classifier.clone(),
                         extension: None,
+                        snapshot_version: None,
                     };
                     visited.insert(ga_key);
                     next_level.push(BfsWork {
@@ -903,7 +976,7 @@ pub fn resolve_declared_gavs(
 ) -> Result<Vec<Gav>> {
     let central = effective_repos(&opts.default_repos);
     let client = build_http_client()?;
-    let global_managed = resolve_boms(&opts.bom_imports, &central, &client, opts.offline)?;
+    let global_managed = resolve_boms_with_opts(&opts.bom_imports, &central, &client, opts)?;
 
     let mut out = Vec::with_capacity(deps.len());
     for dep in deps {
@@ -930,8 +1003,10 @@ pub fn resolve_declared_gavs(
 /// An entry with an empty version string (`""`) means the version must be
 /// supplied by one of the BOMs in `opts.bom_imports`; it is a hard error if
 /// no BOM provides it.
+///
+/// Prefer [`resolve_full`] when the caller needs SNAPSHOT pins for `Curie.lock`.
 pub fn resolve(deps: &[DepEntry], opts: &ResolveOptions) -> Result<Vec<PathBuf>> {
-    resolve_with_pins(deps, opts, &[])
+    Ok(resolve_full(deps, opts, &[])?.jars)
 }
 
 /// Like [`resolve`], but treats each `group:artifact` key in `pins` as already
@@ -945,6 +1020,16 @@ pub fn resolve_with_pins(
     opts: &ResolveOptions,
     pins: &[String],
 ) -> Result<Vec<PathBuf>> {
+    Ok(resolve_full(deps, opts, pins)?.jars)
+}
+
+/// Full dependency resolution including the SNAPSHOT pin map for lockfile
+/// writers.  See [`resolve`] / [`resolve_with_pins`] for the algorithm.
+pub fn resolve_full(
+    deps: &[DepEntry],
+    opts: &ResolveOptions,
+    pins: &[String],
+) -> Result<ResolveResult> {
     let central = effective_repos(&opts.default_repos);
 
     // Build a lookup map from repo id → Repository for named repos.
@@ -958,7 +1043,7 @@ pub fn resolve_with_pins(
 
     // BOMs are resolved using the same default repos as regular deps
     // so that a Central mirror is respected here too.
-    let global_managed = resolve_boms(&opts.bom_imports, &central, &client, opts.offline)?;
+    let global_managed = resolve_boms_with_opts(&opts.bom_imports, &central, &client, opts)?;
 
     // -----------------------------------------------------------------------
     // Phase 1: level-synchronised parallel BFS over POMs.
@@ -1088,7 +1173,7 @@ pub fn resolve_with_pins(
     while !current_level.is_empty() {
         // Parallel fetch: each thread pulls the next item from `current_level`
         // via an atomic index and stores (index, pom_result).
-        let pom_results = parallel_pom_fetch(&current_level, &client, opts.offline);
+        let pom_results = parallel_pom_fetch(&current_level, &client, opts);
 
         // A POM that failed to fetch/read/parse (including any parent in its
         // chain) is fatal: silently skipping it would drop its transitive
@@ -1176,6 +1261,7 @@ pub fn resolve_with_pins(
                         version: raw_version,
                         classifier: dep.classifier.clone(),
                         extension: None,
+                        snapshot_version: None,
                     };
                     chosen.insert(ga_key.clone(), child_gav.version.clone());
                     visited.insert(ga_key);
@@ -1221,6 +1307,14 @@ pub fn resolve_with_pins(
     }
 
     // -----------------------------------------------------------------------
+    // Resolve unique SNAPSHOT filenames before Phase 2 so JAR paths and
+    // lockfile pins reflect the timestamped artifact.
+    // -----------------------------------------------------------------------
+    for (gav, fetch_repos) in &mut ordered_gavs {
+        prepare_snapshot_gav(gav, fetch_repos, &client, opts)?;
+    }
+
+    // -----------------------------------------------------------------------
     // Phase 2: download JARs in parallel.
     //
     // We spawn up to PARALLEL_DOWNLOADS threads, each pulling one JAR at a
@@ -1232,7 +1326,10 @@ pub fn resolve_with_pins(
 
     let n = ordered_gavs.len();
     if n == 0 {
-        return Ok(vec![]);
+        return Ok(ResolveResult {
+            jars: vec![],
+            snapshot_pins: BTreeMap::new(),
+        });
     }
 
     // Count how many JARs are not yet in the local cache — only those will
@@ -1368,7 +1465,237 @@ pub fn resolve_with_pins(
         ordered_jars.push(path);
     }
 
-    Ok(ordered_jars)
+    let mut snapshot_pins = BTreeMap::new();
+    for (gav, _) in &ordered_gavs {
+        if gav.is_snapshot() {
+            if let Some(sv) = &gav.snapshot_version {
+                snapshot_pins.insert(gav.snapshot_pin_key(), sv.clone());
+            }
+        }
+    }
+
+    Ok(ResolveResult {
+        jars: ordered_jars,
+        snapshot_pins,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// SNAPSHOT unique-version resolution
+// ---------------------------------------------------------------------------
+
+/// Populate `gav.snapshot_version` for a `-SNAPSHOT` coordinate.
+///
+/// Order of preference:
+/// 1. Existing pin in [`ResolveOptions::snapshot_pins`] (from `Curie.lock`),
+///    unless [`ResolveOptions::update_snapshots`] forces a refresh.
+/// 2. Version-level `maven-metadata.xml` from the first repo that publishes it.
+/// 3. Leave `snapshot_version = None` (non-unique / local-install layout).
+fn prepare_snapshot_gav(
+    gav: &mut Gav,
+    repos: &[Repository],
+    client: &Client,
+    opts: &ResolveOptions,
+) -> Result<()> {
+    if !gav.is_snapshot() {
+        return Ok(());
+    }
+
+    let pin_key = gav.snapshot_pin_key();
+
+    if !opts.update_snapshots {
+        if let Some(unique) = opts.snapshot_pins.get(&pin_key) {
+            gav.snapshot_version = Some(unique.clone());
+            return Ok(());
+        }
+        // Keep an already-resolved unique version (e.g. re-prepare).
+        if gav.snapshot_version.is_some() {
+            return Ok(());
+        }
+    } else {
+        // Force refresh: drop any prior resolution so metadata is consulted.
+        gav.snapshot_version = None;
+    }
+
+    if opts.offline {
+        // Offline without a pin: use non-unique layout if present in cache.
+        return Ok(());
+    }
+
+    // Unpinned resolve: honour update policy only when a local metadata
+    // cache exists with a freshness marker.  First resolve always fetches.
+    let policy = if opts.update_snapshots {
+        SnapshotUpdatePolicy::Always
+    } else {
+        opts.snapshot_update_policy.clone()
+    };
+
+    let relative_meta = gav.relative_snapshot_metadata_path();
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for repo in repos {
+        let url = repo.artifact_url(&relative_meta);
+        let local_meta = local_snapshot_metadata_path(gav, &repo.id);
+
+        let last_checked = read_curie_checked(&local_meta);
+        let now = SystemTime::now();
+        let need_fetch = opts.update_snapshots
+            || !local_meta.exists()
+            || snapshot_meta::should_refetch(&policy, last_checked, now);
+
+        let xml = if need_fetch {
+            match fetch_text(client, &url) {
+                Ok(Some(body)) => {
+                    if let Some(parent) = local_meta.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(&local_meta, &body);
+                    write_curie_checked(&local_meta, now);
+                    body
+                }
+                Ok(None) => continue, // 404 — try next repo
+                Err(e) => {
+                    last_err = Some(e);
+                    // Fall back to cached metadata if present.
+                    if local_meta.exists() {
+                        match std::fs::read_to_string(&local_meta) {
+                            Ok(body) => body,
+                            Err(_) => continue,
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+            }
+        } else {
+            match std::fs::read_to_string(&local_meta) {
+                Ok(body) => body,
+                Err(_) => continue,
+            }
+        };
+
+        let meta = snapshot_meta::parse_snapshot_metadata(&xml)
+            .with_context(|| format!("failed to parse snapshot metadata for {gav} from {url}"))?;
+
+        let classifier = gav.classifier.as_deref();
+        // Prefer jar entry (classpath), then pom — both usually share the value.
+        let unique = meta
+            .resolve_unique_version(&gav.version, "jar", classifier)
+            .or_else(|| meta.resolve_unique_version(&gav.version, "pom", None));
+
+        if let Some(u) = unique {
+            gav.snapshot_version = Some(u);
+        }
+        // Whether unique or non-unique, this repo answered — stop searching.
+        return Ok(());
+    }
+
+    if let Some(e) = last_err {
+        // All repos failed with errors (not just 404).  Surface the last one
+        // only when we also have no non-unique local artifact to fall back to.
+        let non_unique = gav.local_repository_path()?;
+        if !non_unique.exists() {
+            return Err(e).context(format!(
+                "failed to resolve unique snapshot version for {gav}"
+            ));
+        }
+    }
+
+    // No metadata → non-unique layout (local install / some Nexus configs).
+    Ok(())
+}
+
+/// Cached version-level metadata path under `~/.m2`, keyed by repo id
+/// (Maven layout: `maven-metadata-<repoId>.xml`).
+fn local_snapshot_metadata_path(gav: &Gav, repo_id: &str) -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".m2")
+        .join("repository")
+        .join(gav.group_path())
+        .join(&gav.artifact)
+        .join(&gav.version)
+        .join(format!("maven-metadata-{repo_id}.xml"))
+}
+
+fn curie_checked_path(metadata_path: &Path) -> PathBuf {
+    let mut s = metadata_path.as_os_str().to_owned();
+    s.push(".curie-checked");
+    PathBuf::from(s)
+}
+
+fn read_curie_checked(metadata_path: &Path) -> Option<SystemTime> {
+    let path = curie_checked_path(metadata_path);
+    let text = std::fs::read_to_string(path).ok()?;
+    let secs: u64 = text.trim().parse().ok()?;
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+}
+
+fn write_curie_checked(metadata_path: &Path, now: SystemTime) {
+    let path = curie_checked_path(metadata_path);
+    if let Ok(dur) = now.duration_since(SystemTime::UNIX_EPOCH) {
+        let _ = std::fs::write(path, format!("{}", dur.as_secs()));
+    }
+}
+
+/// Fetch a URL as text. Supports `http(s)://` and `file://` (and bare
+/// `file:` relative forms that have already been absolutised by the caller).
+/// Returns `Ok(None)` on HTTP 404 so callers can try the next repository.
+fn fetch_text(client: &Client, url: &str) -> Result<Option<String>> {
+    if let Some(path) = file_url_to_path(url) {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let body = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        return Ok(Some(body));
+    }
+
+    let response = client
+        .get(url)
+        .send()
+        .with_context(|| format!("HTTP request failed for {url}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        bail!("HTTP {} for {}", response.status(), url);
+    }
+    let body = response
+        .text()
+        .with_context(|| format!("failed to read response body for {url}"))?;
+    Ok(Some(body))
+}
+
+/// Convert a `file://` / `file:` URL to a filesystem path. Returns `None` for
+/// non-file schemes.
+///
+/// Accepted forms:
+/// - `file:///abs/path` → `/abs/path`
+/// - `file://localhost/abs/path` → `/abs/path`
+/// - `file:/abs/path` → `/abs/path`
+/// - `file:relative/path` → `relative/path`
+/// - `file://relative/path` → `relative/path` (no host authority; used when
+///   the caller has not yet absolutised a project-relative repo)
+fn file_url_to_path(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file:")?;
+    if let Some(stripped) = rest.strip_prefix("//") {
+        // file:///abs → stripped starts with '/'
+        if stripped.starts_with('/') {
+            return Some(PathBuf::from(stripped));
+        }
+        // file://localhost/abs
+        if let Some(p) = stripped.strip_prefix("localhost/") {
+            return Some(PathBuf::from(format!("/{p}")));
+        }
+        if stripped == "localhost" {
+            return Some(PathBuf::from("/"));
+        }
+        // file://relative/or/windows — treat the whole remainder as a path
+        // (do NOT strip a fake "host" segment).
+        return Some(PathBuf::from(stripped));
+    }
+    // file:/abs or file:relative
+    Some(PathBuf::from(rest))
 }
 
 /// Resolve the version a transitive dependency should be pinned to, applying
@@ -1436,15 +1763,27 @@ enum ArtifactKind {
 /// cached JAR path.  Used by `curie fetch <gav> --no-transitive`.
 pub fn fetch_artifact(gav: &Gav, repos: &[Repository], offline: bool) -> Result<PathBuf> {
     let client = build_http_client()?;
-    ensure_artifact(gav, repos, &client, ArtifactKind::Pom, offline, None, None)?;
-    ensure_artifact(gav, repos, &client, ArtifactKind::Jar, offline, None, None)
+    let opts = ResolveOptions {
+        offline,
+        ..ResolveOptions::default()
+    };
+    let mut resolved = gav.clone();
+    prepare_snapshot_gav(&mut resolved, repos, &client, &opts)?;
+    ensure_artifact(&resolved, repos, &client, ArtifactKind::Pom, offline, None, None)?;
+    ensure_artifact(&resolved, repos, &client, ArtifactKind::Jar, offline, None, None)
 }
 
 /// Download only the POM for an artifact — no JAR.  Used for BOM and
 /// parent-POM pre-fetching where no JAR exists.  Returns the cached POM path.
 pub fn fetch_pom_only(gav: &Gav, repos: &[Repository], offline: bool) -> Result<PathBuf> {
     let client = build_http_client()?;
-    ensure_artifact(gav, repos, &client, ArtifactKind::Pom, offline, None, None)
+    let opts = ResolveOptions {
+        offline,
+        ..ResolveOptions::default()
+    };
+    let mut resolved = gav.clone();
+    prepare_snapshot_gav(&mut resolved, repos, &client, &opts)?;
+    ensure_artifact(&resolved, repos, &client, ArtifactKind::Pom, offline, None, None)
 }
 
 // ---------------------------------------------------------------------------
@@ -1484,21 +1823,9 @@ pub fn fetch_available_versions(ga: &str, repos: &[Repository], offline: bool) -
 
 /// Plain-text GET that returns `None` on a 404 (so the caller can try the next
 /// repository) and errors on any other non-success status or transport failure.
+/// Supports `file://` repository URLs.
 fn http_get_text(client: &Client, url: &str) -> Result<Option<String>> {
-    let response = client
-        .get(url)
-        .send()
-        .with_context(|| format!("HTTP request failed for {url}"))?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
-    if !response.status().is_success() {
-        bail!("HTTP {} for {}", response.status(), url);
-    }
-    response
-        .text()
-        .map(Some)
-        .with_context(|| format!("failed to read response body for {url}"))
+    fetch_text(client, url)
 }
 
 /// Extract the `<versioning><versions><version>…</version></versions></versioning>`
@@ -1758,6 +2085,8 @@ fn stage_and_rename_atomically(
 /// `.sha256` (or `.sha1` fallback) sidecar, and persist the sidecar alongside
 /// the artifact for fast cache-hit verification on subsequent runs.
 ///
+/// Supports `http(s)://` and `file://` repository URLs.
+///
 /// A missing sidecar is a hard error — every well-formed Maven repository
 /// publishes one (Maven's deploy plugin and Nexus/Artifactory both generate
 /// them on upload).  A missing sidecar usually means a misconfigured proxy or
@@ -1768,18 +2097,27 @@ fn download(
     url: &str,
     dest: &Path,
 ) -> Result<()> {
-    let response = client
-        .get(url)
-        .send()
-        .with_context(|| format!("HTTP request failed for {}", url))?;
+    let bytes = if let Some(path) = file_url_to_path(url) {
+        if !path.exists() {
+            bail!("HTTP 404 for {}", url);
+        }
+        std::fs::read(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?
+    } else {
+        let response = client
+            .get(url)
+            .send()
+            .with_context(|| format!("HTTP request failed for {}", url))?;
 
-    if !response.status().is_success() {
-        bail!("HTTP {} for {}", response.status(), url);
-    }
+        if !response.status().is_success() {
+            bail!("HTTP {} for {}", response.status(), url);
+        }
 
-    let bytes = response
-        .bytes()
-        .with_context(|| format!("failed to read response body for {}", url))?;
+        response
+            .bytes()
+            .with_context(|| format!("failed to read response body for {}", url))?
+            .to_vec()
+    };
 
     let (expected_hex, kind) = fetch_any_remote_checksum(client, url)?;
     verify_bytes(&bytes, &expected_hex, kind)
@@ -1889,21 +2227,10 @@ fn fetch_remote_checksum(
     kind: DigestKind,
 ) -> Result<Option<String>> {
     let sidecar_url = format!("{}{}", url, kind.suffix());
-    let response = client
-        .get(&sidecar_url)
-        .send()
-        .with_context(|| format!("HTTP request failed for {}", sidecar_url))?;
-
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
-    if !response.status().is_success() {
-        bail!("HTTP {} for {}", response.status(), sidecar_url);
-    }
-
-    let body = response
-        .text()
-        .with_context(|| format!("failed to read sidecar body for {}", sidecar_url))?;
+    let body = match fetch_text(client, &sidecar_url)? {
+        Some(b) => b,
+        None => return Ok(None),
+    };
     let hex = parse_checksum_text(&body).with_context(|| {
         format!("sidecar {} returned malformed checksum text {:?}", sidecar_url, body)
     })?;
@@ -2086,6 +2413,7 @@ mod tests {
             version: version.to_string(),
             classifier: None,
             extension: None,
+            snapshot_version: None,
         };
         let rel = gav.relative_pom_path();
         let path = home_dir.join(".m2").join("repository").join(&rel);
@@ -2194,7 +2522,7 @@ mod tests {
             &[("org.foo", "y", "2.0")],
             &[("com.example", "bom-a", "1.0.0")],
         );
-        let bom_a = Gav { group: "com.example".into(), artifact: "bom-a".into(), version: "1.0.0".into(), classifier: None, extension: None };
+        let bom_a = Gav { group: "com.example".into(), artifact: "bom-a".into(), version: "1.0.0".into(), classifier: None, extension: None, snapshot_version: None };
         let result = run_resolve_boms(dir.path(), &[bom_a]).unwrap();
         assert_eq!(result.get("org.foo:x").map(String::as_str), Some("1.0"));
         assert_eq!(result.get("org.foo:y").map(String::as_str), Some("2.0"));
@@ -2302,6 +2630,7 @@ mod tests {
             version: version.to_string(),
             classifier: None,
             extension: None,
+            snapshot_version: None,
         };
         let m2 = home_dir.join(".m2").join("repository");
 
@@ -2326,6 +2655,7 @@ mod tests {
             version: version.to_string(),
             classifier: None,
             extension: None,
+            snapshot_version: None,
         };
         let pom_path = home_dir.join(".m2").join("repository").join(gav.relative_pom_path());
         write_with_sidecar(&pom_path, pom_xml.as_bytes());
@@ -2414,6 +2744,7 @@ mod tests {
             version: version.to_string(),
             classifier: None,
             extension: None,
+            snapshot_version: None,
         };
         let pom_path = m2.join(pom_gav.relative_pom_path());
         let pom_xml = make_pom(group, artifact, version, deps);
@@ -2457,6 +2788,9 @@ mod tests {
             // These helpers exercise the user-dependency path, so conflict
             // errors are enabled (matching compile.rs / test.rs).
             skip_version_ranges: false, error_on_version_conflict: true,
+            snapshot_pins: Default::default(),
+            update_snapshots: false,
+            snapshot_update_policy: Default::default(),
         };
         let result = resolve(&entries, &opts);
 
@@ -2489,6 +2823,9 @@ mod tests {
             bom_imports: vec![],
             offline: true,
             skip_version_ranges: false, error_on_version_conflict: false,
+            snapshot_pins: Default::default(),
+            update_snapshots: false,
+            snapshot_update_policy: Default::default(),
         };
         let pins: Vec<String> = pins.iter().map(|s| s.to_string()).collect();
         let result = resolve_with_pins(&entries, &opts, &pins);
@@ -2531,6 +2868,9 @@ mod tests {
             // These helpers exercise the user-dependency path, so conflict
             // errors are enabled (matching compile.rs / test.rs).
             skip_version_ranges: false, error_on_version_conflict: true,
+            snapshot_pins: Default::default(),
+            update_snapshots: false,
+            snapshot_update_policy: Default::default(),
         };
         let result = resolve(&entries, &opts);
 
@@ -2937,7 +3277,7 @@ mod tests {
 
         // grp:lib 1.0 depends on foo:bar 1.0 with an exclusion on foo:baz.
         // Build the POM manually to include <exclusions>.
-        let lib_gav = Gav { group: "grp".into(), artifact: "lib".into(), version: "1.0".into(), classifier: None, extension: None };
+        let lib_gav = Gav { group: "grp".into(), artifact: "lib".into(), version: "1.0".into(), classifier: None, extension: None, snapshot_version: None };
         let m2 = dir.path().join(".m2").join("repository");
         let pom_xml = r#"<?xml version="1.0"?>
 <project>
@@ -3003,6 +3343,9 @@ mod tests {
             bom_imports: vec![],
             offline: true,
             skip_version_ranges: false, error_on_version_conflict: false,
+            snapshot_pins: Default::default(),
+            update_snapshots: false,
+            snapshot_update_policy: Default::default(),
         };
         let result = resolve(&entries, &opts).unwrap();
 
@@ -3049,6 +3392,9 @@ mod tests {
             bom_imports: vec![],
             offline: true,
             skip_version_ranges: false, error_on_version_conflict: false,
+            snapshot_pins: Default::default(),
+            update_snapshots: false,
+            snapshot_update_policy: Default::default(),
         };
         let result = resolve(&entries, &opts).unwrap();
 
@@ -3092,6 +3438,9 @@ mod tests {
             bom_imports: vec![],
             offline: true,
             skip_version_ranges: false, error_on_version_conflict: false,
+            snapshot_pins: Default::default(),
+            update_snapshots: false,
+            snapshot_update_policy: Default::default(),
         };
         let result = resolve(&entries, &opts).unwrap();
 
@@ -3442,6 +3791,9 @@ mod tests {
             // These helpers exercise the user-dependency path, so conflict
             // errors are enabled (matching compile.rs / test.rs).
             skip_version_ranges: false, error_on_version_conflict: true,
+            snapshot_pins: Default::default(),
+            update_snapshots: false,
+            snapshot_update_policy: Default::default(),
         };
         let result = resolve(&entries, &opts);
 
@@ -3486,6 +3838,9 @@ mod tests {
             bom_imports: vec![],
             offline: true, // cache-hit path; no network call made
             skip_version_ranges: false, error_on_version_conflict: false,
+            snapshot_pins: Default::default(),
+            update_snapshots: false,
+            snapshot_update_policy: Default::default(),
         };
         let entries = [DepEntry { key: "foo:bar", version: "1.0", repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }];
         let result = resolve(&entries, &opts).unwrap();
@@ -3584,6 +3939,9 @@ mod tests {
             bom_imports,
             offline: true,
             skip_version_ranges: false, error_on_version_conflict: false,
+            snapshot_pins: Default::default(),
+            update_snapshots: false,
+            snapshot_update_policy: Default::default(),
         };
         let result = resolve_tree(&entries, &opts);
 
@@ -3861,6 +4219,9 @@ mod tests {
             bom_imports: vec![],
             offline: true,
             skip_version_ranges: false, error_on_version_conflict: false,
+            snapshot_pins: Default::default(),
+            update_snapshots: false,
+            snapshot_update_policy: Default::default(),
         };
         let result = resolve(&entries, &opts).unwrap();
 
@@ -3925,6 +4286,7 @@ mod tests {
             version: "3.3.0".to_string(),
             classifier: None,
             extension: None,
+            snapshot_version: None,
         };
         let importer_xml = r#"<?xml version="1.0"?>
 <project>
@@ -3984,6 +4346,7 @@ mod tests {
             version: "5.0.0".to_string(),
             classifier: None,
             extension: None,
+            snapshot_version: None,
         };
         let bom_xml = r#"<?xml version="1.0"?>
 <project>
@@ -4072,5 +4435,306 @@ mod tests {
         let p2s = p2.to_string_lossy();
         assert!(p1s.contains("foo-1.0.pom.part."), "pom staging: {}", p1s);
         assert!(p2s.contains("foo-1.0.jar.part."), "jar staging: {}", p2s);
+    }
+
+    // -----------------------------------------------------------------------
+    // SNAPSHOT resolution + pins
+    // -----------------------------------------------------------------------
+
+    /// Write a unique-snapshot artifact (timestamped JAR/POM + sidecars) and
+    /// version-level `maven-metadata.xml` into a file:// repository root.
+    fn write_unique_snapshot_repo(
+        repo_root: &std::path::Path,
+        group: &str,
+        artifact: &str,
+        base_version: &str,
+        unique_version: &str,
+        jar_bytes: &[u8],
+    ) {
+        let group_path = group.replace('.', "/");
+        let dir = repo_root
+            .join(&group_path)
+            .join(artifact)
+            .join(base_version);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let pom_xml = make_pom(group, artifact, base_version, &[]);
+        let pom_name = format!("{artifact}-{unique_version}.pom");
+        let jar_name = format!("{artifact}-{unique_version}.jar");
+        write_with_sidecar(&dir.join(&pom_name), pom_xml.as_bytes());
+        write_with_sidecar(&dir.join(&jar_name), jar_bytes);
+
+        let meta = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+  <groupId>{group}</groupId>
+  <artifactId>{artifact}</artifactId>
+  <version>{base_version}</version>
+  <versioning>
+    <snapshot>
+      <timestamp>{ts}</timestamp>
+      <buildNumber>{bn}</buildNumber>
+    </snapshot>
+    <snapshotVersions>
+      <snapshotVersion>
+        <extension>jar</extension>
+        <value>{unique_version}</value>
+      </snapshotVersion>
+      <snapshotVersion>
+        <extension>pom</extension>
+        <value>{unique_version}</value>
+      </snapshotVersion>
+    </snapshotVersions>
+  </versioning>
+</metadata>
+"#,
+            // unique = baseWithoutSNAPSHOT-timestamp-buildNumber
+            ts = unique_version
+                .rsplit_once('-')
+                .and_then(|(left, _bn)| left.rsplit_once('-').map(|(_, ts)| ts))
+                .unwrap_or("20260101.000000"),
+            bn = unique_version.rsplit_once('-').map(|(_, bn)| bn).unwrap_or("1"),
+        );
+        std::fs::write(dir.join("maven-metadata.xml"), meta).unwrap();
+    }
+
+    #[test]
+    fn unique_snapshot_resolves_via_metadata_and_returns_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_unique_snapshot_repo(
+            &repo,
+            "com.example",
+            "snap-lib",
+            "1.0-SNAPSHOT",
+            "1.0-20260115.120000-1",
+            b"snap-jar-v1",
+        );
+
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", dir.path().join("home").to_str().unwrap());
+
+        let entries = [DepEntry {
+            key: "com.example:snap-lib",
+            version: "1.0-SNAPSHOT",
+            repo_id: Some("local"),
+            exclusions: vec![],
+            classifier: None,
+            allow_version_conflict: false,
+        }];
+        let opts = ResolveOptions {
+            default_repos: vec![],
+            named_repos: vec![Repository {
+                id: "local".into(),
+                name: "Local".into(),
+                url: format!("file://{}", repo.display()),
+            }],
+            progress: false,
+            bom_imports: vec![],
+            offline: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
+            snapshot_pins: HashMap::new(),
+            update_snapshots: false,
+            snapshot_update_policy: SnapshotUpdatePolicy::Always,
+        };
+        let result = resolve_full(&entries, &opts, &[]).unwrap();
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert_eq!(result.jars.len(), 1);
+        let jar = result.jars[0].to_string_lossy();
+        assert!(
+            jar.contains("snap-lib-1.0-20260115.120000-1.jar"),
+            "expected unique snapshot JAR path, got {jar}"
+        );
+        assert_eq!(
+            result
+                .snapshot_pins
+                .get("com.example:snap-lib:1.0-SNAPSHOT")
+                .map(String::as_str),
+            Some("1.0-20260115.120000-1")
+        );
+        // Bytes actually came from the unique file.
+        assert_eq!(std::fs::read(&result.jars[0]).unwrap(), b"snap-jar-v1");
+    }
+
+    #[test]
+    fn snapshot_pin_selects_locked_unique_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        // Publish *two* unique builds; the pin must select the older one.
+        write_unique_snapshot_repo(
+            &repo,
+            "com.example",
+            "snap-lib",
+            "1.0-SNAPSHOT",
+            "1.0-20260115.120000-1",
+            b"snap-v1",
+        );
+        // Overwrite metadata to point at build 2, and add the v2 artifacts.
+        write_unique_snapshot_repo(
+            &repo,
+            "com.example",
+            "snap-lib",
+            "1.0-SNAPSHOT",
+            "1.0-20260116.120000-2",
+            b"snap-v2",
+        );
+
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", dir.path().join("home").to_str().unwrap());
+
+        let mut pins = HashMap::new();
+        pins.insert(
+            "com.example:snap-lib:1.0-SNAPSHOT".into(),
+            "1.0-20260115.120000-1".into(),
+        );
+
+        let entries = [DepEntry {
+            key: "com.example:snap-lib",
+            version: "1.0-SNAPSHOT",
+            repo_id: Some("local"),
+            exclusions: vec![],
+            classifier: None,
+            allow_version_conflict: false,
+        }];
+        let opts = ResolveOptions {
+            default_repos: vec![],
+            named_repos: vec![Repository {
+                id: "local".into(),
+                name: "Local".into(),
+                url: format!("file://{}", repo.display()),
+            }],
+            progress: false,
+            bom_imports: vec![],
+            offline: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
+            snapshot_pins: pins,
+            update_snapshots: false,
+            snapshot_update_policy: SnapshotUpdatePolicy::Always,
+        };
+        let result = resolve_full(&entries, &opts, &[]).unwrap();
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert_eq!(std::fs::read(&result.jars[0]).unwrap(), b"snap-v1");
+        assert!(result.jars[0]
+            .to_string_lossy()
+            .contains("1.0-20260115.120000-1"));
+    }
+
+    #[test]
+    fn update_snapshots_ignores_pin_and_takes_latest() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_unique_snapshot_repo(
+            &repo,
+            "com.example",
+            "snap-lib",
+            "1.0-SNAPSHOT",
+            "1.0-20260115.120000-1",
+            b"snap-v1",
+        );
+        write_unique_snapshot_repo(
+            &repo,
+            "com.example",
+            "snap-lib",
+            "1.0-SNAPSHOT",
+            "1.0-20260116.120000-2",
+            b"snap-v2",
+        );
+
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", dir.path().join("home").to_str().unwrap());
+
+        let mut pins = HashMap::new();
+        pins.insert(
+            "com.example:snap-lib:1.0-SNAPSHOT".into(),
+            "1.0-20260115.120000-1".into(),
+        );
+
+        let entries = [DepEntry {
+            key: "com.example:snap-lib",
+            version: "1.0-SNAPSHOT",
+            repo_id: Some("local"),
+            exclusions: vec![],
+            classifier: None,
+            allow_version_conflict: false,
+        }];
+        let opts = ResolveOptions {
+            default_repos: vec![],
+            named_repos: vec![Repository {
+                id: "local".into(),
+                name: "Local".into(),
+                url: format!("file://{}", repo.display()),
+            }],
+            progress: false,
+            bom_imports: vec![],
+            offline: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
+            snapshot_pins: pins,
+            update_snapshots: true, // -U
+            snapshot_update_policy: SnapshotUpdatePolicy::Always,
+        };
+        let result = resolve_full(&entries, &opts, &[]).unwrap();
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert_eq!(std::fs::read(&result.jars[0]).unwrap(), b"snap-v2");
+        assert_eq!(
+            result
+                .snapshot_pins
+                .get("com.example:snap-lib:1.0-SNAPSHOT")
+                .map(String::as_str),
+            Some("1.0-20260116.120000-2")
+        );
+    }
+
+    #[test]
+    fn non_unique_snapshot_works_from_local_cache_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        // Non-unique layout in ~/.m2: foo-1.0-SNAPSHOT.jar (no metadata needed).
+        write_fake_artifact(dir.path(), "com.example", "local-snap", "1.0-SNAPSHOT", &[]);
+
+        let jars = run_resolve(
+            dir.path(),
+            &[("com.example:local-snap", "1.0-SNAPSHOT")],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(jars.len(), 1);
+        assert!(jars[0]
+            .to_string_lossy()
+            .contains("local-snap-1.0-SNAPSHOT.jar"));
+    }
+
+    #[test]
+    fn file_url_to_path_parses_absolute() {
+        let p = file_url_to_path("file:///tmp/repo/foo.jar").unwrap();
+        assert_eq!(p, PathBuf::from("/tmp/repo/foo.jar"));
+    }
+
+    #[test]
+    fn file_url_to_path_parses_relative_without_host_stripping() {
+        // Must not treat "examples" as a host and drop it.
+        let p = file_url_to_path("file://examples/snapshot-demo/local-repo/x").unwrap();
+        assert_eq!(p, PathBuf::from("examples/snapshot-demo/local-repo/x"));
+        let p = file_url_to_path("file:local-repo/x").unwrap();
+        assert_eq!(p, PathBuf::from("local-repo/x"));
     }
 }

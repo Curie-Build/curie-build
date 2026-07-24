@@ -45,6 +45,7 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
         no_jlink: false,
         offline: opts.offline,
         coverage: false,
+        update_snapshots: false,
     };
     let output = build::do_build(project_root, &desc, build_opts, &[])?;
 

@@ -1,0 +1,26 @@
+# snapshot-demo
+#
+# Demonstrates SNAPSHOT dependency resolution and Curie.lock.
+#
+# The dependency below is a unique Maven snapshot served from a local
+# file:// repository under local-repo/.  On the first build Curie:
+#   1. Fetches version-level maven-metadata.xml
+#   2. Downloads the timestamped artifact (…-20260115.120000-1.jar)
+#   3. Writes Curie.lock pinning that unique version
+#
+# Subsequent builds reuse the pin from Curie.lock (no metadata re-fetch
+# for the pinned version).  Refresh with:
+#   curie build -U
+# or delete Curie.lock.
+
+[application]
+name = "snapshot-demo"
+version = "0.1.0"
+
+[[repositories]]
+id = "local-snapshots"
+name = "Local snapshot repo"
+url = "file:local-repo"
+
+[dependencies]
+"com.example:snapshot-lib" = { version = "1.0-SNAPSHOT", repository = "local-snapshots" }

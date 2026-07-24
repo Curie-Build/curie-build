@@ -10,6 +10,7 @@ use crate::jar::classpath_string;
 use crate::{build, descriptor};
 use crate::build::central_repos;
 use anyhow::{bail, Context, Result};
+use crate::lock;
 use curie_deps::resolver::{resolve, DepEntry, ResolveOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -42,6 +43,7 @@ const TEST_SOURCE_SET_STAMP: &str = ".test-sources";
 /// into an intermediate struct adds plumbing without making the API
 /// clearer.  Revisit if the list grows further.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // convenience wrapper; build/test paths use run_tests_with_options
 pub fn run_tests(
     project_root: &Path,
     desc: &descriptor::Descriptor,
@@ -55,6 +57,39 @@ pub fn run_tests(
     offline: bool,
     coverage: bool,
     extra_cp: &[PathBuf],
+) -> Result<()> {
+    run_tests_with_options(
+        project_root,
+        desc,
+        classes_dir,
+        dep_jars,
+        kotlin_stdlib_jars,
+        groovy_jars,
+        resources_dir,
+        test_resources_dir,
+        filter,
+        offline,
+        coverage,
+        extra_cp,
+        false,
+    )
+}
+
+/// Like [`run_tests`], with explicit SNAPSHOT refresh for test dependencies.
+pub fn run_tests_with_options(
+    project_root: &Path,
+    desc: &descriptor::Descriptor,
+    classes_dir: &Path,
+    dep_jars: &[PathBuf],
+    kotlin_stdlib_jars: &[PathBuf],
+    groovy_jars: &[PathBuf],
+    resources_dir: Option<&Path>,
+    test_resources_dir: Option<&Path>,
+    filter: Option<&str>,
+    offline: bool,
+    coverage: bool,
+    extra_cp: &[PathBuf],
+    update_snapshots: bool,
 ) -> Result<()> {
     // --- discover test sources -----------------------------------------------
     let (java_test_sources, kotlin_test_sources) = discover_test_sources(project_root);
@@ -108,11 +143,12 @@ pub fn run_tests(
             .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
             .collect();
 
-        resolve(
+        lock::resolve_with_lock(
+            project_root,
             &pairs,
-            &ResolveOptions {
+            ResolveOptions {
                 default_repos: central_repos(),
-                named_repos: extra_repos.clone(),
+                named_repos: crate::build::extra_repos_for(desc, Some(project_root)),
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: test_bom_gavs.clone(),
                 offline,
@@ -120,7 +156,11 @@ pub fn run_tests(
                 // User-declared [test-dependencies]: fail on a major-version
                 // conflict unless the coordinate sets allowVersionConflict.
                 error_on_version_conflict: true,
+                snapshot_pins: Default::default(),
+                update_snapshots: false,
+                snapshot_update_policy: Default::default(),
             },
+            update_snapshots,
         )
         .context("test dependency resolution failed")?
     };
@@ -156,6 +196,9 @@ pub fn run_tests(
                 bom_imports: spock_bom_imports,
                 offline,
                 skip_version_ranges: false, error_on_version_conflict: false,
+                snapshot_pins: Default::default(),
+                update_snapshots: false,
+                snapshot_update_policy: Default::default(),
             },
         )
         .context("Spock resolution failed")?;
@@ -184,6 +227,9 @@ pub fn run_tests(
                 bom_imports: test_bom_gavs.clone(),
                 offline,
                 skip_version_ranges: false, error_on_version_conflict: false,
+                snapshot_pins: Default::default(),
+                update_snapshots: false,
+                snapshot_update_policy: Default::default(),
             },
         )
         .context("Kotlin compiler/stdlib resolution failed (test phase)")?;
@@ -215,6 +261,9 @@ pub fn run_tests(
                 bom_imports: test_bom_gavs.clone(),
                 offline,
                 skip_version_ranges: false, error_on_version_conflict: false,
+                snapshot_pins: Default::default(),
+                update_snapshots: false,
+                snapshot_update_policy: Default::default(),
             },
         )
         .context("Kotlin compiler resolution failed (test phase)")?;
@@ -249,6 +298,9 @@ pub fn run_tests(
                 bom_imports: test_bom_gavs.clone(),
                 offline,
                 skip_version_ranges: false, error_on_version_conflict: false,
+                snapshot_pins: Default::default(),
+                update_snapshots: false,
+                snapshot_update_policy: Default::default(),
             },
         )
         .context("test annotation-processor resolution failed")?;
@@ -271,7 +323,11 @@ pub fn run_tests(
                     progress: false,
                     bom_imports: test_bom_gavs.clone(),
                     offline,
-                    skip_version_ranges: false, error_on_version_conflict: false,
+                    skip_version_ranges: false,
+                    error_on_version_conflict: false,
+                    snapshot_pins: Default::default(),
+                    update_snapshots: false,
+                    snapshot_update_policy: Default::default(),
                 },
             )
             .with_context(|| {
@@ -495,6 +551,9 @@ pub fn run_tests(
                             bom_imports: test_bom_gavs.clone(),
                             offline,
                             skip_version_ranges: false, error_on_version_conflict: false,
+                            snapshot_pins: Default::default(),
+                            update_snapshots: false,
+                            snapshot_update_policy: Default::default(),
                         },
                     )
                     .context("Groovy test compiler resolution failed")?
@@ -879,6 +938,9 @@ fn resolve_standalone(
             bom_imports: vec![],
             offline,
             skip_version_ranges: false, error_on_version_conflict: false,
+            snapshot_pins: Default::default(),
+            update_snapshots: false,
+            snapshot_update_policy: Default::default(),
         },
     )
     .with_context(|| format!("failed to resolve {}", coord))?;

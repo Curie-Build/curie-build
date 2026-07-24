@@ -1,7 +1,7 @@
 //! Top-level build orchestrator: ties `compile`, `test`, `jar`, `main_class`,
 //! and `docker` together for the `curie build` and `curie clean` commands.
 
-use crate::compile::compile;
+use crate::compile;
 use crate::config;
 use crate::descriptor;
 use crate::git;
@@ -45,6 +45,9 @@ pub struct BuildOptions {
     pub no_jlink: bool,
     pub offline: bool,
     pub coverage: bool,
+    /// Force re-resolution of SNAPSHOT metadata and rewrite `Curie.lock`
+    /// (`-U` / `--update-snapshots`).
+    pub update_snapshots: bool,
 }
 
 /// Output paths produced by a successful build.
@@ -161,7 +164,16 @@ pub fn central_repos() -> Vec<Repository> {
 /// Named repositories from the descriptor with user mirrors applied.
 /// All `[[repositories]]` entries are passed; the resolver activates only those
 /// referenced by a dep's `repository = "id"` field.
+///
+/// Relative `file:` / `file://` URLs are resolved against `project_root` so
+/// examples can ship a local snapshot repository as `file:local-repo`.
 pub fn extra_repos(desc: &descriptor::Descriptor) -> Vec<Repository> {
+    extra_repos_for(desc, None)
+}
+
+/// Like [`extra_repos`], but resolves relative `file:` repository URLs
+/// against `project_root` when provided.
+pub fn extra_repos_for(desc: &descriptor::Descriptor, project_root: Option<&Path>) -> Vec<Repository> {
     let cfg = config::load_config().unwrap_or_default();
     let repos = desc
         .repositories
@@ -169,10 +181,46 @@ pub fn extra_repos(desc: &descriptor::Descriptor) -> Vec<Repository> {
         .map(|r| Repository {
             id: r.id.clone(),
             name: r.display_name().to_string(),
-            url: r.url.clone(),
+            url: resolve_repo_url(&r.url, project_root),
         })
         .collect();
     config::apply_mirrors(repos, &cfg.mirrors)
+}
+
+/// Absolutise relative `file:` repository URLs against the project root.
+fn resolve_repo_url(url: &str, project_root: Option<&Path>) -> String {
+    let Some(root) = project_root else {
+        return url.to_string();
+    };
+    let Some(rest) = url.strip_prefix("file:") else {
+        return url.to_string();
+    };
+    // Already absolute: file:///abs or file://localhost/abs
+    let path_part = rest.strip_prefix("//").unwrap_or(rest);
+    let path_part = path_part
+        .strip_prefix("localhost/")
+        .or_else(|| path_part.strip_prefix("localhost"))
+        .unwrap_or(path_part);
+    if path_part.starts_with('/') {
+        // Absolute filesystem path — normalise to file:///...
+        return format!("file://{path_part}");
+    }
+    // Relative to project root: file:local-repo or file:./local-repo
+    let rel = path_part.trim_start_matches("./");
+    let abs = root.join(rel);
+    // Prefer a canonical absolute path so file:// URLs are unambiguous.
+    let abs = abs
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            if abs.is_absolute() {
+                abs
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(&abs))
+                    .unwrap_or(abs)
+            }
+        });
+    format!("file://{}", abs.display())
 }
 
 /// Build a BOM project: generate the POM file into `target/` and return.
@@ -216,7 +264,13 @@ pub fn do_build(
     extra_cp: &[PathBuf],
 ) -> Result<BuildOutput> {
     let offline = opts.offline;
-    let compiled = compile(project_root, desc, offline, extra_cp)?;
+    let compiled = compile::compile_with_options(
+        project_root,
+        desc,
+        offline,
+        opts.update_snapshots,
+        extra_cp,
+    )?;
 
     // Detect Git once: reused by resource filtering (`git.*` vars) and below
     // by build-info generation, so a non-repo degrades both gracefully.
@@ -241,7 +295,7 @@ pub fn do_build(
         filtered.test_dir.clone().or_else(|| compiled.test_resources_dir.clone());
 
     // --- run tests before packaging ------------------------------------------
-    test::run_tests(
+    test::run_tests_with_options(
         project_root,
         desc,
         &compiled.classes_dir,
@@ -254,6 +308,7 @@ pub fn do_build(
         offline,
         opts.coverage || desc.test.coverage_enabled(),
         extra_cp,
+        opts.update_snapshots,
     )?;
 
     // --- package (deterministic JAR, incremental) ----------------------------

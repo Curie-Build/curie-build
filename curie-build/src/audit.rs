@@ -194,6 +194,9 @@ fn resolve_components(
         bom_imports: desc.prod_bom_gavs()?,
         offline: opts.offline,
         skip_version_ranges: false, error_on_version_conflict: false,
+        snapshot_pins: Default::default(),
+        update_snapshots: false,
+        snapshot_update_policy: Default::default(),
     };
 
     let prod_entries: Vec<DepEntry> = desc
@@ -229,6 +232,9 @@ fn resolve_components(
             bom_imports: desc.test_bom_gavs()?,
             offline: opts.offline,
             skip_version_ranges: false, error_on_version_conflict: false,
+            snapshot_pins: Default::default(),
+            update_snapshots: false,
+            snapshot_update_policy: Default::default(),
         };
         let test_entries: Vec<DepEntry> = desc
             .test_dependencies

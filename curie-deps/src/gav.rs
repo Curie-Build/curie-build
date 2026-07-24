@@ -2,6 +2,7 @@
 
 use anyhow::{bail, Result};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 /// A fully-specified Maven coordinate.
@@ -12,7 +13,14 @@ use std::path::PathBuf;
 /// Extensions are supported for plugin artifacts and other non-JAR files
 /// (e.g. `protoc` with extension "exe", custom generators). When absent,
 /// "jar" is assumed for the primary artifact path.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+///
+/// For Maven unique snapshots (`1.0-SNAPSHOT` published as
+/// `1.0-20260610.123456-3`), [`Self::version`] is always the base version
+/// (directory segment / identity) while [`Self::snapshot_version`] holds the
+/// timestamped filename version. Identity (`Eq`/`Hash`) ignores
+/// `snapshot_version` so two references to the same base snapshot collapse
+/// correctly under nearest-wins.
+#[derive(Debug, Clone, Default)]
 pub struct Gav {
     pub group: String,
     pub artifact: String,
@@ -25,6 +33,32 @@ pub struct Gav {
     /// This enables downloading non-JAR plugin artifacts via the hardened
     /// resolver path.
     pub extension: Option<String>,
+    /// Resolved unique snapshot version used only in the *filename*, e.g.
+    /// `"1.0-20260610.123456-3"`. `None` means the filename uses `version`
+    /// verbatim (releases, and non-unique / locally-installed snapshots).
+    pub snapshot_version: Option<String>,
+}
+
+impl PartialEq for Gav {
+    fn eq(&self, other: &Self) -> bool {
+        self.group == other.group
+            && self.artifact == other.artifact
+            && self.version == other.version
+            && self.classifier == other.classifier
+            && self.extension == other.extension
+    }
+}
+
+impl Eq for Gav {}
+
+impl Hash for Gav {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.group.hash(state);
+        self.artifact.hash(state);
+        self.version.hash(state);
+        self.classifier.hash(state);
+        self.extension.hash(state);
+    }
 }
 
 /// Returns true if `s` contains only characters allowed in Maven coordinates
@@ -76,7 +110,34 @@ impl Gav {
                 validate_coord("extension", e)?;
             }
         }
+        if let Some(sv) = &self.snapshot_version {
+            if !sv.is_empty() {
+                validate_coord("snapshot_version", sv)?;
+            }
+        }
         Ok(())
+    }
+
+    /// Maven snapshot test: case-sensitive `-SNAPSHOT` suffix on the base
+    /// version (`1.0-SNAPSHOT`). Unique timestamps (`1.0-2026…`) are not
+    /// snapshots in this sense — they are the resolved form of one.
+    pub fn is_snapshot(&self) -> bool {
+        self.version.ends_with("-SNAPSHOT")
+    }
+
+    /// Version string used in the artifact *filename* (unique snapshot when
+    /// resolved, otherwise the base `version`).
+    pub fn filename_version(&self) -> &str {
+        self.snapshot_version
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.version)
+    }
+
+    /// Lockfile / pin key: `group:artifact:baseVersion` (classifier omitted —
+    /// pins apply to the GA+base version; classifier only affects the path).
+    pub fn snapshot_pin_key(&self) -> String {
+        format!("{}:{}:{}", self.group, self.artifact, self.version)
     }
 }
 
@@ -106,7 +167,14 @@ impl Gav {
             bail!("dependency key {:?} has empty group, artifact, or version", key);
         }
 
-        let g = Gav { group, artifact, version, classifier: None, extension: None };
+        let g = Gav {
+            group,
+            artifact,
+            version,
+            classifier: None,
+            extension: None,
+            snapshot_version: None,
+        };
         g.validate_for_path()?;
         Ok(g)
     }
@@ -151,21 +219,28 @@ impl Gav {
     }
 
     /// Relative path within a Maven repository layout.
+    ///
+    /// The **directory** always uses the base `version` (`1.0-SNAPSHOT`);
+    /// the **filename** uses [`Self::filename_version`] so unique snapshots
+    /// land at `…/1.0-SNAPSHOT/foo-1.0-20260610.123456-3.jar`.
+    ///
     /// Respects classifier and extension (defaults to ".jar" when extension
     /// is absent). Examples:
     ///   foo-1.0.jar
     ///   foo-1.0-runtime.jar
+    ///   foo-1.0-20260610.123456-3.jar   (unique snapshot)
     ///   protoc-3.25.0-linux-x86_64.exe   (plugin artifact)
     pub fn relative_path(&self) -> String {
         self.validate_for_path()
             .expect("GAV must be valid for path construction (see bug #21)");
+        let file_ver = self.filename_version();
         let base = format!(
             "{}/{}/{}/{}-{}",
             self.group_path(),
             self.artifact,
             self.version,
             self.artifact,
-            self.version,
+            file_ver,
         );
         let ext = self
             .extension
@@ -181,6 +256,8 @@ impl Gav {
     }
 
     /// Relative POM path within a Maven repository layout.
+    ///
+    /// Directory uses base `version`; filename uses [`Self::filename_version`].
     pub fn relative_pom_path(&self) -> String {
         self.validate_for_path()
             .expect("GAV must be valid for path construction (see bug #21)");
@@ -189,6 +266,19 @@ impl Gav {
             self.group_path(),
             self.artifact,
             self.version,
+            self.artifact,
+            self.filename_version(),
+        )
+    }
+
+    /// Relative path of the version-level `maven-metadata.xml` used to resolve
+    /// unique snapshots (`…/artifact/1.0-SNAPSHOT/maven-metadata.xml`).
+    pub fn relative_snapshot_metadata_path(&self) -> String {
+        self.validate_for_path()
+            .expect("GAV must be valid for path construction (see bug #21)");
+        format!(
+            "{}/{}/{}/maven-metadata.xml",
+            self.group_path(),
             self.artifact,
             self.version,
         )
@@ -411,5 +501,74 @@ mod tests {
         // relative_path uses expect (panics on violation for invariant); test via Result fn
         let p = g.local_repository_path();
         assert!(p.is_err());
+    }
+
+    #[test]
+    fn is_snapshot_strict_suffix() {
+        assert!(Gav::from_key_version("g:a", "1.0-SNAPSHOT").unwrap().is_snapshot());
+        assert!(!Gav::from_key_version("g:a", "1.0").unwrap().is_snapshot());
+        assert!(!Gav::from_key_version("g:a", "1.0-snapshot").unwrap().is_snapshot());
+        assert!(!Gav::from_key_version("g:a", "1.0-SNAPSHOTX").unwrap().is_snapshot());
+        assert!(!Gav::from_key_version("g:a", "1.0-20260610.123456-3").unwrap().is_snapshot());
+    }
+
+    #[test]
+    fn relative_path_unique_snapshot() {
+        let mut g = Gav::from_key_version("com.example:foo", "1.0-SNAPSHOT").unwrap();
+        g.snapshot_version = Some("1.0-20260610.123456-3".into());
+        assert_eq!(
+            g.relative_path(),
+            "com/example/foo/1.0-SNAPSHOT/foo-1.0-20260610.123456-3.jar"
+        );
+        assert_eq!(
+            g.relative_pom_path(),
+            "com/example/foo/1.0-SNAPSHOT/foo-1.0-20260610.123456-3.pom"
+        );
+    }
+
+    #[test]
+    fn relative_path_unique_snapshot_with_classifier() {
+        let mut g = Gav::from_key_version_classifier(
+            "com.example:foo",
+            "1.0-SNAPSHOT",
+            Some("sources"),
+        )
+        .unwrap();
+        g.snapshot_version = Some("1.0-20260610.123456-3".into());
+        assert_eq!(
+            g.relative_path(),
+            "com/example/foo/1.0-SNAPSHOT/foo-1.0-20260610.123456-3-sources.jar"
+        );
+    }
+
+    #[test]
+    fn relative_path_non_unique_snapshot() {
+        let g = Gav::from_key_version("com.example:foo", "1.0-SNAPSHOT").unwrap();
+        assert!(g.snapshot_version.is_none());
+        assert_eq!(
+            g.relative_path(),
+            "com/example/foo/1.0-SNAPSHOT/foo-1.0-SNAPSHOT.jar"
+        );
+    }
+
+    #[test]
+    fn snapshot_version_excluded_from_eq_and_hash() {
+        use std::collections::HashSet;
+        let mut a = Gav::from_key_version("com.example:foo", "1.0-SNAPSHOT").unwrap();
+        let mut b = a.clone();
+        a.snapshot_version = Some("1.0-20260610.123456-1".into());
+        b.snapshot_version = Some("1.0-20260610.123456-2".into());
+        assert_eq!(a, b);
+        let mut set = HashSet::new();
+        set.insert(a);
+        set.insert(b);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_pin_key_uses_base_version() {
+        let mut g = Gav::from_key_version("com.example:foo", "1.0-SNAPSHOT").unwrap();
+        g.snapshot_version = Some("1.0-20260610.123456-3".into());
+        assert_eq!(g.snapshot_pin_key(), "com.example:foo:1.0-SNAPSHOT");
     }
 }

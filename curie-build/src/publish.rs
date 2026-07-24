@@ -76,6 +76,7 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
             no_jlink: true,  // publishing never builds jlink runtime images
             offline: false,
             coverage: false,
+            update_snapshots: false,
         },
         &[],
     )
@@ -550,6 +551,9 @@ fn resolve_declared_dep_gavs(desc: &Descriptor) -> Result<Vec<Gav>> {
         bom_imports: desc.prod_bom_gavs()?,
         offline: false,
         skip_version_ranges: false, error_on_version_conflict: false,
+        snapshot_pins: Default::default(),
+        update_snapshots: false,
+        snapshot_update_policy: Default::default(),
     };
     curie_deps::resolve_declared_gavs(&entries, &opts)
 }

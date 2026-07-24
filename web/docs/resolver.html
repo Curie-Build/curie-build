@@ -48,6 +48,7 @@
       <li><span class="nav-group">Build &amp; test</span></li>
       <li><a href="/docs/incremental.html">Incremental builds</a></li>
       <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/snapshots.html">SNAPSHOT dependencies</a></li>
       <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
       <li><a href="/docs/testing.html">Testing</a></li>
       <li><a href="/docs/resources.html">Resource filtering</a></li>
@@ -77,7 +78,7 @@
   <main class="prose">
     <span class="eyebrow">Subsystem · resolver</span>
     <h1>Resolver &amp; checksums</h1>
-    <p class="lede">Curie talks to Maven Central directly — it resolves transitive closures, verifies checksums, and supports mirrors, credentials, and per-artifact repository routing. For declaring dependencies and BOM imports, see <a href="/docs/dependencies.html">Adding dependencies</a>.</p>
+    <p class="lede">Curie talks to Maven Central directly — it resolves transitive closures, verifies checksums, and supports mirrors, credentials, and per-artifact repository routing. For declaring dependencies and BOM imports, see <a href="/docs/dependencies.html">Adding dependencies</a>. For mutable <code>-SNAPSHOT</code> versions and <code>Curie.lock</code>, see <a href="/docs/snapshots.html">SNAPSHOT dependencies</a>.</p>
 
     <h2>Transitive resolution</h2>
     <p>Curie does a breadth-first walk of every dependency's POM, applying Maven's conflict-resolution rules:</p>

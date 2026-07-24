@@ -26,6 +26,7 @@ mod jpms;
 mod java_agent;
 mod jlink;
 mod kt_stale;
+mod lock;
 mod main_class;
 mod maven;
 mod native;
@@ -88,6 +89,10 @@ enum Cmd {
         #[arg(long)]
         offline: bool,
 
+        /// Force re-resolution of SNAPSHOT dependencies and rewrite Curie.lock
+        #[arg(short = 'U', long = "update-snapshots")]
+        update_snapshots: bool,
+
         /// Maximum number of workspace members to build in parallel (default: CPU count)
         #[arg(short = 'j', long)]
         jobs: Option<usize>,
@@ -105,6 +110,10 @@ enum Cmd {
         /// Collect code coverage via JaCoCo and produce a report under target/coverage/
         #[arg(long)]
         coverage: bool,
+
+        /// Force re-resolution of SNAPSHOT dependencies and rewrite Curie.lock
+        #[arg(short = 'U', long = "update-snapshots")]
+        update_snapshots: bool,
 
         /// Maximum number of workspace members to test in parallel (default: CPU count)
         #[arg(short = 'j', long)]
@@ -431,8 +440,15 @@ fn main() {
     }
 
     let result = match cli.command {
-        Cmd::Build { no_docker, no_native, no_jlink, offline, jobs } => {
-            let opts = build::BuildOptions { no_docker, no_native, no_jlink, offline, coverage: false };
+        Cmd::Build { no_docker, no_native, no_jlink, offline, update_snapshots, jobs } => {
+            let opts = build::BuildOptions {
+                no_docker,
+                no_native,
+                no_jlink,
+                offline,
+                coverage: false,
+                update_snapshots,
+            };
             let jobs = resolve_jobs(jobs);
             match &ctx {
                 workspace::WorkspaceContext::WorkspaceRoot(root) => {
@@ -449,20 +465,20 @@ fn main() {
                 }
             }
         }
-        Cmd::Test { filter, offline, coverage, jobs } => {
+        Cmd::Test { filter, offline, coverage, update_snapshots, jobs } => {
             let jobs = resolve_jobs(jobs);
             match &ctx {
                 workspace::WorkspaceContext::WorkspaceRoot(root) => {
-                    workspace::test_all(root, filter.as_deref(), offline, coverage, jobs)
+                    workspace::test_all(root, filter.as_deref(), offline, coverage, update_snapshots, jobs)
                 }
                 workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
-                    workspace::test_one(workspace_root, *member_index, filter.as_deref(), offline, coverage, jobs)
+                    workspace::test_one(workspace_root, *member_index, filter.as_deref(), offline, coverage, update_snapshots, jobs)
                 }
                 workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
-                    workspace::test_subtree(workspace_root, member_indices, filter.as_deref(), offline, coverage, jobs)
+                    workspace::test_subtree(workspace_root, member_indices, filter.as_deref(), offline, coverage, update_snapshots, jobs)
                 }
                 workspace::WorkspaceContext::Standalone(project) => {
-                    test_single_module(project, filter.as_deref(), offline, coverage)
+                    test_single_module(project, filter.as_deref(), offline, coverage, update_snapshots)
                 }
             }
         }
@@ -767,7 +783,13 @@ fn main() {
 /// Single-module variant of the test pipeline.  Lifted out of the inline
 /// match arm so the workspace fan-out can reuse the same conceptual flow
 /// (see `workspace::run_member_tests`) without duplicating the printf.
-fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: bool, cli_coverage: bool) -> anyhow::Result<()> {
+fn test_single_module(
+    project: &std::path::Path,
+    filter: Option<&str>,
+    offline: bool,
+    cli_coverage: bool,
+    update_snapshots: bool,
+) -> anyhow::Result<()> {
     let desc = descriptor::load(project)?;
     if desc.is_bom() {
         println!("{}", style::neutral("Tests", "skipped for BOM"));
@@ -778,7 +800,7 @@ fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: 
         desc.buildable_name(),
         desc.buildable_version()
     );
-    let compiled = compile::compile(project, &desc, offline, &[])?;
+    let compiled = compile::compile_with_options(project, &desc, offline, update_snapshots, &[])?;
     let enable_coverage = cli_coverage || desc.test.coverage_enabled();
     let target_dir = compiled.classes_dir.parent().unwrap_or(project);
     let (eff_main, eff_test) = resources::effective_test_dirs(
@@ -788,7 +810,7 @@ fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: 
         compiled.test_resources_dir.as_deref(),
         target_dir,
     )?;
-    test::run_tests(
+    test::run_tests_with_options(
         project,
         &desc,
         &compiled.classes_dir,
@@ -801,6 +823,7 @@ fn test_single_module(project: &std::path::Path, filter: Option<&str>, offline: 
         offline,
         enable_coverage,
         &[],
+        update_snapshots,
     )?;
     Ok(())
 }
@@ -835,6 +858,7 @@ fn native_single_module(project: &std::path::Path, offline: bool) -> anyhow::Res
         no_jlink: true,
         offline,
         coverage: false,
+        update_snapshots: false,
     };
     let output = build::build_with_desc(project, &desc, opts, &[])?;
 
@@ -874,6 +898,7 @@ fn jlink_single_module(project: &std::path::Path, offline: bool) -> anyhow::Resu
         no_jlink: true, // we call jlink::build_jlink ourselves below
         offline,
         coverage: false,
+        update_snapshots: false,
     };
     let output = build::build_with_desc(project, &desc, opts, &[])?;
 
@@ -952,7 +977,7 @@ groupId = "com.example"
 "#,
         )
         .unwrap();
-        let result = test_single_module(dir.path(), None, true, false);
+        let result = test_single_module(dir.path(), None, true, false, false);
         assert!(result.is_ok(), "expected Ok for BOM project, got: {result:?}");
     }
 }

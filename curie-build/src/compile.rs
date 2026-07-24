@@ -25,7 +25,7 @@
 //! For Java-only projects the existing single-phase `javac` path is used
 //! unchanged.
 
-use crate::build::{central_repos, extra_repos};
+use crate::build::{central_repos, extra_repos, extra_repos_for};
 use crate::descriptor;
 use crate::incremental::{
     self, javac_version, needs_recompile, walk_files, write_javac_version_stamp, CompileStatus,
@@ -35,6 +35,7 @@ use crate::jpms;
 use crate::kt_stale;
 use anyhow::{bail, Context, Result};
 use curie_deps::resolver::{resolve, DepEntry, ResolveOptions};
+use crate::lock;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -244,6 +245,17 @@ pub fn compile(
     offline: bool,
     extra_cp: &[PathBuf],
 ) -> Result<CompileOutput> {
+    compile_with_options(project_root, desc, offline, false, extra_cp)
+}
+
+/// Like [`compile`], with explicit control over SNAPSHOT refresh (`-U`).
+pub fn compile_with_options(
+    project_root: &Path,
+    desc: &descriptor::Descriptor,
+    offline: bool,
+    update_snapshots: bool,
+    extra_cp: &[PathBuf],
+) -> Result<CompileOutput> {
     // --- source roots --------------------------------------------------------
     // Supported layouts (may coexist):
     //   A) Maven-style Java:   src/main/java/
@@ -401,11 +413,14 @@ pub fn compile(
             .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
             .collect();
 
-        let jars = resolve(
+        // User-declared deps: honour Curie.lock for SNAPSHOT pins and rewrite
+        // it after resolve. Tool classpaths (kotlinc, etc.) keep plain resolve.
+        let jars = lock::resolve_with_lock(
+            project_root,
             &pairs,
-            &ResolveOptions {
+            ResolveOptions {
                 default_repos: central_repos(),
-                named_repos: extra_repos(desc),
+                named_repos: extra_repos_for(desc, Some(project_root)),
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: bom_gavs.clone(),
                 offline,
@@ -413,7 +428,11 @@ pub fn compile(
                 // User-declared [dependencies]: fail on a major-version conflict
                 // unless the coordinate sets allowVersionConflict (bug #13).
                 error_on_version_conflict: true,
+                snapshot_pins: Default::default(),
+                update_snapshots: false,
+                snapshot_update_policy: Default::default(),
             },
+            update_snapshots,
         )
         .context("dependency resolution failed")?;
 
@@ -442,6 +461,9 @@ pub fn compile(
                 bom_imports: bom_gavs.clone(),
                 offline,
                 skip_version_ranges: false, error_on_version_conflict: false,
+                snapshot_pins: Default::default(),
+                update_snapshots: false,
+                snapshot_update_policy: Default::default(),
             },
         )
         .context("annotation-processor resolution failed")?;
@@ -477,6 +499,9 @@ pub fn compile(
                     bom_imports: bom_gavs.clone(),
                     offline,
                     skip_version_ranges: false, error_on_version_conflict: false,
+                    snapshot_pins: Default::default(),
+                    update_snapshots: false,
+                    snapshot_update_policy: Default::default(),
                 },
             )
             .with_context(|| format!("annotation-processor classpath resolution failed for {}", coord))?;
@@ -611,6 +636,9 @@ pub fn compile(
                 bom_imports: bom_gavs.clone(),
                 offline,
                 skip_version_ranges: false, error_on_version_conflict: false,
+                snapshot_pins: Default::default(),
+                update_snapshots: false,
+                snapshot_update_policy: Default::default(),
             },
         )
         .context("Kotlin compiler/stdlib resolution failed")?;
@@ -648,6 +676,9 @@ pub fn compile(
                 bom_imports: bom_gavs.clone(),
                 offline,
                 skip_version_ranges: false, error_on_version_conflict: false,
+                snapshot_pins: Default::default(),
+                update_snapshots: false,
+                snapshot_update_policy: Default::default(),
             },
         )
         .context("Groovy compiler/runtime resolution failed")?;

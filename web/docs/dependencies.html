@@ -48,6 +48,7 @@
       <li><span class="nav-group">Build &amp; test</span></li>
       <li><a href="/docs/incremental.html">Incremental builds</a></li>
       <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/snapshots.html">SNAPSHOT dependencies</a></li>
       <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
       <li><a href="/docs/testing.html">Testing</a></li>
       <li><a href="/docs/resources.html">Resource filtering</a></li>
@@ -97,6 +98,8 @@
     </div>
 
     <p>An empty version (<code>""</code>) means the version comes from a BOM — see <a href="#bom-imports">BOM imports</a> below. If no BOM provides the version, the build fails immediately with an error.</p>
+
+    <p>Versions ending in <code>-SNAPSHOT</code> are resolved to a unique timestamped build and pinned in <code>Curie.lock</code>. See <a href="/docs/snapshots.html">SNAPSHOT dependencies</a>.</p>
 
     <h2 id="exclusions">Excluding transitive dependencies</h2>
     <p>Some dependencies pull in transitive dependencies you don't need. Use the detailed form with an <code>exclusions</code> list to prevent specific artifacts from appearing on the classpath:</p>

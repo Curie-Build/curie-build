@@ -38,6 +38,7 @@ members = [
     "exclusion-demo",
     "version-conflict-demo",
     "version-range-demo",
+    "snapshot-demo",
     "groovy-greeter",
     "spock-demo",
     "simplified-main",
