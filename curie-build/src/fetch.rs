@@ -201,8 +201,7 @@ fn fetch_jars_transitive(
             skip_version_ranges: false, error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        };
+            };
         match resolve_with_pins(&[entry], &opts, &pins) {
             Ok(jars) => total += jars.len(),
             Err(e) => match e.downcast::<VersionRangeError>() {
@@ -406,8 +405,7 @@ fn fetch_dep_section(desc: &descriptor::Descriptor, tests: bool, offline: bool) 
         skip_version_ranges: false, error_on_version_conflict: false,
         snapshot_pins: Default::default(),
         update_snapshots: false,
-        snapshot_update_policy: Default::default(),
-    };
+        };
     let jars = curie_deps::resolve(&entries, &opts)?;
     let label = if tests { "Test deps" } else { "Dependencies" };
     crate::parallel::emit(&crate::style::resolve(label, &format!("{} JAR(s)", jars.len())));

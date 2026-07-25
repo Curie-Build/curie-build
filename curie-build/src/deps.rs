@@ -114,8 +114,7 @@ pub fn resolve_pinned_dependencies(desc: &descriptor::Descriptor, offline: bool)
             skip_version_ranges: false, error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        },
+            },
     )
     .context("pinTransitive: failed to resolve the transitive dependency closure")?;
 
@@ -167,8 +166,7 @@ pub fn resolve_ap_versions_for_sync(desc: &descriptor::Descriptor, offline: bool
             skip_version_ranges: false, error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        },
+            },
     )
     .context("failed to resolve BOM-managed annotation processor versions")?;
 
@@ -326,8 +324,7 @@ pub fn resolve_dep_tree(
         error_on_version_conflict: false,
         snapshot_pins: Default::default(),
         update_snapshots: false,
-        snapshot_update_policy: Default::default(),
-    };
+        };
     curie_deps::resolve_tree(&entries, &opts)
 }
 

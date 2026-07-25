@@ -430,8 +430,7 @@ pub fn compile_with_options(
                 error_on_version_conflict: true,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                snapshot_update_policy: Default::default(),
-            },
+                },
             update_snapshots,
         )
         .context("dependency resolution failed")?;
@@ -463,8 +462,7 @@ pub fn compile_with_options(
                 skip_version_ranges: false, error_on_version_conflict: false,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                snapshot_update_policy: Default::default(),
-            },
+                },
         )
         .context("annotation-processor resolution failed")?;
         crate::parallel::emit(&crate::style::resolve("Resolve APs", &format!("{} JAR(s)", jars.len())));
@@ -501,8 +499,7 @@ pub fn compile_with_options(
                     skip_version_ranges: false, error_on_version_conflict: false,
                     snapshot_pins: Default::default(),
                     update_snapshots: false,
-                    snapshot_update_policy: Default::default(),
-                },
+                    },
             )
             .with_context(|| format!("annotation-processor classpath resolution failed for {}", coord))?;
             // The leaf coord's own JAR is the first entry; the rest are
@@ -638,8 +635,7 @@ pub fn compile_with_options(
                 skip_version_ranges: false, error_on_version_conflict: false,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                snapshot_update_policy: Default::default(),
-            },
+                },
         )
         .context("Kotlin compiler/stdlib resolution failed")?;
         crate::parallel::emit(&crate::style::resolve("Resolve Kotlin", &format!("{} JAR(s)", kotlin_jars.len())));
@@ -678,8 +674,7 @@ pub fn compile_with_options(
                 skip_version_ranges: false, error_on_version_conflict: false,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                snapshot_update_policy: Default::default(),
-            },
+                },
         )
         .context("Groovy compiler/runtime resolution failed")?;
         crate::parallel::emit(&crate::style::resolve("Resolve Groovy", &format!("{} JAR(s)", jars.len())));

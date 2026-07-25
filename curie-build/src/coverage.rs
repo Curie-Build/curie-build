@@ -51,8 +51,7 @@ pub fn resolve_agent_jar(
             skip_version_ranges: false, error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        },
+            },
     )
     .context("failed to resolve JaCoCo agent")?;
 
@@ -114,8 +113,7 @@ pub fn resolve_cli_jar(
             skip_version_ranges: false, error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        },
+            },
     )
     .context("failed to resolve JaCoCo CLI")?;
 

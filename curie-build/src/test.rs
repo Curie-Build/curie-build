@@ -158,8 +158,7 @@ pub fn run_tests_with_options(
                 error_on_version_conflict: true,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                snapshot_update_policy: Default::default(),
-            },
+                },
             update_snapshots,
         )
         .context("test dependency resolution failed")?
@@ -198,8 +197,7 @@ pub fn run_tests_with_options(
                 skip_version_ranges: false, error_on_version_conflict: false,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                snapshot_update_policy: Default::default(),
-            },
+                },
         )
         .context("Spock resolution failed")?;
         crate::parallel::emit(&crate::style::resolve("Resolve Spock", &format!("{} JAR(s)", jars.len())));
@@ -229,8 +227,7 @@ pub fn run_tests_with_options(
                 skip_version_ranges: false, error_on_version_conflict: false,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                snapshot_update_policy: Default::default(),
-            },
+                },
         )
         .context("Kotlin compiler/stdlib resolution failed (test phase)")?;
 
@@ -263,8 +260,7 @@ pub fn run_tests_with_options(
                 skip_version_ranges: false, error_on_version_conflict: false,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                snapshot_update_policy: Default::default(),
-            },
+                },
         )
         .context("Kotlin compiler resolution failed (test phase)")?;
 
@@ -300,8 +296,7 @@ pub fn run_tests_with_options(
                 skip_version_ranges: false, error_on_version_conflict: false,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                snapshot_update_policy: Default::default(),
-            },
+                },
         )
         .context("test annotation-processor resolution failed")?;
 
@@ -327,8 +322,7 @@ pub fn run_tests_with_options(
                     error_on_version_conflict: false,
                     snapshot_pins: Default::default(),
                     update_snapshots: false,
-                    snapshot_update_policy: Default::default(),
-                },
+                    },
             )
             .with_context(|| {
                 format!("test annotation-processor classpath resolution failed for {}", coord)
@@ -553,8 +547,7 @@ pub fn run_tests_with_options(
                             skip_version_ranges: false, error_on_version_conflict: false,
                             snapshot_pins: Default::default(),
                             update_snapshots: false,
-                            snapshot_update_policy: Default::default(),
-                        },
+                            },
                     )
                     .context("Groovy test compiler resolution failed")?
                 } else {
@@ -940,8 +933,7 @@ fn resolve_standalone(
             skip_version_ranges: false, error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        },
+            },
     )
     .with_context(|| format!("failed to resolve {}", coord))?;
 

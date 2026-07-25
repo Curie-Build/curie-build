@@ -46,7 +46,7 @@
 use crate::gav::Gav;
 use crate::pom::{self, BomRef, Pom};
 use crate::repo::{default_repositories, Repository};
-use crate::snapshot_meta::{self, SnapshotUpdatePolicy};
+use crate::snapshot_meta;
 use reqwest::blocking::Client;
 use anyhow::{bail, Context, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -55,7 +55,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // In-process coordination for concurrent artifact downloads (bug #2 fix).
@@ -146,14 +146,13 @@ pub struct ResolveOptions {
     /// `group:artifact:baseVersion` (e.g. `com.ex:foo:1.0-SNAPSHOT`), values
     /// are the unique timestamped filename version
     /// (`1.0-20260610.123456-3`). When present and
-    /// [`Self::update_snapshots`] is `false`, metadata is not re-fetched.
+    /// [`Self::update_snapshots`] is `false`, the pin is used and metadata is
+    /// not re-fetched. Without a pin (or with `-U`), metadata is always
+    /// re-fetched from the repository.
     pub snapshot_pins: HashMap<String, String>,
     /// Force re-resolution of SNAPSHOT metadata (`curie build -U`), ignoring
-    /// existing pins and cache freshness policy.
+    /// existing pins.
     pub update_snapshots: bool,
-    /// How often to re-check snapshot metadata when no lock pin applies.
-    /// Default: [`SnapshotUpdatePolicy::Daily`]. Offline mode forces `Never`.
-    pub snapshot_update_policy: SnapshotUpdatePolicy,
 }
 
 impl Default for ResolveOptions {
@@ -168,7 +167,6 @@ impl Default for ResolveOptions {
             error_on_version_conflict: false,
             snapshot_pins: HashMap::new(),
             update_snapshots: false,
-            snapshot_update_policy: SnapshotUpdatePolicy::Daily,
         }
     }
 }
@@ -1488,9 +1486,13 @@ pub fn resolve_full(
 ///
 /// Order of preference:
 /// 1. Existing pin in [`ResolveOptions::snapshot_pins`] (from `Curie.lock`),
-///    unless [`ResolveOptions::update_snapshots`] forces a refresh.
-/// 2. Version-level `maven-metadata.xml` from the first repo that publishes it.
+///    unless [`ResolveOptions::update_snapshots`] (`-U`) forces a refresh.
+/// 2. Version-level `maven-metadata.xml` from the first repo that publishes it
+///    (always re-fetched when unpinned — no Maven-style daily cache policy).
 /// 3. Leave `snapshot_version = None` (non-unique / local-install layout).
+///
+/// Deleting `Curie.lock` and building without `-U` therefore behaves the same
+/// as `-U` for SNAPSHOT resolution: both re-query repository metadata.
 fn prepare_snapshot_gav(
     gav: &mut Gav,
     repos: &[Repository],
@@ -1522,14 +1524,9 @@ fn prepare_snapshot_gav(
         return Ok(());
     }
 
-    // Unpinned resolve: honour update policy only when a local metadata
-    // cache exists with a freshness marker.  First resolve always fetches.
-    let policy = if opts.update_snapshots {
-        SnapshotUpdatePolicy::Always
-    } else {
-        opts.snapshot_update_policy.clone()
-    };
-
+    // Unpinned (or -U): always re-fetch version-level metadata from the repo.
+    // There is no same-day / interval freshness window — Curie.lock is the only
+    // pin; without it every resolve asks the repository again.
     let relative_meta = gav.relative_snapshot_metadata_path();
     let mut last_err: Option<anyhow::Error> = None;
 
@@ -1537,40 +1534,28 @@ fn prepare_snapshot_gav(
         let url = repo.artifact_url(&relative_meta);
         let local_meta = local_snapshot_metadata_path(gav, &repo.id);
 
-        let last_checked = read_curie_checked(&local_meta);
-        let now = SystemTime::now();
-        let need_fetch = opts.update_snapshots
-            || !local_meta.exists()
-            || snapshot_meta::should_refetch(&policy, last_checked, now);
-
-        let xml = if need_fetch {
-            match fetch_text(client, &url) {
-                Ok(Some(body)) => {
-                    if let Some(parent) = local_meta.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    let _ = std::fs::write(&local_meta, &body);
-                    write_curie_checked(&local_meta, now);
-                    body
+        let xml = match fetch_text(client, &url) {
+            Ok(Some(body)) => {
+                // Best-effort cache for offline recovery on later network errors;
+                // never used as a freshness gate on the happy path.
+                if let Some(parent) = local_meta.parent() {
+                    let _ = std::fs::create_dir_all(parent);
                 }
-                Ok(None) => continue, // 404 — try next repo
-                Err(e) => {
-                    last_err = Some(e);
-                    // Fall back to cached metadata if present.
-                    if local_meta.exists() {
-                        match std::fs::read_to_string(&local_meta) {
-                            Ok(body) => body,
-                            Err(_) => continue,
-                        }
-                    } else {
-                        continue;
-                    }
-                }
+                let _ = std::fs::write(&local_meta, &body);
+                body
             }
-        } else {
-            match std::fs::read_to_string(&local_meta) {
-                Ok(body) => body,
-                Err(_) => continue,
+            Ok(None) => continue, // 404 — try next repo
+            Err(e) => {
+                last_err = Some(e);
+                // Network failure: fall back to last cached metadata if any.
+                if local_meta.exists() {
+                    match std::fs::read_to_string(&local_meta) {
+                        Ok(body) => body,
+                        Err(_) => continue,
+                    }
+                } else {
+                    continue;
+                }
             }
         };
 
@@ -1606,7 +1591,8 @@ fn prepare_snapshot_gav(
 }
 
 /// Cached version-level metadata path under `~/.m2`, keyed by repo id
-/// (Maven layout: `maven-metadata-<repoId>.xml`).
+/// (Maven layout: `maven-metadata-<repoId>.xml`). Used only as a network-error
+/// fallback; unpinned resolves always try the remote first.
 fn local_snapshot_metadata_path(gav: &Gav, repo_id: &str) -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".m2")
@@ -1615,26 +1601,6 @@ fn local_snapshot_metadata_path(gav: &Gav, repo_id: &str) -> PathBuf {
         .join(&gav.artifact)
         .join(&gav.version)
         .join(format!("maven-metadata-{repo_id}.xml"))
-}
-
-fn curie_checked_path(metadata_path: &Path) -> PathBuf {
-    let mut s = metadata_path.as_os_str().to_owned();
-    s.push(".curie-checked");
-    PathBuf::from(s)
-}
-
-fn read_curie_checked(metadata_path: &Path) -> Option<SystemTime> {
-    let path = curie_checked_path(metadata_path);
-    let text = std::fs::read_to_string(path).ok()?;
-    let secs: u64 = text.trim().parse().ok()?;
-    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
-}
-
-fn write_curie_checked(metadata_path: &Path, now: SystemTime) {
-    let path = curie_checked_path(metadata_path);
-    if let Ok(dur) = now.duration_since(SystemTime::UNIX_EPOCH) {
-        let _ = std::fs::write(path, format!("{}", dur.as_secs()));
-    }
 }
 
 /// Fetch a URL as text. Supports `http(s)://` and `file://` (and bare
@@ -2790,8 +2756,7 @@ mod tests {
             skip_version_ranges: false, error_on_version_conflict: true,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        };
+            };
         let result = resolve(&entries, &opts);
 
         match prev_home {
@@ -2825,8 +2790,7 @@ mod tests {
             skip_version_ranges: false, error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        };
+            };
         let pins: Vec<String> = pins.iter().map(|s| s.to_string()).collect();
         let result = resolve_with_pins(&entries, &opts, &pins);
 
@@ -2870,8 +2834,7 @@ mod tests {
             skip_version_ranges: false, error_on_version_conflict: true,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        };
+            };
         let result = resolve(&entries, &opts);
 
         match prev_home {
@@ -3345,8 +3308,7 @@ mod tests {
             skip_version_ranges: false, error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        };
+            };
         let result = resolve(&entries, &opts).unwrap();
 
         match prev_home {
@@ -3394,8 +3356,7 @@ mod tests {
             skip_version_ranges: false, error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        };
+            };
         let result = resolve(&entries, &opts).unwrap();
 
         match prev_home {
@@ -3440,8 +3401,7 @@ mod tests {
             skip_version_ranges: false, error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        };
+            };
         let result = resolve(&entries, &opts).unwrap();
 
         match prev_home {
@@ -3793,8 +3753,7 @@ mod tests {
             skip_version_ranges: false, error_on_version_conflict: true,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        };
+            };
         let result = resolve(&entries, &opts);
 
         match prev_home {
@@ -3840,8 +3799,7 @@ mod tests {
             skip_version_ranges: false, error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        };
+            };
         let entries = [DepEntry { key: "foo:bar", version: "1.0", repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }];
         let result = resolve(&entries, &opts).unwrap();
         assert_eq!(result.len(), 1, "should find cached artifact regardless of mirror URL");
@@ -3941,8 +3899,7 @@ mod tests {
             skip_version_ranges: false, error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        };
+            };
         let result = resolve_tree(&entries, &opts);
 
         match prev_home {
@@ -4221,8 +4178,7 @@ mod tests {
             skip_version_ranges: false, error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            snapshot_update_policy: Default::default(),
-        };
+            };
         let result = resolve(&entries, &opts).unwrap();
 
         if let Some(h) = prev_home {
@@ -4537,7 +4493,6 @@ mod tests {
             error_on_version_conflict: false,
             snapshot_pins: HashMap::new(),
             update_snapshots: false,
-            snapshot_update_policy: SnapshotUpdatePolicy::Always,
         };
         let result = resolve_full(&entries, &opts, &[]).unwrap();
 
@@ -4618,7 +4573,6 @@ mod tests {
             error_on_version_conflict: false,
             snapshot_pins: pins,
             update_snapshots: false,
-            snapshot_update_policy: SnapshotUpdatePolicy::Always,
         };
         let result = resolve_full(&entries, &opts, &[]).unwrap();
 
@@ -4686,7 +4640,6 @@ mod tests {
             error_on_version_conflict: false,
             snapshot_pins: pins,
             update_snapshots: true, // -U
-            snapshot_update_policy: SnapshotUpdatePolicy::Always,
         };
         let result = resolve_full(&entries, &opts, &[]).unwrap();
 

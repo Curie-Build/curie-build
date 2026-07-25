@@ -23,4 +23,4 @@ pub use resolver::{
     DepTree, RangeViolation, ResolveResult, ResolvedDep, ResolveOptions, SkippedDep,
     VersionRangeError,
 };
-pub use snapshot_meta::{should_refetch, SnapshotMetadata, SnapshotUpdatePolicy};
+pub use snapshot_meta::SnapshotMetadata;

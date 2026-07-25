@@ -5,100 +5,13 @@
 //! `curie update`). This module only parses the *version-level* document at
 //! `…/artifact/1.0-SNAPSHOT/maven-metadata.xml` that names the current
 //! timestamped filename for a snapshot.
+//!
+//! Freshness is not policy-gated: without a `Curie.lock` pin (or with `-U`),
+//! metadata is always re-fetched from the repository. The lock *is* the pin.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use quick_xml::events::Event;
 use quick_xml::Reader;
-use std::time::{Duration, SystemTime};
-
-/// How often to re-fetch snapshot metadata when no lock pin is in force.
-///
-/// When a `Curie.lock` pin is present the lock *is* the policy — this enum
-/// only applies to unpinned snapshot resolution.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SnapshotUpdatePolicy {
-    /// Re-fetch metadata on every resolve.
-    Always,
-    /// Re-fetch when the last check was on an earlier calendar day (UTC).
-    Daily,
-    /// Re-fetch when older than `minutes`.
-    Interval { minutes: u64 },
-    /// Never re-fetch; use whatever is cached (or fail if absent).
-    Never,
-}
-
-impl SnapshotUpdatePolicy {
-    /// Parse a Maven-compatible policy string:
-    /// `always` | `daily` | `never` | `interval:<minutes>`.
-    pub fn parse(s: &str) -> Result<Self> {
-        let s = s.trim();
-        if s.eq_ignore_ascii_case("always") {
-            return Ok(Self::Always);
-        }
-        if s.eq_ignore_ascii_case("daily") {
-            return Ok(Self::Daily);
-        }
-        if s.eq_ignore_ascii_case("never") {
-            return Ok(Self::Never);
-        }
-        if let Some(rest) = s
-            .strip_prefix("interval:")
-            .or_else(|| s.strip_prefix("INTERVAL:"))
-        {
-            let minutes: u64 = rest.trim().parse().with_context(|| {
-                format!("invalid snapshot update policy {s:?}: interval minutes must be an integer")
-            })?;
-            if minutes == 0 {
-                bail!("invalid snapshot update policy {s:?}: interval must be >= 1 minute");
-            }
-            return Ok(Self::Interval { minutes });
-        }
-        bail!(
-            "invalid snapshot update policy {s:?}; expected always | daily | never | interval:<minutes>"
-        );
-    }
-}
-
-impl Default for SnapshotUpdatePolicy {
-    fn default() -> Self {
-        Self::Daily
-    }
-}
-
-/// Whether snapshot metadata should be re-fetched given `policy`, the
-/// `last_checked` instant (if any), and the injected `now`.
-///
-/// Pure and unit-testable — callers inject `now` so tests stay deterministic.
-pub fn should_refetch(
-    policy: &SnapshotUpdatePolicy,
-    last_checked: Option<SystemTime>,
-    now: SystemTime,
-) -> bool {
-    match policy {
-        SnapshotUpdatePolicy::Always => true,
-        SnapshotUpdatePolicy::Never => false,
-        SnapshotUpdatePolicy::Daily => match last_checked {
-            None => true,
-            Some(prev) => {
-                // Compare UTC calendar days via seconds-since-epoch / 86400.
-                let day = |t: SystemTime| {
-                    t.duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                        / 86_400
-                };
-                day(prev) < day(now)
-            }
-        },
-        SnapshotUpdatePolicy::Interval { minutes } => match last_checked {
-            None => true,
-            Some(prev) => match now.duration_since(prev) {
-                Ok(elapsed) => elapsed >= Duration::from_secs(minutes.saturating_mul(60)),
-                Err(_) => true, // clock went backwards — re-fetch
-            },
-        },
-    }
-}
 
 /// One `<snapshotVersion>` entry from version-level metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,7 +137,9 @@ pub fn parse_snapshot_metadata(xml: &str) -> Result<SnapshotMetadata> {
                 } else {
                     // <versioning><snapshot><timestamp|buildNumber>
                     let joined = path.join("/");
-                    if joined.ends_with("snapshot/timestamp") || joined.ends_with("versioning/snapshot/timestamp") {
+                    if joined.ends_with("snapshot/timestamp")
+                        || joined.ends_with("versioning/snapshot/timestamp")
+                    {
                         meta.timestamp = Some(text);
                     } else if joined.ends_with("snapshot/buildNumber")
                         || joined.ends_with("versioning/snapshot/buildNumber")
@@ -255,7 +170,6 @@ pub fn parse_snapshot_metadata(xml: &str) -> Result<SnapshotMetadata> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     const SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <metadata>
@@ -335,65 +249,5 @@ mod tests {
         let xml = r#"<?xml version="1.0"?><metadata><versioning></versioning></metadata>"#;
         let meta = parse_snapshot_metadata(xml).unwrap();
         assert!(meta.resolve_unique_version("1.0-SNAPSHOT", "jar", None).is_none());
-    }
-
-    #[test]
-    fn should_refetch_policies() {
-        let epoch = SystemTime::UNIX_EPOCH;
-        let day0 = epoch + Duration::from_secs(0);
-        let day0_later = epoch + Duration::from_secs(1000);
-        let day1 = epoch + Duration::from_secs(86_400 + 10);
-
-        assert!(should_refetch(&SnapshotUpdatePolicy::Always, Some(day0), day0_later));
-        assert!(!should_refetch(&SnapshotUpdatePolicy::Never, None, day1));
-        assert!(!should_refetch(
-            &SnapshotUpdatePolicy::Never,
-            Some(day0),
-            day1
-        ));
-
-        // Daily: same day → no; next day → yes; never checked → yes.
-        assert!(!should_refetch(
-            &SnapshotUpdatePolicy::Daily,
-            Some(day0),
-            day0_later
-        ));
-        assert!(should_refetch(&SnapshotUpdatePolicy::Daily, Some(day0), day1));
-        assert!(should_refetch(&SnapshotUpdatePolicy::Daily, None, day0));
-
-        let interval = SnapshotUpdatePolicy::Interval { minutes: 30 };
-        assert!(should_refetch(&interval, None, day0));
-        assert!(!should_refetch(
-            &interval,
-            Some(day0),
-            day0 + Duration::from_secs(10 * 60)
-        ));
-        assert!(should_refetch(
-            &interval,
-            Some(day0),
-            day0 + Duration::from_secs(31 * 60)
-        ));
-    }
-
-    #[test]
-    fn parse_policy_strings() {
-        assert_eq!(
-            SnapshotUpdatePolicy::parse("always").unwrap(),
-            SnapshotUpdatePolicy::Always
-        );
-        assert_eq!(
-            SnapshotUpdatePolicy::parse("daily").unwrap(),
-            SnapshotUpdatePolicy::Daily
-        );
-        assert_eq!(
-            SnapshotUpdatePolicy::parse("never").unwrap(),
-            SnapshotUpdatePolicy::Never
-        );
-        assert_eq!(
-            SnapshotUpdatePolicy::parse("interval:15").unwrap(),
-            SnapshotUpdatePolicy::Interval { minutes: 15 }
-        );
-        assert!(SnapshotUpdatePolicy::parse("interval:0").is_err());
-        assert!(SnapshotUpdatePolicy::parse("weekly").is_err());
     }
 }

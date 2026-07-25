@@ -553,8 +553,7 @@ fn resolve_declared_dep_gavs(desc: &Descriptor) -> Result<Vec<Gav>> {
         skip_version_ranges: false, error_on_version_conflict: false,
         snapshot_pins: Default::default(),
         update_snapshots: false,
-        snapshot_update_policy: Default::default(),
-    };
+        };
     curie_deps::resolve_declared_gavs(&entries, &opts)
 }
 
