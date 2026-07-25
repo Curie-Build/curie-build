@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>snapshot-lib</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>snapshot-lib</name>
+    <description>
+        Test fixture for curie's SNAPSHOT resolution. `mvn deploy` publishes a
+        unique, timestamped snapshot (…-YYYYMMDD.HHMMSS-N.jar) plus
+        version-level maven-metadata.xml into ../local-repo, exactly the layout
+        curie resolves and pins in Curie.lock.
+    </description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.release>17</maven.compiler.release>
+    </properties>
+
+    <!--
+      Deploy to the demo's file:// repository. Each `mvn deploy` mints a new
+      unique snapshot build number, so it is the way to produce a *newer*
+      snapshot when testing `curie build -U`.
+
+      `mvn install` is deliberately NOT used: it writes a non-unique
+      1.0-SNAPSHOT artifact into ~/.m2, not the timestamped layout under test.
+    -->
+    <distributionManagement>
+        <snapshotRepository>
+            <id>local-snapshots</id>
+            <name>Demo local snapshot repo</name>
+            <url>file://${project.basedir}/../local-repo</url>
+        </snapshotRepository>
+    </distributionManagement>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-deploy-plugin</artifactId>
+                <version>3.1.2</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>

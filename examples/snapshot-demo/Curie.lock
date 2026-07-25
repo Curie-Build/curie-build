@@ -3,4 +3,4 @@
 # re-fetch SNAPSHOT metadata from the repository and refresh the pins.
 
 [snapshots]
-"com.example:snapshot-lib:1.0-SNAPSHOT" = "1.0-20260725.211851-4"
+"com.example:snapshot-lib:1.0-SNAPSHOT" = "1.0-20260725.225500-5"
