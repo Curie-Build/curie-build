@@ -500,6 +500,10 @@ fn merge_parent_chain(
         for (k, v) in &parent_pom.managed_versions {
             pom.managed_versions.entry(k.clone()).or_insert_with(|| v.clone());
         }
+        // Managed scopes: parent fills gaps (same Maven rule as versions).
+        for (k, v) in &parent_pom.managed_scopes {
+            pom.managed_scopes.entry(k.clone()).or_insert_with(|| v.clone());
+        }
         // BOM imports from parent are appended (parent has lower priority than own).
         for bom_ref in &parent_pom.bom_imports {
             pom.bom_imports.push(bom_ref.clone());
@@ -521,7 +525,28 @@ fn merge_parent_chain(
 
         current_parent = parent_pom.parent.clone();
     }
+    apply_dependency_management(pom);
     Ok(())
+}
+
+/// Fill missing version/scope on each dependency from this POM's
+/// `<dependencyManagement>` (already merged with the parent chain).
+/// Maven's effective POM does this before deciding whether a dependency
+/// is transitive: a managed `provided` scope must not leak to consumers.
+fn apply_dependency_management(pom: &mut Pom) {
+    for dep in &mut pom.dependencies {
+        let key = format!("{}:{}", dep.group_id, dep.artifact_id);
+        if dep.version.is_none() {
+            if let Some(v) = pom.managed_versions.get(&key) {
+                dep.version = Some(v.clone());
+            }
+        }
+        if dep.scope.is_none() {
+            if let Some(s) = pom.managed_scopes.get(&key) {
+                dep.scope = Some(s.clone());
+            }
+        }
+    }
 }
 
 /// Resolve a flat list of BOM GAVs into a combined `managed_versions` map.
@@ -3149,6 +3174,82 @@ mod tests {
         assert!(
             gavs.contains(&"com.google.guava:guava:30.0-jre".to_string()),
             "guava version from parent POM property must resolve: {:?}", gavs,
+        );
+    }
+
+    #[test]
+    fn managed_provided_scope_keeps_inherited_parent_dep_off_classpath() {
+        // hamcrest-core 1.1 inherits junit/jmock from hamcrest-parent, but
+        // dependencyManagement marks them <scope>provided</scope>.  They
+        // must not become compile transitives of a consumer.
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "junit", "junit", "4.0", &[]);
+        write_fake_artifact(dir.path(), "jmock", "jmock", "1.1.0", &[
+            ("junit", "junit", "3.8.1"),
+        ]);
+        write_fake_artifact(dir.path(), "junit", "junit", "3.8.1", &[]);
+        write_fake_pom(
+            dir.path(), "org.hamcrest", "hamcrest-parent", "1.1",
+            r#"<?xml version="1.0"?>
+<project>
+  <groupId>org.hamcrest</groupId>
+  <artifactId>hamcrest-parent</artifactId>
+  <version>1.1</version>
+  <packaging>pom</packaging>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>junit</groupId>
+        <artifactId>junit</artifactId>
+        <version>4.0</version>
+        <scope>provided</scope>
+      </dependency>
+      <dependency>
+        <groupId>jmock</groupId>
+        <artifactId>jmock</artifactId>
+        <version>1.1.0</version>
+        <scope>provided</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>jmock</groupId>
+      <artifactId>jmock</artifactId>
+    </dependency>
+  </dependencies>
+</project>"#,
+        );
+        write_fake_artifact_with_pom(
+            dir.path(), "org.hamcrest", "hamcrest-core", "1.1",
+            r#"<?xml version="1.0"?>
+<project>
+  <parent>
+    <groupId>org.hamcrest</groupId>
+    <artifactId>hamcrest-parent</artifactId>
+    <version>1.1</version>
+  </parent>
+  <artifactId>hamcrest-core</artifactId>
+</project>"#,
+        );
+
+        let result = run_resolve(dir.path(), &[("org.hamcrest:hamcrest-core", "1.1")], vec![]).unwrap();
+        let gavs = jar_gavs(&result);
+        assert!(
+            gavs.contains(&"org.hamcrest:hamcrest-core:1.1".to_string()),
+            "leaf must resolve: {gavs:?}"
+        );
+        assert!(
+            !gavs.iter().any(|g| g.starts_with("junit:junit:")),
+            "managed-provided junit must not be a compile transitive: {gavs:?}"
+        );
+        assert!(
+            !gavs.iter().any(|g| g.starts_with("jmock:jmock:")),
+            "managed-provided jmock must not be a compile transitive: {gavs:?}"
         );
     }
 

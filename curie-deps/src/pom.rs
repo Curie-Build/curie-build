@@ -31,6 +31,10 @@ pub struct Pom {
     /// Does NOT include BOM imports (`scope=import` + `type=pom`) — those go to
     /// [`bom_imports`].
     pub managed_versions: HashMap<String, String>,
+    /// Scopes declared in `<dependencyManagement>`, keyed by `"group:artifact"`.
+    /// Applied to a dependency that omits `<scope>` (Maven effective-POM
+    /// rule).  Hamcrest 1.1's parent marks junit/jmock `provided` this way.
+    pub managed_scopes: HashMap<String, String>,
     /// BOM imports found in `<dependencyManagement>`: entries with
     /// `<scope>import</scope>` and `<type>pom</type>`.  These must be fetched
     /// and their managed versions merged into the resolution context.
@@ -409,9 +413,14 @@ fn finalize_managed_dep(d: PomDep, pom: &mut Pom) {
                 version: v,
             });
         }
-    } else if let Some(v) = d.version {
+    } else {
         let key = format!("{}:{}", d.group_id, d.artifact_id);
-        pom.managed_versions.insert(key, v);
+        if let Some(v) = d.version {
+            pom.managed_versions.insert(key.clone(), v);
+        }
+        if let Some(s) = d.scope {
+            pom.managed_scopes.insert(key, s);
+        }
     }
 }
 
@@ -631,6 +640,39 @@ mod tests {
         assert_eq!(
             pom.managed_versions.get("org.example:some-lib").map(String::as_str),
             Some("3.0.0")
+        );
+        assert_eq!(
+            pom.managed_scopes.get("org.example:some-lib").map(String::as_str),
+            Some("compile")
+        );
+    }
+
+    #[test]
+    fn parse_stores_managed_provided_scope() {
+        let xml = r#"<?xml version="1.0"?>
+<project>
+  <groupId>org.hamcrest</groupId>
+  <artifactId>hamcrest-parent</artifactId>
+  <version>1.1</version>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>junit</groupId>
+        <artifactId>junit</artifactId>
+        <version>4.0</version>
+        <scope>provided</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+</project>"#;
+        let pom = parse(xml).unwrap();
+        assert_eq!(
+            pom.managed_scopes.get("junit:junit").map(String::as_str),
+            Some("provided")
+        );
+        assert_eq!(
+            pom.managed_versions.get("junit:junit").map(String::as_str),
+            Some("4.0")
         );
     }
 
