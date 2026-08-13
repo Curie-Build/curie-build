@@ -1,6 +1,6 @@
 use crate::compile::{
-    flat_package_src_dirs, flat_package_test_dirs, javac_release_arg, KOTLIN_COMPILER_COORD,
-    KOTLIN_STDLIB_COORD,
+    flat_package_src_dirs, flat_package_test_dirs, resolve_configured_source_dirs,
+    KOTLIN_COMPILER_COORD, KOTLIN_STDLIB_COORD,
 };
 use crate::incremental::{
     self, javac_version, needs_recompile, walk_files, write_javac_version_stamp, CompileStatus,
@@ -92,8 +92,11 @@ pub fn run_tests_with_options(
     update_snapshots: bool,
 ) -> Result<()> {
     // --- discover test sources -----------------------------------------------
-    let (java_test_sources, kotlin_test_sources) = discover_test_sources(project_root);
-    let groovy_test_sources = discover_groovy_test_sources(project_root);
+    let extra_test_dirs =
+        resolve_configured_source_dirs(project_root, &desc.java.test_source_dirs, "testSourceDirs")?;
+    let (java_test_sources, kotlin_test_sources) =
+        discover_test_sources(project_root, &extra_test_dirs);
+    let groovy_test_sources = discover_groovy_test_sources(project_root, &extra_test_dirs);
 
     let all_test_sources: Vec<PathBuf> = {
         let mut v = java_test_sources.clone();
@@ -410,16 +413,18 @@ pub fn run_tests_with_options(
         ));
 
         // Shared classpath for both phases:
-        //   production classes + src/main/resources + prod deps + test deps
-        //   + standalone launcher + kotlin stdlib + extras
+        //   production classes + workspace members + src/main/resources
+        //   + prod deps + test deps + standalone launcher + kotlin stdlib.
+        // Workspace classes come before Maven jars so a reactor member
+        // (Guava testlib HEAD) wins over a published transitive copy.
         let mut shared_cp: Vec<PathBuf> = Vec::new();
         shared_cp.push(classes_dir.to_path_buf());
+        shared_cp.extend_from_slice(extra_cp);
         if let Some(rd) = resources_dir {
             shared_cp.push(rd.to_path_buf());
         }
         shared_cp.extend_from_slice(dep_jars);
         shared_cp.extend_from_slice(&test_dep_jars);
-        shared_cp.extend_from_slice(extra_cp);
         shared_cp.extend_from_slice(&test_ap_on_cp_jars);
         shared_cp.extend_from_slice(&test_kotlin_stdlib_jars);
         shared_cp.extend_from_slice(groovy_jars);
@@ -461,9 +466,7 @@ pub fn run_tests_with_options(
             let mut javac = Command::new("java");
             javac.arg("-jar").arg(&wrapper_jar);
             javac.arg("--curie-manifest-out").arg(&test_manifest_path);
-            if let Some(release) = javac_release_arg(desc)? {
-                javac.arg("--release").arg(release);
-            }
+            crate::compile::apply_javac_language_level(&mut javac, desc)?;
             if desc.java.preview_enabled() {
                 javac.arg("--enable-preview");
             }
@@ -496,6 +499,7 @@ pub fn run_tests_with_options(
             for (key, value) in desc.flat_test_ap_options() {
                 javac.arg(format!("-A{}={}", key, value));
             }
+            crate::compile::apply_javac_compiler_args(&mut javac, desc);
 
             for src in &java_test_sources {
                 javac.arg(src);
@@ -623,6 +627,7 @@ pub fn run_tests_with_options(
     let mut run_cp: Vec<PathBuf> = Vec::new();
     run_cp.push(test_classes_dir.clone());
     run_cp.push(classes_dir.to_path_buf());
+    run_cp.extend_from_slice(extra_cp);
     if let Some(rd) = resources_dir {
         run_cp.push(rd.to_path_buf());
     }
@@ -631,7 +636,6 @@ pub fn run_tests_with_options(
     }
     run_cp.extend_from_slice(dep_jars);
     run_cp.extend_from_slice(&test_dep_jars);
-    run_cp.extend_from_slice(extra_cp);
     run_cp.extend_from_slice(&test_kotlin_stdlib_jars);
     run_cp.extend_from_slice(groovy_jars);
     run_cp.extend_from_slice(&spock_jars);
@@ -684,6 +688,7 @@ pub fn run_tests_with_options(
 
     // Build extra JVM args (e.g. JaCoCo agent for coverage).
     let mut extra_jvm_args: Vec<String> = Vec::new();
+    extra_jvm_args.extend(desc.test.jvm_args.iter().cloned());
     if let Some(ref agent_jar) = jacoco_agent_jar {
         extra_jvm_args.push(crate::coverage::agent_jvm_arg(agent_jar, &coverage_exec));
     }
@@ -698,6 +703,7 @@ pub fn run_tests_with_options(
         desc.java.preview_enabled(),
         &agent_jars,
         &extra_jvm_args,
+        &desc.test.exclude_classname,
     );
 
     let status = crate::proc::spawn_cmd(&mut java)
@@ -791,7 +797,10 @@ fn discover_source_roots(project_root: &Path) -> Vec<PathBuf> {
 ///   ending in `Test.java/kt`, `Tests.java/kt`, or `Spec.java/kt`.
 /// - Integration tests: each dot-named directory under `tests/` — all
 ///   `*.java` and `*.kt` files.
-fn discover_test_sources(project_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+fn discover_test_sources(
+    project_root: &Path,
+    extra_test_dirs: &[PathBuf],
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut java_sources: Vec<PathBuf> = Vec::new();
     let mut kotlin_sources: Vec<PathBuf> = Vec::new();
 
@@ -855,6 +864,22 @@ fn discover_test_sources(project_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
         kotlin_sources.extend(kotlin_int);
     }
 
+    // --- Configured hierarchical test roots ([java] testSourceDirs) ----------
+    // Same rule as src/test/java: every source file is a test source.
+    for dir in extra_test_dirs {
+        let extra_java: Vec<PathBuf> = walk_files(dir)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".java"))
+            .map(|e| e.into_path())
+            .collect();
+        java_sources.extend(extra_java);
+
+        let extra_kotlin: Vec<PathBuf> = walk_files(dir)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".kt"))
+            .map(|e| e.into_path())
+            .collect();
+        kotlin_sources.extend(extra_kotlin);
+    }
+
     // Deduplicate by canonical path and sort for determinism.
     java_sources.sort();
     java_sources.dedup();
@@ -869,7 +894,10 @@ fn discover_test_sources(project_root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
 /// `src/main/groovy` is a production root; files there named `*Test.groovy` / `*Spec.groovy`
 /// are production classes (Maven-compatible).  The co-located convention applies only to
 /// flat-package roots under `src/<dot.pkg>/`.
-fn discover_groovy_test_sources(project_root: &Path) -> Vec<PathBuf> {
+fn discover_groovy_test_sources(
+    project_root: &Path,
+    extra_test_dirs: &[PathBuf],
+) -> Vec<PathBuf> {
     let mut sources: Vec<PathBuf> = Vec::new();
 
     // Separate test tree src/test/groovy/
@@ -903,6 +931,14 @@ fn discover_groovy_test_sources(project_root: &Path) -> Vec<PathBuf> {
             .map(|e| e.into_path())
             .collect();
         sources.extend(all);
+    }
+
+    for dir in extra_test_dirs {
+        let extra: Vec<PathBuf> = walk_files(dir)
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".groovy"))
+            .map(|e| e.into_path())
+            .collect();
+        sources.extend(extra);
     }
 
     sources.sort();
@@ -1032,7 +1068,7 @@ mod tests {
         fs::write(main_java.join("SmokeTests.java"), b"public class SmokeTests {}").unwrap();
         fs::write(main_java.join("OpenApiSpec.java"), b"public class OpenApiSpec {}").unwrap();
 
-        let (java, _kotlin) = discover_test_sources(dir.path());
+        let (java, _kotlin) = discover_test_sources(dir.path(), &[]);
         assert!(
             java.is_empty(),
             "test-named files in src/main/java must not be discovered as test sources; got: {java:?}"
@@ -1047,7 +1083,7 @@ mod tests {
         fs::write(test_java.join("GreeterTest.java"), b"public class GreeterTest {}").unwrap();
         fs::write(test_java.join("HelperUtil.java"), b"public class HelperUtil {}").unwrap();
 
-        let (java, _kotlin) = discover_test_sources(dir.path());
+        let (java, _kotlin) = discover_test_sources(dir.path(), &[]);
         assert_eq!(java.len(), 2, "all files in src/test/java are test sources; got: {java:?}");
     }
 
@@ -1060,7 +1096,7 @@ mod tests {
         fs::write(pkg.join("GreeterTest.java"), b"package com.example; class GreeterTest {}").unwrap();
         fs::write(pkg.join("GreeterSpec.java"), b"package com.example; class GreeterSpec {}").unwrap();
 
-        let (java, _kotlin) = discover_test_sources(dir.path());
+        let (java, _kotlin) = discover_test_sources(dir.path(), &[]);
         assert_eq!(java.len(), 2, "only *Test.java and *Spec.java from flat-package are test sources; got: {java:?}");
         assert!(java.iter().any(|p| p.ends_with("GreeterTest.java")));
         assert!(java.iter().any(|p| p.ends_with("GreeterSpec.java")));
@@ -1073,7 +1109,7 @@ mod tests {
         fs::create_dir_all(&main_groovy).unwrap();
         fs::write(main_groovy.join("GreeterSpec.groovy"), b"package com.example; class GreeterSpec {}").unwrap();
 
-        let sources = discover_groovy_test_sources(dir.path());
+        let sources = discover_groovy_test_sources(dir.path(), &[]);
         assert!(
             sources.is_empty(),
             "test-named files in src/main/groovy must not be test sources; got: {sources:?}"
@@ -1087,8 +1123,25 @@ mod tests {
         fs::create_dir_all(&test_groovy).unwrap();
         fs::write(test_groovy.join("GreeterSpec.groovy"), b"package com.example; class GreeterSpec {}").unwrap();
 
-        let sources = discover_groovy_test_sources(dir.path());
+        let sources = discover_groovy_test_sources(dir.path(), &[]);
         assert_eq!(sources.len(), 1, "src/test/groovy files must be test sources; got: {sources:?}");
+    }
+
+    #[test]
+    fn configured_test_source_dir_is_discovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let test_dir = dir.path().join("test").join("com").join("example");
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::write(test_dir.join("GreeterTest.java"), b"public class GreeterTest {}").unwrap();
+        fs::write(test_dir.join("Helper.java"), b"public class Helper {}").unwrap();
+
+        let extra = vec![dir.path().join("test")];
+        let (java, _kotlin) = discover_test_sources(dir.path(), &extra);
+        assert_eq!(
+            java.len(),
+            2,
+            "all files under [java] testSourceDirs are test sources; got: {java:?}"
+        );
     }
 }
 

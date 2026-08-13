@@ -24,21 +24,25 @@ import java.util.*;
  *   args[0] — path for the JSON results file   (target/build.tests.json)
  *   args[1] — directory for per-test text files (target/test-output, pre-created)
  *   args[2..] — optional --include-classname=<pattern>
+ *               optional --exclude-classname=<pattern>
  */
 public class CurieTestRunner {
 
     public static void main(String[] args) throws Exception {
         if (args.length < 2) {
-            System.err.println("Usage: CurieTestRunner <json-out> <output-dir> [--include-classname=...]");
+            System.err.println("Usage: CurieTestRunner <json-out> <output-dir> [--include-classname=...] [--exclude-classname=...]");
             System.exit(2);
         }
 
         Path jsonOut   = Path.of(args[0]);
         Path outputDir = Path.of(args[1]);
-        List<String> patterns = new ArrayList<>();
+        List<String> includePatterns = new ArrayList<>();
+        List<String> excludePatterns = new ArrayList<>();
         for (int i = 2; i < args.length; i++) {
             if (args[i].startsWith("--include-classname=")) {
-                patterns.add(args[i].substring("--include-classname=".length()));
+                includePatterns.add(args[i].substring("--include-classname=".length()));
+            } else if (args[i].startsWith("--exclude-classname=")) {
+                excludePatterns.add(args[i].substring("--exclude-classname=".length()));
             }
         }
 
@@ -48,9 +52,13 @@ public class CurieTestRunner {
             LauncherDiscoveryRequestBuilder.request()
                 .selectors(DiscoverySelectors.selectClasspathRoots(classpathRoots));
 
-        if (!patterns.isEmpty()) {
+        if (!includePatterns.isEmpty()) {
             requestBuilder.filters(
-                ClassNameFilter.includeClassNamePatterns(patterns.toArray(new String[0])));
+                ClassNameFilter.includeClassNamePatterns(includePatterns.toArray(new String[0])));
+        }
+        if (!excludePatterns.isEmpty()) {
+            requestBuilder.filters(
+                ClassNameFilter.excludeClassNamePatterns(excludePatterns.toArray(new String[0])));
         }
 
         LauncherDiscoveryRequest request = requestBuilder.build();
@@ -69,9 +77,13 @@ public class CurieTestRunner {
         for (String entry : cp.split(File.pathSeparator)) {
             if (entry.isBlank()) continue;
             Path p = Path.of(entry);
-            if (Files.isDirectory(p)) {
-                roots.add(p.toAbsolutePath().normalize());
-            }
+            if (!Files.isDirectory(p)) continue;
+            // Only scan test output dirs. Production classes stay on the
+            // runtime classpath but must not be discovered: a testing
+            // library (Guava testlib) ships TestCase subclasses that
+            // Surefire never launches as standalone tests.
+            if (!"test-classes".equals(p.getFileName().toString())) continue;
+            roots.add(p.toAbsolutePath().normalize());
         }
         return roots;
     }
@@ -91,33 +103,38 @@ class ResultListener implements TestExecutionListener {
     private final Path              outputDir;
     private final PrintStream       originalOut = System.out;
     private final List<TestRecord>  results     = new ArrayList<>();
-    private final Map<String, Long> startTimes  = new LinkedHashMap<>();
-    private final Map<String, ByteArrayOutputStream> captures = new LinkedHashMap<>();
+    private final Map<String, Long> startTimes  = new HashMap<>();
+    private final ByteArrayOutputStream captureBuf = new ByteArrayOutputStream(4096);
+    private String currentId;
 
     ResultListener(Path outputDir) {
         this.outputDir = outputDir;
+        // One tee for the whole run. Allocating a PrintStream per test OOMs
+        // on suites that expand to tens of thousands of methods (Guava).
+        System.setOut(new PrintStream(new TeeOutputStream(originalOut, captureBuf), true, StandardCharsets.UTF_8));
     }
 
     @Override
     public void executionStarted(TestIdentifier id) {
         if (!id.isTest()) return;
         startTimes.put(id.getUniqueId(), System.currentTimeMillis());
-        ByteArrayOutputStream buf = new ByteArrayOutputStream();
-        captures.put(id.getUniqueId(), buf);
-        System.setOut(new PrintStream(new TeeOutputStream(originalOut, buf)));
+        captureBuf.reset();
+        currentId = id.getUniqueId();
     }
 
     @Override
     public void executionFinished(TestIdentifier id, TestExecutionResult result) {
         if (!id.isTest()) return;
-        System.setOut(originalOut);
         System.out.flush();
 
-        long start    = startTimes.getOrDefault(id.getUniqueId(), System.currentTimeMillis());
-        long duration = System.currentTimeMillis() - start;
+        Long started = startTimes.remove(id.getUniqueId());
+        long duration = started == null ? 0 : System.currentTimeMillis() - started;
 
-        ByteArrayOutputStream buf = captures.remove(id.getUniqueId());
-        String captured = buf != null ? buf.toString(StandardCharsets.UTF_8) : "";
+        String captured = captureBuf.size() == 0 ? "" : captureBuf.toString(StandardCharsets.UTF_8);
+        captureBuf.reset();
+        if (id.getUniqueId().equals(currentId)) {
+            currentId = null;
+        }
 
         String outputFile = null;
         if (!captured.isBlank()) {
@@ -161,6 +178,7 @@ class ResultListener implements TestExecutionListener {
     }
 
     void printSummary() {
+        System.setOut(originalOut);
         long passed  = results.stream().filter(r -> "passed".equals(r.status())).count();
         long failed  = results.stream().filter(r -> "failed".equals(r.status())).count();
         long skipped = results.stream().filter(r -> "skipped".equals(r.status())).count();

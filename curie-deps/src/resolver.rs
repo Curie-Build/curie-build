@@ -504,6 +504,20 @@ fn merge_parent_chain(
         for bom_ref in &parent_pom.bom_imports {
             pom.bom_imports.push(bom_ref.clone());
         }
+        // Dependencies: parent fills gaps. A child that redeclares the same
+        // group:artifact keeps its own version, scope, and exclusions.
+        // Maven's effective POM includes inherited parent <dependencies>
+        // (test-parameter-injector publishes snakeyaml on its parent POM).
+        for dep in &parent_pom.dependencies {
+            let already = pom.dependencies.iter().any(|d| {
+                d.group_id == dep.group_id
+                    && d.artifact_id == dep.artifact_id
+                    && d.classifier == dep.classifier
+            });
+            if !already {
+                pom.dependencies.push(dep.clone());
+            }
+        }
 
         current_parent = parent_pom.parent.clone();
     }
@@ -3135,6 +3149,72 @@ mod tests {
         assert!(
             gavs.contains(&"com.google.guava:guava:30.0-jre".to_string()),
             "guava version from parent POM property must resolve: {:?}", gavs,
+        );
+    }
+
+    #[test]
+    fn parent_pom_dependencies_are_inherited() {
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "org.yaml", "snakeyaml", "2.0", &[]);
+        write_fake_artifact(dir.path(), "junit", "junit", "4.13.2", &[]);
+        write_fake_pom(
+            dir.path(), "com.example", "parent-pom", "1.0",
+            &make_pom(
+                "com.example", "parent-pom", "1.0",
+                &[("org.yaml", "snakeyaml", "2.0")],
+            ),
+        );
+        write_fake_artifact_with_pom(
+            dir.path(), "com.example", "child", "1.0",
+            &make_pom_with_parent(
+                "com.example", "child", "1.0",
+                ("com.example", "parent-pom", "1.0"),
+                &[("junit", "junit", "4.13.2")],
+            ),
+        );
+
+        let result = run_resolve(dir.path(), &[("com.example:child", "1.0")], vec![]).unwrap();
+        let gavs = jar_gavs(&result);
+        assert!(
+            gavs.contains(&"org.yaml:snakeyaml:2.0".to_string()),
+            "parent <dependencies> must be inherited: {gavs:?}"
+        );
+        assert!(
+            gavs.contains(&"junit:junit:4.13.2".to_string()),
+            "child's own dependency must remain: {gavs:?}"
+        );
+    }
+
+    #[test]
+    fn child_dependency_overrides_inherited_parent_dependency() {
+        let dir = tempfile::tempdir().unwrap();
+        write_fake_artifact(dir.path(), "org.yaml", "snakeyaml", "2.0", &[]);
+        write_fake_artifact(dir.path(), "org.yaml", "snakeyaml", "2.2", &[]);
+        write_fake_pom(
+            dir.path(), "com.example", "parent-pom", "1.0",
+            &make_pom(
+                "com.example", "parent-pom", "1.0",
+                &[("org.yaml", "snakeyaml", "2.0")],
+            ),
+        );
+        write_fake_artifact_with_pom(
+            dir.path(), "com.example", "child", "1.0",
+            &make_pom_with_parent(
+                "com.example", "child", "1.0",
+                ("com.example", "parent-pom", "1.0"),
+                &[("org.yaml", "snakeyaml", "2.2")],
+            ),
+        );
+
+        let result = run_resolve(dir.path(), &[("com.example:child", "1.0")], vec![]).unwrap();
+        let gavs = jar_gavs(&result);
+        assert!(
+            gavs.contains(&"org.yaml:snakeyaml:2.2".to_string()),
+            "child redeclaration must win: {gavs:?}"
+        );
+        assert!(
+            !gavs.contains(&"org.yaml:snakeyaml:2.0".to_string()),
+            "parent version must not leak after override: {gavs:?}"
         );
     }
 

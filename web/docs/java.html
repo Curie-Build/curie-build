@@ -90,6 +90,28 @@
     </ul>
     <p>Both layouts are discovered by scanning for <code>*.java</code> files. You can migrate from Maven layout to flat-package layout gradually — Curie will compile whichever files it finds.</p>
 
+    <h2>Custom source directories</h2>
+    <p>Projects that keep hierarchical packages under a non-standard root (Guava's <code>src/com/google/…</code> and <code>test/com/google/…</code>) declare those roots explicitly. Configured directories are added to auto-discovery; every file under a test root is a test source, matching Maven's <code>src/test/java</code> rule.</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[java]</span>
+<span class="kw">sourceDirs</span>     = [<span class="str">"src"</span>]
+<span class="kw">testSourceDirs</span> = [<span class="str">"test"</span>]
+<span class="kw">compilerArgs</span>   = [<span class="str">"-parameters"</span>]
+<span class="kw">excludes</span>       = [<span class="str">"module-info.java"</span>]
+</pre>
+    </div>
+
+    <p><code>excludes</code> matches a file name or a path suffix, so <code>module-info.java</code> skips the JPMS descriptor when targeting Java 8. <code>compilerArgs</code> are appended to every <code>javac</code> invocation (production and tests).</p>
+
+    <p>A library that declares only <code>testSourceDirs</code> (no production sources) is a test-only module: Curie skips production compilation and still runs its tests.</p>
+
+    <p>See <a href="https://github.com/atteo/curie-build/tree/master/examples/custom-layout-demo" target="_blank" rel="noopener">examples/custom-layout-demo</a>.</p>
+
     <h2>Java version</h2>
     <p>The <code>[java]</code> section controls the language version. When <code>releaseVersion</code> is set, curie passes <code>--release</code> to <code>javac</code>, fixing the source language, bytecode major version, and available APIs simultaneously:</p>
 
@@ -104,6 +126,20 @@
     </div>
 
     <p>When <code>releaseVersion</code> is absent (the default), curie omits <code>--release</code> entirely and <code>javac</code> targets the running JDK's own version automatically. Curie rebuilds the project whenever the JDK version changes, so builds stay correct even without an explicit pin.</p>
+
+    <p>To emit older bytecode while still compiling against the running JDK's APIs (Maven's <code>-source</code>/<code>-target</code> without <code>--release</code>), set <code>sourceVersion</code> and <code>targetVersion</code> instead. The two styles are mutually exclusive:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[java]</span>
+<span class="kw">sourceVersion</span> = <span class="str">"8"</span>
+<span class="kw">targetVersion</span> = <span class="str">"8"</span>
+<span class="kw">compilerArgs</span>  = [<span class="str">"-XDignore.symbol.file"</span>, <span class="str">"-Xlint:-options"</span>]
+</pre>
+    </div>
 
     <h2>Main class auto-detection</h2>
     <p>For <code>[application]</code> projects, Curie scans compiled <code>.class</code> files looking for a <code>public static void main(String[])</code> method. If exactly one is found it is used automatically; if zero or more than one are found, the build fails with a message listing the candidates — set <code>mainClass</code> explicitly to resolve the ambiguity:</p>

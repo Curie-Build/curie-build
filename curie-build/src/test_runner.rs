@@ -84,6 +84,7 @@ pub fn build_runner_command(
     enable_preview: bool,
     agent_jars: &[std::path::PathBuf],
     extra_jvm_args: &[String],
+    exclude_classname: &[String],
 ) -> Command {
     let classpath = format!(
         "{}{}{}{}{}",
@@ -109,6 +110,9 @@ pub fn build_runner_command(
 
     if let Some(pattern) = include_classname {
         cmd.arg(format!("--include-classname={pattern}"));
+    }
+    for pattern in exclude_classname {
+        cmd.arg(format!("--exclude-classname={pattern}"));
     }
 
     cmd

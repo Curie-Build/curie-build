@@ -482,6 +482,42 @@ pub struct Java {
     /// [`Self::preview_enabled`] to read the resolved boolean.
     #[serde(rename = "enablePreview")]
     pub enable_preview: Option<bool>,
+    /// `[java].sourceVersion` — passed to `javac -source`.  Use this (with
+    /// [`Self::target_version`]) instead of [`Self::release_version`] when
+    /// the project must emit older bytecode while still compiling against
+    /// the running JDK's APIs (Guava's `-source 8 -target 8` plus
+    /// `-XDignore.symbol.file` is the canonical case).  Mutually exclusive
+    /// with `releaseVersion`.
+    #[serde(rename = "sourceVersion")]
+    pub source_version: Option<String>,
+    /// `[java].targetVersion` — passed to `javac -target`.  See
+    /// [`Self::source_version`].
+    #[serde(rename = "targetVersion")]
+    pub target_version: Option<String>,
+    /// Extra hierarchical (Maven-style) production source roots, relative
+    /// to the project directory.  Empty ⇒ auto-discover `src/main/java`,
+    /// `src/main/kotlin`, `src/main/groovy`, flat-package dirs, and bare
+    /// `src/`.  Configured dirs are *added* to auto-discovery, so a project
+    /// can keep `src/main/java` and also compile `src/`.
+    #[serde(rename = "sourceDirs", default)]
+    pub source_dirs: Vec<String>,
+    /// Extra hierarchical test source roots, relative to the project
+    /// directory.  Empty ⇒ auto-discover `src/test/java` (and kotlin/groovy
+    /// equivalents) plus flat-package `tests/`.  Every `*.java`/`*.kt`/
+    /// `*.groovy` file under a configured dir is a test source (same rule
+    /// as `src/test/java`).
+    #[serde(rename = "testSourceDirs", default)]
+    pub test_source_dirs: Vec<String>,
+    /// Extra arguments appended to every `javac` invocation (production
+    /// and tests), e.g. `["-parameters", "-XDignore.symbol.file"]`.
+    #[serde(rename = "compilerArgs", default)]
+    pub compiler_args: Vec<String>,
+    /// Filename or relative-path patterns skipped during production
+    /// compilation.  A pattern matches when it equals the file name or is
+    /// a suffix of the path (`module-info.java` and `**/module-info.java`
+    /// both exclude every `module-info.java`).
+    #[serde(default)]
+    pub excludes: Vec<String>,
 }
 
 impl Java {
@@ -502,6 +538,32 @@ impl Java {
     /// applied by the time the build pipeline reads this.
     pub fn preview_enabled(&self) -> bool {
         self.enable_preview.unwrap_or(false)
+    }
+
+    /// Resolved `-source` argument, if `sourceVersion` is set.
+    pub fn source_version(&self) -> Option<&str> {
+        self.source_version.as_deref()
+    }
+
+    /// Resolved `-target` argument, if `targetVersion` is set.
+    pub fn target_version(&self) -> Option<&str> {
+        self.target_version.as_deref()
+    }
+
+    /// `true` when the path should be skipped based on [`Self::excludes`].
+    pub fn excludes_path(&self, path: &Path) -> bool {
+        if self.excludes.is_empty() {
+            return false;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let rendered = path.to_string_lossy();
+        self.excludes.iter().any(|pat| {
+            let trimmed = pat.trim_start_matches("**/");
+            name == trimmed || rendered.ends_with(trimmed) || rendered.ends_with(pat)
+        })
     }
 }
 
@@ -544,6 +606,16 @@ pub struct Test {
     /// ```
     #[serde(default)]
     pub coverage: Option<bool>,
+    /// Extra JVM arguments for the test process, e.g. heap size, locale,
+    /// and `--add-opens`.  Inherited from the workspace when the member
+    /// leaves the list empty.
+    #[serde(rename = "jvmArgs", default)]
+    pub jvm_args: Vec<String>,
+    /// Regular expressions passed to JUnit Platform
+    /// `--exclude-classname`.  Matching test classes are not executed.
+    /// Inherited from the workspace when the member leaves the list empty.
+    #[serde(rename = "excludeClassname", default)]
+    pub exclude_classname: Vec<String>,
 }
 
 impl Test {
@@ -2072,8 +2144,26 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     }
 
     validate_dep_repo_refs(&descriptor)?;
+    validate_java_language_level(&descriptor.java)?;
 
     Ok(descriptor)
+}
+
+/// `releaseVersion` pins the documented API surface via `--release`.
+/// `sourceVersion`/`targetVersion` emit older bytecode while compiling
+/// against the running JDK.  Combining them would make javac see both
+/// `--release` and `-source`/`-target`, which it rejects.
+fn validate_java_language_level(java: &Java) -> Result<()> {
+    if java.release_version.is_some()
+        && (java.source_version.is_some() || java.target_version.is_some())
+    {
+        bail!(
+            "[java] cannot set releaseVersion together with sourceVersion/targetVersion; \
+             use releaseVersion to pin the API surface, or sourceVersion/targetVersion \
+             to emit older bytecode against the running JDK"
+        );
+    }
+    Ok(())
 }
 
 /// Validate `[workspace.foreign.*]` declarations at load time (key shape,
@@ -2518,6 +2608,74 @@ url = "https://example.com/m2"
         assert_eq!(d.java.effective(), Some("17"));
         assert_eq!(d.repositories.len(), 1);
         assert_eq!(d.repositories[0].id, "nexus");
+    }
+
+    #[test]
+    fn java_parses_source_target_dirs_args_and_excludes() {
+        let toml = r#"
+[library]
+name = "x"
+version = "1.0"
+
+[java]
+sourceVersion = "8"
+targetVersion = "8"
+sourceDirs = ["src"]
+testSourceDirs = ["test"]
+compilerArgs = ["-parameters", "-XDignore.symbol.file"]
+excludes = ["module-info.java"]
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.java.source_version(), Some("8"));
+        assert_eq!(d.java.target_version(), Some("8"));
+        assert_eq!(d.java.source_dirs, vec!["src"]);
+        assert_eq!(d.java.test_source_dirs, vec!["test"]);
+        assert_eq!(
+            d.java.compiler_args,
+            vec!["-parameters", "-XDignore.symbol.file"]
+        );
+        assert_eq!(d.java.excludes, vec!["module-info.java"]);
+        assert!(d.java.excludes_path(Path::new("src/module-info.java")));
+        assert!(d.java.excludes_path(Path::new("module-info.java")));
+        assert!(!d.java.excludes_path(Path::new("src/com/Foo.java")));
+    }
+
+    #[test]
+    fn java_rejects_release_together_with_source_target() {
+        let toml = r#"
+[library]
+name = "x"
+version = "1.0"
+
+[java]
+releaseVersion = "8"
+sourceVersion = "8"
+targetVersion = "8"
+"#;
+        let err = load_str(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("releaseVersion") && err.contains("sourceVersion"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parses_jvm_args_and_exclude_classname() {
+        let toml = r#"
+[library]
+name = "x"
+version = "1.0"
+
+[test]
+jvmArgs = ["-Xmx1g", "-Duser.language=hi"]
+excludeClassname = [".*PackageSanityTest", ".*Tester"]
+"#;
+        let d = load_str(toml).unwrap();
+        assert_eq!(d.test.jvm_args, vec!["-Xmx1g", "-Duser.language=hi"]);
+        assert_eq!(
+            d.test.exclude_classname,
+            vec![".*PackageSanityTest", ".*Tester"]
+        );
     }
 
     #[test]

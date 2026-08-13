@@ -53,6 +53,7 @@ members = [
     "liquid-filtering-demo",
     "polyrepo-demo",
     "foreign-projects-demo",
+    "custom-layout-demo",
 ]
 
 [bom-imports]

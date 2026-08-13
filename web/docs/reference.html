@@ -112,8 +112,14 @@
     <table>
       <thead><tr><th>Key</th><th>Type</th><th>Inherited</th><th>Default</th><th>Notes</th></tr></thead>
       <tbody>
-        <tr><td><code>releaseVersion</code></td><td>string</td><td>W</td><td>Running JDK</td><td>Passed to <code>javac --release</code>. Omit to target the running JDK's version automatically</td></tr>
+        <tr><td><code>releaseVersion</code></td><td>string</td><td>W</td><td>Running JDK</td><td>Passed to <code>javac --release</code>. Omit to target the running JDK's version automatically. Mutually exclusive with <code>sourceVersion</code>/<code>targetVersion</code></td></tr>
         <tr><td><code>enablePreview</code></td><td>bool</td><td>W</td><td><code>false</code></td><td>Adds <code>--enable-preview</code> to <code>javac</code> and the test JVM. When no <code>releaseVersion</code> is set, Curie supplies <code>--release &lt;running-jdk&gt;</code> as required by <code>javac</code></td></tr>
+        <tr><td><code>sourceVersion</code></td><td>string</td><td>W</td><td>—</td><td>Passed to <code>javac -source</code>. Use with <code>targetVersion</code> to emit older bytecode while compiling against the running JDK's APIs. Mutually exclusive with <code>releaseVersion</code></td></tr>
+        <tr><td><code>targetVersion</code></td><td>string</td><td>W</td><td>—</td><td>Passed to <code>javac -target</code>. See <code>sourceVersion</code></td></tr>
+        <tr><td><code>sourceDirs</code></td><td>string[]</td><td>W</td><td><code>[]</code></td><td>Extra hierarchical production source roots (e.g. <code>["src"]</code>), added to auto-discovery</td></tr>
+        <tr><td><code>testSourceDirs</code></td><td>string[]</td><td>W</td><td><code>[]</code></td><td>Extra hierarchical test source roots (e.g. <code>["test"]</code>). Every source file under these dirs is a test source</td></tr>
+        <tr><td><code>compilerArgs</code></td><td>string[]</td><td>W</td><td><code>[]</code></td><td>Extra arguments appended to every <code>javac</code> invocation</td></tr>
+        <tr><td><code>excludes</code></td><td>string[]</td><td>W</td><td><code>[]</code></td><td>Filename or path-suffix patterns skipped during production compile (e.g. <code>["module-info.java"]</code>)</td></tr>
       </tbody>
     </table>
 
@@ -156,6 +162,8 @@
       <tbody>
         <tr><td><code>junitPlatformVersion</code></td><td>string</td><td>W</td><td><code>6.0.3</code></td><td>Version of JUnit Platform Console Standalone used to run tests</td></tr>
         <tr><td><code>coverage</code></td><td>bool</td><td>W</td><td><code>false</code></td><td>Enable JaCoCo coverage instrumentation. Produces a report under <code>target/coverage/</code> (open <code>html/index.html</code>). See <a href="/docs/testing.html#code-coverage">Code coverage</a></td></tr>
+        <tr><td><code>jvmArgs</code></td><td>string[]</td><td>W</td><td><code>[]</code></td><td>Extra JVM arguments for the test process (<code>-Xmx</code>, <code>-D</code>, <code>--add-opens</code>, …)</td></tr>
+        <tr><td><code>excludeClassname</code></td><td>string[]</td><td>W</td><td><code>[]</code></td><td>Regular expressions passed to JUnit Platform <code>--exclude-classname</code></td></tr>
       </tbody>
     </table>
 

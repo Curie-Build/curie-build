@@ -1,0 +1,17 @@
+# custom-layout-demo
+#
+# Hierarchical sources under `src/` and `test/` (not `src/main/java` or
+# the flat-package `src/com.example/` layout).  Same convention Guava uses.
+
+[library]
+name    = "custom-layout-demo"
+version = "0.1.0"
+groupId = "com.example"
+
+[java]
+sourceDirs     = ["src"]
+testSourceDirs = ["test"]
+compilerArgs   = ["-parameters"]
+
+[test-dependencies]
+"org.junit.jupiter:junit-jupiter" = "6.0.3"

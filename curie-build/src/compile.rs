@@ -189,8 +189,13 @@ pub(crate) fn running_jdk_major_version() -> Result<String> {
 /// When `releaseVersion` is set, uses it.  When it is absent but
 /// `enablePreview = true`, falls back to the running JDK's major version
 /// (javac requires `--release` whenever `--enable-preview` is used).
-/// When neither applies, returns `None` (javac targets the running JDK).
+/// When `sourceVersion`/`targetVersion` are set, returns `None` so the
+/// caller can pass `-source`/`-target` instead.  When none of those
+/// apply, returns `None` (javac targets the running JDK).
 pub(crate) fn javac_release_arg(desc: &descriptor::Descriptor) -> Result<Option<String>> {
+    if desc.java.source_version().is_some() || desc.java.target_version().is_some() {
+        return Ok(None);
+    }
     if let Some(release) = desc.java.effective() {
         return Ok(Some(release.to_string()));
     }
@@ -198,6 +203,49 @@ pub(crate) fn javac_release_arg(desc: &descriptor::Descriptor) -> Result<Option<
         return Ok(Some(running_jdk_major_version()?));
     }
     Ok(None)
+}
+
+/// Apply `--release`, or `-source`/`-target`, to a `javac` command.
+pub(crate) fn apply_javac_language_level(
+    javac: &mut Command,
+    desc: &descriptor::Descriptor,
+) -> Result<()> {
+    if let Some(release) = javac_release_arg(desc)? {
+        javac.arg("--release").arg(release);
+        return Ok(());
+    }
+    if let Some(source) = desc.java.source_version() {
+        javac.arg("-source").arg(source);
+    }
+    if let Some(target) = desc.java.target_version() {
+        javac.arg("-target").arg(target);
+    }
+    Ok(())
+}
+
+/// Append `[java] compilerArgs` to a `javac` command.
+pub(crate) fn apply_javac_compiler_args(javac: &mut Command, desc: &descriptor::Descriptor) {
+    for arg in &desc.java.compiler_args {
+        javac.arg(arg);
+    }
+}
+
+/// Resolve configured `[java] sourceDirs` / `testSourceDirs` to absolute
+/// paths.  Missing directories fail the build.
+pub(crate) fn resolve_configured_source_dirs(
+    project_root: &Path,
+    dirs: &[String],
+    label: &str,
+) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        let path = project_root.join(dir);
+        if !path.is_dir() {
+            bail!("[java] {label} entry '{dir}' does not exist");
+        }
+        out.push(path);
+    }
+    Ok(out)
 }
 
 /// JVM system-property argument that pins the bytecode level emitted by
@@ -214,7 +262,10 @@ pub(crate) fn javac_release_arg(desc: &descriptor::Descriptor) -> Result<Option<
 /// the running JDK's own version, matching the behaviour of omitting `--release`
 /// from javac in the same build).
 pub(crate) fn groovy_target_bytecode_arg(desc: &descriptor::Descriptor) -> Option<String> {
-    desc.java.effective().map(|v| format!("-Dgroovy.target.bytecode={v}"))
+    desc.java
+        .effective()
+        .or_else(|| desc.java.target_version())
+        .map(|v| format!("-Dgroovy.target.bytecode={v}"))
 }
 
 /// Build the `--classpath` argument list for a groovyc invocation.
@@ -276,6 +327,13 @@ pub fn compile_with_options(
     if maven_kotlin_src.exists() { src_roots.push(maven_kotlin_src.clone()); }
     if maven_groovy_src.exists() { src_roots.push(maven_groovy_src.clone()); }
     src_roots.extend(flat_src_dirs);
+
+    // Configured hierarchical roots ([java] sourceDirs), e.g. Guava's `src/`.
+    for dir in resolve_configured_source_dirs(project_root, &desc.java.source_dirs, "sourceDirs")? {
+        if !src_roots.contains(&dir) {
+            src_roots.push(dir);
+        }
+    }
 
     // Layout E: source files placed directly under src/ (no package subdirectory).
     // This is the natural location for unnamed-class files that have no package
@@ -385,11 +443,16 @@ pub fn compile_with_options(
         }
     }
 
-    if src_roots.is_empty() {
+    // A library that declares only test source dirs (Guava's guava-tests)
+    // has no production sources.  Applications still need a source root.
+    let test_only_library = src_roots.is_empty()
+        && desc.is_library()
+        && !desc.java.test_source_dirs.is_empty();
+    if src_roots.is_empty() && !test_only_library {
         bail!(
             "no source directory found: expected src/main/java/, src/main/kotlin/, \
-             src/main/groovy/, src/<dot-named>/ (flat-package), or source files \
-             directly in src/ (unnamed classes)"
+             src/main/groovy/, src/<dot-named>/ (flat-package), source files \
+             directly in src/ (unnamed classes), or [java] sourceDirs"
         );
     }
 
@@ -525,6 +588,7 @@ pub fn compile_with_options(
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
                 if !name.ends_with(".java") { return false; }
+                if desc.java.excludes_path(&e.path()) { return false; }
                 if colocated_layout {
                     !name.ends_with("Test.java")
                         && !name.ends_with("Tests.java")
@@ -541,6 +605,7 @@ pub fn compile_with_options(
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
                 if !name.ends_with(".kt") { return false; }
+                if desc.java.excludes_path(&e.path()) { return false; }
                 if colocated_layout {
                     !name.ends_with("Test.kt")
                         && !name.ends_with("Tests.kt")
@@ -557,6 +622,7 @@ pub fn compile_with_options(
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
                 if !name.ends_with(".groovy") { return false; }
+                if desc.java.excludes_path(&e.path()) { return false; }
                 if colocated_layout {
                     !name.ends_with("Test.groovy")
                         && !name.ends_with("Tests.groovy")
@@ -593,7 +659,7 @@ pub fn compile_with_options(
     sources.sort();
     sources.dedup();
 
-    if sources.is_empty() {
+    if sources.is_empty() && !test_only_library {
         bail!(
             "no Java, Kotlin, or Groovy source files found under {}",
             src_roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
@@ -684,7 +750,8 @@ pub fn compile_with_options(
     }
 
     // --- JPMS detection and validation ----------------------------------------
-    let module_info_path = jpms::find_module_info_java(&src_roots);
+    let module_info_path = jpms::find_module_info_java(&src_roots)
+        .filter(|p| !desc.java.excludes_path(p));
     let is_modular = module_info_path.is_some();
 
     if is_modular && has_groovy {
@@ -826,12 +893,14 @@ pub fn compile_with_options(
         };
 
         // Build shared classpath entries used by both phases.
+        // Workspace member classes (extra_cp) precede Maven jars so a
+        // reactor module wins over a published transitive of the same GAV.
         let mut shared_cp: Vec<PathBuf> = Vec::new();
+        shared_cp.extend_from_slice(extra_cp);
         if let Some(ref rd) = resources_dir {
             shared_cp.push(rd.clone());
         }
         shared_cp.extend_from_slice(&dep_jars);
-        shared_cp.extend_from_slice(extra_cp);
         shared_cp.extend_from_slice(&ap_on_compile_classpath_jars);
         shared_cp.extend_from_slice(&kotlin_stdlib_jars);
 
@@ -919,9 +988,7 @@ pub fn compile_with_options(
             let mut javac = Command::new("java");
             javac.arg("-jar").arg(&wrapper_jar);
             javac.arg("--curie-manifest-out").arg(&manifest_path);
-            if let Some(release) = javac_release_arg(desc)? {
-                javac.arg("--release").arg(release);
-            }
+            apply_javac_language_level(&mut javac, desc)?;
             if desc.java.preview_enabled() {
                 javac.arg("--enable-preview");
             }
@@ -986,6 +1053,7 @@ pub fn compile_with_options(
             for (key, value) in desc.flat_ap_options() {
                 javac.arg(format!("-A{}={}", key, value));
             }
+            apply_javac_compiler_args(&mut javac, desc);
 
             for src in &java_sources {
                 javac.arg(src);
@@ -1256,6 +1324,34 @@ mod tests {
     }
 
     // --- javac_release_arg --------------------------------------------------
+
+    #[test]
+    fn javac_release_arg_omitted_when_source_target_set() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[library]\nname = \"g\"\nversion = \"0.1.0\"\n\
+             [java]\nsourceVersion = \"8\"\ntargetVersion = \"8\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+        assert_eq!(javac_release_arg(&desc).unwrap(), None);
+    }
+
+    #[test]
+    fn source_excluded_matches_filename_and_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[library]\nname = \"g\"\nversion = \"0.1.0\"\n\
+             [java]\nexcludes = [\"module-info.java\"]\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+        assert!(desc.java.excludes_path(Path::new("src/module-info.java")));
+        assert!(desc.java.excludes_path(Path::new("/tmp/foo/module-info.java")));
+        assert!(!desc.java.excludes_path(Path::new("src/com/Foo.java")));
+    }
 
     #[test]
     fn javac_release_arg_uses_release_version_when_set() {

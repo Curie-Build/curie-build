@@ -123,9 +123,27 @@ pub struct MavenLayout {
 }
 
 /// Discover the Maven-equivalent source layout for `project_root`.
-pub fn discover_layout(project_root: &Path) -> MavenLayout {
+///
+/// When `desc` is present, `[java] sourceDirs` / `testSourceDirs` are
+/// added to the auto-discovered roots so `curie maven sync` emits the
+/// same extra directories Curie compiles.
+pub fn discover_layout(project_root: &Path, desc: Option<&Descriptor>) -> MavenLayout {
     let mut src_roots = production_source_roots(project_root);
     let mut test_roots = test_source_roots(project_root);
+    if let Some(d) = desc {
+        for dir in &d.java.source_dirs {
+            let rel = PathBuf::from(dir);
+            if project_root.join(&rel).is_dir() && !src_roots.contains(&rel) {
+                src_roots.push(rel);
+            }
+        }
+        for dir in &d.java.test_source_dirs {
+            let rel = PathBuf::from(dir);
+            if project_root.join(&rel).is_dir() && !test_roots.contains(&rel) {
+                test_roots.push(rel);
+            }
+        }
+    }
 
     let colocated_test_excludes = colocated_test_exclude_patterns(project_root, &src_roots);
     if !colocated_test_excludes.is_empty() {
@@ -455,7 +473,7 @@ pub fn build_project(
         anyhow::bail!("build_project: BOM descriptors are handled by the BOM POM generator");
     }
 
-    let layout = discover_layout(project_root);
+    let layout = discover_layout(project_root, Some(desc));
     let has_kotlin = layout_has_extension(project_root, &layout, "kt");
     let has_groovy = layout_has_extension(project_root, &layout, "groovy");
     let is_modular = layout.src_roots.iter().any(|root| root.join("module-info.java").exists())
@@ -2474,7 +2492,7 @@ fn sync_member_pom(
         sync_bom_pom(&pom_path, desc, &member_toml, workspace_toml, &pinned, force, check)?
     } else {
         let resolved_ap_versions = crate::deps::resolve_ap_versions_for_sync(desc, offline)?;
-        let layout = discover_layout(project_root);
+        let layout = discover_layout(project_root, Some(desc));
         let main_class = resolve_main_class_for_sync(desc, project_root, &layout)?;
         sync_pom(
             project_root, &pom_path, desc, &member_toml, workspace_toml,
@@ -3103,7 +3121,7 @@ mod tests {
         write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
         write_file(dir.path(), "src/test/java/com/example/HelloTest.java", "package com.example; class HelloTest {}");
 
-        let layout = discover_layout(dir.path());
+        let layout = discover_layout(dir.path(), None);
         assert_eq!(layout.src_roots, vec![PathBuf::from("src/main/java")]);
         assert_eq!(layout.test_roots, vec![PathBuf::from("src/test/java")]);
         assert!(layout.colocated_test_excludes.is_empty());
@@ -3121,7 +3139,7 @@ mod tests {
         write_file(dir.path(), "src/com.example.app/Hello.java", "package com.example.app; class Hello {}");
         write_file(dir.path(), "tests/com.example.app/HelloTest.java", "package com.example.app; class HelloTest {}");
 
-        let layout = discover_layout(dir.path());
+        let layout = discover_layout(dir.path(), None);
         assert_eq!(layout.src_roots, vec![PathBuf::from("src/com.example.app")]);
         assert_eq!(layout.test_roots, vec![PathBuf::from("tests/com.example.app")]);
 
@@ -3138,7 +3156,7 @@ mod tests {
         write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
         write_file(dir.path(), "src/main/kotlin/com/example/World.kt", "package com.example\nclass World");
 
-        let layout = discover_layout(dir.path());
+        let layout = discover_layout(dir.path(), None);
         assert_eq!(layout.src_roots, vec![PathBuf::from("src/main/java"), PathBuf::from("src/main/kotlin")]);
 
         let desc = minimal_app("my-app", Some("com.example"));
@@ -3157,7 +3175,7 @@ mod tests {
         write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
         write_file(dir.path(), "src/main/java/com/example/HelloTest.java", "package com.example; class HelloTest {}");
 
-        let layout = discover_layout(dir.path());
+        let layout = discover_layout(dir.path(), None);
         assert_eq!(layout.colocated_test_excludes, vec!["**/*Test.java".to_string(), "**/*Tests.java".to_string(), "**/*Spec.java".to_string()]);
         // The production root is also a test source root for the co-located tests.
         assert!(layout.test_roots.contains(&PathBuf::from("src/main/java")));
@@ -4048,7 +4066,7 @@ mod tests {
             "package com.example;\npublic class Other { public static void main(String[] args) {} }",
         );
         let desc = minimal_app("my-app", Some("com.example"));
-        let layout = discover_layout(dir.path());
+        let layout = discover_layout(dir.path(), None);
 
         let main_class = resolve_main_class_for_sync(&desc, dir.path(), &layout).unwrap();
         assert_eq!(main_class, Some("Main".to_string()));
@@ -4063,7 +4081,7 @@ mod tests {
             DescriptorKind::Application(app) => app.main_class = None,
             _ => unreachable!(),
         }
-        let layout = discover_layout(dir.path());
+        let layout = discover_layout(dir.path(), None);
 
         let err = resolve_main_class_for_sync(&desc, dir.path(), &layout).unwrap_err();
         let chain = format!("{err:#}");

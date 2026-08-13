@@ -605,12 +605,24 @@ fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
     if member.java.enable_preview.is_none() {
         member.java.enable_preview = ws.java.enable_preview;
     }
+    if member.java.source_version.is_none() {
+        member.java.source_version = ws.java.source_version.clone();
+    }
+    if member.java.target_version.is_none() {
+        member.java.target_version = ws.java.target_version.clone();
+    }
+    inherit_vec_if_empty(&mut member.java.source_dirs, &ws.java.source_dirs);
+    inherit_vec_if_empty(&mut member.java.test_source_dirs, &ws.java.test_source_dirs);
+    inherit_vec_if_empty(&mut member.java.compiler_args, &ws.java.compiler_args);
+    inherit_vec_if_empty(&mut member.java.excludes, &ws.java.excludes);
     if member.test.junit_platform_version.is_none() {
         member.test.junit_platform_version = ws.test.junit_platform_version.clone();
     }
     if member.test.coverage.is_none() {
         member.test.coverage = ws.test.coverage;
     }
+    inherit_vec_if_empty(&mut member.test.jvm_args, &ws.test.jvm_args);
+    inherit_vec_if_empty(&mut member.test.exclude_classname, &ws.test.exclude_classname);
     if member.kotlin.version.is_none() {
         member.kotlin.version = ws.kotlin.version.clone();
     }
@@ -683,6 +695,14 @@ fn merge_resource_properties(
 
 /// Merge `base` entries into `target`.  Existing entries in `target`
 /// (from a nearer/inner workspace) take precedence over `base` entries.
+/// Copy `ws` into `member` when the member left the list empty.  A member
+/// that declares its own list replaces the workspace value entirely.
+fn inherit_vec_if_empty(member: &mut Vec<String>, ws: &[String]) {
+    if member.is_empty() && !ws.is_empty() {
+        *member = ws.to_vec();
+    }
+}
+
 pub(crate) fn merge_btree<V: Clone>(
     target: &mut std::collections::BTreeMap<String, V>,
     base: &std::collections::BTreeMap<String, V>,
@@ -2197,6 +2217,51 @@ mod tests {
         let t = &ws.members[0].descriptor.test;
         assert!(t.coverage_enabled());
         assert_eq!(t.junit_platform_version(), "5.10.0");
+    }
+
+    #[test]
+    fn java_layout_and_compiler_settings_inherit_from_workspace() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\n\
+             [java]\nsourceVersion = \"8\"\ntargetVersion = \"8\"\n\
+             sourceDirs = [\"src\"]\ntestSourceDirs = [\"test\"]\n\
+             compilerArgs = [\"-parameters\"]\nexcludes = [\"module-info.java\"]\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
+        )
+        .unwrap();
+        let j = &ws.members[0].descriptor.java;
+        assert_eq!(j.source_version(), Some("8"));
+        assert_eq!(j.target_version(), Some("8"));
+        assert_eq!(j.source_dirs, vec!["src"]);
+        assert_eq!(j.test_source_dirs, vec!["test"]);
+        assert_eq!(j.compiler_args, vec!["-parameters"]);
+        assert_eq!(j.excludes, vec!["module-info.java"]);
+    }
+
+    #[test]
+    fn member_java_lists_replace_workspace_lists() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\n[java]\nsourceDirs = [\"src\"]\ncompilerArgs = [\"-parameters\"]\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                     [java]\nsourceDirs = [\"src/main/java\"]\ncompilerArgs = [\"-g\"]\n")],
+        )
+        .unwrap();
+        let j = &ws.members[0].descriptor.java;
+        assert_eq!(j.source_dirs, vec!["src/main/java"]);
+        assert_eq!(j.compiler_args, vec!["-g"]);
+    }
+
+    #[test]
+    fn test_jvm_args_and_excludes_inherit_from_workspace() {
+        let ws = load_ws_with_content(
+            "[workspace]\nmembers = [\"a\"]\n\n\
+             [test]\njvmArgs = [\"-Xmx1g\"]\nexcludeClassname = [\".*Tester\"]\n",
+            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
+        )
+        .unwrap();
+        let t = &ws.members[0].descriptor.test;
+        assert_eq!(t.jvm_args, vec!["-Xmx1g"]);
+        assert_eq!(t.exclude_classname, vec![".*Tester"]);
     }
 
     // -- resource scope inheritance -------------------------------------------

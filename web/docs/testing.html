@@ -92,7 +92,9 @@
       <li><strong>tests/</strong> — a top-level <code>tests/</code> directory for integration tests that should only see the public surface. Mirrors Maven's <code>src/test/java/</code> when using the flat-package layout.</li>
     </ul>
 
-    <p>Maven-style projects keep using <code>src/test/java/</code>.</p>
+    <p>Maven-style projects keep using <code>src/test/java/</code>. Hierarchical trees that are not in either default location (Guava's <code>test/</code>) are declared with <code>[java] testSourceDirs</code>.</p>
+
+    <p>At run time the launcher scans only <code>target/test-classes</code>. Production classes stay on the runtime classpath but are not discovered as tests — a testing library that ships <code>TestCase</code> subclasses (Guava testlib's <code>*Tester</code> types) would otherwise explode into hundreds of thousands of unintended tests, the same way Surefire only scans the test output directory.</p>
 
     <h2>Declaring test dependencies</h2>
     <div class="code">
@@ -136,6 +138,23 @@
     </div>
 
     <p>The same key in a workspace root <code>Curie.toml</code> applies to every member that doesn't override it.</p>
+
+    <h2>Test JVM arguments and class excludes</h2>
+    <p>Pass extra JVM flags to the test process and skip classes whose names match a regular expression — the same role as Surefire's <code>argLine</code> and <code>&lt;excludes&gt;</code>:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[test]</span>
+<span class="kw">jvmArgs</span> = [<span class="str">"-Xmx1536M"</span>, <span class="str">"-Duser.language=hi"</span>, <span class="str">"-Duser.country=IN"</span>,
+           <span class="str">"--add-opens"</span>, <span class="str">"java.base/java.lang=ALL-UNNAMED"</span>]
+<span class="kw">excludeClassname</span> = [<span class="str">".*PackageSanityTest"</span>, <span class="str">".*Tester"</span>, <span class="str">".*\\$\\d+"</span>]
+</pre>
+    </div>
+
+    <p>Both keys are workspace-inheritable. A member that declares its own list replaces the workspace value.</p>
 
     <h2>Workspace fan-out</h2>
     <p><code>curie test</code> at the workspace root iterates over members in topological order. Upstream members' <code>target/classes</code> directories (not their JARs) are placed on downstream test classpaths, so test runs don't have to wait for upstream JAR packaging.</p>
