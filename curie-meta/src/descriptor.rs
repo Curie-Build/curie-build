@@ -1133,7 +1133,7 @@ impl<'de> serde::Deserialize<'de> for DockerBuilder {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Docker {
     /// Image assembly strategy. Default: `daemonless` (no Docker daemon).
@@ -1181,25 +1181,6 @@ pub struct Docker {
     /// Set by Descriptor::load after deserialisation via a raw TOML check.
     #[serde(skip)]
     pub section_present: bool,
-}
-
-impl Default for Docker {
-    fn default() -> Self {
-        Docker {
-            builder: DockerBuilder::default(),
-            base_image: None,
-            image_name: None,
-            image_tag: None,
-            tags: Vec::new(),
-            platform: None,
-            registry_id: None,
-            jvm_args: Vec::new(),
-            env: std::collections::BTreeMap::new(),
-            labels: std::collections::BTreeMap::new(),
-            user: None,
-            section_present: false,
-        }
-    }
 }
 
 impl Docker {
@@ -3711,7 +3692,7 @@ builder = "daemonless"
         )
         .unwrap();
         std::fs::write(dir.path().join("Dockerfile"), "FROM scratch\n").unwrap();
-        let d = load(&dir.path().to_path_buf()).unwrap();
+        let d = load(dir.path()).unwrap();
         assert_eq!(d.docker.builder, DockerBuilder::Daemonless);
         assert_eq!(
             effective_docker_builder(dir.path(), &d),

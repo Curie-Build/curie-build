@@ -305,7 +305,7 @@ mod tests {
 
         let a = dir.path().join("a.jar");
         let b = dir.path().join("b.jar");
-        write_sources_jar(&a, &[src.clone()], None).unwrap();
+        write_sources_jar(&a, std::slice::from_ref(&src), None).unwrap();
         write_sources_jar(&b, &[src], None).unwrap();
 
         let bytes_a = std::fs::read(&a).unwrap();

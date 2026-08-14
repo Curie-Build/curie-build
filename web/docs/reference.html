@@ -54,6 +54,7 @@
       <li><a href="/docs/resources.html">Resource filtering</a></li>
       <li><a href="/docs/plugins.html">Plugins</a></li>
       <li><a href="/docs/plugin-authoring.html">Plugin authoring</a></li>
+      <li><a href="/docs/osgi.html">OSGi bundles</a></li>
 
       <li><span class="nav-group">Deploy</span></li>
       <li><a href="/docs/docker.html">Docker</a></li>
@@ -355,6 +356,10 @@
         <tr><td><code>enabled</code></td><td>bool</td><td><code>false</code></td><td>Enables JPMS mode. Requires a <code>module-info.java</code> at the source root</td></tr>
       </tbody>
     </table>
+
+    <h2 id="plugin">[plugin.*]</h2>
+    <p>Activates an external <code>curie-&lt;name&gt;</code> binary. The table body is forwarded to the plugin as JSON. See <a href="/docs/plugins.html">Plugins</a> and <a href="/docs/plugin-authoring.html">Plugin authoring</a>.</p>
+    <p>First-party plugins: <code>protobuf</code>, <code>openapi</code> (source generators), and <code>osgi</code> (lifecycle - see <a href="/docs/osgi.html">OSGi bundles</a>).</p>
 
     <h2 id="plugins">[plugins.*]</h2>
     <p>Declares Maven plugins for use with <code>curie maven sync</code>. Each sub-key is a <code>group:artifact</code> coordinate for a Maven plugin. See <a href="/docs/plugins.html">Plugins</a> and <a href="/docs/maven.html">Maven sync</a> for details.</p>

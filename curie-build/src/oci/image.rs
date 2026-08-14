@@ -395,10 +395,14 @@ mod tests {
                 .into(),
         }];
 
-        let mut opts = ImageOptions::default();
-        opts.entrypoint = vec!["java".into(), "-jar".into(), "app.jar".into()];
-        opts.working_dir = Some("/app".into());
-        opts.env.insert("FOO".into(), "bar".into());
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("FOO".into(), "bar".into());
+        let opts = ImageOptions {
+            entrypoint: vec!["java".into(), "-jar".into(), "app.jar".into()],
+            working_dir: Some("/app".into()),
+            env,
+            ..Default::default()
+        };
 
         let assembled =
             assemble_image(&minimal_base_config(), &base_layers, &[layer], &opts, false).unwrap();
@@ -478,7 +482,7 @@ mod tests {
         let a = assemble_image(
             &minimal_base_config(),
             &base_layers,
-            &[layer.clone()],
+            std::slice::from_ref(&layer),
             &opts,
             true,
         )

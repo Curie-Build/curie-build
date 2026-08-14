@@ -73,7 +73,75 @@ pub fn spawn_cmd_with_stdin(cmd: &mut Command, stdin_data: &[u8]) -> Result<Stat
     }
 }
 
+/// Run `cmd` with `stdin_data` on stdin and capture stdout as bytes.
+///
+/// stderr is inherited (sequential) or forwarded to the parallel `LineSink`.
+/// stdout is never inherited or forwarded — callers parse it (plugin `run`
+/// returns optional JSON on stdout).
+pub fn spawn_cmd_with_stdin_capture_stdout(
+    cmd: &mut Command,
+    stdin_data: &[u8],
+) -> Result<(Status, Vec<u8>)> {
+    if let Some(sink) = crate::parallel::try_get_sink() {
+        spawn_with_stdin_stdout_captured_stderr_sink(cmd, stdin_data, &sink)
+    } else {
+        spawn_with_stdin_stdout_captured_stderr_inherit(cmd, stdin_data)
+    }
+}
+
 // ── stdin + inherit (sequential) ───────────────────────────────────────────
+
+fn spawn_with_stdin_stdout_captured_stderr_inherit(
+    cmd: &mut Command,
+    stdin_data: &[u8],
+) -> Result<(Status, Vec<u8>)> {
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+
+    let mut child = cmd.spawn().context("command failed to start")?;
+    let write_th = take_stdin_writer(&mut child, stdin_data);
+    let mut stdout = child.stdout.take().expect("stdout was piped");
+    let out_th = thread::spawn(move || {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).map(|_| buf)
+    });
+
+    let status = child.wait().context("failed to wait for child process")?;
+    let write_res = write_th.join().expect("stdin writer thread panicked");
+    let stdout = out_th.join().expect("stdout reader thread panicked")?;
+    check_write_result_vs_status(write_res, status)?;
+    Ok((status_from_exit(status), stdout))
+}
+
+fn spawn_with_stdin_stdout_captured_stderr_sink(
+    cmd: &mut Command,
+    stdin_data: &[u8],
+    sink: &Arc<dyn crate::parallel::LineSink + Send + Sync>,
+) -> Result<(Status, Vec<u8>)> {
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().context("command failed to start")?;
+    let write_th = take_stdin_writer(&mut child, stdin_data);
+
+    let mut stdout = child.stdout.take().expect("stdout was piped");
+    let stderr = child.stderr.take().expect("stderr was piped");
+    let sink_err = Arc::clone(sink);
+    let out_th = thread::spawn(move || {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).map(|_| buf)
+    });
+    let err_th = thread::spawn(move || forward_lines(stderr, &sink_err));
+
+    let status = child.wait().context("failed to wait for child process")?;
+    let write_res = write_th.join().expect("stdin writer thread panicked");
+    let stdout = out_th.join().expect("stdout reader thread panicked")?;
+    let _ = err_th.join();
+    check_write_result_vs_status(write_res, status)?;
+    Ok((status_from_exit(status), stdout))
+}
 
 fn spawn_with_stdin_inherit(cmd: &mut Command, stdin_data: &[u8]) -> Result<Status> {
     cmd.stdin(Stdio::piped())

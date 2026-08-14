@@ -280,7 +280,7 @@ pub fn derive_package(name: &str) -> String {
 ///
 /// `my-service` → `MyService`, `hello_world` → `HelloWorld`
 pub fn derive_class_name(name: &str) -> String {
-    name.split(|c| c == '-' || c == '_')
+    name.split(['-', '_'])
         .filter(|s| !s.is_empty())
         .map(|s| {
             let mut c = s.chars();

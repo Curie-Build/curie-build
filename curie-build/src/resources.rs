@@ -1027,8 +1027,10 @@ mod tests {
             }
             root_paths.push(root);
         }
-        let mut scope = Resources::default();
-        scope.filter = stages.to_vec();
+        let scope = Resources {
+            filter: stages.to_vec(),
+            ..Default::default()
+        };
         let compiled = must(compile_stages(dir.path(), &scope, &root_paths, "resources"));
         let out = dir.path().join("out");
         let vctx = ctx(vars);
@@ -1113,9 +1115,11 @@ mod tests {
         std::fs::write(root0.join("a.properties"), "v=@x@").unwrap();
         std::fs::write(root1.join("b.properties"), "v=@x@").unwrap();
 
-        let mut scope = Resources::default();
-        scope.directories = vec!["r0".into(), "r1".into()];
-        scope.filter = vec![substitute_stage(&["**/*.properties"], &[], &["r1"])];
+        let scope = Resources {
+            directories: vec!["r0".into(), "r1".into()],
+            filter: vec![substitute_stage(&["**/*.properties"], &[], &["r1"])],
+            ..Default::default()
+        };
         let roots = vec![root0.clone(), root1.clone()];
         let compiled = must(compile_stages(dir.path(), &scope, &roots, "resources"));
         let out = dir.path().join("out");
@@ -1141,8 +1145,10 @@ mod tests {
     #[test]
     fn stage_directory_not_in_scope_roots_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let mut scope = Resources::default();
-        scope.filter = vec![substitute_stage(&[], &[], &["nope"])];
+        let scope = Resources {
+            filter: vec![substitute_stage(&[], &[], &["nope"])],
+            ..Default::default()
+        };
         let roots = vec![dir.path().join("r0")];
         let err = match compile_stages(dir.path(), &scope, &roots, "resources") {
             Err(e) => e,
@@ -1352,8 +1358,10 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let bytes = b"\x89PNG\x00@x@";
         std::fs::write(root.join("logo.png"), bytes).unwrap();
-        let mut scope = Resources::default();
-        scope.filter = vec![stage];
+        let scope = Resources {
+            filter: vec![stage],
+            ..Default::default()
+        };
         let roots = vec![root.clone()];
         let compiled = must(compile_stages(dir.path(), &scope, &roots, "resources"));
         let out = dir.path().join("out");

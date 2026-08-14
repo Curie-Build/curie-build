@@ -968,20 +968,24 @@ mod tests {
 
     #[test]
     fn resolve_project_version() {
-        let mut pom = Pom::default();
-        pom.version = Some("4.2.0".to_string());
+        let pom = Pom {
+            version: Some("4.2.0".to_string()),
+            ..Default::default()
+        };
         assert_eq!(pom.resolve_value("${project.version}"), "4.2.0");
     }
 
     #[test]
     fn resolve_project_parent_version() {
-        let mut pom = Pom::default();
         // own version absent; falls back to parent version
-        pom.parent = Some(ParentRef {
-            group_id: "com.example".to_string(),
-            artifact_id: "parent".to_string(),
-            version: "3.1.0".to_string(),
-        });
+        let pom = Pom {
+            parent: Some(ParentRef {
+                group_id: "com.example".to_string(),
+                artifact_id: "parent".to_string(),
+                version: "3.1.0".to_string(),
+            }),
+            ..Default::default()
+        };
         assert_eq!(pom.resolve_value("${project.parent.version}"), "3.1.0");
     }
 
@@ -989,13 +993,15 @@ mod tests {
     fn resolve_parent_version_distinct_from_own() {
         // Regression for bug #7: when the child declares its own version, the
         // parent variable must resolve to the parent's version, not the child's.
-        let mut pom = Pom::default();
-        pom.version = Some("2.0.0".to_string());
-        pom.parent = Some(ParentRef {
-            group_id: "com.example".to_string(),
-            artifact_id: "parent".to_string(),
-            version: "5.0.0".to_string(),
-        });
+        let pom = Pom {
+            version: Some("2.0.0".to_string()),
+            parent: Some(ParentRef {
+                group_id: "com.example".to_string(),
+                artifact_id: "parent".to_string(),
+                version: "5.0.0".to_string(),
+            }),
+            ..Default::default()
+        };
         assert_eq!(pom.resolve_value("${project.parent.version}"), "5.0.0");
         assert_eq!(pom.resolve_value("${project.version}"), "2.0.0");
     }
@@ -1003,15 +1009,19 @@ mod tests {
     #[test]
     fn resolve_parent_version_no_parent_falls_back_to_own() {
         // No <parent>: best-effort fall back to the own version.
-        let mut pom = Pom::default();
-        pom.version = Some("1.2.3".to_string());
+        let pom = Pom {
+            version: Some("1.2.3".to_string()),
+            ..Default::default()
+        };
         assert_eq!(pom.resolve_value("${project.parent.version}"), "1.2.3");
     }
 
     #[test]
     fn resolve_custom_property() {
-        let mut pom = Pom::default();
-        pom.version = Some("1.0.0".to_string());
+        let mut pom = Pom {
+            version: Some("1.0.0".to_string()),
+            ..Default::default()
+        };
         pom.properties
             .insert("jackson.version".to_string(), "2.17.2".to_string());
         assert_eq!(pom.resolve_value("${jackson.version}"), "2.17.2");
@@ -1048,39 +1058,45 @@ mod tests {
 
     #[test]
     fn effective_group_own() {
-        let mut pom = Pom::default();
-        pom.group_id = Some("com.example".to_string());
+        let pom = Pom {
+            group_id: Some("com.example".to_string()),
+            ..Default::default()
+        };
         assert_eq!(pom.effective_group(), Some("com.example"));
     }
 
     #[test]
     fn effective_group_fallback_to_parent() {
-        let mut pom = Pom::default();
-        pom.group_id = None;
-        pom.parent = Some(ParentRef {
-            group_id: "com.parent".to_string(),
-            artifact_id: "parent".to_string(),
-            version: "1.0".to_string(),
-        });
+        let pom = Pom {
+            parent: Some(ParentRef {
+                group_id: "com.parent".to_string(),
+                artifact_id: "parent".to_string(),
+                version: "1.0".to_string(),
+            }),
+            ..Default::default()
+        };
         assert_eq!(pom.effective_group(), Some("com.parent"));
     }
 
     #[test]
     fn effective_version_own() {
-        let mut pom = Pom::default();
-        pom.version = Some("5.0.0".to_string());
+        let pom = Pom {
+            version: Some("5.0.0".to_string()),
+            ..Default::default()
+        };
         assert_eq!(pom.effective_version(), Some("5.0.0"));
     }
 
     #[test]
     fn effective_version_fallback_to_parent() {
-        let mut pom = Pom::default();
-        pom.version = None;
-        pom.parent = Some(ParentRef {
-            group_id: "com.example".to_string(),
-            artifact_id: "parent".to_string(),
-            version: "9.9.9".to_string(),
-        });
+        let pom = Pom {
+            parent: Some(ParentRef {
+                group_id: "com.example".to_string(),
+                artifact_id: "parent".to_string(),
+                version: "9.9.9".to_string(),
+            }),
+            ..Default::default()
+        };
         assert_eq!(pom.effective_version(), Some("9.9.9"));
     }
 
@@ -1088,21 +1104,24 @@ mod tests {
 
     #[test]
     fn resolve_project_group_id() {
-        let mut pom = Pom::default();
-        pom.group_id = Some("com.google.guava".to_string());
+        let pom = Pom {
+            group_id: Some("com.google.guava".to_string()),
+            ..Default::default()
+        };
         // guava-testlib uses ${project.groupId}:guava as a self-referential dep
         assert_eq!(pom.resolve_value("${project.groupId}"), "com.google.guava");
     }
 
     #[test]
     fn resolve_project_group_id_inherits_from_parent() {
-        let mut pom = Pom::default();
-        pom.group_id = None;
-        pom.parent = Some(ParentRef {
-            group_id: "com.example".to_string(),
-            artifact_id: "parent".to_string(),
-            version: "1.0".to_string(),
-        });
+        let pom = Pom {
+            parent: Some(ParentRef {
+                group_id: "com.example".to_string(),
+                artifact_id: "parent".to_string(),
+                version: "1.0".to_string(),
+            }),
+            ..Default::default()
+        };
         assert_eq!(pom.resolve_value("${project.groupId}"), "com.example");
     }
 

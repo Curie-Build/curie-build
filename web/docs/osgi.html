@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OSGi bundles · Curie docs</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/styles/main.css">
+</head>
+<body>
+
+<nav class="site">
+  <div class="container">
+    <a class="brand" href="/">
+      <span class="brand-mark">Cm</span>
+      <span>Curie</span>
+    </a>
+    <ul>
+      <li><a href="/getting-started.html">Get started</a></li>
+      <li><a href="/docs/">Docs</a></li>
+      <li class="hide-sm"><a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a></li>
+      <li class="hide-sm"><a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="container docs-layout">
+  <aside class="docs-nav">
+    <h4>Documentation</h4>
+    <ul>
+      <li><a href="/docs/">Overview</a></li>
+      <li><a href="/docs/installation.html">Installation</a></li>
+
+      <li><span class="nav-group">Language support</span></li>
+      <li><a href="/docs/java.html">Java</a></li>
+      <li><a href="/docs/kotlin.html">Kotlin</a></li>
+      <li><a href="/docs/groovy.html">Groovy &amp; Spock</a></li>
+
+      <li><span class="nav-group">Project types</span></li>
+      <li><a href="/docs/app.html">Application</a></li>
+      <li><a href="/docs/lib.html">Library</a></li>
+      <li><a href="/docs/workspaces.html">Workspaces</a></li>
+      <li><a href="/docs/bom.html">BOM</a></li>
+
+      <li><span class="nav-group">Build &amp; test</span></li>
+      <li><a href="/docs/incremental.html">Incremental builds</a></li>
+      <li><a href="/docs/dependencies.html">Adding dependencies</a></li>
+      <li><a href="/docs/snapshots.html">SNAPSHOT dependencies</a></li>
+      <li><a href="/docs/resolver.html">Resolver &amp; checksums</a></li>
+      <li><a href="/docs/testing.html">Testing</a></li>
+      <li><a href="/docs/resources.html">Resource filtering</a></li>
+      <li><a href="/docs/plugins.html">Plugins</a></li>
+      <li><a href="/docs/plugin-authoring.html">Plugin authoring</a></li>
+      <li><a href="/docs/osgi.html">OSGi bundles</a></li>
+
+      <li><span class="nav-group">Deploy</span></li>
+      <li><a href="/docs/docker.html">Docker</a></li>
+      <li><a href="/docs/publish.html">Publishing</a></li>
+      <li><a href="/docs/native.html">GraalVM native</a></li>
+      <li><a href="/docs/jlink.html">jlink runtime</a></li>
+
+      <li><span class="nav-group">Tools</span></li>
+      <li><a href="/docs/fmt.html">Formatter</a></li>
+      <li><a href="/docs/deps.html">Dependency tree</a></li>
+      <li><a href="/docs/audit.html">Audit (SBOM)</a></li>
+      <li><a href="/docs/scaffold.html">Scaffolding</a></li>
+      <li><a href="/docs/inspect.html">Build Inspect</a></li>
+      <li><a href="/docs/maven.html">Maven sync</a></li>
+
+      <li><span class="nav-group">Reference</span></li>
+      <li><a href="/docs/reference.html">TOML reference</a></li>
+      <li><a href="/docs/troubleshooting.html">Troubleshooting</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose">
+    <span class="eyebrow">Subsystem · plugins</span>
+    <h1>OSGi bundles</h1>
+    <p class="lede"><code>curie-osgi</code> turns the project JAR into an OSGi bundle during <code>curie build</code>, then publishes that bundle to an OSGi Bundle Repository during <code>curie publish</code>. It is a lifecycle plugin - it does not generate sources.</p>
+
+    <h2>Installation</h2>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>terminal</span>
+      </header>
+<pre>cargo install --path plugins/curie-osgi</pre>
+    </div>
+    <p>The binary must be named <code>curie-osgi</code> and sit on <code>PATH</code>. Curie discovers it the same way it discovers <code>curie-protobuf</code>.</p>
+
+    <h2>Activating the plugin</h2>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml</span>
+      </header>
+<pre><span class="kw">[library]</span>
+<span class="kw">name</span>    = <span class="str">"osgi-greeter"</span>
+<span class="kw">version</span> = <span class="str">"1.0.0"</span>
+<span class="kw">groupId</span> = <span class="str">"com.example.curie"</span>
+
+<span class="kw">[plugin.osgi]</span>
+<span class="kw">symbolicName</span>  = <span class="str">"com.example.curie.osgi-greeter"</span>
+<span class="kw">bundleName</span>    = <span class="str">"OSGi Greeter"</span>
+<span class="kw">exportPackage</span> = <span class="str">"com.example.osgi"</span>
+<span class="kw">repository</span>    = <span class="str">"file:target/osgi-repo"</span></pre>
+    </div>
+
+    <h3>Configuration keys</h3>
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>symbolicName</code></td><td>string</td><td><code>groupId.artifactId</code></td><td><code>Bundle-SymbolicName</code></td></tr>
+        <tr><td><code>bundleVersion</code></td><td>string</td><td>project version, OSGi-normalized</td><td><code>1.0.0-SNAPSHOT</code> becomes <code>1.0.0.SNAPSHOT</code></td></tr>
+        <tr><td><code>bundleName</code></td><td>string</td><td>-</td><td><code>Bundle-Name</code></td></tr>
+        <tr><td><code>activator</code></td><td>string</td><td>-</td><td><code>Bundle-Activator</code></td></tr>
+        <tr><td><code>exportPackage</code></td><td>string</td><td>every package that contains a <code>.class</code></td><td>Written as-is when set; otherwise inferred from the JAR</td></tr>
+        <tr><td><code>importPackage</code></td><td>string</td><td>-</td><td><code>Import-Package</code>; omitted when unset</td></tr>
+        <tr><td><code>privatePackage</code></td><td>string</td><td>-</td><td>Comma-separated patterns excluded from inferred exports. A trailing <code>.*</code> is a prefix match</td></tr>
+        <tr><td><code>headers</code></td><td>table</td><td>empty</td><td>Extra MANIFEST.MF headers, e.g. <code>Bundle-Vendor</code></td></tr>
+        <tr><td><code>repository</code></td><td>string</td><td>required at publish</td><td><code>file:</code> path, <code>http(s):</code> URL, or a <code>[[repositories]]</code> id</td></tr>
+      </tbody>
+    </table>
+
+    <h2>What <code>curie build</code> does</h2>
+    <p>After the project JAR is packaged, Curie calls <code>curie-osgi run --phase post-package</code>. The plugin rewrites <code>META-INF/MANIFEST.MF</code> in place: existing headers such as <code>Main-Class</code> and <code>Class-Path</code> are kept, and the OSGi headers are merged in. <code>Export-Package</code> is versioned with the bundle version, <code>Import-Package</code> is taken from class-file type references, and <code>Require-Capability: osgi.ee</code> is derived from the oldest class-file version (the same clause bnd writes).</p>
+
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>$ curie build</span>
+      </header>
+<pre><span class="dim">Building osgi-greeter v1.0.0</span>
+  Compile          1 source file(s)
+  Tests            no test sources found
+  Package          osgi-greeter-1.0.0.jar
+  Plugin osgi      post-package
+  Done             <span class="em">target/osgi-greeter-1.0.0.jar</span></pre>
+    </div>
+
+    <p>The next build skips the plugin when the JAR and <code>[plugin.osgi]</code> config are unchanged (stamp at <code>target/.curie-plugins/osgi.post-package.stamp</code>).</p>
+
+    <h2>What <code>curie publish</code> does</h2>
+    <p>After the Maven upload, Curie calls <code>curie-osgi run --phase publish</code>. The plugin writes the bundle plus an OBR <code>repository.xml</code> to the configured repository:</p>
+    <ul>
+      <li><code>file:target/osgi-repo</code> - a local dummy OBR on disk</li>
+      <li><code>http://host:port/</code> - HTTP PUT of <code>bundles/&lt;bsn&gt;-&lt;version&gt;.jar</code> and <code>repository.xml</code></li>
+      <li>A <code>[[repositories]]</code> id - URL and credentials come from the project and <code>~/.curie/config.toml</code></li>
+    </ul>
+
+    <p><code>curie publish --dry-run</code> still invokes the plugin; the plugin prints the PUT plan and writes nothing.</p>
+
+    <h3>Dummy HTTP repository</h3>
+    <p><code>curie-osgi dummy-repo</code> is a tiny PUT/GET server for local testing:</p>
+    <div class="term">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>terminal</span>
+      </header>
+<pre>curie-osgi dummy-repo --dir /tmp/osgi-repo --port 9999</pre>
+    </div>
+    <p>Point <code>[plugin.osgi] repository</code> at <code>http://127.0.0.1:9999</code> and run <code>curie publish</code>. The server stores whatever is PUT under <code>--dir</code>.</p>
+
+    <h2>Example</h2>
+    <p><code>examples/osgi-bundle-demo</code> is a one-class library with the plugin enabled. After <code>curie build</code>, the JAR manifest includes <code>Bundle-SymbolicName</code>, versioned <code>Export-Package</code>, and <code>Require-Capability: osgi.ee</code> for Java 21.</p>
+    <p>Maven sync keeps <code>&lt;packaging&gt;jar&lt;/packaging&gt;</code> and follows the Felix recipe for <a href="https://felix.apache.org/documentation/subprojects/apache-felix-maven-bundle-plugin-bnd.html#_simple_example">adding OSGi metadata without changing the packaging type</a>: the bundle plugin's <code>manifest</code> goal only writes <code>target/classes/META-INF/MANIFEST.MF</code>; <code>maven-jar-plugin</code> must set <code>&lt;manifestFile&gt;</code> to that path or the packaged JAR keeps a default Archiver manifest with no OSGi headers. Maven Archiver may still add <code>Created-By</code> / <code>Build-Jdk-Spec</code>; those are not OSGi attributes.</p>
+
+    <div class="pager">
+      <a href="/docs/plugin-authoring.html">
+        <span>← Previous</span>
+        <strong>Plugin authoring</strong>
+      </a>
+      <a href="/docs/docker.html" style="text-align: right; align-items: flex-end;">
+        <span>Next →</span>
+        <strong>Docker</strong>
+      </a>
+    </div>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="container">
+    <div>
+      <a class="brand" href="/" style="font-size: 0.95rem;">
+        <span class="brand-mark" style="width: 24px; height: 24px; font-size: 0.7rem;">Cm</span>
+        <span>Curie</span>
+      </a>
+      <p style="font-size: 0.8rem; margin-top: 0.4rem;">© 2026 · curie-build.org · research project</p>
+    </div>
+    <div style="display: flex; gap: 1.5rem;">
+      <a href="/getting-started.html">Get started</a>
+      <a href="/docs/">Docs</a>
+      <a href="https://github.com/atteo/curie-build" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://crates.io/crates/curie-build" target="_blank" rel="noopener">Crates.io</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/scripts/main.js"></script>
+</body>
+</html>

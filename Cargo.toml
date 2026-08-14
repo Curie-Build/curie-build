@@ -6,5 +6,6 @@ members = [
     "curie-plugin",
     "plugins/curie-protobuf",
     "plugins/curie-openapi",
+    "plugins/curie-osgi",
 ]
 resolver = "2"

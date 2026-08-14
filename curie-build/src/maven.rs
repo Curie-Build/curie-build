@@ -72,6 +72,8 @@ pub mod plugin_versions {
     /// The ascopes protobuf-maven-plugin wrapper version (not the protoc
     /// version, which comes from `[plugin.protobuf].version` in Curie.toml).
     pub const PROTOBUF_MAVEN: &str = "5.1.2";
+    /// Apache Felix maven-bundle-plugin, used for `[plugin.osgi]` Maven sync.
+    pub const BUNDLE: &str = "5.1.9";
 }
 
 const BUILD_HELPER_GROUP_ID: &str = "org.codehaus.mojo";
@@ -89,6 +91,9 @@ const PROTOBUF_MAVEN_ARTIFACT_ID: &str = "protobuf-maven-plugin";
 
 const OPENAPI_GENERATOR_GROUP_ID: &str = "org.openapitools";
 const OPENAPI_GENERATOR_ARTIFACT_ID: &str = "openapi-generator-maven-plugin";
+
+const BUNDLE_GROUP_ID: &str = "org.apache.felix";
+const BUNDLE_ARTIFACT_ID: &str = "maven-bundle-plugin";
 
 const GROOVY_GROUP_ID: &str = "org.apache.groovy";
 const GROOVY_ARTIFACT_ID: &str = "groovy";
@@ -549,7 +554,11 @@ pub fn build_project(
     if desc.test.coverage_enabled() {
         plugins.push(build_jacoco_plugin());
     }
-    plugins.push(build_jar_plugin(main_class, populate_libs));
+    plugins.push(build_jar_plugin(
+        main_class,
+        populate_libs,
+        desc.plugins.contains_key("osgi"),
+    ));
     if let Some(dep_plugin) =
         build_dependency_plugin(dependency_plugin_executions(desc, populate_libs))
     {
@@ -1199,7 +1208,6 @@ fn build_gmavenplus_plugin(project_root: &Path, layout: &MavenLayout) -> MavenPl
             .collect(),
             ..Default::default()
         }],
-        ..Default::default()
     }
 }
 
@@ -1273,6 +1281,26 @@ struct OpenApiSyncConfig {
 
 fn default_openapi_output_dir() -> String {
     "target/generated-sources/openapi".to_string()
+}
+
+/// Subset of `[plugin.osgi]` config fields used by Maven sync.
+#[derive(serde::Deserialize, Debug, Default)]
+struct OsgiSyncConfig {
+    #[serde(rename = "symbolicName")]
+    symbolic_name: Option<String>,
+    #[serde(rename = "bundleVersion")]
+    bundle_version: Option<String>,
+    #[serde(rename = "bundleName")]
+    bundle_name: Option<String>,
+    activator: Option<String>,
+    #[serde(rename = "exportPackage")]
+    export_package: Option<String>,
+    #[serde(rename = "importPackage")]
+    import_package: Option<String>,
+    #[serde(rename = "privatePackage")]
+    private_package: Option<String>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
 }
 
 /// Render a `BTreeMap<String,String>` as `<tag><k1>v1</k1><k2>v2</k2>...</tag>`.
@@ -1374,8 +1402,65 @@ fn build_openapi_plugin(cfg: &OpenApiSyncConfig) -> MavenPlugin {
     }
 }
 
+/// `org.apache.felix:maven-bundle-plugin` for `[plugin.osgi]`.
+///
+/// Keeps Maven `<packaging>jar</packaging>` and uses the plugin's `manifest`
+/// goal only. That goal writes `${project.build.outputDirectory}/META-INF/MANIFEST.MF`
+/// and does **not** attach it to the artifact — the jar plugin must pick it
+/// up via `<manifestFile>` (see [`build_jar_plugin`]). This is the official
+/// "Adding OSGi metadata to existing projects without changing the packaging
+/// type" recipe:
+/// https://felix.apache.org/documentation/subprojects/apache-felix-maven-bundle-plugin-bnd.html
+///
+/// Tool-only bnd headers (`Tool`, `Private-Package`, …) are stripped; real
+/// OSGi headers such as `Require-Capability` are left for bnd to generate
+/// (curie-osgi emits the same `osgi.ee` clause from class-file versions).
+fn build_osgi_plugin(cfg: &OsgiSyncConfig) -> MavenPlugin {
+    let mut instructions = vec![XmlNode::text(
+        "_removeheaders",
+        "Tool,Bnd-LastModified,Private-Package".to_string(),
+    )];
+    if let Some(v) = &cfg.symbolic_name {
+        instructions.push(XmlNode::text("Bundle-SymbolicName", v.clone()));
+    }
+    if let Some(v) = &cfg.bundle_version {
+        instructions.push(XmlNode::text("Bundle-Version", v.clone()));
+    }
+    if let Some(v) = &cfg.bundle_name {
+        instructions.push(XmlNode::text("Bundle-Name", v.clone()));
+    }
+    if let Some(v) = &cfg.activator {
+        instructions.push(XmlNode::text("Bundle-Activator", v.clone()));
+    }
+    if let Some(v) = &cfg.export_package {
+        instructions.push(XmlNode::text("Export-Package", v.clone()));
+    }
+    if let Some(v) = &cfg.import_package {
+        instructions.push(XmlNode::text("Import-Package", v.clone()));
+    }
+    if let Some(v) = &cfg.private_package {
+        instructions.push(XmlNode::text("Private-Package", v.clone()));
+    }
+    for (k, v) in &cfg.headers {
+        instructions.push(XmlNode::text(k.clone(), v.clone()));
+    }
+
+    MavenPlugin {
+        group_id: Some(BUNDLE_GROUP_ID.to_string()),
+        artifact_id: BUNDLE_ARTIFACT_ID.to_string(),
+        version: plugin_versions::BUNDLE.to_string(),
+        executions: vec![MavenExecution {
+            id: Some("bundle-manifest".to_string()),
+            goals: vec!["manifest".to_string()],
+            phase: Some("process-classes".to_string()),
+            configuration: vec![XmlNode::element("instructions", instructions)],
+        }],
+        ..Default::default()
+    }
+}
+
 /// Build Maven plugins for every recognized `[plugin.*]` section in `desc`.
-/// Currently handles `protobuf` and `openapi`; other plugin names are
+/// Currently handles `protobuf`, `openapi`, and `osgi`; other plugin names are
 /// silently passed through so the warning in [`unrepresented_plugin_names`]
 /// can report them.
 fn build_source_generator_plugins(desc: &Descriptor) -> Result<Vec<MavenPlugin>> {
@@ -1395,6 +1480,13 @@ fn build_source_generator_plugins(desc: &Descriptor) -> Result<Vec<MavenPlugin>>
                     .try_into()
                     .with_context(|| format!("[plugin.openapi]: invalid configuration — {raw}"))?;
                 plugins.push(build_openapi_plugin(&cfg));
+            }
+            "osgi" => {
+                let cfg: OsgiSyncConfig = raw
+                    .clone()
+                    .try_into()
+                    .with_context(|| format!("[plugin.osgi]: invalid configuration — {raw}"))?;
+                plugins.push(build_osgi_plugin(&cfg));
             }
             _ => {}
         }
@@ -1560,7 +1652,16 @@ fn build_jacoco_plugin() -> MavenPlugin {
 /// `<classpathPrefix>libs/</classpathPrefix>` mirror `jar.rs`'s
 /// `Class-Path: libs/<dep>.jar` folding against `target/libs/`
 /// (see [`build_dependency_plugin`]).
-fn build_jar_plugin(main_class: Option<&str>, populate_libs: bool) -> MavenPlugin {
+///
+/// When `[plugin.osgi]` is active, `<manifestFile>` points at the
+/// `maven-bundle-plugin` `manifest` output. Required because that goal only
+/// writes the file; it does not change jar packaging. See
+/// [`build_osgi_plugin`].
+fn build_jar_plugin(
+    main_class: Option<&str>,
+    populate_libs: bool,
+    use_osgi_manifest: bool,
+) -> MavenPlugin {
     let mut manifest = Vec::new();
     if let Some(main_class) = main_class {
         manifest.push(XmlNode::text("mainClass", main_class.to_string()));
@@ -1571,6 +1672,12 @@ fn build_jar_plugin(main_class: Option<&str>, populate_libs: bool) -> MavenPlugi
     }
 
     let mut archive = vec![XmlNode::text("addMavenDescriptor", "false".to_string())];
+    if use_osgi_manifest {
+        archive.push(XmlNode::text(
+            "manifestFile",
+            "${project.build.outputDirectory}/META-INF/MANIFEST.MF".to_string(),
+        ));
+    }
     if !manifest.is_empty() {
         archive.push(XmlNode::element("manifest", manifest));
     }
@@ -2799,7 +2906,7 @@ fn sync_member_pom(
 /// [`build_source_generator_plugins`]; only other (unknown) plugin names are
 /// returned and trigger a warning.
 fn unrepresented_plugin_names(desc: &Descriptor) -> Vec<&str> {
-    const REPRESENTED: &[&str] = &["openapi", "protobuf"];
+    const REPRESENTED: &[&str] = &["openapi", "osgi", "protobuf"];
     desc.plugins
         .keys()
         .map(String::as_str)
@@ -5670,6 +5777,19 @@ mod tests {
     }
 
     #[test]
+    fn unrepresented_plugin_names_excludes_osgi() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[library]\nname = \"my-lib\"\nversion = \"1.0.0\"\n\
+             [plugin.osgi]\nsymbolicName = \"com.example.lib\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+        assert!(unrepresented_plugin_names(&desc).is_empty());
+    }
+
+    #[test]
     fn unrepresented_plugin_names_lists_unknown_plugin() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -5865,5 +5985,98 @@ mod tests {
         assert!(oa_block.contains("<globalProperties>"));
         assert!(oa_block.contains("<apis></apis>"));
         assert!(oa_block.contains("<models></models>"));
+    }
+
+    #[test]
+    fn osgi_plugin_emitted_in_pom() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[library]\nname = \"osgi-lib\"\nversion = \"1.0.0\"\n\
+             [plugin.osgi]\nsymbolicName = \"com.example.lib\"\nexportPackage = \"com.example\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+
+        let block = xml
+            .split("<plugin>")
+            .find(|b| b.contains("maven-bundle-plugin"))
+            .expect("maven-bundle-plugin not found");
+        assert!(block.contains("<groupId>org.apache.felix</groupId>"));
+        assert!(block.contains(&format!("<version>{}</version>", plugin_versions::BUNDLE)));
+        assert!(block.contains("<goal>manifest</goal>"));
+        assert!(block.contains("<Bundle-SymbolicName>com.example.lib</Bundle-SymbolicName>"));
+        assert!(block.contains("<Export-Package>com.example</Export-Package>"));
+        assert!(
+            !block.contains("<_noee>"),
+            "bnd must keep Require-Capability (osgi.ee)"
+        );
+        assert!(block
+            .contains("<_removeheaders>Tool,Bnd-LastModified,Private-Package</_removeheaders>"));
+    }
+
+    #[test]
+    fn osgi_wires_jar_plugin_to_bundle_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[library]\nname = \"osgi-lib\"\nversion = \"1.0.0\"\n\
+             [plugin.osgi]\nsymbolicName = \"com.example.lib\"\n",
+        )
+        .unwrap();
+        let desc = descriptor::load(dir.path()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+
+        let jar_block = xml
+            .split("<plugin>")
+            .find(|b| b.contains("maven-jar-plugin"))
+            .expect("maven-jar-plugin not found");
+        assert!(
+            jar_block.contains("<manifestFile>${project.build.outputDirectory}/META-INF/MANIFEST.MF</manifestFile>"),
+            "jar plugin must package the bundle-plugin manifest, got: {jar_block}"
+        );
+    }
+
+    #[test]
+    fn jar_plugin_omits_manifest_file_without_osgi() {
+        let dir = tempfile::tempdir().unwrap();
+        let desc = minimal_library("my-lib", Some("com.example"));
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        let jar_block = xml
+            .split("<plugin>")
+            .find(|b| b.contains("maven-jar-plugin"))
+            .expect("maven-jar-plugin not found");
+        assert!(
+            !jar_block.contains("<manifestFile>"),
+            "non-OSGi projects must not point jar-plugin at a bundle manifest"
+        );
     }
 }

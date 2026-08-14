@@ -54,6 +54,7 @@
       <li><a href="/docs/resources.html">Resource filtering</a></li>
       <li><a href="/docs/plugins.html">Plugins</a></li>
       <li><a href="/docs/plugin-authoring.html">Plugin authoring</a></li>
+      <li><a href="/docs/osgi.html">OSGi bundles</a></li>
 
       <li><span class="nav-group">Deploy</span></li>
       <li><a href="/docs/docker.html">Docker</a></li>
@@ -78,7 +79,7 @@
   <main class="prose">
     <span class="eyebrow">Subsystem · publish</span>
     <h1>Publishing</h1>
-    <p class="lede"><code>curie publish</code> uploads your library or application to any Maven 2-layout repository — Nexus, Artifactory, GitHub Packages, or a self-hosted mirror. It generates a POM, builds sources and javadoc jars, optionally GPG-signs everything, and uploads each artifact with its checksums via HTTP PUT.</p>
+    <p class="lede"><code>curie publish</code> uploads your library or application to any Maven 2-layout repository — Nexus, Artifactory, GitHub Packages, or a self-hosted mirror. It generates a POM, builds sources and javadoc jars, optionally GPG-signs everything, and uploads each artifact with its checksums via HTTP PUT. Lifecycle plugins bound to <code>pre-publish</code> / <code>publish</code> / <code>post-publish</code> run as part of the same command (for example <a href="/docs/osgi.html">OSGi bundle publishing</a>).</p>
 
     <h2>Configuration</h2>
     <p>Add a <code>[publish]</code> table and declare the target repository. All POM-metadata fields are required at publish time (Maven Central's validation checks them):</p>

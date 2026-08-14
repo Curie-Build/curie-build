@@ -229,15 +229,15 @@ fn fetch_jars_transitive(
         };
         match resolve_with_pins(&[entry], &opts, &pins) {
             Ok(jars) => total += jars.len(),
-            Err(e) => match e.downcast::<VersionRangeError>() {
-                Ok(range_err) => range_pairs.extend(
+            Err(e) => {
+                let range_err = e.downcast::<VersionRangeError>()?;
+                range_pairs.extend(
                     range_err
                         .violations
                         .into_iter()
                         .map(|v| (v.dep_key, v.range)),
-                ),
-                Err(other) => return Err(other),
-            },
+                )
+            }
         }
     }
 

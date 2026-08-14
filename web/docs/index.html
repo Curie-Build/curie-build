@@ -55,6 +55,7 @@
       <li><a href="/docs/resources.html">Resource filtering</a></li>
       <li><a href="/docs/plugins.html">Plugins</a></li>
       <li><a href="/docs/plugin-authoring.html">Plugin authoring</a></li>
+      <li><a href="/docs/osgi.html">OSGi bundles</a></li>
 
       <li><span class="nav-group">Deploy</span></li>
       <li><a href="/docs/docker.html">Docker</a></li>
@@ -159,7 +160,7 @@
       <a class="feature-card" href="/docs/plugins.html" style="text-decoration: none; color: inherit;">
         <span class="badge">13</span>
         <h3>Plugins</h3>
-        <p>Extend the build with external source generators. Any binary named <code>curie-&lt;name&gt;</code> on PATH is activated via <code>[plugin.&lt;name&gt;]</code>. Curie handles staleness, artifact downloading, and source-root wiring.</p>
+        <p>Extend the build with external binaries. Source generators run before compile; lifecycle plugins bind to <code>post-package</code>, <code>publish</code>, and other cut-points. Curie handles staleness, artifact downloading, and wiring.</p>
       </a>
 
       <p style="font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-lo); margin: 1.5rem 0 0.5rem;">Deploy</p>

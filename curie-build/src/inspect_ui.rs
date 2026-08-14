@@ -28,8 +28,8 @@ use ratatui::{
 };
 
 use crate::coverage::{
-    load_source_lines, try_load_member_coverage, CoverageReport, LineHit, MemberCoverage,
-    SourceFileCoverage, SourceLine,
+    load_source_lines, try_load_member_coverage, LineHit, MemberCoverage, SourceFileCoverage,
+    SourceLine,
 };
 use crate::deps::{self, MemberDepsView};
 use crate::descriptor;
@@ -151,6 +151,7 @@ struct TreeNode {
     /// Compact coverage badge (`"87.3% / 74.1%"`) for job / source nodes; `None` when absent.
     coverage_badge: Option<String>,
     /// `Some(job_idx)` for the "Coverage" group under a job.
+    #[allow(dead_code)]
     coverage_group_ref: Option<usize>,
     /// `Some((job_idx, source_idx))` for a source-file leaf under Coverage.
     coverage_source_ref: Option<(usize, usize)>,
@@ -570,7 +571,7 @@ fn load_log(path: &std::path::Path) -> Vec<String> {
         Err(_) => return Vec::new(),
     };
     let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
-    while lines.last().map_or(false, |l| l.trim().is_empty()) {
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
     }
     lines
@@ -642,6 +643,7 @@ fn build_tree_nodes(
     nodes
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_job_nodes(
     nodes: &mut Vec<TreeNode>,
     job: &Job,
@@ -2020,8 +2022,8 @@ fn member_line(
                     .to_lowercase()
                     .contains(&job_search.to_lowercase());
             let grep_dim =
-                !grep_matches.is_empty() && ji.map_or(true, |i| !grep_matches.contains(&i));
-            let is_stale = ji.map_or(false, |i| stale_jobs.contains(&i));
+                !grep_matches.is_empty() && ji.is_none_or(|i| !grep_matches.contains(&i));
+            let is_stale = ji.is_some_and(|i| stale_jobs.contains(&i));
             let search_dim = job_search_dim || grep_dim;
 
             let state_badge = if is_stale {
@@ -2451,10 +2453,8 @@ fn handle_mouse(state: &mut InspectState, mouse: MouseEvent, layout: &PaneLayout
                 state.h_scroll = state.h_scroll.saturating_sub(H_SCROLL_STEP);
             }
         }
-        MouseEventKind::ScrollRight => {
-            if layout.detail.contains(pos) {
-                state.h_scroll += H_SCROLL_STEP;
-            }
+        MouseEventKind::ScrollRight if layout.detail.contains(pos) => {
+            state.h_scroll += H_SCROLL_STEP;
         }
         _ => {}
     }
@@ -2794,7 +2794,7 @@ fn rebuild_tree_and_reselect_class(state: &mut InspectState, job_idx: usize, cla
     if let Some(ni) = state.nodes.iter().position(|n| {
         n.class_ref
             .as_ref()
-            .map_or(false, |(ji, cn)| *ji == job_idx && cn == class_name)
+            .is_some_and(|(ji, cn)| *ji == job_idx && cn == class_name)
     }) {
         state.selected_idx = ni;
     }
@@ -2860,6 +2860,7 @@ fn clear_search(state: &mut InspectState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coverage::CoverageReport;
 
     fn make_job(declared: &str, started_ms: Option<u64>, exit_code: Option<i32>) -> Job {
         let state = match exit_code {

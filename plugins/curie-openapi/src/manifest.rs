@@ -9,6 +9,7 @@ pub fn build(cfg: &OpenApiConfig) -> curie_plugin::Manifest {
         description: "Generate Java sources from an OpenAPI spec".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         types: vec!["source-generator".to_string()],
+        phases: vec![],
         inputs: curie_plugin::Inputs {
             files: vec![PathBuf::from(&cfg.spec_file)],
             dirs: vec![],
@@ -16,6 +17,7 @@ pub fn build(cfg: &OpenApiConfig) -> curie_plugin::Manifest {
         },
         outputs: curie_plugin::Outputs {
             source_dirs: vec![PathBuf::from(source_dir)],
+            files: vec![],
         },
         artifacts: vec![curie_plugin::Artifact {
             id: "openapi-generator-cli".to_string(),

@@ -69,6 +69,7 @@ pub enum WorkspaceContext {
 ///          `project` → `WorkspaceMember`.
 ///        - `project` is itself a workspace → the members whose canonical
 ///          path lives under `project`'s directory → `WorkspaceSubtree`.
+///
 ///      Outermost wins so the full inheritance chain applies and
 ///      `[workspace-dependencies]` that cross inner-workspace boundaries
 ///      resolve against the root's flattened member list.
@@ -913,7 +914,7 @@ pub fn rel_from(base: &Path, target: &Path) -> String {
         .count();
 
     let up = base_comps.len() - common;
-    let mut parts: Vec<String> = std::iter::repeat("..".to_string()).take(up).collect();
+    let mut parts: Vec<String> = std::iter::repeat_n("..".to_string(), up).collect();
     parts.extend(
         tgt_comps[common..]
             .iter()
@@ -2156,7 +2157,7 @@ mod tests {
                 assert!(declared.iter().any(|d| d.contains("mid-lib")));
                 assert!(declared.iter().any(|d| d.contains("leaf-app")));
                 assert!(
-                    !declared.iter().any(|d| *d == "core-lib"),
+                    !declared.contains(&"core-lib"),
                     "core-lib is outside the services subtree: {declared:?}",
                 );
             }

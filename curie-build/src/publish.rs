@@ -156,6 +156,46 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
         artifacts.push(UploadArtifact::pom(&pom_path));
     }
 
+    let plugin_ctx = crate::plugin::build_context(
+        project_root,
+        &desc,
+        crate::plugin::ContextExtras {
+            jar: Some(build_out.jar.clone()),
+            target_dir: Some(target_dir.clone()),
+            dry_run: opts.dry_run,
+            publish_url: Some(target_url.clone()),
+            repositories: crate::plugin::repositories_for_plugins(&desc, &cfg),
+            ..Default::default()
+        },
+    );
+    let pre_publish = crate::plugin::run_plugins_for_phase(
+        crate::plugin::PHASE_PRE_PUBLISH,
+        project_root,
+        &desc,
+        false,
+        &plugin_ctx,
+        true,
+    )?;
+    for outcome in &pre_publish {
+        if !outcome.result.artifacts.is_empty() {
+            println!(
+                "{}",
+                crate::style::publish_step(
+                    &format!("Plugin {}", outcome.name),
+                    &format!("{} extra artifact(s)", outcome.result.artifacts.len()),
+                )
+            );
+        }
+        for art in &outcome.result.artifacts {
+            artifacts.push(UploadArtifact {
+                path: art.path.clone(),
+                classifier: art.classifier.clone().unwrap_or_default(),
+                extension_override: art.extension.clone(),
+                signature: None,
+            });
+        }
+    }
+
     // --- GPG sign ------------------------------------------------------------
     if sign {
         for a in &mut artifacts {
@@ -192,6 +232,22 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
                 &format!("{} file(s) would be uploaded", upload_jobs.len())
             )
         );
+        crate::plugin::run_plugins_for_phase(
+            crate::plugin::PHASE_PUBLISH,
+            project_root,
+            &desc,
+            false,
+            &plugin_ctx,
+            true,
+        )?;
+        crate::plugin::run_plugins_for_phase(
+            crate::plugin::PHASE_POST_PUBLISH,
+            project_root,
+            &desc,
+            false,
+            &plugin_ctx,
+            true,
+        )?;
         return Ok(());
     }
 
@@ -211,6 +267,23 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
         "{}",
         crate::style::publish_step("Uploaded", &format!("{} file(s)", upload_jobs.len()))
     );
+
+    crate::plugin::run_plugins_for_phase(
+        crate::plugin::PHASE_PUBLISH,
+        project_root,
+        &desc,
+        false,
+        &plugin_ctx,
+        true,
+    )?;
+    crate::plugin::run_plugins_for_phase(
+        crate::plugin::PHASE_POST_PUBLISH,
+        project_root,
+        &desc,
+        false,
+        &plugin_ctx,
+        true,
+    )?;
     Ok(())
 }
 

@@ -1,16 +1,22 @@
 //! Generic plugin framework.
 //!
-//! Protocol (two-phase, JSON over stdin/stdout):
+//! Protocol (JSON over stdin/stdout):
 //!
 //! 1. `curie-<name> manifest --project <dir>`
-//!    stdin:  envelope JSON  (curie_version + config)
-//!    stdout: manifest JSON  (types, inputs, outputs, artifacts)
+//!    stdin:  envelope JSON  (curie_version + config + optional context)
+//!    stdout: manifest JSON  (types, phases, inputs, outputs, artifacts)
 //!
 //! 2. `curie-<name> generate-sources --project <dir> [--offline]`
 //!    stdin:  envelope JSON  (curie_version + config + artifacts map)
 //!    stdout / stderr: not parsed; routed through the parallel `LineSink`
 //!    (same destination as javac) when a workspace mux/TUI sink is active,
 //!    otherwise inherited on the process terminal for sequential builds.
+//!    Kept for source-generator plugins.
+//!
+//! 3. `curie-<name> run --phase <phase> --project <dir> [--offline]`
+//!    stdin:  envelope JSON  (config + artifacts + phase + context)
+//!    stdout: optional [`curie_plugin::PhaseResult`] JSON (extra artifacts)
+//!    stderr: progress (routed like generate-sources)
 
 use anyhow::{Context, Result};
 use curie_deps::repo::Repository;
@@ -25,6 +31,14 @@ use std::time::UNIX_EPOCH;
 
 pub use curie_plugin::Artifact as PluginArtifact;
 pub use curie_plugin::Manifest as PluginManifest;
+pub use curie_plugin::PhaseResult;
+pub use curie_plugin::PluginContext;
+pub use curie_plugin::PluginRepository;
+pub use curie_plugin::{
+    participates_in, participates_in_any_known_phase, PHASE_GENERATE_SOURCES, PHASE_POST_COMPILE,
+    PHASE_POST_PACKAGE, PHASE_POST_PUBLISH, PHASE_POST_TEST, PHASE_PRE_PACKAGE, PHASE_PRE_PUBLISH,
+    PHASE_PRE_TEST, PHASE_PUBLISH,
+};
 
 // ── Stamp types ───────────────────────────────────────────────────────────────
 
@@ -228,6 +242,258 @@ pub fn generate_sources(
     Ok(())
 }
 
+/// Optional extras layered on the project identity when building a [`PluginContext`].
+#[derive(Debug, Default, Clone)]
+pub struct ContextExtras {
+    pub jar: Option<PathBuf>,
+    pub classes_dir: Option<PathBuf>,
+    pub target_dir: Option<PathBuf>,
+    pub offline: bool,
+    pub dry_run: bool,
+    pub publish_url: Option<String>,
+    pub repositories: Vec<PluginRepository>,
+}
+
+/// Build a [`PluginContext`] from a descriptor plus optional extras.
+pub fn build_context(
+    project_root: &Path,
+    desc: &crate::descriptor::Descriptor,
+    extras: ContextExtras,
+) -> PluginContext {
+    let target_dir = extras
+        .target_dir
+        .unwrap_or_else(|| project_root.join("target"));
+    let jar = extras.jar.or_else(|| {
+        let name = format!(
+            "{}-{}.jar",
+            desc.buildable_name().replace(':', "-"),
+            desc.buildable_version()
+        );
+        Some(target_dir.join(name))
+    });
+    PluginContext {
+        group_id: desc.group_id().map(str::to_string),
+        artifact_id: desc.buildable_name().to_string(),
+        version: desc.buildable_version().to_string(),
+        jar,
+        classes_dir: extras.classes_dir,
+        target_dir,
+        project_root: project_root.to_path_buf(),
+        offline: extras.offline,
+        dry_run: extras.dry_run,
+        publish_url: extras.publish_url,
+        repositories: extras.repositories,
+    }
+}
+
+/// Serialize the stdin envelope (`curie_version` + plugin config + optional context).
+pub fn make_envelope(config: &toml::Value, context: Option<&PluginContext>) -> Result<String> {
+    let mut envelope = serde_json::json!({
+        "curie_version": env!("CARGO_PKG_VERSION"),
+        "config": serde_json::to_value(config).context("failed to convert plugin config to JSON")?,
+    });
+    if let Some(ctx) = context {
+        envelope["context"] =
+            serde_json::to_value(ctx).context("failed to serialize plugin context")?;
+    }
+    serde_json::to_string(&envelope).context("failed to serialize plugin envelope")
+}
+
+/// Attach resolved credentials to every `[[repositories]]` entry.
+pub fn repositories_for_plugins(
+    desc: &crate::descriptor::Descriptor,
+    cfg: &crate::config::CurieConfig,
+) -> Vec<PluginRepository> {
+    desc.repositories
+        .iter()
+        .map(|r| {
+            let (username, password) = crate::config::credentials_for(cfg, &r.id)
+                .and_then(|c| c.resolve().ok())
+                .map(|(u, p)| (Some(u), Some(p)))
+                .unwrap_or((None, None));
+            PluginRepository {
+                id: r.id.clone(),
+                url: r.url.clone(),
+                username,
+                password,
+            }
+        })
+        .collect()
+}
+
+/// One plugin's result from [`run_plugins_for_phase`].
+#[derive(Debug)]
+pub struct PhaseOutcome {
+    pub name: String,
+    pub result: PhaseResult,
+}
+
+/// Invoke every plugin that declared `phase`, honouring stamps unless `always_run`.
+pub fn run_plugins_for_phase(
+    phase: &str,
+    project_root: &Path,
+    desc: &crate::descriptor::Descriptor,
+    offline: bool,
+    context: &PluginContext,
+    always_run: bool,
+) -> Result<Vec<PhaseOutcome>> {
+    let mut outcomes = Vec::new();
+    if desc.plugins.is_empty() {
+        return Ok(outcomes);
+    }
+
+    let plugin_repos: Vec<_> = {
+        let mut r = crate::build::central_repos();
+        r.extend(crate::build::extra_repos(desc));
+        r
+    };
+
+    for (plugin_name, plugin_config) in &desc.plugins {
+        let envelope = make_envelope(plugin_config, Some(context))?;
+        let manifest = fetch_manifest(plugin_name, &envelope, project_root)?;
+        if !participates_in_any_known_phase(&manifest) {
+            anyhow::bail!(
+                "plugin '{plugin_name}' declares no lifecycle phase Curie understands \
+                 (set types = [\"source-generator\"] or phases = [...])"
+            );
+        }
+        if !participates_in(&manifest, phase) {
+            continue;
+        }
+
+        let config_hash = config_hash(&envelope, &manifest.version);
+        let plugins_dir = project_root.join("target").join(".curie-plugins");
+        let stamp_path = plugin_phase_stamp_path(&plugins_dir, plugin_name, phase);
+
+        let up_to_date =
+            !always_run && is_up_to_date(&manifest, &stamp_path, project_root, &config_hash);
+
+        if up_to_date {
+            crate::parallel::emit(&crate::style::up_to_date(&format!("Plugin {plugin_name}")));
+            continue;
+        }
+
+        crate::parallel::emit(&crate::style::active(
+            &format!("Plugin {plugin_name}"),
+            phase,
+        ));
+        let resolved = download_artifacts(&manifest.artifacts, &plugin_repos, offline)?;
+        let result = run_phase(
+            plugin_name,
+            phase,
+            &envelope,
+            &resolved,
+            context,
+            project_root,
+            offline,
+        )?;
+        write_stamp(&manifest, &stamp_path, project_root, &config_hash)?;
+        outcomes.push(PhaseOutcome {
+            name: plugin_name.clone(),
+            result,
+        });
+    }
+    Ok(outcomes)
+}
+
+/// Invoke `curie-<name> run --phase <phase>`, returning the optional JSON result.
+pub fn run_phase(
+    name: &str,
+    phase: &str,
+    config_envelope: &str,
+    resolved: &BTreeMap<String, PathBuf>,
+    context: &PluginContext,
+    project_root: &Path,
+    offline: bool,
+) -> Result<PhaseResult> {
+    let bin_name = format!("curie-{name}");
+    let bin = which::which(&bin_name).with_context(|| format!("{bin_name} not found on PATH"))?;
+
+    let run_json = merge_run_envelope(config_envelope, resolved, phase, context)?;
+
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.args(["run", "--phase", phase, "--project"])
+        .arg(project_root);
+    if offline {
+        cmd.arg("--offline");
+    }
+
+    let (status, stdout) =
+        crate::proc::spawn_cmd_with_stdin_capture_stdout(&mut cmd, run_json.as_bytes())
+            .with_context(|| format!("failed to run {bin_name}"))?;
+    if !status.success() {
+        anyhow::bail!("{bin_name} exited with status {:?}", status.code());
+    }
+    parse_phase_result(&stdout)
+}
+
+fn merge_run_envelope(
+    config_envelope: &str,
+    resolved: &BTreeMap<String, PathBuf>,
+    phase: &str,
+    context: &PluginContext,
+) -> Result<String> {
+    let mut envelope: serde_json::Value = serde_json::from_str(config_envelope)
+        .context("internal: failed to parse config envelope")?;
+    let artifacts_json: serde_json::Value = resolved
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                serde_json::Value::String(v.display().to_string()),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+    envelope["artifacts"] = artifacts_json;
+    envelope["phase"] = serde_json::Value::String(phase.to_string());
+    envelope["context"] =
+        serde_json::to_value(context).context("internal: failed to serialize plugin context")?;
+    serde_json::to_string(&envelope).context("internal: failed to serialize run envelope")
+}
+
+fn parse_phase_result(stdout: &[u8]) -> Result<PhaseResult> {
+    let trimmed = trim_ascii_bytes(stdout);
+    if trimmed.is_empty() {
+        return Ok(PhaseResult::default());
+    }
+    serde_json::from_slice(trimmed).with_context(|| {
+        format!(
+            "plugin run produced invalid JSON on stdout: {}",
+            String::from_utf8_lossy(trimmed)
+        )
+    })
+}
+
+fn trim_ascii_bytes(s: &[u8]) -> &[u8] {
+    let start = s
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(s.len());
+    let end = s
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    if start >= end {
+        &[]
+    } else {
+        &s[start..end]
+    }
+}
+
+/// Stamp path for a plugin at a given phase.
+///
+/// `generate-sources` keeps the original `<name>.stamp` so existing projects
+/// do not regenerate on upgrade. Other phases use `<name>.<phase>.stamp`.
+pub fn plugin_phase_stamp_path(plugins_dir: &Path, plugin_name: &str, phase: &str) -> PathBuf {
+    if phase == PHASE_GENERATE_SOURCES {
+        plugins_dir.join(format!("{plugin_name}.stamp"))
+    } else {
+        plugins_dir.join(format!("{plugin_name}.{phase}.stamp"))
+    }
+}
+
 /// Hash the inputs that should trigger regeneration when changed: the full
 /// config envelope (`curie_version` + the `[plugin.<name>]` config) plus the
 /// plugin's own manifest version.  Returned as a hex SHA-256 string.
@@ -300,7 +566,7 @@ pub fn current_plugin_output_set(
     manifest: &PluginManifest,
     project_root: &Path,
 ) -> BTreeSet<String> {
-    let files: Vec<PathBuf> = manifest
+    let mut files: Vec<PathBuf> = manifest
         .outputs
         .source_dirs
         .iter()
@@ -311,6 +577,9 @@ pub fn current_plugin_output_set(
                 .collect::<Vec<_>>()
         })
         .collect();
+    for f in &manifest.outputs.files {
+        files.push(project_root.join(f));
+    }
     crate::incremental::canonical_source_set(&files)
 }
 
@@ -427,21 +696,21 @@ fn artifact_cache_path(art: &PluginArtifact) -> Result<PathBuf> {
     // Delegate to Gav so we get the common validation (bug #21) and single
     // source of truth for local repository layout.
     let key = format!("{}:{}", art.group, art.artifact);
-    let mut gav = curie_deps::Gav::from_key_version_classifier_extension(
+    let gav = curie_deps::Gav::from_key_version_classifier_extension(
         &key,
         &art.version,
         art.classifier.as_deref(),
         &art.extension,
     )?;
     // Note: extension may be set already by the from_ call.
-    Ok(gav.local_repository_path()?)
+    gav.local_repository_path()
 }
 
 #[cfg(test)]
 fn artifact_relative_path(art: &PluginArtifact) -> String {
     // Delegate to Gav (gets validation for free).
     let key = format!("{}:{}", art.group, art.artifact);
-    let mut gav = curie_deps::Gav::from_key_version_classifier_extension(
+    let gav = curie_deps::Gav::from_key_version_classifier_extension(
         &key,
         &art.version,
         art.classifier.as_deref(),
@@ -1178,6 +1447,124 @@ exit 9
         assert!(
             lines.iter().any(|l| l.contains("FAIL_VISIBLE")),
             "failure diagnostics on stderr must still reach LineSink, got: {lines:?}"
+        );
+    }
+
+    // ── lifecycle run / envelope ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_phase_result_empty_is_default() {
+        let r = parse_phase_result(b"").unwrap();
+        assert!(r.artifacts.is_empty());
+        let r = parse_phase_result(b"   \n").unwrap();
+        assert!(r.artifacts.is_empty());
+    }
+
+    #[test]
+    fn parse_phase_result_reads_artifacts() {
+        let r = parse_phase_result(
+            br#"{"artifacts":[{"path":"target/extra.jar","classifier":"extra"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(r.artifacts.len(), 1);
+        assert_eq!(r.artifacts[0].path, PathBuf::from("target/extra.jar"));
+        assert_eq!(r.artifacts[0].classifier.as_deref(), Some("extra"));
+    }
+
+    #[test]
+    fn parse_phase_result_rejects_garbage() {
+        let err = parse_phase_result(b"not-json").unwrap_err().to_string();
+        assert!(err.contains("invalid JSON"), "got: {err}");
+    }
+
+    #[test]
+    fn make_envelope_includes_context_when_provided() {
+        let cfg: toml::Value = toml::from_str("symbolicName = \"x\"").unwrap();
+        let ctx = PluginContext {
+            artifact_id: "greeter".into(),
+            version: "1.0.0".into(),
+            dry_run: true,
+            ..Default::default()
+        };
+        let json = make_envelope(&cfg, Some(&ctx)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["config"]["symbolicName"], "x");
+        assert_eq!(v["context"]["artifact_id"], "greeter");
+        assert_eq!(v["context"]["dry_run"], true);
+    }
+
+    #[test]
+    fn plugin_phase_stamp_keeps_generate_sources_compat_path() {
+        let dir = Path::new("/tmp/plugins");
+        assert_eq!(
+            plugin_phase_stamp_path(dir, "protobuf", PHASE_GENERATE_SOURCES),
+            PathBuf::from("/tmp/plugins/protobuf.stamp")
+        );
+        assert_eq!(
+            plugin_phase_stamp_path(dir, "osgi", PHASE_POST_PACKAGE),
+            PathBuf::from("/tmp/plugins/osgi.post-package.stamp")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_phase_parses_stdout_json() {
+        let tmp = TempDir::new().unwrap();
+        let script = r#"#!/bin/sh
+cat >/dev/null
+echo '{"artifacts":[{"path":"target/foo.jar"}]}'
+"#;
+        let _ = make_fake_plugin_script(tmp.path(), "curie-life", script).unwrap();
+        let envelope = r#"{"curie_version":"0","config":{}}"#;
+        let ctx = PluginContext::default();
+        let result = with_path_prepended(tmp.path(), || {
+            run_phase(
+                "life",
+                PHASE_POST_PACKAGE,
+                envelope,
+                &BTreeMap::new(),
+                &ctx,
+                tmp.path(),
+                false,
+            )
+        });
+        assert!(
+            result.is_ok(),
+            "expected success: {:#}",
+            result.unwrap_err()
+        );
+        let r = result.unwrap();
+        assert_eq!(r.artifacts[0].path, PathBuf::from("target/foo.jar"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn run_phase_reports_child_status() {
+        let tmp = TempDir::new().unwrap();
+        let script = r#"#!/bin/sh
+cat >/dev/null
+echo 'RUN FAIL' >&2
+exit 13
+"#;
+        let _ = make_fake_plugin_script(tmp.path(), "curie-lifefail", script).unwrap();
+        let envelope = r#"{"curie_version":"0","config":{}}"#;
+        let ctx = PluginContext::default();
+        let result = with_path_prepended(tmp.path(), || {
+            run_phase(
+                "lifefail",
+                PHASE_PUBLISH,
+                envelope,
+                &BTreeMap::new(),
+                &ctx,
+                tmp.path(),
+                false,
+            )
+        });
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("13") || msg.contains("exited with status"),
+            "got: {msg}"
         );
     }
 }

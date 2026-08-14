@@ -54,6 +54,7 @@
       <li><a href="/docs/resources.html">Resource filtering</a></li>
       <li><a href="/docs/plugins.html">Plugins</a></li>
       <li><a href="/docs/plugin-authoring.html">Plugin authoring</a></li>
+      <li><a href="/docs/osgi.html">OSGi bundles</a></li>
 
       <li><span class="nav-group">Deploy</span></li>
       <li><a href="/docs/docker.html">Docker</a></li>
@@ -78,7 +79,7 @@
   <main class="prose">
     <span class="eyebrow">Build &amp; test · plugin authoring</span>
     <h1>Plugin authoring</h1>
-    <p class="lede">A Curie plugin is any executable named <code>curie-&lt;name&gt;</code> that implements two subcommands over stdin/stdout JSON. Curie owns the network, the cache, and the stamp file — the plugin owns only the generation logic.</p>
+    <p class="lede">A Curie plugin is any executable named <code>curie-&lt;name&gt;</code> that speaks stdin/stdout JSON. Source generators implement <code>manifest</code> + <code>generate-sources</code>. Lifecycle plugins implement <code>manifest</code> + <code>run --phase</code>. Curie owns the network, the cache, and the stamp file.</p>
 
     <p>For how users activate and configure plugins, see <a href="/docs/plugins.html">Plugins</a>. This page is the implementer's reference.</p>
 
@@ -166,11 +167,13 @@
         <tr><td><code>name</code></td><td>string</td><td>Yes</td><td>Plugin name, shown in build output</td></tr>
         <tr><td><code>description</code></td><td>string</td><td>Yes</td><td>One-line description; shown in <code>curie build</code> progress</td></tr>
         <tr><td><code>version</code></td><td>string</td><td>Yes</td><td>Plugin binary version; informational only</td></tr>
-        <tr><td><code>types</code></td><td>string[]</td><td>Yes</td><td>Capability list. Only <code>"source-generator"</code> is acted on today; include future roles here as the protocol evolves</td></tr>
+        <tr><td><code>types</code></td><td>string[]</td><td>Yes</td><td>Capability list. <code>"source-generator"</code> runs before compile. <code>"lifecycle"</code> is used with <code>phases</code></td></tr>
+        <tr><td><code>phases</code></td><td>string[]</td><td>No</td><td>Lifecycle cut-points this plugin implements: <code>post-compile</code>, <code>pre-test</code>, <code>post-test</code>, <code>pre-package</code>, <code>post-package</code>, <code>pre-publish</code>, <code>publish</code>, <code>post-publish</code>. Source generators may omit this</td></tr>
         <tr><td><code>inputs.dirs</code></td><td>string[]</td><td>No</td><td>Directories Curie watches. Paths are relative to the project root. The stamp is invalidated when any file under any of these dirs is added, removed, or modified</td></tr>
         <tr><td><code>inputs.file_regex</code></td><td>string</td><td>No</td><td>Regex filter applied to files inside <code>inputs.dirs</code>. Only matching files contribute to the stamp. Omit to watch all files in the directories</td></tr>
         <tr><td><code>inputs.files</code></td><td>string[]</td><td>No</td><td>Explicit file list, relative to project root. Watched in addition to <code>dirs</code>. Useful for a single spec file like <code>"api/spec.yaml"</code></td></tr>
-        <tr><td><code>outputs.source_dirs</code></td><td>string[]</td><td>Yes</td><td>Directories added to <code>javac</code>'s source roots after generation. Must be relative to the project root. Create them in <code>generate-sources</code> even when empty</td></tr>
+        <tr><td><code>outputs.source_dirs</code></td><td>string[]</td><td>No</td><td>Directories added to <code>javac</code>'s source roots after <code>generate-sources</code>. Empty for non-generator plugins</td></tr>
+        <tr><td><code>outputs.files</code></td><td>string[]</td><td>No</td><td>Extra files the plugin produces, used for incremental stamps on lifecycle phases</td></tr>
         <tr><td><code>artifacts[].id</code></td><td>string</td><td>Yes</td><td>Logical key used in the <code>generate-sources</code> stdin's <code>artifacts</code> map</td></tr>
         <tr><td><code>artifacts[].group</code></td><td>string</td><td>Yes</td><td>Maven group ID</td></tr>
         <tr><td><code>artifacts[].artifact</code></td><td>string</td><td>Yes</td><td>Maven artifact ID</td></tr>
@@ -214,6 +217,64 @@
 
     <h3>Stdout and stderr</h3>
     <p>Write user-visible progress to <strong>stderr</strong> — Curie displays it during the build. Stdout is ignored. Exit 0 on success; any non-zero exit code is treated as a build error and the stamp is not written.</p>
+
+    <h2 id="run">Subcommand 3: run</h2>
+    <p>Lifecycle plugins implement <code>run</code> instead of (or in addition to) <code>generate-sources</code>. Curie calls it at each phase listed in the manifest. The call is skipped when the per-phase stamp is still valid, except for publish phases, which always run.</p>
+
+    <h3>Invocation</h3>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>shell</span>
+      </header>
+<pre>curie-&lt;name&gt; run --phase &lt;phase&gt; --project &lt;absolute-path&gt; [--offline]</pre>
+    </div>
+
+    <h3>Stdin</h3>
+    <p>Same envelope as <code>generate-sources</code>, plus <code>phase</code> and a <code>context</code> object describing the project:</p>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>stdin (run)</span>
+      </header>
+<pre>{
+  <span class="str">"curie_version"</span>: <span class="str">"0.7.0"</span>,
+  <span class="str">"config"</span>: { <span class="com">/* [plugin.name] table */</span> },
+  <span class="str">"artifacts"</span>: {},
+  <span class="str">"phase"</span>: <span class="str">"post-package"</span>,
+  <span class="str">"context"</span>: {
+    <span class="str">"group_id"</span>: <span class="str">"com.example"</span>,
+    <span class="str">"artifact_id"</span>: <span class="str">"greeter"</span>,
+    <span class="str">"version"</span>: <span class="str">"1.0.0"</span>,
+    <span class="str">"jar"</span>: <span class="str">"/abs/path/target/greeter-1.0.0.jar"</span>,
+    <span class="str">"target_dir"</span>: <span class="str">"/abs/path/target"</span>,
+    <span class="str">"project_root"</span>: <span class="str">"/abs/path"</span>,
+    <span class="str">"offline"</span>: <span class="kw">false</span>,
+    <span class="str">"dry_run"</span>: <span class="kw">false</span>,
+    <span class="str">"publish_url"</span>: <span class="str">"https://nexus.example/repo"</span>,
+    <span class="str">"repositories"</span>: [
+      { <span class="str">"id"</span>: <span class="str">"releases"</span>, <span class="str">"url"</span>: <span class="str">"https://nexus.example/repo"</span> }
+    ]
+  }
+}</pre>
+    </div>
+
+    <p><code>context.repositories</code> carries every <code>[[repositories]]</code> entry, with username/password filled in when <code>~/.curie/config.toml</code> has matching credentials. Use this for any custom publish target - do not special-case one repository kind in Curie itself.</p>
+
+    <h3>Stdout</h3>
+    <p>Optional JSON. Empty stdout is a successful no-result. To contribute extra Maven artifacts during <code>pre-publish</code>, print:</p>
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>stdout (run)</span>
+      </header>
+<pre>{
+  <span class="str">"artifacts"</span>: [
+    { <span class="str">"path"</span>: <span class="str">"target/extra.jar"</span>, <span class="str">"classifier"</span>: <span class="str">"extra"</span>, <span class="str">"extension"</span>: <span class="str">"jar"</span> }
+  ]
+}</pre>
+    </div>
+    <p>Write progress to <strong>stderr</strong>. Curie does not forward <code>run</code> stdout to the terminal - it is reserved for this result object.</p>
 
     <h2 id="stamp">Stamp file</h2>
     <p>Curie manages the stamp at <code>target/.curie-plugins/&lt;name&gt;.stamp</code>. The plugin never reads or writes it directly. Curie writes the stamp after a successful <code>generate-sources</code> exit, recording the mtimes (and hashes for small files) of every input file matched by <code>inputs.dirs</code> + <code>inputs.file_regex</code> + <code>inputs.files</code>. On subsequent builds Curie compares current state against the stamp; if nothing changed, <code>generate-sources</code> is not called.</p>

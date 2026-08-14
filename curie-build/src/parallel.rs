@@ -86,13 +86,6 @@ pub(crate) fn try_get_sink() -> Option<Arc<dyn LineSink + Send + Sync>> {
     OUTPUT_SINK.with(|s| s.borrow().clone())
 }
 
-/// Emit one line of pipeline output.
-///
-/// - Parallel path (sink active): pushes the line to the per-member mux slot
-///   so it is prefixed and flushed contiguously with the member's other output.
-///   Blank lines are suppressed (they serve as separators in sequential output
-///   but add noise when interleaved across members).
-/// - Sequential path (no sink): plain `println!`.
 /// Shorten a workspace-member declared path for use as a mux prefix.
 ///
 /// The last path component (the project name itself) is kept in full.
@@ -156,6 +149,13 @@ fn make_display_names(declared_names: &[&str]) -> Vec<String> {
         .collect()
 }
 
+/// Emit one line of pipeline output.
+///
+/// - Parallel path (sink active): pushes the line to the per-member mux slot
+///   so it is prefixed and flushed contiguously with the member's other output.
+///   Blank lines are suppressed (they serve as separators in sequential output
+///   but add noise when interleaved across members).
+/// - Sequential path (no sink): plain `println!`.
 pub(crate) fn emit(line: &str) {
     if let Some(slot) = try_get_sink() {
         if !line.is_empty() {
@@ -378,7 +378,7 @@ fn initial_pending(ws: &Workspace, subset: &[usize], respect_dag: bool) -> Vec<u
 fn on_completion(
     ws: &Workspace,
     subset: &[usize],
-    pending: &mut Vec<usize>,
+    pending: &mut [usize],
     dispatched: &HashSet<usize>, // global indices already dispatched
     completed_idx: usize,
 ) -> Vec<usize> {
@@ -520,6 +520,7 @@ pub(crate) enum TuiMode {
 /// The caller is responsible for ensuring `subset.len() > 1` before calling
 /// this function — single-member subsets use the direct [`crate::workspace`]
 /// path (no PTY overhead).
+#[allow(clippy::too_many_arguments)]
 pub fn run_jobs<F>(
     ws: &Workspace,
     subset: &[usize],
@@ -816,7 +817,9 @@ mod tests {
         }
     }
 
-    fn vec_sink() -> (Arc<Mutex<Vec<u8>>>, Arc<Mutex<Box<dyn Write + Send>>>) {
+    type DynWriteSink = Arc<Mutex<Box<dyn Write + Send>>>;
+
+    fn vec_sink() -> (Arc<Mutex<Vec<u8>>>, DynWriteSink) {
         let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
         let sink: Arc<Mutex<Box<dyn Write + Send>>> =
             Arc::new(Mutex::new(Box::new(VecSink(Arc::clone(&buf)))));

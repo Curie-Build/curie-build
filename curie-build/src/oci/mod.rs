@@ -343,11 +343,13 @@ fn build_jar_layers(jar: &Path, dep_jars: &[PathBuf]) -> Result<Vec<layer::Built
 }
 
 fn image_options(desc: &Descriptor, plan: &LayerPlan) -> ImageOptions {
-    let mut opts = ImageOptions::default();
-    opts.working_dir = Some("/app".into());
-    opts.env = desc.docker.env.clone();
-    opts.labels = desc.docker.labels.clone();
-    opts.user = desc.docker.user.clone();
+    let mut opts = ImageOptions {
+        working_dir: Some("/app".into()),
+        env: desc.docker.env.clone(),
+        labels: desc.docker.labels.clone(),
+        user: desc.docker.user.clone(),
+        ..Default::default()
+    };
 
     match plan {
         LayerPlan::Jar { .. } => {

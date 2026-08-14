@@ -1387,7 +1387,8 @@ mod tests {
         };
 
         let split =
-            compute_module_path_split(&module_info, &[jar_path.clone()], &target_dir).unwrap();
+            compute_module_path_split(&module_info, std::slice::from_ref(&jar_path), &target_dir)
+                .unwrap();
         assert_eq!(split.module_path, vec![jar_path]);
         assert!(split.classpath.is_empty());
     }
@@ -1407,7 +1408,8 @@ mod tests {
         };
 
         let split =
-            compute_module_path_split(&module_info, &[jar_path.clone()], &target_dir).unwrap();
+            compute_module_path_split(&module_info, std::slice::from_ref(&jar_path), &target_dir)
+                .unwrap();
         assert!(split.module_path.is_empty());
         assert_eq!(split.classpath, vec![jar_path]);
     }

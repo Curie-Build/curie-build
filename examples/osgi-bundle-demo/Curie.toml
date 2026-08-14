@@ -1,0 +1,41 @@
+# osgi-bundle-demo
+#
+# Demonstrates the curie-osgi plugin:
+#   * `curie build` wraps the JAR as an OSGi bundle (Bundle-SymbolicName, etc.)
+#   * `curie publish` uploads the bundle to an OSGi Bundle Repository
+#
+# The OSGi repository below is a local directory (a dummy OBR). To exercise
+# a live HTTP repository:
+#
+#   cargo run -p curie-osgi -- dummy-repo --dir /tmp/osgi-repo --port 9999
+#   # then set repository = "http://127.0.0.1:9999"
+
+[library]
+name    = "osgi-greeter"
+version = "1.0.0"
+groupId = "com.example.curie"
+
+[java]
+releaseVersion = "21"
+
+[plugin.osgi]
+symbolicName = "com.example.curie.osgi-greeter"
+bundleName   = "OSGi Greeter"
+exportPackage = "com.example.osgi"
+repository   = "file:target/osgi-repo"
+
+[[repositories]]
+id  = "local-osgi"
+url = "file:target/osgi-repo"
+
+[publish]
+url      = "http://127.0.0.1:1/unused-maven"
+sign     = false
+javadoc  = false
+description = "A tiny library packaged as an OSGi bundle"
+homepage    = "https://github.com/example/osgi-greeter"
+licenses    = ["Apache-2.0"]
+developers  = [
+    { id = "alice", name = "Alice Example", email = "alice@example.com" },
+]
+scm = { url = "https://github.com/example/osgi-greeter", connection = "scm:git:git@github.com:example/osgi-greeter.git" }

@@ -307,11 +307,9 @@ fn scan_main_candidates(src_roots: &[PathBuf], sources: &[PathBuf]) -> Vec<(Stri
                     }
                 }
             }
-            "kt" => {
-                if kotlin_source_has_main(&text) {
-                    if let Some(fqcn) = fqcn_from_kotlin_source(src_roots, source) {
-                        candidates.push((fqcn, source.clone()));
-                    }
+            "kt" if kotlin_source_has_main(&text) => {
+                if let Some(fqcn) = fqcn_from_kotlin_source(src_roots, source) {
+                    candidates.push((fqcn, source.clone()));
                 }
             }
             _ => {}
@@ -582,7 +580,7 @@ mod tests {
             "package com.example;\npublic class Lib { public void run() {} }",
         );
 
-        let err = detect_main_class_from_source(&[src_root], &[source.clone()])
+        let err = detect_main_class_from_source(&[src_root], std::slice::from_ref(&source))
             .unwrap_err()
             .to_string();
         assert!(err.contains("no main method found"), "got: {err}");

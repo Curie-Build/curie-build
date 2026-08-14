@@ -76,6 +76,7 @@ pub fn ensure_runner_jar(standalone_jar: &Path) -> Result<PathBuf> {
 ///
 /// The caller should not modify the returned command further unless they need
 /// to set environment variables; all positional arguments are already set.
+#[allow(clippy::too_many_arguments)]
 pub fn build_runner_command(
     runner_jar: &Path,
     standalone_jar: &Path,

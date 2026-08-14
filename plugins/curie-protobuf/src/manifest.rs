@@ -34,6 +34,7 @@ pub fn build(cfg: &ProtobufConfig) -> Result<curie_plugin::Manifest> {
         description: "Generate Java + gRPC stubs from .proto files".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         types: vec!["source-generator".to_string()],
+        phases: vec![],
         inputs: curie_plugin::Inputs {
             dirs: vec![PathBuf::from(&cfg.source_dir)],
             file_regex: Some(r"\.proto$".to_string()),
@@ -41,6 +42,7 @@ pub fn build(cfg: &ProtobufConfig) -> Result<curie_plugin::Manifest> {
         },
         outputs: curie_plugin::Outputs {
             source_dirs: vec![PathBuf::from("target/generated-sources/protobuf")],
+            files: vec![],
         },
         artifacts,
     })

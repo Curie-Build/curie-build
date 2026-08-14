@@ -3987,7 +3987,7 @@ mod tests {
         let jar = dir.path().join("foo.jar");
         std::fs::write(&jar, b"").unwrap();
         // No sidecar written.
-        assert_eq!(verify_with_local_sidecar(&jar).unwrap(), false);
+        assert!(!verify_with_local_sidecar(&jar).unwrap());
     }
 
     #[test]
@@ -4000,7 +4000,7 @@ mod tests {
             ABC_SHA256.as_bytes(),
         )
         .unwrap();
-        assert_eq!(verify_with_local_sidecar(&jar).unwrap(), true);
+        assert!(verify_with_local_sidecar(&jar).unwrap());
     }
 
     #[test]
@@ -4010,7 +4010,7 @@ mod tests {
         std::fs::write(&jar, b"").unwrap();
         // No .sha256, only .sha1.
         std::fs::write(sidecar_path(&jar, DigestKind::Sha1), EMPTY_SHA1.as_bytes()).unwrap();
-        assert_eq!(verify_with_local_sidecar(&jar).unwrap(), true);
+        assert!(verify_with_local_sidecar(&jar).unwrap());
     }
 
     #[test]
@@ -4903,8 +4903,8 @@ mod tests {
         let pom_dest = Path::new("/tmp/cache/com/example/foo/1.0/foo-1.0.pom");
         let jar_dest = Path::new("/tmp/cache/com/example/foo/1.0/foo-1.0.jar");
 
-        let p1 = compute_unique_staging_path(&pom_dest);
-        let p2 = compute_unique_staging_path(&jar_dest);
+        let p1 = compute_unique_staging_path(pom_dest);
+        let p2 = compute_unique_staging_path(jar_dest);
 
         assert_ne!(p1, p2, "POM and JAR must get distinct staging paths");
         let p1s = p1.to_string_lossy();

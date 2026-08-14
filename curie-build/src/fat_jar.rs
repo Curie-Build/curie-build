@@ -561,10 +561,10 @@ fn merge_services(
 fn relocate_dotted_name(name: &str, relocations: &[Relocation]) -> String {
     let mut result = name.to_string();
     for reloc in relocations {
-        if result.starts_with(&reloc.from) {
-            if !is_excluded(&result.replace('.', "/"), &reloc.excludes) {
-                result = format!("{}{}", reloc.to, &result[reloc.from.len()..]);
-            }
+        if result.starts_with(&reloc.from)
+            && !is_excluded(&result.replace('.', "/"), &reloc.excludes)
+        {
+            result = format!("{}{}", reloc.to, &result[reloc.from.len()..]);
         }
     }
     result
@@ -678,8 +678,7 @@ pub fn write_fat_jar(
                 }
 
                 // Handle project's own META-INF/services — collect for merging
-                if zip_path.starts_with("META-INF/services/") {
-                    let service_name = &zip_path["META-INF/services/".len()..];
+                if let Some(service_name) = zip_path.strip_prefix("META-INF/services/") {
                     let content = std::fs::read_to_string(entry.path()).unwrap_or_default();
                     let relocated_service = relocate_service_name(service_name, relocations);
                     let existing = project_services.entry(relocated_service).or_default();
@@ -986,23 +985,17 @@ mod tests {
     /// java/lang/Object and the class itself). Returns the bytes and the
     /// 1-based indices of the inserted extra UTF-8 entries.
     fn make_minimal_class_with_utf8s(extra_utf8s: &[&str]) -> (Vec<u8>, Vec<u16>) {
-        let mut cp_entries: Vec<Vec<u8>> = Vec::new();
-
-        // Slot 1: UTF8 "java/lang/Object"
-        cp_entries.push(encode_utf8_cp("java/lang/Object"));
-        // Slot 2: Class #1
-        cp_entries.push(encode_class_cp(1));
-        // Slot 3: UTF8 for our synthetic class name
-        cp_entries.push(encode_utf8_cp("com/example/TestRelocated"));
-        // Slot 4: Class #3  (this class)
-        cp_entries.push(encode_class_cp(3));
+        let mut cp_entries: Vec<Vec<u8>> = vec![
+            encode_utf8_cp("java/lang/Object"),
+            encode_class_cp(1),
+            encode_utf8_cp("com/example/TestRelocated"),
+            encode_class_cp(3),
+        ];
 
         let mut extra_indices = Vec::new();
-        let mut next_slot: u16 = 5;
-        for s in extra_utf8s {
+        for (next_slot, s) in (5_u16..).zip(extra_utf8s.iter()) {
             extra_indices.push(next_slot);
             cp_entries.push(encode_utf8_cp(s));
-            next_slot += 1;
         }
 
         // Header constant_pool_count is one greater than the highest index.
@@ -1707,7 +1700,7 @@ mod tests {
             &classes_dir,
             None,
             Some("com.example.App"),
-            &[dep_jar.clone()],
+            std::slice::from_ref(&dep_jar),
             None,
             &[],
         )

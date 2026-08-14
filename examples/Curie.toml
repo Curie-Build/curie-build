@@ -49,6 +49,7 @@ members = [
     "spring-boot-demo",
     "proto-greeter",
     "openapi-greeter",
+    "osgi-bundle-demo",
     "resource-filtering-demo",
     "liquid-filtering-demo",
     "polyrepo-demo",

@@ -75,6 +75,7 @@ pub fn run_tests(
 }
 
 /// Like [`run_tests`], with explicit SNAPSHOT refresh for test dependencies.
+#[allow(clippy::too_many_arguments)]
 pub fn run_tests_with_options(
     project_root: &Path,
     desc: &descriptor::Descriptor,

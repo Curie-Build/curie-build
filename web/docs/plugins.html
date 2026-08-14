@@ -54,6 +54,7 @@
       <li><a href="/docs/resources.html">Resource filtering</a></li>
       <li><a href="/docs/plugins.html">Plugins</a></li>
       <li><a href="/docs/plugin-authoring.html">Plugin authoring</a></li>
+      <li><a href="/docs/osgi.html">OSGi bundles</a></li>
 
       <li><span class="nav-group">Deploy</span></li>
       <li><a href="/docs/docker.html">Docker</a></li>
@@ -78,7 +79,7 @@
   <main class="prose">
     <span class="eyebrow">Subsystem · plugins</span>
     <h1>Plugins</h1>
-    <p class="lede">Extend the build with external source generators. Any binary named <code>curie-&lt;name&gt;</code> on <code>PATH</code> becomes a plugin — Curie invokes it before compilation, feeds it the resolved tool paths, and adds its output directories to the compiler's source roots.</p>
+    <p class="lede">Extend the build with external binaries. Any executable named <code>curie-&lt;name&gt;</code> on <code>PATH</code> becomes a plugin. Source generators run before compilation; lifecycle plugins bind to later cut-points such as <code>post-package</code> and <code>publish</code>.</p>
 
     <h2>Activating a plugin</h2>
     <p>Add a <code>[plugin.&lt;name&gt;]</code> table to <code>Curie.toml</code>. The key after <code>plugin.</code> is the plugin name; Curie will look for a binary called <code>curie-&lt;name&gt;</code> on <code>PATH</code>.</p>
@@ -170,6 +171,9 @@
     </div>
 
     <p>On the second run with no changes the <code>Plugin protobuf</code> line is omitted — the stamp matched, so protoc is not invoked and the previously generated sources are used directly.</p>
+
+    <h2>OSGi plugin</h2>
+    <p><code>curie-osgi</code> is a lifecycle plugin: it rewrites the packaged JAR as an OSGi bundle during <code>curie build</code> and publishes that bundle to an OSGi Bundle Repository during <code>curie publish</code>. See <a href="/docs/osgi.html">OSGi bundles</a> for configuration, the dummy repository, and the example project.</p>
 
     <h2>Plugin protocol (for plugin authors)</h2>
     <p>A plugin is any binary that implements two subcommands. The full stdin/stdout protocol is described here so you can write your own.</p>

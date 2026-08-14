@@ -90,19 +90,10 @@ pub struct RemoveOptions {
 pub fn run_add(project_root: &Path, coord_arg: Option<&str>, opts: AddOptions) -> Result<()> {
     let desc = descriptor::load(project_root)?;
 
-    let (coord, version, section) = if coord_arg.is_none() {
-        // ── Interactive path: unified search → version+scope picker ──
-        if opts.offline {
-            bail!("`--offline` cannot be used without specifying a coordinate");
-        }
-        match run_interactive_flow(&opts, &desc)? {
-            Some(triple) => triple,
-            None => return Ok(()), // user cancelled
-        }
-    } else {
+    let (coord, version, section) = if let Some(coord_arg) = coord_arg {
         // ── CLI path: coord (possibly with explicit version) given on command line ──
         let section = section_name(&opts);
-        let (coord, explicit_version) = parse_coord_arg(coord_arg.unwrap())?;
+        let (coord, explicit_version) = parse_coord_arg(coord_arg)?;
         if opts.bom && explicit_version.is_none() {
             bail!(
                 "BOM imports require an explicit version.\n\
@@ -115,6 +106,15 @@ pub fn run_add(project_root: &Path, coord_arg: Option<&str>, opts: AddOptions) -
             None => resolve_version(&coord, &desc, &opts)?,
         };
         (coord, version, section)
+    } else {
+        // ── Interactive path: unified search → version+scope picker ──
+        if opts.offline {
+            bail!("`--offline` cannot be used without specifying a coordinate");
+        }
+        match run_interactive_flow(&opts, &desc)? {
+            Some(triple) => triple,
+            None => return Ok(()), // user cancelled
+        }
     };
 
     // -- guard: already present ----------------------------------------------

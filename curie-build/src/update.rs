@@ -499,9 +499,7 @@ fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 fn version_parts(v: &str) -> Vec<String> {
-    v.split(|c| c == '.' || c == '-')
-        .map(str::to_string)
-        .collect()
+    v.split(['.', '-']).map(str::to_string).collect()
 }
 
 // ---------------------------------------------------------------------------

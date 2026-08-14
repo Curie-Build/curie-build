@@ -376,7 +376,7 @@ mod tests {
         // nothing.
         let dir = tempfile::tempdir().unwrap();
         let c = dir.path().join("Mod.class");
-        std::fs::write(&c, &build_class_with_modified_utf8("Greeting.kt")).unwrap();
+        std::fs::write(&c, build_class_with_modified_utf8("Greeting.kt")).unwrap();
         assert_eq!(class_source_file(&c).as_deref(), Some("Greeting.kt"));
     }
 
@@ -415,7 +415,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = dir.path().join("short.class");
         // Just the magic, then EOF.
-        std::fs::write(&c, &0xCAFEBABEu32.to_be_bytes()).unwrap();
+        std::fs::write(&c, 0xCAFEBABEu32.to_be_bytes()).unwrap();
         assert!(class_source_file(&c).is_none());
     }
 

@@ -1,0 +1,21 @@
+[package]
+name = "curie-osgi"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Curie plugin: package and publish OSGi bundles"
+
+[[bin]]
+name = "curie-osgi"
+path = "src/main.rs"
+
+[dependencies]
+anyhow       = "1"
+curie-plugin = { version = "0.7.0", path = "../../curie-plugin" }
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+ureq         = "2"
+zip          = { version = "8", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"

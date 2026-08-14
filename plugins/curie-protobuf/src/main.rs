@@ -44,5 +44,5 @@ fn parse_project(args: &[String]) -> Result<PathBuf> {
         }
         i += 1;
     }
-    Ok(std::env::current_dir().context("failed to get current directory")?)
+    std::env::current_dir().context("failed to get current directory")
 }

@@ -171,10 +171,10 @@ fn unfold_manifest(manifest: &str) -> String {
     let mut result = String::new();
     let mut current = String::new();
     for line in manifest.lines() {
-        if line.starts_with(' ') {
+        if let Some(rest) = line.strip_prefix(' ') {
             // Continuation: append content after the leading space.
             if !current.is_empty() {
-                current.push_str(&line[1..]);
+                current.push_str(rest);
             }
         } else {
             if !current.is_empty() {

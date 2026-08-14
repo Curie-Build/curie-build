@@ -369,10 +369,29 @@ pub fn compile_with_options(
     // Each [plugin.<name>] activates curie-<name> to produce extra source dirs.
     // curie-build owns staleness tracking; the plugin only runs when inputs changed
     // or when a previously-generated output file is missing from disk.
+    // Plugins that do not declare the generate-sources phase are skipped here
+    // and invoked later at their declared lifecycle cut-point.
     if !desc.plugins.is_empty() {
+        let plugin_ctx = crate::plugin::build_context(
+            project_root,
+            desc,
+            crate::plugin::ContextExtras {
+                offline,
+                ..Default::default()
+            },
+        );
         for (plugin_name, plugin_config) in &desc.plugins {
-            let envelope = build_plugin_envelope(plugin_config)?;
+            let envelope = crate::plugin::make_envelope(plugin_config, Some(&plugin_ctx))?;
             let manifest = crate::plugin::fetch_manifest(plugin_name, &envelope, project_root)?;
+            if !crate::plugin::participates_in_any_known_phase(&manifest) {
+                bail!(
+                    "plugin '{plugin_name}' declares no lifecycle phase Curie understands \
+                     (set types = [\"source-generator\"] or phases = [...])"
+                );
+            }
+            if !crate::plugin::participates_in(&manifest, crate::plugin::PHASE_GENERATE_SOURCES) {
+                continue;
+            }
             // Hash the config envelope + plugin version so a config edit that
             // doesn't touch any input file still re-runs generation (bug #5).
             let config_hash = crate::plugin::config_hash(&envelope, &manifest.version);
@@ -623,7 +642,7 @@ pub fn compile_with_options(
                 if !name.ends_with(".java") {
                     return false;
                 }
-                if desc.java.excludes_path(&e.path()) {
+                if desc.java.excludes_path(e.path()) {
                     return false;
                 }
                 if colocated_layout {
@@ -644,7 +663,7 @@ pub fn compile_with_options(
                 if !name.ends_with(".kt") {
                     return false;
                 }
-                if desc.java.excludes_path(&e.path()) {
+                if desc.java.excludes_path(e.path()) {
                     return false;
                 }
                 if colocated_layout {
@@ -665,7 +684,7 @@ pub fn compile_with_options(
                 if !name.ends_with(".groovy") {
                     return false;
                 }
-                if desc.java.excludes_path(&e.path()) {
+                if desc.java.excludes_path(e.path()) {
                     return false;
                 }
                 if colocated_layout {
@@ -811,8 +830,7 @@ pub fn compile_with_options(
     }
 
     // --- resolve Groovy compiler + runtime (when needed) ---------------------
-    let groovy_jars: Vec<PathBuf>;
-    if has_groovy {
+    let groovy_jars = if has_groovy {
         let gver = desc.groovy.version();
         let jars = resolve(
             &[DepEntry {
@@ -840,10 +858,10 @@ pub fn compile_with_options(
             "Resolve Groovy",
             &format!("{} JAR(s)", jars.len()),
         ));
-        groovy_jars = jars;
+        jars
     } else {
-        groovy_jars = Vec::new();
-    }
+        Vec::new()
+    };
 
     // --- JPMS detection and validation ----------------------------------------
     let module_info_path =
@@ -1305,14 +1323,6 @@ fn summarise_plugin_inputs(
     } else {
         all.join(", ")
     }
-}
-
-fn build_plugin_envelope(config: &toml::Value) -> Result<String> {
-    let envelope = serde_json::json!({
-        "curie_version": env!("CARGO_PKG_VERSION"),
-        "config": serde_json::to_value(config).context("failed to convert plugin config to JSON")?,
-    });
-    serde_json::to_string(&envelope).context("failed to serialize plugin envelope")
 }
 
 // ---------------------------------------------------------------------------

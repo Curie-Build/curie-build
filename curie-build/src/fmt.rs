@@ -124,7 +124,7 @@ pub fn has_kotlin_sources(project_root: &Path) -> bool {
         WalkDir::new(root)
             .into_iter()
             .filter_map(|e| e.ok())
-            .any(|e| e.file_type().is_file() && e.path().extension().map_or(false, |x| x == "kt"))
+            .any(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "kt"))
     })
 }
 
@@ -329,7 +329,7 @@ pub(crate) fn collect_java_files(project_root: &Path) -> Vec<PathBuf> {
                 .into_iter()
                 .filter_map(|e| e.ok())
                 .filter(|e| {
-                    e.file_type().is_file() && e.path().extension().map_or(false, |x| x == "java")
+                    e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "java")
                 })
                 .map(|e| e.into_path())
         })
@@ -358,7 +358,7 @@ pub(crate) fn collect_kotlin_files(project_root: &Path) -> Vec<PathBuf> {
                 .into_iter()
                 .filter_map(|e| e.ok())
                 .filter(|e| {
-                    e.file_type().is_file() && e.path().extension().map_or(false, |x| x == "kt")
+                    e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "kt")
                 })
                 .map(|e| e.into_path())
         })

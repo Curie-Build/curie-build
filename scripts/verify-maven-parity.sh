@@ -46,8 +46,10 @@
 #        - JAR entry name set + per-entry SHA-256 (`META-INF/MANIFEST.MF` is
 #          compared separately below; `META-INF/build-info.properties` is
 #          Curie-only — _design/MAVEN-SYNC.md divergence #4 — and excluded)
-#        - `META-INF/MANIFEST.MF`: `Main-Class` (exact) and `Class-Path`
-#          (as a set of `libs/*.jar` names — order may differ)
+#        - `META-INF/MANIFEST.MF`: `Main-Class` (exact), `Class-Path`
+#          (as a set of `libs/*.jar` names — order may differ), and OSGi
+#          headers (`Bundle-SymbolicName`, `Bundle-Version`, `Bundle-Name`,
+#          `Export-Package`) when either side declares them
 #        - `target/libs/*.jar` name set
 #        - fat-jar entry name set, when `[fat-jar]` is enabled
 #        - test class names, per-run total/failed counts
@@ -95,6 +97,7 @@ REACTOR_MODULES=(
   test-ap-demo
   proto-greeter
   openapi-greeter
+  osgi-bundle-demo
   nested-workspace-demo/core-lib
   nested-workspace-demo/services/greeter-lib
   nested-workspace-demo/services/apps/hello-app
@@ -300,11 +303,26 @@ compare_manifest() {
 
   if [[ "$curie_main" != "$maven_main" ]]; then
     fail "$label: Main-Class differs ('$curie_main' vs '$maven_main')"
-  elif [[ "$curie_cp" != "$maven_cp" ]]; then
+    return
+  fi
+  if [[ "$curie_cp" != "$maven_cp" ]]; then
     fail "$label: Class-Path entries differ"
     diff <(echo "$curie_cp") <(echo "$maven_cp") | sed 's/^/    /' || true
-  else
-    ok "$label: Main-Class/Class-Path match"
+    return
+  fi
+
+  local header mismatch=0
+  for header in Bundle-SymbolicName Bundle-Version Bundle-Name Export-Package Import-Package Bundle-Activator Require-Capability; do
+    local curie_h maven_h
+    curie_h=$(unwrap_manifest "$curie_jar" | grep "^${header}:" || true)
+    maven_h=$(unwrap_manifest "$maven_jar" | grep "^${header}:" || true)
+    if [[ "$curie_h" != "$maven_h" ]]; then
+      fail "$label: $header differs ('$curie_h' vs '$maven_h')"
+      mismatch=1
+    fi
+  done
+  if [[ $mismatch -eq 0 ]]; then
+    ok "$label: Main-Class/Class-Path/OSGi headers match"
   fi
 }
 

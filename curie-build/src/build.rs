@@ -280,6 +280,26 @@ pub fn do_build(
         extra_cp,
     )?;
 
+    let plugin_ctx = crate::plugin::build_context(
+        project_root,
+        desc,
+        crate::plugin::ContextExtras {
+            jar: Some(compiled.jar_path.clone()),
+            classes_dir: Some(compiled.classes_dir.clone()),
+            target_dir: compiled.jar_path.parent().map(Path::to_path_buf),
+            offline,
+            ..Default::default()
+        },
+    );
+    crate::plugin::run_plugins_for_phase(
+        crate::plugin::PHASE_POST_COMPILE,
+        project_root,
+        desc,
+        offline,
+        &plugin_ctx,
+        false,
+    )?;
+
     // Detect Git once: reused by resource filtering (`git.*` vars) and below
     // by build-info generation, so a non-repo degrades both gracefully.
     let git_info = git::detect(project_root);
@@ -312,6 +332,14 @@ pub fn do_build(
         .or_else(|| compiled.test_resources_dir.clone());
 
     // --- run tests before packaging ------------------------------------------
+    crate::plugin::run_plugins_for_phase(
+        crate::plugin::PHASE_PRE_TEST,
+        project_root,
+        desc,
+        offline,
+        &plugin_ctx,
+        false,
+    )?;
     test::run_tests_with_options(
         project_root,
         desc,
@@ -326,6 +354,23 @@ pub fn do_build(
         opts.coverage || desc.test.coverage_enabled(),
         extra_cp,
         opts.update_snapshots,
+    )?;
+    crate::plugin::run_plugins_for_phase(
+        crate::plugin::PHASE_POST_TEST,
+        project_root,
+        desc,
+        offline,
+        &plugin_ctx,
+        false,
+    )?;
+
+    crate::plugin::run_plugins_for_phase(
+        crate::plugin::PHASE_PRE_PACKAGE,
+        project_root,
+        desc,
+        offline,
+        &plugin_ctx,
+        false,
     )?;
 
     // --- package (deterministic JAR, incremental) ----------------------------
@@ -431,6 +476,15 @@ pub fn do_build(
         }
     };
 
+    crate::plugin::run_plugins_for_phase(
+        crate::plugin::PHASE_POST_PACKAGE,
+        project_root,
+        desc,
+        offline,
+        &plugin_ctx,
+        false,
+    )?;
+
     // --- populate target/libs/ with dep JARs (hardlink preferred) ------------
     // Always done for application projects so that `java -jar` works.
     // target/libs/ is wiped and repopulated on every build to stay in sync
@@ -471,7 +525,7 @@ pub fn do_build(
         // direct dep that will be shaded (per should_shade).
         let mut active_relocs: Vec<crate::descriptor::Relocation> =
             desc.fat_jar.relocations.clone();
-        for (_coord, v) in &desc.dependencies {
+        for v in desc.dependencies.values() {
             if v.should_shade(desc.fat_jar.shade_all) {
                 active_relocs.extend(v.relocations().iter().cloned());
             }

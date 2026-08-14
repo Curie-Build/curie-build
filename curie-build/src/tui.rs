@@ -347,11 +347,7 @@ fn render_loop(rx: mpsc::Receiver<TuiMsg>, names: Vec<String>, visible: usize, d
     // corresponding slot as Skipped.
     let mut pending: std::collections::VecDeque<TuiMsg> = std::collections::VecDeque::new();
     let mut dbg = DbgLog::open();
-    loop {
-        let msg = match pending.pop_front().or_else(|| rx.recv().ok()) {
-            Some(m) => m,
-            None => break,
-        };
+    while let Some(msg) = pending.pop_front().or_else(|| rx.recv().ok()) {
         if dbg.is_on() {
             dbg.log(&format!(
                 "RECV pending_remaining={} msg={}",

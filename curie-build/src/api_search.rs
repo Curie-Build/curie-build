@@ -123,7 +123,7 @@ fn parse_response(body: &str) -> Result<Vec<ArtifactHit>> {
 /// `version_count` is a reliable proxy for popularity: widely-adopted libraries
 /// accumulate many releases over time.  `timestamp` breaks ties in favour of
 /// recently active projects.
-fn sort_by_popularity(hits: &mut Vec<ArtifactHit>) {
+fn sort_by_popularity(hits: &mut [ArtifactHit]) {
     hits.sort_by(|a, b| {
         b.version_count
             .cmp(&a.version_count)
