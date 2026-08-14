@@ -197,7 +197,6 @@ pub fn sha256_digest(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(hash))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,8 +237,16 @@ mod tests {
         let layer = build_layer(&hello_files()).unwrap();
         // Locked goldens for the single-file "hello curie\n" fixture.
         // Update only when the tar/gzip format intentionally changes.
-        assert_eq!(layer.diff_id, HELLO_DIFF_ID, "diff_id drifted: {}", layer.diff_id);
-        assert_eq!(layer.digest, HELLO_DIGEST, "digest drifted: {}", layer.digest);
+        assert_eq!(
+            layer.diff_id, HELLO_DIFF_ID,
+            "diff_id drifted: {}",
+            layer.diff_id
+        );
+        assert_eq!(
+            layer.digest, HELLO_DIGEST,
+            "digest drifted: {}",
+            layer.digest
+        );
         assert_eq!(layer.size, layer.compressed.len() as u64);
     }
 
@@ -265,7 +272,10 @@ mod tests {
         let dep_b = Path::new("/repo/org/other/foo/1.0/foo-1.0.jar");
         let names = crate::jar::libs_entry_names(&[dep_a.to_path_buf(), dep_b.to_path_buf()]);
         assert_eq!(names.len(), 2);
-        assert_ne!(names[0], names[1], "colliding bare names must be disambiguated");
+        assert_ne!(
+            names[0], names[1],
+            "colliding bare names must be disambiguated"
+        );
         for n in &names {
             assert!(!format!("app/libs/{n}").contains(".."));
         }

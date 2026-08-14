@@ -92,7 +92,6 @@ pub enum ProjectKind {
     Bom,
 }
 
-
 // ── core scaffolding ───────────────────────────────────────────────────────
 
 /// Write all scaffold files into `dest`.  Returns the absolute paths of every
@@ -145,10 +144,7 @@ fn scaffold_lib(dest: &Path, name: &str, package: Option<String>) -> Result<Vec<
     let pkg = package.unwrap_or_else(|| derive_package(name));
     let class = derive_class_name(name);
 
-    let toml = format!(
-        "[library]\nname = \"{}\"\nversion = \"0.1.0\"\n",
-        name
-    );
+    let toml = format!("[library]\nname = \"{}\"\nversion = \"0.1.0\"\n", name);
     let toml_path = dest.join("Curie.toml");
     write_file(&toml_path, &toml)?;
 
@@ -190,8 +186,7 @@ fn write_gitignore(dest: &Path) -> Result<PathBuf> {
 }
 
 fn write_file(path: &Path, content: &str) -> Result<()> {
-    std::fs::write(path, content)
-        .with_context(|| format!("failed to write `{}`", path.display()))
+    std::fs::write(path, content).with_context(|| format!("failed to write `{}`", path.display()))
 }
 
 // ── workspace auto-registration ────────────────────────────────────────────
@@ -230,9 +225,7 @@ fn maybe_register_in_workspace(dest: &Path) -> Result<()> {
     let member_name = dir_base_name(dest)?;
 
     // Avoid duplicates.
-    let already_present = members
-        .iter()
-        .any(|v| v.as_str() == Some(&member_name));
+    let already_present = members.iter().any(|v| v.as_str() == Some(&member_name));
     if already_present {
         return Ok(());
     }
@@ -242,9 +235,10 @@ fn maybe_register_in_workspace(dest: &Path) -> Result<()> {
     std::fs::write(&ws_toml_path, doc.to_string())
         .with_context(|| format!("failed to write `{}`", ws_toml_path.display()))?;
 
-    println!("{}", crate::style::registered(
-        &format!("{} in {}", member_name, ws_toml_path.display()),
-    ));
+    println!(
+        "{}",
+        crate::style::registered(&format!("{} in {}", member_name, ws_toml_path.display()),)
+    );
     Ok(())
 }
 
@@ -446,8 +440,11 @@ mod tests {
     #[test]
     fn init_existing_curie_toml_is_rejected() {
         let tmp = tempdir().unwrap();
-        fs::write(tmp.path().join("Curie.toml"), "[library]\nname=\"x\"\nversion=\"0\"\n")
-            .unwrap();
+        fs::write(
+            tmp.path().join("Curie.toml"),
+            "[library]\nname=\"x\"\nversion=\"0\"\n",
+        )
+        .unwrap();
         // Verify the check logic: Curie.toml present → should error.
         assert!(tmp.path().join("Curie.toml").exists());
     }
@@ -472,8 +469,16 @@ mod tests {
         maybe_register_in_workspace(&dest).unwrap();
 
         let ws = fs::read_to_string(tmp.path().join("Curie.toml")).unwrap();
-        assert!(ws.contains("\"my-app\""), "workspace should contain my-app: {}", ws);
-        assert!(ws.contains("\"existing\""), "existing member should be preserved: {}", ws);
+        assert!(
+            ws.contains("\"my-app\""),
+            "workspace should contain my-app: {}",
+            ws
+        );
+        assert!(
+            ws.contains("\"existing\""),
+            "existing member should be preserved: {}",
+            ws
+        );
     }
 
     #[test]
@@ -515,8 +520,14 @@ mod tests {
         maybe_register_in_workspace(&dest).unwrap();
 
         let ws = fs::read_to_string(tmp.path().join("Curie.toml")).unwrap();
-        assert!(ws.contains("# My workspace"), "top comment should be preserved");
-        assert!(ws.contains("# list of members"), "inline comment should be preserved");
+        assert!(
+            ws.contains("# My workspace"),
+            "top comment should be preserved"
+        );
+        assert!(
+            ws.contains("# list of members"),
+            "inline comment should be preserved"
+        );
         assert!(ws.contains("\"new-member\""));
     }
 
@@ -536,6 +547,9 @@ mod tests {
         assert!(!toml.contains("[application]"));
         assert!(!toml.contains("[library]"));
         // BOM projects have no source directory.
-        assert!(!dest.join("src").exists(), "BOM project must not create src/");
+        assert!(
+            !dest.join("src").exists(),
+            "BOM project must not create src/"
+        );
     }
 }

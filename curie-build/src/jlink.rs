@@ -104,7 +104,8 @@ pub fn build_jlink(
     if cfg.strip_debug {
         cmd.arg("--strip-debug");
     }
-    cmd.arg("--compress").arg(if cfg.compress { "zip-6" } else { "zip-0" });
+    cmd.arg("--compress")
+        .arg(if cfg.compress { "zip-6" } else { "zip-0" });
 
     crate::parallel::emit(&crate::style::active(
         "jlink",
@@ -122,7 +123,11 @@ pub fn build_jlink(
             .with_context(|| format!("failed to clear {}", jdk_dir.display()))?;
     }
     std::fs::rename(&staging, &jdk_dir).with_context(|| {
-        format!("failed to move {} into {}", staging.display(), jdk_dir.display())
+        format!(
+            "failed to move {} into {}",
+            staging.display(),
+            jdk_dir.display()
+        )
     })?;
 
     // --- lib/: app jar + dependency libs/ ------------------------------------
@@ -132,18 +137,29 @@ pub fn build_jlink(
         .file_name()
         .context("application JAR path has no file name")?;
     let lib_jar_path = lib_dir.join(jar_file_name);
-    std::fs::copy(jar, &lib_jar_path)
-        .with_context(|| format!("failed to copy {} into {}", jar.display(), lib_dir.display()))?;
+    std::fs::copy(jar, &lib_jar_path).with_context(|| {
+        format!(
+            "failed to copy {} into {}",
+            jar.display(),
+            lib_dir.display()
+        )
+    })?;
     crate::jar::populate_libs_dir(&lib_dir.join("libs"), dep_jars)?;
 
     // --- bin/: launcher scripts -----------------------------------------------
     std::fs::create_dir_all(&bin_dir)
         .with_context(|| format!("failed to create {}", bin_dir.display()))?;
-    write_launchers(&bin_dir, launcher_name, jar_file_name.to_string_lossy().as_ref())?;
+    write_launchers(
+        &bin_dir,
+        launcher_name,
+        jar_file_name.to_string_lossy().as_ref(),
+    )?;
 
     // Write stamp so the next build can skip this step.
     touch_stamp(&target_dir)?;
-    crate::parallel::emit(&crate::style::done(&format!("target/runtime/bin/{launcher_name}")));
+    crate::parallel::emit(&crate::style::done(&format!(
+        "target/runtime/bin/{launcher_name}"
+    )));
 
     Ok(())
 }
@@ -333,7 +349,10 @@ mod tests {
     #[test]
     fn stamp_path_is_in_target_dir() {
         let target = PathBuf::from("/some/target");
-        assert_eq!(stamp_path(&target), PathBuf::from("/some/target/.jlink-stamp"));
+        assert_eq!(
+            stamp_path(&target),
+            PathBuf::from("/some/target/.jlink-stamp")
+        );
     }
 
     #[test]

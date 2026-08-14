@@ -52,8 +52,7 @@ pub fn credentials_for<'a>(cfg: &'a CurieConfig, repo_id: &str) -> Option<&'a Cr
 /// silently use empty passwords.
 fn resolve_env_indirection(s: &str) -> Result<String> {
     if let Some(var) = s.strip_prefix("${").and_then(|rest| rest.strip_suffix('}')) {
-        std::env::var(var)
-            .with_context(|| format!("environment variable '{}' is not set", var))
+        std::env::var(var).with_context(|| format!("environment variable '{}' is not set", var))
     } else {
         Ok(s.to_string())
     }
@@ -83,8 +82,7 @@ pub fn load_config() -> Result<CurieConfig> {
     }
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    toml::from_str(&text)
-        .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", path.display(), e))
+    toml::from_str(&text).map_err(|e| anyhow::anyhow!("failed to parse {}: {}", path.display(), e))
 }
 
 fn config_path() -> Result<PathBuf> {
@@ -331,8 +329,16 @@ password = "${TEST_NEXUS_TOKEN}"
         let cfg = CurieConfig {
             mirrors: vec![],
             credentials: vec![
-                CredentialEntry { repo_id: "a".into(), username: "ua".into(), password: "pa".into() },
-                CredentialEntry { repo_id: "b".into(), username: "ub".into(), password: "pb".into() },
+                CredentialEntry {
+                    repo_id: "a".into(),
+                    username: "ua".into(),
+                    password: "pa".into(),
+                },
+                CredentialEntry {
+                    repo_id: "b".into(),
+                    username: "ub".into(),
+                    password: "pb".into(),
+                },
             ],
         };
         let b = credentials_for(&cfg, "b").unwrap();

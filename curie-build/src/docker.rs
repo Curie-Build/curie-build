@@ -22,7 +22,10 @@ enum DockerArtifact {
     /// The plain (or fat) JAR, plus `libs/` when there are separate dep JARs.
     /// This is the only mode when neither `[native-image]` nor `[jlink]` is
     /// configured.
-    Jar { jar_filename: String, has_libs: bool },
+    Jar {
+        jar_filename: String,
+        has_libs: bool,
+    },
     /// A GraalVM native-image binary, already at `target/<binary_name>`.
     Native { binary_name: String },
     /// A jlink runtime image, already at `target/runtime/`.
@@ -66,7 +69,9 @@ fn select_docker_artifact(
                 runtime_dir.display()
             );
         }
-        return Ok(DockerArtifact::Jlink { launcher_name: jlink::launcher_name(desc).to_string() });
+        return Ok(DockerArtifact::Jlink {
+            launcher_name: jlink::launcher_name(desc).to_string(),
+        });
     }
 
     let jar_filename = jar
@@ -74,7 +79,10 @@ fn select_docker_artifact(
         .context("JAR path has no filename")?
         .to_string_lossy()
         .into_owned();
-    Ok(DockerArtifact::Jar { jar_filename, has_libs: !dep_jars.is_empty() })
+    Ok(DockerArtifact::Jar {
+        jar_filename,
+        has_libs: !dep_jars.is_empty(),
+    })
 }
 
 /// Resolve the effective base image: the user's explicit `baseImage` if set,
@@ -85,7 +93,9 @@ fn resolved_base_image<'a>(desc: &'a Descriptor, artifact: &DockerArtifact) -> &
     }
     match artifact {
         DockerArtifact::Jar { .. } => DEFAULT_BASE_IMAGE_JAR,
-        DockerArtifact::Native { .. } | DockerArtifact::Jlink { .. } => DEFAULT_BASE_IMAGE_SELF_CONTAINED,
+        DockerArtifact::Native { .. } | DockerArtifact::Jlink { .. } => {
+            DEFAULT_BASE_IMAGE_SELF_CONTAINED
+        }
     }
 }
 
@@ -204,13 +214,20 @@ fn touch_stamp(target_dir: &Path) -> Result<()> {
 /// generated Dockerfile, the generated .dockerignore, and whichever artifact
 /// the Dockerfile packages (app JAR + `libs/`, the native binary, or the
 /// jlink runtime image).
-fn generated_dockerfile_inputs(target_dir: &Path, project_root: &Path, artifact: &DockerArtifact) -> Inputs {
+fn generated_dockerfile_inputs(
+    target_dir: &Path,
+    project_root: &Path,
+    artifact: &DockerArtifact,
+) -> Inputs {
     let mut inputs = Inputs::new();
     inputs
         .add_file(&target_dir.join("Dockerfile"))
         .add_file(&target_dir.join(".dockerignore"));
     match artifact {
-        DockerArtifact::Jar { jar_filename, has_libs } => {
+        DockerArtifact::Jar {
+            jar_filename,
+            has_libs,
+        } => {
             inputs.add_file(&target_dir.join(jar_filename));
             if *has_libs {
                 inputs.add_dir(&target_dir.join("libs"));
@@ -253,7 +270,10 @@ fn build_with_user_dockerfile(
     jar: &Path,
     image_ref: &str,
 ) -> Result<()> {
-    crate::parallel::emit(&crate::style::info("Dockerfile", "using project root Dockerfile"));
+    crate::parallel::emit(&crate::style::info(
+        "Dockerfile",
+        "using project root Dockerfile",
+    ));
 
     let target_dir = project_root.join("target");
     std::fs::create_dir_all(&target_dir).context("failed to create target/")?;
@@ -264,7 +284,10 @@ fn build_with_user_dockerfile(
         return Ok(());
     }
 
-    crate::parallel::emit(&crate::style::active("Docker image", &format!("building {}", image_ref)));
+    crate::parallel::emit(&crate::style::active(
+        "Docker image",
+        &format!("building {}", image_ref),
+    ));
     // Make JAR path relative to project root for the build arg.
     let jar_rel = jar
         .strip_prefix(project_root)
@@ -337,18 +360,29 @@ fn build_with_generated_dockerfile(
 
         match (copied, skipped) {
             (0, _) => crate::parallel::emit(&crate::style::up_to_date("Docker dep JARs")),
-            (c, 0) => crate::parallel::emit(&crate::style::info("Docker dep JARs", &format!("{} copied", c))),
-            (c, s) => crate::parallel::emit(&crate::style::info("Docker dep JARs", &format!("{} copied, {} up to date", c, s))),
+            (c, 0) => crate::parallel::emit(&crate::style::info(
+                "Docker dep JARs",
+                &format!("{} copied", c),
+            )),
+            (c, s) => crate::parallel::emit(&crate::style::info(
+                "Docker dep JARs",
+                &format!("{} copied, {} up to date", c, s),
+            )),
         }
     }
 
     // Generate Dockerfile in target/ — skip write if content is unchanged.
     let dockerfile_content = match &artifact {
-        DockerArtifact::Jar { jar_filename, has_libs } => {
-            generate_dockerfile_jar(&base_image, jar_filename, *has_libs)
+        DockerArtifact::Jar {
+            jar_filename,
+            has_libs,
+        } => generate_dockerfile_jar(&base_image, jar_filename, *has_libs),
+        DockerArtifact::Native { binary_name } => {
+            generate_dockerfile_native(&base_image, binary_name)
         }
-        DockerArtifact::Native { binary_name } => generate_dockerfile_native(&base_image, binary_name),
-        DockerArtifact::Jlink { launcher_name } => generate_dockerfile_jlink(&base_image, launcher_name),
+        DockerArtifact::Jlink { launcher_name } => {
+            generate_dockerfile_jlink(&base_image, launcher_name)
+        }
     };
     let dockerfile_path = target_dir.join("Dockerfile");
     let existing = std::fs::read_to_string(&dockerfile_path).unwrap_or_default();
@@ -357,12 +391,18 @@ fn build_with_generated_dockerfile(
     } else {
         std::fs::write(&dockerfile_path, &dockerfile_content)
             .context("failed to write generated Dockerfile")?;
-        crate::parallel::emit(&crate::style::info("Dockerfile", "generated  (target/Dockerfile)"));
+        crate::parallel::emit(&crate::style::info(
+            "Dockerfile",
+            "generated  (target/Dockerfile)",
+        ));
     }
 
     // Generate .dockerignore in target/ — skip write if content is unchanged.
     let dockerignore_content = match &artifact {
-        DockerArtifact::Jar { jar_filename, has_libs } => generate_dockerignore_jar(jar_filename, *has_libs),
+        DockerArtifact::Jar {
+            jar_filename,
+            has_libs,
+        } => generate_dockerignore_jar(jar_filename, *has_libs),
         DockerArtifact::Native { binary_name } => generate_dockerignore_native(binary_name),
         DockerArtifact::Jlink { .. } => generate_dockerignore_jlink(),
     };
@@ -373,7 +413,10 @@ fn build_with_generated_dockerfile(
     } else {
         std::fs::write(&dockerignore_path, &dockerignore_content)
             .context("failed to write .dockerignore")?;
-        crate::parallel::emit(&crate::style::info(".dockerignore", "generated  (target/.dockerignore)"));
+        crate::parallel::emit(&crate::style::info(
+            ".dockerignore",
+            "generated  (target/.dockerignore)",
+        ));
     }
 
     // Skip docker build if the stamp is newer than all inputs.
@@ -387,9 +430,17 @@ fn build_with_generated_dockerfile(
         return Ok(());
     }
 
-    crate::parallel::emit(&crate::style::active("Docker image", &format!("building {}", image_ref)));
+    crate::parallel::emit(&crate::style::active(
+        "Docker image",
+        &format!("building {}", image_ref),
+    ));
     let mut build_cmd2 = Command::new("docker");
-    build_cmd2.arg("build").arg("--progress=plain").arg("-t").arg(image_ref).arg(&target_dir);
+    build_cmd2
+        .arg("build")
+        .arg("--progress=plain")
+        .arg("-t")
+        .arg(image_ref)
+        .arg(&target_dir);
     let status = crate::proc::spawn_cmd(&mut build_cmd2)
         .context("failed to invoke docker build — is Docker installed?")?;
 
@@ -415,10 +466,7 @@ fn generate_dockerignore_jar(jar_filename: &str, has_libs: bool) -> String {
 }
 
 fn generate_dockerfile_jar(base_image: &str, jar_filename: &str, has_libs: bool) -> String {
-    let mut lines = vec![
-        format!("FROM {}", base_image),
-        "WORKDIR /app".to_string(),
-    ];
+    let mut lines = vec![format!("FROM {}", base_image), "WORKDIR /app".to_string()];
 
     if has_libs {
         // Copy dep JARs before the app JAR so this layer is cached across app-code changes.
@@ -557,7 +605,10 @@ mod tests {
         ];
         let names = crate::jar::libs_entry_names(&jars);
         assert_eq!(names.len(), 2);
-        assert_ne!(names[0], names[1], "colliding deps must not share a libs/ name");
+        assert_ne!(
+            names[0], names[1],
+            "colliding deps must not share a libs/ name"
+        );
         assert_eq!(names[0], "javax.inject-javax.inject-1.jar");
         assert_eq!(names[1], "com.example-javax.inject-1.jar");
         // Same mapping as jar packaging — docker and Class-Path stay aligned.
@@ -587,7 +638,10 @@ mod tests {
             set_file_mtime(path, t0).unwrap();
         }
 
-        let artifact = DockerArtifact::Jar { jar_filename: "app-1.0.jar".to_string(), has_libs: false };
+        let artifact = DockerArtifact::Jar {
+            jar_filename: "app-1.0.jar".to_string(),
+            has_libs: false,
+        };
 
         // No stamp yet → must build.
         let inputs = generated_dockerfile_inputs(target, target, &artifact);
@@ -625,15 +679,31 @@ mod tests {
         let desc = crate::descriptor::load(root).unwrap();
 
         assert_eq!(
-            resolved_base_image(&desc, &DockerArtifact::Jar { jar_filename: "x.jar".to_string(), has_libs: false }),
+            resolved_base_image(
+                &desc,
+                &DockerArtifact::Jar {
+                    jar_filename: "x.jar".to_string(),
+                    has_libs: false
+                }
+            ),
             "eclipse-temurin:21-jre-alpine"
         );
         assert_eq!(
-            resolved_base_image(&desc, &DockerArtifact::Native { binary_name: "x".to_string() }),
+            resolved_base_image(
+                &desc,
+                &DockerArtifact::Native {
+                    binary_name: "x".to_string()
+                }
+            ),
             "debian:trixie-slim"
         );
         assert_eq!(
-            resolved_base_image(&desc, &DockerArtifact::Jlink { launcher_name: "x".to_string() }),
+            resolved_base_image(
+                &desc,
+                &DockerArtifact::Jlink {
+                    launcher_name: "x".to_string()
+                }
+            ),
             "debian:trixie-slim"
         );
     }
@@ -651,7 +721,12 @@ mod tests {
         let desc = crate::descriptor::load(root).unwrap();
 
         assert_eq!(
-            resolved_base_image(&desc, &DockerArtifact::Native { binary_name: "x".to_string() }),
+            resolved_base_image(
+                &desc,
+                &DockerArtifact::Native {
+                    binary_name: "x".to_string()
+                }
+            ),
             "alpine:3.20"
         );
     }
@@ -669,7 +744,13 @@ mod tests {
         let jar = root.join("target").join("x-0.1.jar");
 
         let artifact = select_docker_artifact(root, &desc, &jar, &[]).unwrap();
-        assert!(matches!(artifact, DockerArtifact::Jar { has_libs: false, .. }));
+        assert!(matches!(
+            artifact,
+            DockerArtifact::Jar {
+                has_libs: false,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -687,7 +768,9 @@ mod tests {
 
         // Both configured, but neither artifact has been built yet → error
         // must mention native-image specifically (it takes precedence).
-        let err = select_docker_artifact(root, &desc, &jar, &[]).unwrap_err().to_string();
+        let err = select_docker_artifact(root, &desc, &jar, &[])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("native-image"), "got: {err}");
 
         // Build only the native binary; native must still be selected.
@@ -710,7 +793,9 @@ mod tests {
         let desc = crate::descriptor::load(root).unwrap();
         let jar = root.join("target").join("x-0.1.jar");
 
-        let err = select_docker_artifact(root, &desc, &jar, &[]).unwrap_err().to_string();
+        let err = select_docker_artifact(root, &desc, &jar, &[])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("jlink"), "got: {err}");
 
         std::fs::create_dir_all(jlink::runtime_dir(root)).unwrap();

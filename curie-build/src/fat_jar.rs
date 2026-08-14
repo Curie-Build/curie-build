@@ -22,8 +22,7 @@ use crate::descriptor::{self, Relocation};
 
 /// Reproducible-build epoch: 2024-01-01 00:00:00 UTC.
 fn epoch() -> zip::DateTime {
-    zip::DateTime::from_date_and_time(2024, 1, 1, 0, 0, 0)
-        .expect("epoch constant is valid")
+    zip::DateTime::from_date_and_time(2024, 1, 1, 0, 0, 0).expect("epoch constant is valid")
 }
 
 /// Filter dependency JARs according to the global `shadeAll` policy and
@@ -34,10 +33,7 @@ fn epoch() -> zip::DateTime {
 /// dependency force inclusion.  The filename-prefix heuristic (artifact name
 /// from the declared "group:artifact" key) is used to map resolved JARs back
 /// to direct dependencies for filtering and for per-dep relocation attribution.
-pub fn filter_fat_jar_deps(
-    dep_jars: &[PathBuf],
-    desc: &descriptor::Descriptor,
-) -> Vec<PathBuf> {
+pub fn filter_fat_jar_deps(dep_jars: &[PathBuf], desc: &descriptor::Descriptor) -> Vec<PathBuf> {
     let shade_all = desc.fat_jar.shade_all;
 
     // Direct deps that must not be shaded — match JARs by artifact-version stem
@@ -51,7 +47,11 @@ pub fn filter_fat_jar_deps(
 
     dep_jars
         .iter()
-        .filter(|jar| !excluded.iter().any(|(coord, ver)| jar_matches_direct_dep(jar, coord, ver)))
+        .filter(|jar| {
+            !excluded
+                .iter()
+                .any(|(coord, ver)| jar_matches_direct_dep(jar, coord, ver))
+        })
         .cloned()
         .collect()
 }
@@ -426,7 +426,8 @@ fn replace_pattern_occurrences(s: &str, from: &str, to: &str, excludes: &[String
             let rest = &s[abs..];
             let mut end = rest.len();
             for (idx, ch) in rest.char_indices() {
-                if !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '/' || ch == '_' || ch == '$') {
+                if !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '/' || ch == '_' || ch == '$')
+                {
                     end = idx;
                     break;
                 }
@@ -599,8 +600,12 @@ pub fn write_fat_jar(
 ) -> Result<()> {
     let part = staging_path(jar_path);
     if let Some(parent) = part.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent for staging file {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create parent for staging file {}",
+                parent.display()
+            )
+        })?;
     }
 
     {
@@ -619,239 +624,236 @@ pub fn write_fat_jar(
             .last_modified_time(epoch())
             .unix_permissions(0o755);
 
-    // --- MANIFEST.MF (must be first entry per JAR spec) ---------------------
-    zip.start_file("META-INF/", dir_options)
-        .context("failed to write META-INF/ directory entry")?;
+        // --- MANIFEST.MF (must be first entry per JAR spec) ---------------------
+        zip.start_file("META-INF/", dir_options)
+            .context("failed to write META-INF/ directory entry")?;
 
-    // Use the common builder so Main-Class is folded when long and we have
-    // a single implementation for all manifest content in the crate.
-    let manifest = build_manifest(main_class, None, None);
+        // Use the common builder so Main-Class is folded when long and we have
+        // a single implementation for all manifest content in the crate.
+        let manifest = build_manifest(main_class, None, None);
 
-    zip.start_file("META-INF/MANIFEST.MF", options)
-        .context("failed to start MANIFEST.MF entry")?;
-    zip.write_all(manifest.as_bytes())
-        .context("failed to write MANIFEST.MF")?;
+        zip.start_file("META-INF/MANIFEST.MF", options)
+            .context("failed to start MANIFEST.MF entry")?;
+        zip.write_all(manifest.as_bytes())
+            .context("failed to write MANIFEST.MF")?;
 
-    // --- build-info.properties (optional) -----------------------------------
-    if let Some(props) = build_info {
-        zip.start_file("META-INF/build-info.properties", options)
-            .context("failed to start META-INF/build-info.properties entry")?;
-        zip.write_all(props.as_bytes())
-            .context("failed to write META-INF/build-info.properties")?;
-    }
+        // --- build-info.properties (optional) -----------------------------------
+        if let Some(props) = build_info {
+            zip.start_file("META-INF/build-info.properties", options)
+                .context("failed to start META-INF/build-info.properties entry")?;
+            zip.write_all(props.as_bytes())
+                .context("failed to write META-INF/build-info.properties")?;
+        }
 
-    // --- Merge META-INF/services from all dependency JARs -------------------
-    let merged_services = merge_services(dep_jars, relocations)?;
+        // --- Merge META-INF/services from all dependency JARs -------------------
+        let merged_services = merge_services(dep_jars, relocations)?;
 
-    // --- Collect project's own classes/resources into entries ----------------
-    // Also collect from resources_dir merged into the project's own services.
-    let mut project_services: BTreeMap<String, String> = BTreeMap::new();
-    let mut entries: BTreeMap<String, EntrySource> = BTreeMap::new();
+        // --- Collect project's own classes/resources into entries ----------------
+        // Also collect from resources_dir merged into the project's own services.
+        let mut project_services: BTreeMap<String, String> = BTreeMap::new();
+        let mut entries: BTreeMap<String, EntrySource> = BTreeMap::new();
 
-    for (root, label) in [
-        (Some(classes_dir), "classes"),
-        (resources_dir, "resources"),
-    ] {
-        let Some(root) = root else { continue };
-        for entry in walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            let zip_path = entry
-                .path()
-                .strip_prefix(root)
-                .ok()
-                .map(|r| r.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
-            if zip_path.is_empty() || zip_path == "META-INF/MANIFEST.MF" {
-                continue;
-            }
-            if build_info.is_some() && zip_path == "META-INF/build-info.properties" {
-                continue;
-            }
-            // Fat JARs run as the unnamed module; module-info.class would describe a broken module.
-            if zip_path == "module-info.class" {
-                continue;
-            }
-
-            // Handle project's own META-INF/services — collect for merging
-            if zip_path.starts_with("META-INF/services/") {
-                let service_name = &zip_path["META-INF/services/".len()..];
-                let content = std::fs::read_to_string(entry.path())
+        for (root, label) in [(Some(classes_dir), "classes"), (resources_dir, "resources")] {
+            let Some(root) = root else { continue };
+            for entry in walkdir::WalkDir::new(root)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+            {
+                let zip_path = entry
+                    .path()
+                    .strip_prefix(root)
+                    .ok()
+                    .map(|r| r.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_default();
-                let relocated_service = relocate_service_name(service_name, relocations);
-                let existing = project_services.entry(relocated_service).or_default();
-                for line in content.lines() {
-                    let line = line.trim();
-                    if !line.is_empty() && !line.starts_with('#') {
-                        let relocated_line = relocate_dotted_name(line, relocations);
-                        if !existing.contains(&relocated_line) {
-                            if !existing.is_empty() {
-                                existing.push('\n');
+                if zip_path.is_empty() || zip_path == "META-INF/MANIFEST.MF" {
+                    continue;
+                }
+                if build_info.is_some() && zip_path == "META-INF/build-info.properties" {
+                    continue;
+                }
+                // Fat JARs run as the unnamed module; module-info.class would describe a broken module.
+                if zip_path == "module-info.class" {
+                    continue;
+                }
+
+                // Handle project's own META-INF/services — collect for merging
+                if zip_path.starts_with("META-INF/services/") {
+                    let service_name = &zip_path["META-INF/services/".len()..];
+                    let content = std::fs::read_to_string(entry.path()).unwrap_or_default();
+                    let relocated_service = relocate_service_name(service_name, relocations);
+                    let existing = project_services.entry(relocated_service).or_default();
+                    for line in content.lines() {
+                        let line = line.trim();
+                        if !line.is_empty() && !line.starts_with('#') {
+                            let relocated_line = relocate_dotted_name(line, relocations);
+                            if !existing.contains(&relocated_line) {
+                                if !existing.is_empty() {
+                                    existing.push('\n');
+                                }
+                                existing.push_str(&relocated_line);
                             }
-                            existing.push_str(&relocated_line);
                         }
                     }
+                    continue;
                 }
-                continue;
-            }
 
-            // Class files take precedence; skip if already inserted from classes.
-            if label == "resources" && entries.contains_key(&zip_path) {
-                continue;
-            }
+                // Class files take precedence; skip if already inserted from classes.
+                if label == "resources" && entries.contains_key(&zip_path) {
+                    continue;
+                }
 
-            let relocated_path = relocate_path(&zip_path, relocations);
-            entries.insert(relocated_path, EntrySource::File(entry.into_path()));
+                let relocated_path = relocate_path(&zip_path, relocations);
+                entries.insert(relocated_path, EntrySource::File(entry.into_path()));
+            }
         }
-    }
 
-    // --- Collect entries from dependency JARs --------------------------------
-    for jar_dep_path in dep_jars {
-        let file = std::fs::File::open(jar_dep_path)
-            .with_context(|| format!("failed to open dep JAR: {}", jar_dep_path.display()))?;
-        let mut archive = match zip::ZipArchive::new(file) {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
-
-        for i in 0..archive.len() {
-            let mut entry = match archive.by_index(i) {
-                Ok(e) => e,
+        // --- Collect entries from dependency JARs --------------------------------
+        for jar_dep_path in dep_jars {
+            let file = std::fs::File::open(jar_dep_path)
+                .with_context(|| format!("failed to open dep JAR: {}", jar_dep_path.display()))?;
+            let mut archive = match zip::ZipArchive::new(file) {
+                Ok(a) => a,
                 Err(_) => continue,
             };
-            if entry.is_dir() {
-                continue;
-            }
-            let name = entry.name().to_string();
 
-            // Skip META-INF that we handle ourselves
-            if name == "META-INF/MANIFEST.MF" {
-                continue;
-            }
-            // Skip META-INF/services — handled via merge_services above
-            if name.starts_with("META-INF/services/") {
-                continue;
-            }
-            // Skip signature files that would invalidate the fat JAR
-            if name.starts_with("META-INF/")
-                && (name.ends_with(".SF")
-                    || name.ends_with(".DSA")
-                    || name.ends_with(".RSA")
-                    || name.ends_with(".EC"))
-            {
-                continue;
-            }
-            // Skip a top-level module-info.class from deps: it describes that
-            // dependency's own module, not the shaded application. Nested
-            // multi-release entries (META-INF/versions/*/module-info.class)
-            // are kept, matching maven-shade-plugin's default behaviour.
-            if name == "module-info.class" {
-                continue;
-            }
-            if build_info.is_some() && name == "META-INF/build-info.properties" {
-                continue;
-            }
-
-            // Project's own entries win over deps
-            let relocated_name = relocate_path(&name, relocations);
-            if entries.contains_key(&relocated_name) {
-                continue;
-            }
-
-            let mut data = Vec::new();
-            let _ = entry.read_to_end(&mut data);
-
-            // Apply package relocations to ordinary class files only — never to
-            // module-info.class (incl. multi-release), which we copy through.
-            let data = if should_relocate_class_bytes(&relocated_name) {
-                relocate_class_bytes(&data, relocations).with_context(|| {
-                    format!("relocating class entry '{relocated_name}'")
-                })?
-            } else {
-                data
-            };
-            entries.insert(relocated_name, EntrySource::Bytes(data));
-        }
-    }
-
-    // --- Merge META-INF/services: project + deps ----------------------------
-    let mut all_services: BTreeMap<String, String> = merged_services;
-    for (service, project_content) in &project_services {
-        let entry = all_services.entry(service.clone()).or_default();
-        // Prepend project's providers (they come first)
-        if entry.is_empty() {
-            *entry = format!("{}\n", project_content);
-        } else {
-            // Merge: project providers first, then dep providers
-            let mut combined: Vec<String> = Vec::new();
-            for line in project_content.lines() {
-                let line = line.trim();
-                if !line.is_empty() {
-                    combined.push(line.to_string());
+            for i in 0..archive.len() {
+                let mut entry = match archive.by_index(i) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                if entry.is_dir() {
+                    continue;
                 }
-            }
-            for line in entry.lines() {
-                let line = line.trim();
-                if !line.is_empty() && !combined.contains(&line.to_string()) {
-                    combined.push(line.to_string());
+                let name = entry.name().to_string();
+
+                // Skip META-INF that we handle ourselves
+                if name == "META-INF/MANIFEST.MF" {
+                    continue;
                 }
-            }
-            combined.sort();
-            combined.dedup();
-            *entry = combined.join("\n") + "\n";
-        }
-    }
+                // Skip META-INF/services — handled via merge_services above
+                if name.starts_with("META-INF/services/") {
+                    continue;
+                }
+                // Skip signature files that would invalidate the fat JAR
+                if name.starts_with("META-INF/")
+                    && (name.ends_with(".SF")
+                        || name.ends_with(".DSA")
+                        || name.ends_with(".RSA")
+                        || name.ends_with(".EC"))
+                {
+                    continue;
+                }
+                // Skip a top-level module-info.class from deps: it describes that
+                // dependency's own module, not the shaded application. Nested
+                // multi-release entries (META-INF/versions/*/module-info.class)
+                // are kept, matching maven-shade-plugin's default behaviour.
+                if name == "module-info.class" {
+                    continue;
+                }
+                if build_info.is_some() && name == "META-INF/build-info.properties" {
+                    continue;
+                }
 
-    // Add merged services as entries (their META-INF/services/ ancestor
-    // directory is derived below along with every other entry's ancestors).
-    for (service_name, content) in &all_services {
-        let key = format!("META-INF/services/{}", service_name);
-        entries.insert(key, EntrySource::Bytes(content.as_bytes().to_vec()));
-    }
+                // Project's own entries win over deps
+                let relocated_name = relocate_path(&name, relocations);
+                if entries.contains_key(&relocated_name) {
+                    continue;
+                }
 
-    // --- Derive directory entries from file ancestor paths ------------------
-    // `META-INF/` is excluded since it was already written above.
-    let dir_entries: BTreeSet<String> =
-        entries.keys().flat_map(|path| path_ancestors(path)).filter(|dir| dir != "META-INF/").collect();
-    for dir in dir_entries {
-        entries.entry(dir).or_insert(EntrySource::Dir);
-    }
+                let mut data = Vec::new();
+                let _ = entry.read_to_end(&mut data);
 
-    // --- Write all entries sorted lexicographically -------------------------
-    for (zip_path, source) in &entries {
-        match source {
-            EntrySource::Dir => {
-                zip.start_file(zip_path.as_str(), dir_options)
-                    .with_context(|| format!("failed to write directory entry {}", zip_path))?;
-            }
-            EntrySource::File(fs_path) => {
-                let data = std::fs::read(fs_path)
-                    .with_context(|| format!("failed to read {}", fs_path.display()))?;
-                // Apply package relocations to ordinary class files only.
-                let data = if should_relocate_class_bytes(zip_path) {
-                    relocate_class_bytes(&data, relocations).with_context(|| {
-                        format!("relocating class entry '{zip_path}'")
-                    })?
+                // Apply package relocations to ordinary class files only — never to
+                // module-info.class (incl. multi-release), which we copy through.
+                let data = if should_relocate_class_bytes(&relocated_name) {
+                    relocate_class_bytes(&data, relocations)
+                        .with_context(|| format!("relocating class entry '{relocated_name}'"))?
                 } else {
                     data
                 };
-                zip.start_file(zip_path.as_str(), options)
-                    .with_context(|| format!("failed to start entry {}", zip_path))?;
-                zip.write_all(&data)
-                    .with_context(|| format!("failed to write entry {}", zip_path))?;
-            }
-            EntrySource::Bytes(data) => {
-                zip.start_file(zip_path.as_str(), options)
-                    .with_context(|| format!("failed to start entry {}", zip_path))?;
-                zip.write_all(data)
-                    .with_context(|| format!("failed to write entry {}", zip_path))?;
+                entries.insert(relocated_name, EntrySource::Bytes(data));
             }
         }
-    }
 
-    zip.finish().context("failed to finalise fat JAR")?;
+        // --- Merge META-INF/services: project + deps ----------------------------
+        let mut all_services: BTreeMap<String, String> = merged_services;
+        for (service, project_content) in &project_services {
+            let entry = all_services.entry(service.clone()).or_default();
+            // Prepend project's providers (they come first)
+            if entry.is_empty() {
+                *entry = format!("{}\n", project_content);
+            } else {
+                // Merge: project providers first, then dep providers
+                let mut combined: Vec<String> = Vec::new();
+                for line in project_content.lines() {
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        combined.push(line.to_string());
+                    }
+                }
+                for line in entry.lines() {
+                    let line = line.trim();
+                    if !line.is_empty() && !combined.contains(&line.to_string()) {
+                        combined.push(line.to_string());
+                    }
+                }
+                combined.sort();
+                combined.dedup();
+                *entry = combined.join("\n") + "\n";
+            }
+        }
+
+        // Add merged services as entries (their META-INF/services/ ancestor
+        // directory is derived below along with every other entry's ancestors).
+        for (service_name, content) in &all_services {
+            let key = format!("META-INF/services/{}", service_name);
+            entries.insert(key, EntrySource::Bytes(content.as_bytes().to_vec()));
+        }
+
+        // --- Derive directory entries from file ancestor paths ------------------
+        // `META-INF/` is excluded since it was already written above.
+        let dir_entries: BTreeSet<String> = entries
+            .keys()
+            .flat_map(|path| path_ancestors(path))
+            .filter(|dir| dir != "META-INF/")
+            .collect();
+        for dir in dir_entries {
+            entries.entry(dir).or_insert(EntrySource::Dir);
+        }
+
+        // --- Write all entries sorted lexicographically -------------------------
+        for (zip_path, source) in &entries {
+            match source {
+                EntrySource::Dir => {
+                    zip.start_file(zip_path.as_str(), dir_options)
+                        .with_context(|| format!("failed to write directory entry {}", zip_path))?;
+                }
+                EntrySource::File(fs_path) => {
+                    let data = std::fs::read(fs_path)
+                        .with_context(|| format!("failed to read {}", fs_path.display()))?;
+                    // Apply package relocations to ordinary class files only.
+                    let data = if should_relocate_class_bytes(zip_path) {
+                        relocate_class_bytes(&data, relocations)
+                            .with_context(|| format!("relocating class entry '{zip_path}'"))?
+                    } else {
+                        data
+                    };
+                    zip.start_file(zip_path.as_str(), options)
+                        .with_context(|| format!("failed to start entry {}", zip_path))?;
+                    zip.write_all(&data)
+                        .with_context(|| format!("failed to write entry {}", zip_path))?;
+                }
+                EntrySource::Bytes(data) => {
+                    zip.start_file(zip_path.as_str(), options)
+                        .with_context(|| format!("failed to start entry {}", zip_path))?;
+                    zip.write_all(data)
+                        .with_context(|| format!("failed to write entry {}", zip_path))?;
+                }
+            }
+        }
+
+        zip.finish().context("failed to finalise fat JAR")?;
     } // drop writer + file for the part
 
     finalize_staged(&part, jar_path)?;
@@ -942,7 +944,10 @@ mod tests {
             excludes: vec![],
         }];
         let result = relocate_path("com/google/common/collect/ImmutableList.class", &relocs);
-        assert_eq!(result, "shaded/com/google/common/collect/ImmutableList.class");
+        assert_eq!(
+            result,
+            "shaded/com/google/common/collect/ImmutableList.class"
+        );
     }
 
     #[test]
@@ -964,17 +969,14 @@ mod tests {
             excludes: vec!["com.google.common.annotations.*".into()],
         }];
         // Excluded path should not be relocated
-        let result = relocate_path(
-            "com/google/common/annotations/Nullable.class",
-            &relocs,
-        );
+        let result = relocate_path("com/google/common/annotations/Nullable.class", &relocs);
         assert_eq!(result, "com/google/common/annotations/Nullable.class");
         // Non-excluded path should be relocated
-        let result2 = relocate_path(
-            "com/google/common/collect/ImmutableList.class",
-            &relocs,
+        let result2 = relocate_path("com/google/common/collect/ImmutableList.class", &relocs);
+        assert_eq!(
+            result2,
+            "shaded/com/google/common/collect/ImmutableList.class"
         );
-        assert_eq!(result2, "shaded/com/google/common/collect/ImmutableList.class");
     }
 
     // --- relocate_class_bytes -----------------------------------------------
@@ -1013,7 +1015,7 @@ mod tests {
         // minor, major
         out.extend_from_slice(&0u16.to_be_bytes());
         out.extend_from_slice(&65u16.to_be_bytes()); // Java 21
-        // cp_count (number of slots)
+                                                     // cp_count (number of slots)
         out.extend_from_slice(&cp_count.to_be_bytes());
 
         // Write the cp entries we built (each already includes its tag)
@@ -1113,7 +1115,8 @@ mod tests {
         let result = relocate_class_bytes(&data, &relocs).unwrap();
         // Must still be recognized as a classfile and be re-parsable
         assert_eq!(&result[0..4], b"\xCA\xFE\xBA\xBE");
-        let new_content = parse_first_utf8_after_bootstrap(&result, indices[0]).expect("utf8 present");
+        let new_content =
+            parse_first_utf8_after_bootstrap(&result, indices[0]).expect("utf8 present");
         let expected = "com/example/fatjar/shaded/com/google/common/collect/ImmutableList";
         assert_eq!(new_content, expected.as_bytes());
         // Length prefix must have been updated (original len 39 -> new longer)
@@ -1210,16 +1213,16 @@ mod tests {
 
     #[test]
     fn relocate_class_bytes_rejects_non_classfile() {
-        let err = relocate_class_bytes(b"not-a-classfile!!!!", &[Relocation {
-            from: "a".into(),
-            to: "b".into(),
-            excludes: vec![],
-        }])
+        let err = relocate_class_bytes(
+            b"not-a-classfile!!!!",
+            &[Relocation {
+                from: "a".into(),
+                to: "b".into(),
+                excludes: vec![],
+            }],
+        )
         .unwrap_err();
-        assert!(
-            err.to_string().contains("not a classfile"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("not a classfile"), "got: {err}");
     }
 
     // --- is_excluded ---------------------------------------------------------
@@ -1284,7 +1287,10 @@ mod tests {
 
         let merged = merge_services(&[jar1, jar2], &[]).unwrap();
         let content = merged.get("java.sql.Driver").unwrap();
-        let count = content.lines().filter(|l| l.trim() == "com.db1.Driver").count();
+        let count = content
+            .lines()
+            .filter(|l| l.trim() == "com.db1.Driver")
+            .count();
         assert_eq!(count, 1, "duplicates should be removed");
     }
 
@@ -1295,7 +1301,10 @@ mod tests {
         let jar1 = create_test_jar(
             tmp.path(),
             "dep1.jar",
-            &[("META-INF/services/com.google.inject.Module", b"com.google.inject.BuiltinModule\n")],
+            &[(
+                "META-INF/services/com.google.inject.Module",
+                b"com.google.inject.BuiltinModule\n",
+            )],
         );
 
         let relocs = vec![Relocation {
@@ -1343,7 +1352,10 @@ mod tests {
         );
         let merged = merge_services(&[jar], &[]).unwrap();
         // Empty file yields an empty provider list → one trailing newline entry.
-        assert_eq!(merged.get("com.example.Empty").map(String::as_str), Some("\n"));
+        assert_eq!(
+            merged.get("com.example.Empty").map(String::as_str),
+            Some("\n")
+        );
     }
 
     // --- write_fat_jar (integration) ----------------------------------------
@@ -1355,7 +1367,11 @@ mod tests {
         // Project classes
         let classes_dir = tmp.path().join("classes");
         std::fs::create_dir_all(classes_dir.join("com/example")).unwrap();
-        std::fs::write(classes_dir.join("com/example/App.class"), b"\xca\xfe\xba\xbe").unwrap();
+        std::fs::write(
+            classes_dir.join("com/example/App.class"),
+            b"\xca\xfe\xba\xbe",
+        )
+        .unwrap();
 
         // Dep JAR with its own class
         let dep_jar = create_test_jar(
@@ -1402,7 +1418,10 @@ mod tests {
         let fat_path = tmp.path().join("fat.jar");
         write_fat_jar(&fat_path, &classes_dir, None, None, &[dep_jar], None, &[]).unwrap();
 
-        let content = zip_entry_content(&std::fs::read(&fat_path).unwrap(), "com/example/Conflict.class");
+        let content = zip_entry_content(
+            &std::fs::read(&fat_path).unwrap(),
+            "com/example/Conflict.class",
+        );
         assert_eq!(content.as_bytes(), b"PROJECT_VERSION");
     }
 
@@ -1413,11 +1432,7 @@ mod tests {
         std::fs::create_dir_all(&classes_dir).unwrap();
         std::fs::write(classes_dir.join("Main.class"), b"\xca\xfe\xba\xbe").unwrap();
 
-        let dep_jar = create_test_jar(
-            tmp.path(),
-            "dep.jar",
-            &[("Dep.class", b"\xca\xfe\xba\xbe")],
-        );
+        let dep_jar = create_test_jar(tmp.path(), "dep.jar", &[("Dep.class", b"\xca\xfe\xba\xbe")]);
 
         let fat_path = tmp.path().join("fat.jar");
         write_fat_jar(
@@ -1433,7 +1448,10 @@ mod tests {
 
         let bytes = std::fs::read(&fat_path).unwrap();
         let manifest = zip_entry_content(&bytes, "META-INF/MANIFEST.MF");
-        assert!(!manifest.contains("Class-Path"), "fat JAR must not have Class-Path header");
+        assert!(
+            !manifest.contains("Class-Path"),
+            "fat JAR must not have Class-Path header"
+        );
         assert!(manifest.contains("Main-Class: Main"));
     }
 
@@ -1459,7 +1477,9 @@ mod tests {
         write_fat_jar(&fat_path, &classes_dir, None, None, &[dep_jar], None, &[]).unwrap();
 
         let names = zip_entry_names(&std::fs::read(&fat_path).unwrap());
-        assert!(!names.iter().any(|n| n.ends_with(".SF") || n.ends_with(".DSA") || n.ends_with(".RSA")));
+        assert!(!names
+            .iter()
+            .any(|n| n.ends_with(".SF") || n.ends_with(".DSA") || n.ends_with(".RSA")));
         assert!(names.contains(&"org/lib/Lib.class".to_string()));
     }
 
@@ -1516,7 +1536,9 @@ mod tests {
         // Preconditions: the rewriter cannot handle this classfile.
         let rewrite_err = relocate_class_bytes(&module_info, &relocs).unwrap_err();
         assert!(
-            rewrite_err.to_string().contains("unknown constant pool tag"),
+            rewrite_err
+                .to_string()
+                .contains("unknown constant pool tag"),
             "got: {rewrite_err}"
         );
 
@@ -1619,8 +1641,14 @@ mod tests {
             tmp.path(),
             "dep.jar",
             &[
-                ("com/google/common/collect/ImmutableList.class", b"\xca\xfe\xba\xbe"),
-                ("com/google/common/base/Preconditions.class", b"\xca\xfe\xba\xbe"),
+                (
+                    "com/google/common/collect/ImmutableList.class",
+                    b"\xca\xfe\xba\xbe",
+                ),
+                (
+                    "com/google/common/base/Preconditions.class",
+                    b"\xca\xfe\xba\xbe",
+                ),
             ],
         );
 
@@ -1631,7 +1659,16 @@ mod tests {
         }];
 
         let fat_path = tmp.path().join("fat.jar");
-        write_fat_jar(&fat_path, &classes_dir, None, None, &[dep_jar], None, &relocs).unwrap();
+        write_fat_jar(
+            &fat_path,
+            &classes_dir,
+            None,
+            None,
+            &[dep_jar],
+            None,
+            &relocs,
+        )
+        .unwrap();
 
         let names = zip_entry_names(&std::fs::read(&fat_path).unwrap());
         assert!(names.contains(&"shaded/com/google/common/collect/ImmutableList.class".to_string()));
@@ -1646,7 +1683,11 @@ mod tests {
 
         let classes_dir = tmp.path().join("classes");
         std::fs::create_dir_all(classes_dir.join("com/example")).unwrap();
-        std::fs::write(classes_dir.join("com/example/App.class"), b"\xca\xfe\xba\xbe").unwrap();
+        std::fs::write(
+            classes_dir.join("com/example/App.class"),
+            b"\xca\xfe\xba\xbe",
+        )
+        .unwrap();
 
         let dep_jar = create_test_jar(
             tmp.path(),
@@ -1661,12 +1702,33 @@ mod tests {
         let fat1 = tmp.path().join("fat1.jar");
         let fat2 = tmp.path().join("fat2.jar");
 
-        write_fat_jar(&fat1, &classes_dir, None, Some("com.example.App"), &[dep_jar.clone()], None, &[]).unwrap();
-        write_fat_jar(&fat2, &classes_dir, None, Some("com.example.App"), &[dep_jar], None, &[]).unwrap();
+        write_fat_jar(
+            &fat1,
+            &classes_dir,
+            None,
+            Some("com.example.App"),
+            &[dep_jar.clone()],
+            None,
+            &[],
+        )
+        .unwrap();
+        write_fat_jar(
+            &fat2,
+            &classes_dir,
+            None,
+            Some("com.example.App"),
+            &[dep_jar],
+            None,
+            &[],
+        )
+        .unwrap();
 
         let bytes1 = std::fs::read(&fat1).unwrap();
         let bytes2 = std::fs::read(&fat2).unwrap();
-        assert_eq!(bytes1, bytes2, "fat JAR must be deterministic (identical inputs → identical output)");
+        assert_eq!(
+            bytes1, bytes2,
+            "fat JAR must be deterministic (identical inputs → identical output)"
+        );
     }
 
     #[test]
@@ -1804,8 +1866,8 @@ mod tests {
 
     #[test]
     fn filter_excludes_deps_with_fat_jar_false() {
-        use std::collections::BTreeMap;
         use crate::descriptor::*;
+        use std::collections::BTreeMap;
 
         let mut deps = BTreeMap::new();
         deps.insert(
@@ -1883,8 +1945,8 @@ mod tests {
     /// `json-path-*.jar` / `json-smart-*.jar` just because they share a prefix.
     #[test]
     fn filter_does_not_exclude_jars_with_longer_artifact_prefix() {
-        use std::collections::BTreeMap;
         use crate::descriptor::*;
+        use std::collections::BTreeMap;
 
         let mut deps = BTreeMap::new();
         deps.insert(
@@ -1973,27 +2035,40 @@ mod tests {
 
     #[test]
     fn jar_file_matches_artifact_version_boundaries() {
-        assert!(jar_file_matches_artifact_version("json-1.0.jar", "json", "1.0"));
-        assert!(jar_file_matches_artifact_version("json-1.0-tests.jar", "json", "1.0"));
-        assert!(!jar_file_matches_artifact_version("json-path-0.9.jar", "json", "1.0"));
-        assert!(!jar_file_matches_artifact_version("json-1.0.jar", "json", "2.0"));
-        assert!(!jar_file_matches_artifact_version("json-1.0.jar", "json", ""));
+        assert!(jar_file_matches_artifact_version(
+            "json-1.0.jar",
+            "json",
+            "1.0"
+        ));
+        assert!(jar_file_matches_artifact_version(
+            "json-1.0-tests.jar",
+            "json",
+            "1.0"
+        ));
+        assert!(!jar_file_matches_artifact_version(
+            "json-path-0.9.jar",
+            "json",
+            "1.0"
+        ));
+        assert!(!jar_file_matches_artifact_version(
+            "json-1.0.jar",
+            "json",
+            "2.0"
+        ));
+        assert!(!jar_file_matches_artifact_version(
+            "json-1.0.jar",
+            "json",
+            ""
+        ));
     }
 
     #[test]
     fn jar_matches_direct_dep_via_m2_layout_when_version_empty() {
-        let jar = PathBuf::from(
-            "/home/u/.m2/repository/com/example/json/1.0/json-1.0.jar",
-        );
+        let jar = PathBuf::from("/home/u/.m2/repository/com/example/json/1.0/json-1.0.jar");
         assert!(jar_matches_direct_dep(&jar, "com.example:json", ""));
-        assert!(!jar_matches_direct_dep(
-            &jar,
-            "com.example:json-path",
-            ""
-        ));
-        let other = PathBuf::from(
-            "/home/u/.m2/repository/com/example/json-path/0.9/json-path-0.9.jar",
-        );
+        assert!(!jar_matches_direct_dep(&jar, "com.example:json-path", ""));
+        let other =
+            PathBuf::from("/home/u/.m2/repository/com/example/json-path/0.9/json-path-0.9.jar");
         assert!(!jar_matches_direct_dep(&other, "com.example:json", ""));
         assert!(jar_matches_direct_dep(&other, "com.example:json-path", ""));
     }

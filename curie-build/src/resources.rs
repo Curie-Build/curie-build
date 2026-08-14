@@ -143,7 +143,9 @@ fn scope_is_stale(out_dir: &Path, stamp: &Path, fingerprint: u64, roots: &[PathB
     let Some(stamp_mtime) = file_mtime(stamp) else {
         return true;
     };
-    roots.iter().any(|root| newest_mtime_under(root) > Some(stamp_mtime))
+    roots
+        .iter()
+        .any(|root| newest_mtime_under(root) > Some(stamp_mtime))
 }
 
 /// Resolve a scope's source roots: the configured `directories` (each validated
@@ -297,9 +299,7 @@ fn parse_properties(content: &str) -> Vec<(String, String)> {
         if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!') {
             continue;
         }
-        let sep = trimmed
-            .find('=')
-            .or_else(|| trimmed.find(':'));
+        let sep = trimmed.find('=').or_else(|| trimmed.find(':'));
         if let Some(idx) = sep {
             let key = trimmed[..idx].trim().to_string();
             let value = trimmed[idx + 1..].trim().to_string();
@@ -341,7 +341,14 @@ impl From<SubstituteOpts> for SubstituteEngine {
 
 impl TemplateEngine for SubstituteEngine {
     fn render(&self, path: &Path, text: &str, vars: &VarContext) -> Result<String> {
-        substitute(text, &self.begin, &self.end, vars, self.fail_on_unresolved, path)
+        substitute(
+            text,
+            &self.begin,
+            &self.end,
+            vars,
+            self.fail_on_unresolved,
+            path,
+        )
     }
     fn name(&self) -> &'static str {
         "substitute"
@@ -412,8 +419,8 @@ impl CompiledStage {
 
     /// Whether this stage's globs select `rel_path` (a `/`-joined relative path).
     fn matches_path(&self, rel_path: &str) -> bool {
-        let included = self.includes.is_empty()
-            || self.includes.iter().any(|p| glob_match(p, rel_path));
+        let included =
+            self.includes.is_empty() || self.includes.iter().any(|p| glob_match(p, rel_path));
         let excluded = self.excludes.iter().any(|p| glob_match(p, rel_path));
         included && !excluded
     }
@@ -456,7 +463,9 @@ fn compile_stage_roots(
         if !scope_roots.contains(&path) {
             bail!(
                 "[{}] filter stage directory '{}' is not one of the [{}] source directories",
-                label, dir, label
+                label,
+                dir,
+                label
             );
         }
         roots.push(path);
@@ -495,7 +504,11 @@ fn filter_roots(
             .with_context(|| format!("failed to clear {}", out_dir.display()))?;
     }
     std::fs::rename(&staging, out_dir).with_context(|| {
-        format!("failed to move {} into {}", staging.display(), out_dir.display())
+        format!(
+            "failed to move {} into {}",
+            staging.display(),
+            out_dir.display()
+        )
     })?;
     Ok(())
 }
@@ -521,9 +534,7 @@ fn merge_root_into(
             continue;
         }
         let abs = entry.path();
-        let rel = abs
-            .strip_prefix(root)
-            .expect("walked path is under root");
+        let rel = abs.strip_prefix(root).expect("walked path is under root");
         let dest = staging.join(rel);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
@@ -576,7 +587,11 @@ fn apply_stages(
     for stage in stages {
         if stage.accepts_root(root) && stage.matches_path(rel_path) {
             text = stage.engine.render(abs, &text, vars).with_context(|| {
-                format!("{} filter stage failed on {}", stage.engine.name(), rel_path)
+                format!(
+                    "{} filter stage failed on {}",
+                    stage.engine.name(),
+                    rel_path
+                )
             })?;
         }
     }
@@ -734,9 +749,7 @@ fn glob_match_bytes(pat: &[u8], text: &[u8]) -> bool {
                 i += 1;
             }
         }
-        b'?' => {
-            !text.is_empty() && text[0] != b'/' && glob_match_bytes(&pat[1..], &text[1..])
-        }
+        b'?' => !text.is_empty() && text[0] != b'/' && glob_match_bytes(&pat[1..], &text[1..]),
         c => !text.is_empty() && text[0] == c && glob_match_bytes(&pat[1..], &text[1..]),
     }
 }
@@ -926,7 +939,10 @@ mod tests {
     #[test]
     fn properties_parse_skips_comments() {
         let parsed = parse_properties("# c\n\nk=v\nx : y\n");
-        assert_eq!(parsed, vec![("k".into(), "v".into()), ("x".into(), "y".into())]);
+        assert_eq!(
+            parsed,
+            vec![("k".into(), "v".into()), ("x".into(), "y".into())]
+        );
     }
 
     #[test]
@@ -1020,10 +1036,16 @@ mod tests {
         filter_roots(&root_paths, &out, &compiled, &vctx, &non_filtered).unwrap();
 
         let mut got = BTreeMap::new();
-        for entry in walkdir::WalkDir::new(&out).into_iter().filter_map(|e| e.ok()) {
+        for entry in walkdir::WalkDir::new(&out)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             if entry.file_type().is_file() {
                 let rel = entry.path().strip_prefix(&out).unwrap();
-                got.insert(rel_to_slash(rel), std::fs::read_to_string(entry.path()).unwrap());
+                got.insert(
+                    rel_to_slash(rel),
+                    std::fs::read_to_string(entry.path()).unwrap(),
+                );
             }
         }
         (dir, got)
@@ -1097,11 +1119,23 @@ mod tests {
         let roots = vec![root0.clone(), root1.clone()];
         let compiled = must(compile_stages(dir.path(), &scope, &roots, "resources"));
         let out = dir.path().join("out");
-        filter_roots(&roots, &out, &compiled, &ctx(&[("x", "1")]), &binary_extension_set(&[]))
-            .unwrap();
+        filter_roots(
+            &roots,
+            &out,
+            &compiled,
+            &ctx(&[("x", "1")]),
+            &binary_extension_set(&[]),
+        )
+        .unwrap();
 
-        assert_eq!(std::fs::read_to_string(out.join("a.properties")).unwrap(), "v=@x@");
-        assert_eq!(std::fs::read_to_string(out.join("b.properties")).unwrap(), "v=1");
+        assert_eq!(
+            std::fs::read_to_string(out.join("a.properties")).unwrap(),
+            "v=@x@"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join("b.properties")).unwrap(),
+            "v=1"
+        );
     }
 
     #[test]
@@ -1114,7 +1148,9 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("expected a stage-directory validation error"),
         };
-        assert!(err.to_string().contains("not one of the [resources] source directories"));
+        assert!(err
+            .to_string()
+            .contains("not one of the [resources] source directories"));
     }
 
     #[test]
@@ -1214,14 +1250,18 @@ mod tests {
 
     #[test]
     fn liquid_env_variable() {
-        unsafe { std::env::set_var("CURIE_LIQUID_TEST_VAR", "hello"); }
+        unsafe {
+            std::env::set_var("CURIE_LIQUID_TEST_VAR", "hello");
+        }
         let engine = LiquidEngine::new().unwrap();
         let vars = ctx(&[]);
         let out = engine
             .render(Path::new("f"), "val={{ env.CURIE_LIQUID_TEST_VAR }}", &vars)
             .unwrap();
         assert_eq!(out, "val=hello");
-        unsafe { std::env::remove_var("CURIE_LIQUID_TEST_VAR"); }
+        unsafe {
+            std::env::remove_var("CURIE_LIQUID_TEST_VAR");
+        }
     }
 
     #[test]
@@ -1257,7 +1297,10 @@ mod tests {
     fn liquid_stage_in_filter_pipeline() {
         let stage = liquid_stage(&["**/*.txt"], &[], &[]);
         let (_d, out) = run_filter(
-            &[&[("app.txt", "v={{ project.version }}"), ("skip.md", "v={{ project.version }}")]],
+            &[&[
+                ("app.txt", "v={{ project.version }}"),
+                ("skip.md", "v={{ project.version }}"),
+            ]],
             std::slice::from_ref(&stage),
             &[("project.version", "3.0.0")],
         );
@@ -1314,8 +1357,14 @@ mod tests {
         let roots = vec![root.clone()];
         let compiled = must(compile_stages(dir.path(), &scope, &roots, "resources"));
         let out = dir.path().join("out");
-        filter_roots(&roots, &out, &compiled, &ctx(&[("x", "1")]), &binary_extension_set(&[]))
-            .unwrap();
+        filter_roots(
+            &roots,
+            &out,
+            &compiled,
+            &ctx(&[("x", "1")]),
+            &binary_extension_set(&[]),
+        )
+        .unwrap();
         assert_eq!(std::fs::read(out.join("logo.png")).unwrap(), bytes);
     }
 }

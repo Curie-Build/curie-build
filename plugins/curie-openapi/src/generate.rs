@@ -50,9 +50,14 @@ pub fn run(
             .arg(join_properties(&cfg.additional_properties));
     }
 
-    let status = cmd.status().context("failed to run java -jar openapi-generator-cli")?;
+    let status = cmd
+        .status()
+        .context("failed to run java -jar openapi-generator-cli")?;
     if !status.success() {
-        bail!("openapi-generator-cli exited with status {:?}", status.code());
+        bail!(
+            "openapi-generator-cli exited with status {:?}",
+            status.code()
+        );
     }
 
     Ok(())

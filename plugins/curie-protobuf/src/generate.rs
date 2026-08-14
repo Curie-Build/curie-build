@@ -25,13 +25,13 @@ pub fn run(
 
     let proto_files = collect_proto_files(&source_dir)?;
     if proto_files.is_empty() {
-        bail!(
-            "no .proto files found in {}",
-            source_dir.display()
-        );
+        bail!("no .proto files found in {}", source_dir.display());
     }
 
-    let out_dir = project_root.join("target").join("generated-sources").join("protobuf");
+    let out_dir = project_root
+        .join("target")
+        .join("generated-sources")
+        .join("protobuf");
     std::fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create {}", out_dir.display()))?;
 
@@ -43,7 +43,10 @@ pub fn run(
         let grpc_plugin = artifacts
             .get("grpc-plugin")
             .with_context(|| "curie-build did not provide 'grpc-plugin' artifact path")?;
-        cmd.arg(format!("--plugin=protoc-gen-grpc-java={}", grpc_plugin.display()));
+        cmd.arg(format!(
+            "--plugin=protoc-gen-grpc-java={}",
+            grpc_plugin.display()
+        ));
         cmd.arg(format!("--grpc-java_out={}", out_dir.display()));
     }
 
@@ -51,9 +54,7 @@ pub fn run(
         cmd.arg(proto);
     }
 
-    let status = cmd
-        .status()
-        .context("failed to run protoc")?;
+    let status = cmd.status().context("failed to run protoc")?;
 
     if !status.success() {
         bail!("protoc exited with status {:?}", status.code());

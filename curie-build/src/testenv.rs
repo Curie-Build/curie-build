@@ -40,7 +40,9 @@ impl Drop for HomeGuard {
 /// Lock poisoning is ignored: a panicking test still restores HOME via its own
 /// guard's `Drop`, so the lock state stays usable for subsequent tests.
 pub fn set_home(home: &Path) -> HomeGuard {
-    let lock = HOME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lock = HOME_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let prev = std::env::var("HOME").ok();
     // SAFETY: we hold the HOME lock for the lifetime of the returned guard.
     unsafe {

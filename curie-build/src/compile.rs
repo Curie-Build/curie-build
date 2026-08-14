@@ -33,9 +33,9 @@ use crate::incremental::{
 use crate::jar::classpath_string;
 use crate::jpms;
 use crate::kt_stale;
+use crate::lock;
 use anyhow::{bail, Context, Result};
 use curie_deps::resolver::{resolve, DepEntry, ResolveOptions};
-use crate::lock;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -315,7 +315,7 @@ pub fn compile_with_options(
     //   D) Flat-package:       src/com.example.myapp/  (dot-named sibling under src/)
     //      .java, .kt, and .groovy files are all collected from flat-package dirs.
     //   E) Bare src/:          src/Hello.java  (unnamed classes — no package dir)
-    let maven_java_src   = project_root.join("src").join("main").join("java");
+    let maven_java_src = project_root.join("src").join("main").join("java");
     let maven_kotlin_src = project_root.join("src").join("main").join("kotlin");
     let maven_groovy_src = project_root.join("src").join("main").join("groovy");
     let flat_src_dirs = flat_package_src_dirs(project_root);
@@ -323,9 +323,15 @@ pub fn compile_with_options(
     let flat_src_set: std::collections::HashSet<PathBuf> = flat_src_dirs.iter().cloned().collect();
 
     let mut src_roots: Vec<PathBuf> = Vec::new();
-    if maven_java_src.exists()   { src_roots.push(maven_java_src.clone()); }
-    if maven_kotlin_src.exists() { src_roots.push(maven_kotlin_src.clone()); }
-    if maven_groovy_src.exists() { src_roots.push(maven_groovy_src.clone()); }
+    if maven_java_src.exists() {
+        src_roots.push(maven_java_src.clone());
+    }
+    if maven_kotlin_src.exists() {
+        src_roots.push(maven_kotlin_src.clone());
+    }
+    if maven_groovy_src.exists() {
+        src_roots.push(maven_groovy_src.clone());
+    }
     src_roots.extend(flat_src_dirs);
 
     // Configured hierarchical roots ([java] sourceDirs), e.g. Guava's `src/`.
@@ -345,15 +351,13 @@ pub fn compile_with_options(
         let has_direct_sources = std::fs::read_dir(&bare_src)
             .ok()
             .map(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .any(|e| {
-                        e.file_type().map(|t| t.is_file()).unwrap_or(false)
-                            && matches!(
-                                e.path().extension().and_then(|s| s.to_str()),
-                                Some("java") | Some("kt") | Some("groovy")
-                            )
-                    })
+                entries.filter_map(|e| e.ok()).any(|e| {
+                    e.file_type().map(|t| t.is_file()).unwrap_or(false)
+                        && matches!(
+                            e.path().extension().and_then(|s| s.to_str()),
+                            Some("java") | Some("kt") | Some("groovy")
+                        )
+                })
             })
             .unwrap_or(false);
         if has_direct_sources {
@@ -405,11 +409,8 @@ pub fn compile_with_options(
                     r.extend(crate::build::extra_repos(desc));
                     r
                 };
-                let resolved = crate::plugin::download_artifacts(
-                    &manifest.artifacts,
-                    &plugin_repos,
-                    offline,
-                )?;
+                let resolved =
+                    crate::plugin::download_artifacts(&manifest.artifacts, &plugin_repos, offline)?;
                 crate::plugin::generate_sources(
                     plugin_name,
                     &envelope,
@@ -445,9 +446,8 @@ pub fn compile_with_options(
 
     // A library that declares only test source dirs (Guava's guava-tests)
     // has no production sources.  Applications still need a source root.
-    let test_only_library = src_roots.is_empty()
-        && desc.is_library()
-        && !desc.java.test_source_dirs.is_empty();
+    let test_only_library =
+        src_roots.is_empty() && desc.is_library() && !desc.java.test_source_dirs.is_empty();
     if src_roots.is_empty() && !test_only_library {
         bail!(
             "no source directory found: expected src/main/java/, src/main/kotlin/, \
@@ -459,8 +459,7 @@ pub fn compile_with_options(
     let classes_dir = project_root.join("target").join("classes");
     let output_dir = project_root.join("target");
 
-    std::fs::create_dir_all(&classes_dir)
-        .context("failed to create target/classes")?;
+    std::fs::create_dir_all(&classes_dir).context("failed to create target/classes")?;
 
     // --- resolve production dependencies -------------------------------------
     // Parse [bom-imports] into GAVs once — reused for both prod and test.
@@ -473,7 +472,14 @@ pub fn compile_with_options(
         let pairs: Vec<DepEntry> = desc
             .dependencies
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
+            .map(|(k, v)| DepEntry {
+                key: k,
+                version: v.version(),
+                repo_id: v.repository(),
+                exclusions: v.exclusions(),
+                classifier: None,
+                allow_version_conflict: v.allow_version_conflict(),
+            })
             .collect();
 
         // User-declared deps: honour Curie.lock for SNAPSHOT pins and rewrite
@@ -493,12 +499,15 @@ pub fn compile_with_options(
                 error_on_version_conflict: true,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                },
+            },
             update_snapshots,
         )
         .context("dependency resolution failed")?;
 
-        crate::parallel::emit(&crate::style::resolve("Resolve deps", &format!("{} JAR(s)", jars.len())));
+        crate::parallel::emit(&crate::style::resolve(
+            "Resolve deps",
+            &format!("{} JAR(s)", jars.len()),
+        ));
         jars
     };
 
@@ -512,7 +521,14 @@ pub fn compile_with_options(
     } else {
         let ap_entries: Vec<DepEntry> = ap_pairs
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false })
+            .map(|(k, v)| DepEntry {
+                key: k,
+                version: v,
+                repo_id: None,
+                exclusions: vec![],
+                classifier: None,
+                allow_version_conflict: false,
+            })
             .collect();
         let jars = resolve(
             &ap_entries,
@@ -522,13 +538,17 @@ pub fn compile_with_options(
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: bom_gavs.clone(),
                 offline,
-                skip_version_ranges: false, error_on_version_conflict: false,
+                skip_version_ranges: false,
+                error_on_version_conflict: false,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                },
+            },
         )
         .context("annotation-processor resolution failed")?;
-        crate::parallel::emit(&crate::style::resolve("Resolve APs", &format!("{} JAR(s)", jars.len())));
+        crate::parallel::emit(&crate::style::resolve(
+            "Resolve APs",
+            &format!("{} JAR(s)", jars.len()),
+        ));
 
         // Each ap_pairs entry yields a transitive closure starting with
         // the entry's own jar (declared deps first, BFS).  Match the
@@ -552,19 +572,32 @@ pub fn compile_with_options(
                 .expect("on-cp coord must be in ap_pairs");
             // Resolve the single coord again — second call hits ~/.m2.
             let single = resolve(
-                &[DepEntry { key: coord, version, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }],
+                &[DepEntry {
+                    key: coord,
+                    version,
+                    repo_id: None,
+                    exclusions: vec![],
+                    classifier: None,
+                    allow_version_conflict: false,
+                }],
                 &ResolveOptions {
                     default_repos: central_repos(),
                     named_repos: extra_repos(desc),
                     progress: false,
                     bom_imports: bom_gavs.clone(),
                     offline,
-                    skip_version_ranges: false, error_on_version_conflict: false,
+                    skip_version_ranges: false,
+                    error_on_version_conflict: false,
                     snapshot_pins: Default::default(),
                     update_snapshots: false,
-                    },
+                },
             )
-            .with_context(|| format!("annotation-processor classpath resolution failed for {}", coord))?;
+            .with_context(|| {
+                format!(
+                    "annotation-processor classpath resolution failed for {}",
+                    coord
+                )
+            })?;
             // The leaf coord's own JAR is the first entry; the rest are
             // its transitive deps which the processor needs at compile
             // time too (it'd be incomplete without them).
@@ -577,7 +610,7 @@ pub fn compile_with_options(
     // Co-located test convention (*Test.java, *Spec.java, etc.) applies only to
     // Curie flat-package roots.  Maven layout roots (src/main/java, etc.) include
     // every file — a class named LoadTest or ABTest there is production code.
-    let mut java_sources: Vec<PathBuf>   = Vec::new();
+    let mut java_sources: Vec<PathBuf> = Vec::new();
     let mut kotlin_sources: Vec<PathBuf> = Vec::new();
     let mut groovy_sources: Vec<PathBuf> = Vec::new();
 
@@ -587,8 +620,12 @@ pub fn compile_with_options(
         let root_java: Vec<_> = walk_files(src_root)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
-                if !name.ends_with(".java") { return false; }
-                if desc.java.excludes_path(&e.path()) { return false; }
+                if !name.ends_with(".java") {
+                    return false;
+                }
+                if desc.java.excludes_path(&e.path()) {
+                    return false;
+                }
                 if colocated_layout {
                     !name.ends_with("Test.java")
                         && !name.ends_with("Tests.java")
@@ -604,8 +641,12 @@ pub fn compile_with_options(
         let root_kotlin: Vec<_> = walk_files(src_root)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
-                if !name.ends_with(".kt") { return false; }
-                if desc.java.excludes_path(&e.path()) { return false; }
+                if !name.ends_with(".kt") {
+                    return false;
+                }
+                if desc.java.excludes_path(&e.path()) {
+                    return false;
+                }
                 if colocated_layout {
                     !name.ends_with("Test.kt")
                         && !name.ends_with("Tests.kt")
@@ -621,8 +662,12 @@ pub fn compile_with_options(
         let root_groovy: Vec<_> = walk_files(src_root)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
-                if !name.ends_with(".groovy") { return false; }
-                if desc.java.excludes_path(&e.path()) { return false; }
+                if !name.ends_with(".groovy") {
+                    return false;
+                }
+                if desc.java.excludes_path(&e.path()) {
+                    return false;
+                }
                 if colocated_layout {
                     !name.ends_with("Test.groovy")
                         && !name.ends_with("Tests.groovy")
@@ -636,12 +681,15 @@ pub fn compile_with_options(
         groovy_sources.extend(root_groovy);
     }
 
-    java_sources.sort();   java_sources.dedup();
-    kotlin_sources.sort(); kotlin_sources.dedup();
-    groovy_sources.sort(); groovy_sources.dedup();
+    java_sources.sort();
+    java_sources.dedup();
+    kotlin_sources.sort();
+    kotlin_sources.dedup();
+    groovy_sources.sort();
+    groovy_sources.dedup();
 
     let has_kotlin = !kotlin_sources.is_empty();
-    let has_java   = !java_sources.is_empty();
+    let has_java = !java_sources.is_empty();
     let has_groovy = !groovy_sources.is_empty();
 
     if has_groovy && has_kotlin {
@@ -662,7 +710,11 @@ pub fn compile_with_options(
     if sources.is_empty() && !test_only_library {
         bail!(
             "no Java, Kotlin, or Groovy source files found under {}",
-            src_roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+            src_roots
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 
@@ -672,13 +724,25 @@ pub fn compile_with_options(
     // Whichever exists is used; Maven-style takes precedence when both present.
     let resources_dir = {
         let maven = project_root.join("src").join("main").join("resources");
-        let flat  = project_root.join("resources");
-        if maven.exists() { Some(maven) } else if flat.exists() { Some(flat) } else { None }
+        let flat = project_root.join("resources");
+        if maven.exists() {
+            Some(maven)
+        } else if flat.exists() {
+            Some(flat)
+        } else {
+            None
+        }
     };
     let test_resources_dir = {
         let maven = project_root.join("src").join("test").join("resources");
-        let flat  = project_root.join("test-resources");
-        if maven.exists() { Some(maven) } else if flat.exists() { Some(flat) } else { None }
+        let flat = project_root.join("test-resources");
+        if maven.exists() {
+            Some(maven)
+        } else if flat.exists() {
+            Some(flat)
+        } else {
+            None
+        }
     };
 
     // --- resolve Kotlin compiler + stdlib (when needed) ----------------------
@@ -689,8 +753,22 @@ pub fn compile_with_options(
         let kver = desc.kotlin.version();
         let kotlin_jars = resolve(
             &[
-                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false },
-                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false },
+                DepEntry {
+                    key: KOTLIN_COMPILER_COORD,
+                    version: kver,
+                    repo_id: None,
+                    exclusions: vec![],
+                    classifier: None,
+                    allow_version_conflict: false,
+                },
+                DepEntry {
+                    key: KOTLIN_STDLIB_COORD,
+                    version: kver,
+                    repo_id: None,
+                    exclusions: vec![],
+                    classifier: None,
+                    allow_version_conflict: false,
+                },
             ],
             &ResolveOptions {
                 default_repos: central_repos(),
@@ -698,13 +776,17 @@ pub fn compile_with_options(
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: bom_gavs.clone(),
                 offline,
-                skip_version_ranges: false, error_on_version_conflict: false,
+                skip_version_ranges: false,
+                error_on_version_conflict: false,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                },
+            },
         )
         .context("Kotlin compiler/stdlib resolution failed")?;
-        crate::parallel::emit(&crate::style::resolve("Resolve Kotlin", &format!("{} JAR(s)", kotlin_jars.len())));
+        crate::parallel::emit(&crate::style::resolve(
+            "Resolve Kotlin",
+            &format!("{} JAR(s)", kotlin_jars.len()),
+        ));
 
         // Stdlib jars: everything except the compiler embeddable itself.
         // These are threaded into the compile and test runtime classpaths.
@@ -712,7 +794,10 @@ pub fn compile_with_options(
             .iter()
             .filter(|p| {
                 p.file_name()
-                    .map(|f| !f.to_string_lossy().starts_with("kotlin-compiler-embeddable"))
+                    .map(|f| {
+                        !f.to_string_lossy()
+                            .starts_with("kotlin-compiler-embeddable")
+                    })
                     .unwrap_or(true)
             })
             .cloned()
@@ -730,28 +815,39 @@ pub fn compile_with_options(
     if has_groovy {
         let gver = desc.groovy.version();
         let jars = resolve(
-            &[DepEntry { key: GROOVY_COORD, version: gver, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }],
+            &[DepEntry {
+                key: GROOVY_COORD,
+                version: gver,
+                repo_id: None,
+                exclusions: vec![],
+                classifier: None,
+                allow_version_conflict: false,
+            }],
             &ResolveOptions {
                 default_repos: central_repos(),
                 named_repos: extra_repos(desc),
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: bom_gavs.clone(),
                 offline,
-                skip_version_ranges: false, error_on_version_conflict: false,
+                skip_version_ranges: false,
+                error_on_version_conflict: false,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                },
+            },
         )
         .context("Groovy compiler/runtime resolution failed")?;
-        crate::parallel::emit(&crate::style::resolve("Resolve Groovy", &format!("{} JAR(s)", jars.len())));
+        crate::parallel::emit(&crate::style::resolve(
+            "Resolve Groovy",
+            &format!("{} JAR(s)", jars.len()),
+        ));
         groovy_jars = jars;
     } else {
         groovy_jars = Vec::new();
     }
 
     // --- JPMS detection and validation ----------------------------------------
-    let module_info_path = jpms::find_module_info_java(&src_roots)
-        .filter(|p| !desc.java.excludes_path(p));
+    let module_info_path =
+        jpms::find_module_info_java(&src_roots).filter(|p| !desc.java.excludes_path(p));
     let is_modular = module_info_path.is_some();
 
     if is_modular && has_groovy {
@@ -848,10 +944,11 @@ pub fn compile_with_options(
     // with a non-empty previous one (e.g. transitioned away from Kotlin) is
     // also a change, which keeps the Kotlin orphan-wipe firing.
     let source_set = incremental::canonical_source_set(&sources);
-    let source_set_prev =
-        incremental::load_source_set(&incremental::source_set_stamp_path(&output_dir, SOURCE_SET_STAMP));
-    let source_set_changed =
-        incremental::source_set_changed(source_set_prev.as_ref(), &source_set);
+    let source_set_prev = incremental::load_source_set(&incremental::source_set_stamp_path(
+        &output_dir,
+        SOURCE_SET_STAMP,
+    ));
+    let source_set_changed = incremental::source_set_changed(source_set_prev.as_ref(), &source_set);
 
     let compile_status = if pre_pruned > 0 {
         CompileStatus::StaleClasses
@@ -873,7 +970,11 @@ pub fn compile_with_options(
     if compile_status.needs_recompile() {
         crate::parallel::emit(&crate::style::active(
             "Compile",
-            &format!("{} source file(s)  [{}]", sources.len(), compile_status.reason()),
+            &format!(
+                "{} source file(s)  [{}]",
+                sources.len(),
+                compile_status.reason()
+            ),
         ));
 
         // Wipe Kotlin-derived classes ahead of kotlinc.  kotlinc re-emits
@@ -917,7 +1018,9 @@ pub fn compile_with_options(
             let mut kotlinc = Command::new("java");
             // Suppress the jansi native-access warning on JDK 17+.
             kotlinc.arg("--enable-native-access=ALL-UNNAMED");
-            kotlinc.arg("-cp").arg(classpath_string(&kotlin_compiler_jars));
+            kotlinc
+                .arg("-cp")
+                .arg(classpath_string(&kotlin_compiler_jars));
             kotlinc.arg("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler");
 
             // Tell kotlinc not to try to find stdlib/reflect relative to a
@@ -966,13 +1069,25 @@ pub fn compile_with_options(
             if kotlin_orphans > 0 {
                 crate::parallel::emit(&crate::style::stale(
                     "Stale (Kotlin)",
-                    &format!("removed {} orphan class file{}", kotlin_orphans, if kotlin_orphans == 1 { "" } else { "s" }),
+                    &format!(
+                        "removed {} orphan class file{}",
+                        kotlin_orphans,
+                        if kotlin_orphans == 1 { "" } else { "s" }
+                    ),
                 ));
             }
         } else if !wiped_kotlin_classes.is_empty() {
             crate::parallel::emit(&crate::style::stale(
                 "Stale (Kotlin)",
-                &format!("removed {} orphan class file{}", wiped_kotlin_classes.len(), if wiped_kotlin_classes.len() == 1 { "" } else { "s" }),
+                &format!(
+                    "removed {} orphan class file{}",
+                    wiped_kotlin_classes.len(),
+                    if wiped_kotlin_classes.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
             ));
         }
 
@@ -992,25 +1107,20 @@ pub fn compile_with_options(
             if desc.java.preview_enabled() {
                 javac.arg("--enable-preview");
             }
-            javac
-                .arg("-g")
-                .arg("-d")
-                .arg(&classes_dir);
+            javac.arg("-g").arg("-d").arg(&classes_dir);
 
             if let Some((parsed_mi, split)) = &module_split {
                 // Modular javac invocation: use --module-path + --patch-module.
                 if !split.module_path.is_empty() {
-                    javac.arg("--module-path").arg(classpath_string(&split.module_path));
+                    javac
+                        .arg("--module-path")
+                        .arg(classpath_string(&split.module_path));
                 }
 
                 // When Kotlin sources were compiled in phase 1, patch the module
                 // so javac can see the Kotlin .class files alongside our sources.
                 if has_kotlin {
-                    let patch_arg = format!(
-                        "{}={}",
-                        parsed_mi.module_name,
-                        classes_dir.display()
-                    );
+                    let patch_arg = format!("{}={}", parsed_mi.module_name, classes_dir.display());
                     javac.arg("--patch-module").arg(patch_arg);
                 }
 
@@ -1042,9 +1152,8 @@ pub fn compile_with_options(
             // Annotation-processor classpath + generated-sources directory.
             if !ap_jars.is_empty() {
                 let gen_dir = output_dir.join("generated-sources").join("annotations");
-                std::fs::create_dir_all(&gen_dir).with_context(|| {
-                    format!("failed to create {}", gen_dir.display())
-                })?;
+                std::fs::create_dir_all(&gen_dir)
+                    .with_context(|| format!("failed to create {}", gen_dir.display()))?;
                 javac.arg("-processorpath").arg(classpath_string(&ap_jars));
                 javac.arg("-s").arg(&gen_dir);
             }
@@ -1082,7 +1191,11 @@ pub fn compile_with_options(
                     if n > 0 {
                         crate::parallel::emit(&crate::style::stale(
                             "Stale",
-                            &format!("removed {} orphaned class file{}", n, if n == 1 { "" } else { "s" }),
+                            &format!(
+                                "removed {} orphaned class file{}",
+                                n,
+                                if n == 1 { "" } else { "s" }
+                            ),
                         ));
                     }
                 }
@@ -1139,7 +1252,8 @@ pub fn compile_with_options(
 
     let jar_name = format!(
         "{}-{}.jar",
-        desc.buildable_name().replace(':', "-"), desc.buildable_version()
+        desc.buildable_name().replace(':', "-"),
+        desc.buildable_version()
     );
     let jar_path = output_dir.join(&jar_name);
 
@@ -1149,15 +1263,25 @@ pub fn compile_with_options(
     };
 
     Ok(CompileOutput {
-        jar_path, jar_name, classes_dir, src_roots, sources, dep_jars,
-        kotlin_stdlib_jars, groovy_jars,
-        resources_dir, test_resources_dir,
+        jar_path,
+        jar_name,
+        classes_dir,
+        src_roots,
+        sources,
+        dep_jars,
+        kotlin_stdlib_jars,
+        groovy_jars,
+        resources_dir,
+        test_resources_dir,
         is_modular,
         module_name,
         module_path_jars,
     })
 }
-fn summarise_plugin_inputs(manifest: &crate::plugin::PluginManifest, project_root: &Path) -> String {
+fn summarise_plugin_inputs(
+    manifest: &crate::plugin::PluginManifest,
+    project_root: &Path,
+) -> String {
     let from_dirs = manifest.inputs.dirs.iter().flat_map(|d| {
         let full = project_root.join(d);
         walkdir::WalkDir::new(&full)
@@ -1249,7 +1373,10 @@ mod tests {
         assert!(!KOTLIN_VERSION.is_empty());
         // Basic sanity: must look like a semver triple.
         let parts: Vec<&str> = KOTLIN_VERSION.split('.').collect();
-        assert!(parts.len() >= 2, "KOTLIN_VERSION should be at least major.minor");
+        assert!(
+            parts.len() >= 2,
+            "KOTLIN_VERSION should be at least major.minor"
+        );
     }
 
     #[test]
@@ -1277,7 +1404,10 @@ mod tests {
         .unwrap();
         let desc = descriptor::load(dir.path()).unwrap();
 
-        assert_eq!(groovy_target_bytecode_arg(&desc), Some("-Dgroovy.target.bytecode=21".to_string()));
+        assert_eq!(
+            groovy_target_bytecode_arg(&desc),
+            Some("-Dgroovy.target.bytecode=21".to_string())
+        );
     }
 
     #[test]
@@ -1298,8 +1428,14 @@ mod tests {
 
     #[test]
     fn parse_jdk_major_version_plain_output() {
-        assert_eq!(parse_jdk_major_version("javac 21.0.3\n"), Some("21".to_string()));
-        assert_eq!(parse_jdk_major_version("javac 25.0.1"), Some("25".to_string()));
+        assert_eq!(
+            parse_jdk_major_version("javac 21.0.3\n"),
+            Some("21".to_string())
+        );
+        assert_eq!(
+            parse_jdk_major_version("javac 25.0.1"),
+            Some("25".to_string())
+        );
         assert_eq!(parse_jdk_major_version("javac 11"), Some("11".to_string()));
     }
 
@@ -1313,14 +1449,18 @@ mod tests {
     fn parse_jdk_major_version_preamble_only_returns_none() {
         // Version line absent — only the JAVA_TOOL_OPTIONS preamble on stderr;
         // version line was written to stdout instead (caller should try stdout).
-        let stderr = "Picked up JAVA_TOOL_OPTIONS: -Dhttp.proxyHost=172.16.0.4 -Dhttp.proxyPort=2080";
+        let stderr =
+            "Picked up JAVA_TOOL_OPTIONS: -Dhttp.proxyHost=172.16.0.4 -Dhttp.proxyPort=2080";
         assert_eq!(parse_jdk_major_version(stderr), None);
     }
 
     #[test]
     fn parse_jdk_major_version_unrecognised_output_returns_none() {
         assert_eq!(parse_jdk_major_version(""), None);
-        assert_eq!(parse_jdk_major_version("Picked up JAVA_TOOL_OPTIONS: something"), None);
+        assert_eq!(
+            parse_jdk_major_version("Picked up JAVA_TOOL_OPTIONS: something"),
+            None
+        );
     }
 
     // --- javac_release_arg --------------------------------------------------
@@ -1349,7 +1489,9 @@ mod tests {
         .unwrap();
         let desc = descriptor::load(dir.path()).unwrap();
         assert!(desc.java.excludes_path(Path::new("src/module-info.java")));
-        assert!(desc.java.excludes_path(Path::new("/tmp/foo/module-info.java")));
+        assert!(desc
+            .java
+            .excludes_path(Path::new("/tmp/foo/module-info.java")));
         assert!(!desc.java.excludes_path(Path::new("src/com/Foo.java")));
     }
 
@@ -1388,10 +1530,15 @@ mod tests {
         )
         .unwrap();
         let desc = descriptor::load(dir.path()).unwrap();
-        let release = javac_release_arg(&desc).unwrap().expect("should return running JDK version");
+        let release = javac_release_arg(&desc)
+            .unwrap()
+            .expect("should return running JDK version");
         // Must be a non-empty numeric major version string.
         assert!(!release.is_empty(), "release should not be empty");
-        assert!(release.parse::<u32>().is_ok(), "release should be a number, got: {release}");
+        assert!(
+            release.parse::<u32>().is_ok(),
+            "release should be a number, got: {release}"
+        );
     }
 
     // --- Groovy source detection helpers ------------------------------------
@@ -1401,11 +1548,24 @@ mod tests {
         // Maven layout (src/main/groovy) is a production root — files named
         // *Test.groovy / *Spec.groovy there are production classes, not tests.
         let dir = tempfile::tempdir().unwrap();
-        let groovy_src = dir.path().join("src").join("main").join("groovy")
-            .join("com").join("example");
+        let groovy_src = dir
+            .path()
+            .join("src")
+            .join("main")
+            .join("groovy")
+            .join("com")
+            .join("example");
         std::fs::create_dir_all(&groovy_src).unwrap();
-        std::fs::write(groovy_src.join("Greeter.groovy"), b"package com.example; class Greeter {}").unwrap();
-        std::fs::write(groovy_src.join("GreeterSpec.groovy"), b"package com.example; class GreeterSpec {}").unwrap();
+        std::fs::write(
+            groovy_src.join("Greeter.groovy"),
+            b"package com.example; class Greeter {}",
+        )
+        .unwrap();
+        std::fs::write(
+            groovy_src.join("GreeterSpec.groovy"),
+            b"package com.example; class GreeterSpec {}",
+        )
+        .unwrap();
 
         use crate::incremental::walk_files;
         let root = dir.path().join("src").join("main").join("groovy");
@@ -1413,7 +1573,12 @@ mod tests {
         let found: Vec<_> = walk_files(&root)
             .filter(|e| e.file_name().to_string_lossy().ends_with(".groovy"))
             .collect();
-        assert_eq!(found.len(), 2, "both Greeter.groovy and GreeterSpec.groovy should be included; got: {:?}", found);
+        assert_eq!(
+            found.len(),
+            2,
+            "both Greeter.groovy and GreeterSpec.groovy should be included; got: {:?}",
+            found
+        );
     }
 
     #[test]
@@ -1421,20 +1586,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let flat_dir = dir.path().join("src").join("com.example");
         std::fs::create_dir_all(&flat_dir).unwrap();
-        std::fs::write(flat_dir.join("Hello.groovy"), b"package com.example; class Hello {}").unwrap();
-        std::fs::write(flat_dir.join("Hello.java"), b"package com.example; class Hello {}").unwrap();
+        std::fs::write(
+            flat_dir.join("Hello.groovy"),
+            b"package com.example; class Hello {}",
+        )
+        .unwrap();
+        std::fs::write(
+            flat_dir.join("Hello.java"),
+            b"package com.example; class Hello {}",
+        )
+        .unwrap();
 
         let flat_dirs = flat_package_src_dirs(dir.path());
         assert!(!flat_dirs.is_empty(), "should find com.example dir");
 
         use crate::incremental::walk_files;
-        let groovy_files: Vec<_> = flat_dirs.iter()
-            .flat_map(|d| walk_files(d)
-                .filter(|e| e.file_name().to_string_lossy().ends_with(".groovy"))
-                .collect::<Vec<_>>()
-            )
+        let groovy_files: Vec<_> = flat_dirs
+            .iter()
+            .flat_map(|d| {
+                walk_files(d)
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".groovy"))
+                    .collect::<Vec<_>>()
+            })
             .collect();
-        assert_eq!(groovy_files.len(), 1, "should find Hello.groovy; got: {:?}", groovy_files);
+        assert_eq!(
+            groovy_files.len(),
+            1,
+            "should find Hello.groovy; got: {:?}",
+            groovy_files
+        );
     }
 
     // --- groovyc_compiler_classpath -----------------------------------------
@@ -1446,11 +1626,17 @@ mod tests {
         let classes = PathBuf::from("/target/classes");
 
         let gcp = groovyc_compiler_classpath(&shared, &groovy, None);
-        assert_eq!(gcp, vec![
-            PathBuf::from("/deps/dep.jar"),
-            PathBuf::from("/groovy/groovy.jar"),
-        ]);
-        assert!(!gcp.contains(&classes), "classes_dir must not appear when Java is absent");
+        assert_eq!(
+            gcp,
+            vec![
+                PathBuf::from("/deps/dep.jar"),
+                PathBuf::from("/groovy/groovy.jar"),
+            ]
+        );
+        assert!(
+            !gcp.contains(&classes),
+            "classes_dir must not appear when Java is absent"
+        );
     }
 
     #[test]
@@ -1460,10 +1646,13 @@ mod tests {
         let classes = PathBuf::from("/target/classes");
 
         let gcp = groovyc_compiler_classpath(&shared, &groovy, Some(&classes));
-        assert_eq!(gcp, vec![
-            PathBuf::from("/deps/dep.jar"),
-            PathBuf::from("/groovy/groovy.jar"),
-            PathBuf::from("/target/classes"),
-        ]);
+        assert_eq!(
+            gcp,
+            vec![
+                PathBuf::from("/deps/dep.jar"),
+                PathBuf::from("/groovy/groovy.jar"),
+                PathBuf::from("/target/classes"),
+            ]
+        );
     }
 }

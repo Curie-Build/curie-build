@@ -23,8 +23,8 @@
 //! are cached in `<target_dir>/.jpms-modules.toml` and recomputed only when
 //! the JAR's mtime changes.
 
-use anyhow::{bail, Context, Result};
 use crate::jar::get_manifest_header;
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -145,7 +145,14 @@ impl ModuleCache {
     fn insert(&mut self, jar_path: &Path, mtime_secs: Option<u64>, identity: &ModuleIdentity) {
         let (kind, name) = encode_identity(identity);
         let key = jar_path.to_string_lossy().into_owned();
-        self.entries.insert(key, CachedIdentity { mtime_secs, kind, name });
+        self.entries.insert(
+            key,
+            CachedIdentity {
+                mtime_secs,
+                kind,
+                name,
+            },
+        );
     }
 }
 
@@ -187,7 +194,10 @@ pub fn parse_module_info_java(content: &str) -> Result<ParsedModuleInfo> {
     let stripped = strip_java_comments(content);
     let module_name = extract_module_name(&stripped)?;
     let requires = extract_requires_directives(&stripped);
-    Ok(ParsedModuleInfo { module_name, requires })
+    Ok(ParsedModuleInfo {
+        module_name,
+        requires,
+    })
 }
 
 /// Remove `// …` line comments and `/* … */` block comments from Java source.
@@ -291,7 +301,11 @@ fn extract_requires_directives(source: &str) -> Vec<Requires> {
                 let module_name = tokens[i + 1].clone();
                 // Skip the semicolon or anything that isn't an identifier.
                 if !module_name.is_empty() && module_name != ";" {
-                    requires_list.push(Requires { module_name, is_static, is_transitive });
+                    requires_list.push(Requires {
+                        module_name,
+                        is_static,
+                        is_transitive,
+                    });
                 }
                 i += 2;
             } else {
@@ -360,7 +374,11 @@ pub fn derive_automatic_module_name(filename: &str) -> Option<String> {
     let with_dots = replace_non_alphanumeric_with_dot(without_version);
     let collapsed = collapse_and_trim_dots(&with_dots);
 
-    if collapsed.is_empty() { None } else { Some(collapsed) }
+    if collapsed.is_empty() {
+        None
+    } else {
+        Some(collapsed)
+    }
 }
 
 /// Remove the `.jar` suffix (case-insensitive) from a filename.
@@ -560,7 +578,9 @@ fn skip_member(data: &[u8], mut offset: usize) -> Option<usize> {
 enum ConstantPoolEntry {
     Utf8(String),
     /// Tag 19 — CONSTANT_Module — contains a name_index into the pool.
-    Module { name_index: u16 },
+    Module {
+        name_index: u16,
+    },
     /// All other entries that take exactly 4 bytes in the pool item body.
     FourBytes,
     /// Long/Double: takes two slots.
@@ -734,7 +754,9 @@ fn read_module_info_bytes(archive: &mut ZipArchive<std::fs::File>) -> Result<Opt
     match archive.by_name("module-info.class") {
         Ok(mut entry) => {
             let mut buf = Vec::new();
-            entry.read_to_end(&mut buf).context("failed to read module-info.class")?;
+            entry
+                .read_to_end(&mut buf)
+                .context("failed to read module-info.class")?;
             return Ok(Some(buf));
         }
         Err(zip::result::ZipError::FileNotFound) => {}
@@ -808,7 +830,9 @@ fn try_read_manifest_module_name(
     let manifest_text = match archive.by_name("META-INF/MANIFEST.MF") {
         Ok(mut entry) => {
             let mut buf = String::new();
-            entry.read_to_string(&mut buf).context("failed to read MANIFEST.MF")?;
+            entry
+                .read_to_string(&mut buf)
+                .context("failed to read MANIFEST.MF")?;
             buf
         }
         Err(zip::result::ZipError::FileNotFound) => return Ok(None),
@@ -847,7 +871,10 @@ pub fn find_module_info_java(src_roots: &[PathBuf]) -> Option<PathBuf> {
             for entry in walker.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 if path.is_file()
-                    && path.file_name().map(|n| n == "module-info.java").unwrap_or(false)
+                    && path
+                        .file_name()
+                        .map(|n| n == "module-info.java")
+                        .unwrap_or(false)
                 {
                     return Some(path);
                 }
@@ -888,8 +915,7 @@ pub fn compute_module_path_split(
     let _ = cache.save(&cache_path);
 
     // Build a name → index map for fast lookup.
-    let mut name_to_idx: std::collections::HashMap<&str, usize> =
-        std::collections::HashMap::new();
+    let mut name_to_idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for (i, (_, identity)) in identities.iter().enumerate() {
         if let Some(name) = identity.module_name() {
             name_to_idx.insert(name, i);
@@ -1259,7 +1285,7 @@ mod tests {
         bytes.extend_from_slice(&0u16.to_be_bytes()); // minor
         bytes.extend_from_slice(&53u16.to_be_bytes()); // major
         bytes.extend_from_slice(&2u16.to_be_bytes()); // pool count = 2 (one entry)
-        // Entry 1: CONSTANT_Utf8 "hello"
+                                                      // Entry 1: CONSTANT_Utf8 "hello"
         bytes.push(1u8);
         bytes.extend_from_slice(&5u16.to_be_bytes());
         bytes.extend_from_slice(b"hello");
@@ -1333,7 +1359,12 @@ mod tests {
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
         zip.start_file("META-INF/MANIFEST.MF", options).unwrap();
-        write!(zip, "Manifest-Version: 1.0\nAutomatic-Module-Name: {}\n", module_name).unwrap();
+        write!(
+            zip,
+            "Manifest-Version: 1.0\nAutomatic-Module-Name: {}\n",
+            module_name
+        )
+        .unwrap();
         zip.finish().unwrap();
     }
 
@@ -1355,7 +1386,8 @@ mod tests {
             }],
         };
 
-        let split = compute_module_path_split(&module_info, &[jar_path.clone()], &target_dir).unwrap();
+        let split =
+            compute_module_path_split(&module_info, &[jar_path.clone()], &target_dir).unwrap();
         assert_eq!(split.module_path, vec![jar_path]);
         assert!(split.classpath.is_empty());
     }
@@ -1374,7 +1406,8 @@ mod tests {
             requires: vec![], // does NOT require com.example.otherlib
         };
 
-        let split = compute_module_path_split(&module_info, &[jar_path.clone()], &target_dir).unwrap();
+        let split =
+            compute_module_path_split(&module_info, &[jar_path.clone()], &target_dir).unwrap();
         assert!(split.module_path.is_empty());
         assert_eq!(split.classpath, vec![jar_path]);
     }
@@ -1399,12 +1432,9 @@ mod tests {
             }],
         };
 
-        let split = compute_module_path_split(
-            &module_info,
-            &[jar_a.clone(), jar_b.clone()],
-            &target_dir,
-        )
-        .unwrap();
+        let split =
+            compute_module_path_split(&module_info, &[jar_a.clone(), jar_b.clone()], &target_dir)
+                .unwrap();
         assert_eq!(split.module_path, vec![jar_a]);
         assert_eq!(split.classpath, vec![jar_b]);
     }
@@ -1534,8 +1564,7 @@ mod tests {
             return;
         }
         let requires = read_jar_module_requires(jar).unwrap();
-        let names: std::collections::HashSet<&str> =
-            requires.iter().map(|s| s.as_str()).collect();
+        let names: std::collections::HashSet<&str> = requires.iter().map(|s| s.as_str()).collect();
         assert!(
             names.contains("com.fasterxml.jackson.core"),
             "jackson-databind should require jackson-core; got: {requires:?}"
@@ -1574,10 +1603,22 @@ mod tests {
 
         let mp: std::collections::HashSet<&std::path::Path> =
             split.module_path.iter().map(|p| p.as_path()).collect();
-        assert!(mp.contains(databind.as_path()), "databind must be on module-path");
-        assert!(mp.contains(core.as_path()), "jackson-core must be on module-path (transitive)");
-        assert!(mp.contains(annotations.as_path()), "jackson-annotations must be on module-path (transitive)");
-        assert!(split.classpath.is_empty(), "all three JARs should be on module-path");
+        assert!(
+            mp.contains(databind.as_path()),
+            "databind must be on module-path"
+        );
+        assert!(
+            mp.contains(core.as_path()),
+            "jackson-core must be on module-path (transitive)"
+        );
+        assert!(
+            mp.contains(annotations.as_path()),
+            "jackson-annotations must be on module-path (transitive)"
+        );
+        assert!(
+            split.classpath.is_empty(),
+            "all three JARs should be on module-path"
+        );
     }
 
     /// Integration test: verify that a real multi-release JAR (jackson-databind)
@@ -1594,8 +1635,10 @@ mod tests {
         let identity = read_jar_module_identity(jar).unwrap();
         match &identity {
             ModuleIdentity::Explicit(name) => {
-                assert_eq!(name, "com.fasterxml.jackson.databind",
-                    "unexpected module name: {name}");
+                assert_eq!(
+                    name, "com.fasterxml.jackson.databind",
+                    "unexpected module name: {name}"
+                );
             }
             other => panic!("expected Explicit module, got {other:?}"),
         }

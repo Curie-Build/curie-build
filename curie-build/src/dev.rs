@@ -30,9 +30,9 @@ pub struct DevOptions {
 pub fn run_dev(project_root: &Path, opts: DevOptions, extra_args: &[String]) -> Result<()> {
     let desc = descriptor::load(project_root)?;
 
-    let app = desc.application().ok_or_else(|| {
-        anyhow::anyhow!("`curie dev` is only supported for application projects")
-    })?;
+    let app = desc
+        .application()
+        .ok_or_else(|| anyhow::anyhow!("`curie dev` is only supported for application projects"))?;
 
     let enable_preview = desc.java.preview_enabled();
 
@@ -46,7 +46,13 @@ pub fn run_dev(project_root: &Path, opts: DevOptions, extra_args: &[String]) -> 
     let agent_coords = desc.dep_java_agent_coords();
     let agent_jars = crate::java_agent::find_agent_jars(&agent_coords, &classpath);
 
-    let mut proc = Some(spawn_app(&main, &classpath, enable_preview, &agent_jars, extra_args)?);
+    let mut proc = Some(spawn_app(
+        &main,
+        &classpath,
+        enable_preview,
+        &agent_jars,
+        extra_args,
+    )?);
     println!("{}", style::dev_step("Watching", &main));
     println!();
 
@@ -90,7 +96,10 @@ pub fn run_dev(project_root: &Path, opts: DevOptions, extra_args: &[String]) -> 
 /// `resources_dir` is the *effective* directory — the filtered output when a
 /// `[resources]` scope is active, else the raw source dir — so `dev` and `run`
 /// read identical resource values.
-fn exploded_classpath(compiled: &compile::CompileOutput, resources_dir: Option<&Path>) -> Vec<PathBuf> {
+fn exploded_classpath(
+    compiled: &compile::CompileOutput,
+    resources_dir: Option<&Path>,
+) -> Vec<PathBuf> {
     let mut cp = vec![compiled.classes_dir.clone()];
 
     if let Some(rd) = resources_dir {
@@ -171,7 +180,8 @@ fn spawn_app(
     cmd.arg("-cp").arg(jar::classpath_string(classpath));
     cmd.arg(main);
     cmd.args(extra_args);
-    cmd.spawn().context("failed to invoke java — is a JRE installed?")
+    cmd.spawn()
+        .context("failed to invoke java — is a JRE installed?")
 }
 
 /// If the child has already exited on its own, print its exit status and
@@ -242,10 +252,11 @@ impl ChangeWatcher {
     fn wait_for_change(&mut self, timeout: Duration) -> bool {
         match &mut self.inner {
             #[cfg(target_os = "linux")]
-            WatcherInner::Inotify(rx) => {
-                rx.recv_timeout(timeout).is_ok()
-            }
-            WatcherInner::Poll { project_root, last_check } => {
+            WatcherInner::Inotify(rx) => rx.recv_timeout(timeout).is_ok(),
+            WatcherInner::Poll {
+                project_root,
+                last_check,
+            } => {
                 std::thread::sleep(timeout);
                 inputs_changed_since(project_root, *last_check)
             }
@@ -269,8 +280,7 @@ impl ChangeWatcher {
 fn inputs_changed_since(project_root: &Path, since: SystemTime) -> bool {
     let src_dir = project_root.join("src");
     let toml_path = project_root.join("Curie.toml");
-    incremental::newest_mtime_in_dir(&src_dir) > since
-        || incremental::mtime(&toml_path) > since
+    incremental::newest_mtime_in_dir(&src_dir) > since || incremental::mtime(&toml_path) > since
 }
 
 // ── inotify watcher (Linux only) ──────────────────────────────────────────────
@@ -417,7 +427,10 @@ mod tests {
 
     fn poll_watcher(project_root: PathBuf, last_check: SystemTime) -> ChangeWatcher {
         ChangeWatcher {
-            inner: WatcherInner::Poll { project_root, last_check },
+            inner: WatcherInner::Poll {
+                project_root,
+                last_check,
+            },
         }
     }
 
@@ -458,8 +471,13 @@ mod tests {
         let classes = dir.path().join("classes");
         let resources = dir.path().join("resources");
         std::fs::create_dir_all(&resources).unwrap();
-        let compiled =
-            fake_compile_output(classes.clone(), vec![], vec![], vec![], Some(resources.clone()));
+        let compiled = fake_compile_output(
+            classes.clone(),
+            vec![],
+            vec![],
+            vec![],
+            Some(resources.clone()),
+        );
         let cp = exploded_classpath(&compiled, compiled.resources_dir.as_deref());
         assert!(cp.contains(&resources));
     }
@@ -469,8 +487,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let classes = dir.path().join("classes");
         let resources = dir.path().join("does-not-exist");
-        let compiled =
-            fake_compile_output(classes.clone(), vec![], vec![], vec![], Some(resources.clone()));
+        let compiled = fake_compile_output(
+            classes.clone(),
+            vec![],
+            vec![],
+            vec![],
+            Some(resources.clone()),
+        );
         let cp = exploded_classpath(&compiled, compiled.resources_dir.as_deref());
         assert!(!cp.contains(&resources));
     }
@@ -489,7 +512,10 @@ mod tests {
         write_with_mtime(&src, base + Duration::from_secs(10));
 
         assert!(inputs_changed_since(dir.path(), base));
-        assert!(!inputs_changed_since(dir.path(), base + Duration::from_secs(10)));
+        assert!(!inputs_changed_since(
+            dir.path(),
+            base + Duration::from_secs(10)
+        ));
     }
 
     #[test]
@@ -515,7 +541,10 @@ mod tests {
         let toml = dir.path().join("Curie.toml");
         write_with_mtime(&toml, base);
 
-        assert!(!inputs_changed_since(dir.path(), base + Duration::from_secs(10)));
+        assert!(!inputs_changed_since(
+            dir.path(),
+            base + Duration::from_secs(10)
+        ));
     }
 
     // -- ChangeWatcher (poll path) -------------------------------------------

@@ -61,7 +61,11 @@ pub fn write_oci_layout(
     }
 
     // Manifest blob
-    write_blob_file(&blobs, &assembled.manifest_digest, &assembled.manifest_bytes)?;
+    write_blob_file(
+        &blobs,
+        &assembled.manifest_digest,
+        &assembled.manifest_bytes,
+    )?;
 
     // index.json pointing at the manifest, with optional org.opencontainers.image.ref.name
     let index = serde_json::json!({
@@ -142,7 +146,12 @@ fn write_docker_manifest_sidecar(
         let last_hex = assembled
             .layers
             .last()
-            .map(|l| l.digest.strip_prefix("sha256:").unwrap_or(&l.digest).to_string())
+            .map(|l| {
+                l.digest
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&l.digest)
+                    .to_string()
+            })
             .unwrap_or_default();
         let repos = serde_json::json!({ name: { tag: last_hex } });
         std::fs::write(image_dir.join("repositories"), serde_json::to_vec(&repos)?)?;

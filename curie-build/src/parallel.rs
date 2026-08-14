@@ -138,8 +138,7 @@ fn make_display_names(declared_names: &[&str]) -> Vec<String> {
         .map(|d| d.rfind('/').map_or(*d, |pos| &d[pos + 1..]))
         .collect();
 
-    let mut counts: std::collections::HashMap<&str, usize> =
-        std::collections::HashMap::new();
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for &name in &project_names {
         *counts.entry(name).or_insert(0) += 1;
     }
@@ -170,19 +169,19 @@ pub(crate) fn emit(line: &str) {
 // ── Color palette ──────────────────────────────────────────────────────────
 
 const PALETTE: &[&str] = &[
-    "\x1b[32m",  // green
-    "\x1b[33m",  // yellow
-    "\x1b[34m",  // blue
-    "\x1b[35m",  // magenta
-    "\x1b[36m",  // cyan
-    "\x1b[91m",  // bright red
-    "\x1b[92m",  // bright green
-    "\x1b[93m",  // bright yellow
-    "\x1b[94m",  // bright blue
-    "\x1b[95m",  // bright magenta
+    "\x1b[32m", // green
+    "\x1b[33m", // yellow
+    "\x1b[34m", // blue
+    "\x1b[35m", // magenta
+    "\x1b[36m", // cyan
+    "\x1b[91m", // bright red
+    "\x1b[92m", // bright green
+    "\x1b[93m", // bright yellow
+    "\x1b[94m", // bright blue
+    "\x1b[95m", // bright magenta
 ];
 const RESET: &str = "\x1b[0m";
-const DIM:   &str = "\x1b[38;5;240m"; // 256-colour dark-gray
+const DIM: &str = "\x1b[38;5;240m"; // 256-colour dark-gray
 
 // ── MuxSlot ────────────────────────────────────────────────────────────────
 
@@ -388,7 +387,10 @@ fn on_completion(
         if dispatched.contains(&other_idx) {
             continue;
         }
-        if ws.members[other_idx].workspace_deps.contains(&completed_idx) {
+        if ws.members[other_idx]
+            .workspace_deps
+            .contains(&completed_idx)
+        {
             pending[pos] = pending[pos].saturating_sub(1);
             if pending[pos] == 0 {
                 newly_ready.push(pos);
@@ -419,14 +421,14 @@ fn mark_undispatched_skipped(
 /// Persisted after each job: written to `target/<action>.meta` as JSON.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct BuildMeta {
-    pub exit_code:   i32,
+    pub exit_code: i32,
     pub duration_ms: u64,
     /// Unix epoch milliseconds at job dispatch — canonical sort key.
-    pub started_ms:  u64,
+    pub started_ms: u64,
     /// RFC 3339 UTC representation of `started_ms` for human display.
-    pub started_at:  String,
+    pub started_at: String,
     /// UUID v4 shared by all jobs in one `run_jobs` invocation.
-    pub build_id:    String,
+    pub build_id: String,
 }
 
 /// Write a JSON `.meta` sidecar; best-effort (caller ignores errors).
@@ -463,7 +465,7 @@ pub(crate) fn parse_meta(path: &Path) -> Option<BuildMeta> {
 fn format_rfc3339_utc(epoch_ms: u64) -> String {
     let secs = epoch_ms / 1000;
     let time_s = secs % 86400;
-    let days  = secs / 86400;
+    let days = secs / 86400;
     let (y, mo, d) = days_to_ymd(days);
     let h = time_s / 3600;
     let m = (time_s % 3600) / 60;
@@ -475,16 +477,16 @@ fn format_rfc3339_utc(epoch_ms: u64) -> String {
 ///
 /// Algorithm: <https://howardhinnant.github.io/date_algorithms.html#civil_from_days>
 fn days_to_ymd(days: u64) -> (u32, u32, u32) {
-    let z   = days as i64 + 719_468;
+    let z = days as i64 + 719_468;
     let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
     let doe = (z - era * 146_097) as u64;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y   = yoe as i64 + era * 400;
+    let y = yoe as i64 + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp  = (5 * doy + 2) / 153;
-    let d   = doy - (153 * mp + 2) / 5 + 1;
-    let mo  = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y   = if mo <= 2 { y + 1 } else { y };
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
     (y as u32, mo as u32, d as u32)
 }
 
@@ -603,7 +605,12 @@ where
             .into_iter()
             .map(|s| s as Arc<dyn LineSink + Send + Sync>)
             .collect();
-        (sinks, JobMode::Tui { _renderer: renderer })
+        (
+            sinks,
+            JobMode::Tui {
+                _renderer: renderer,
+            },
+        )
     } else {
         // Prefix-mux: shared stdout sink protected by a Mutex.
         let shared_out: Arc<Mutex<Box<dyn Write + Send>>> =
@@ -623,7 +630,9 @@ where
                 ))
             })
             .collect();
-        let mux = Arc::new(Mux { slots: mux_slots.clone() });
+        let mux = Arc::new(Mux {
+            slots: mux_slots.clone(),
+        });
         // Background flusher: every 250 ms flush slots with stale buffered lines.
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop2 = Arc::clone(&stop);
@@ -709,7 +718,9 @@ where
             }
 
             // Block until the next completion.
-            let (pos, result) = rx.recv().expect("channel closed while threads still running");
+            let (pos, result) = rx
+                .recv()
+                .expect("channel closed while threads still running");
             in_flight -= 1;
             let idx = subset[pos];
             let job_ok = result.is_ok();
@@ -717,24 +728,36 @@ where
             // Write .meta sidecar (best-effort; errors are intentionally ignored).
             if let Some((sys_start, mono_start)) = job_starts.remove(&pos) {
                 let duration_ms = mono_start.elapsed().as_millis() as u64;
-                let meta_path = ws.members[idx].path
+                let meta_path = ws.members[idx]
+                    .path
                     .join("target")
                     .join(format!("{action_name}.meta"));
-                write_meta(&meta_path, if job_ok { 0 } else { 1 }, duration_ms, sys_start, &build_id).ok();
+                write_meta(
+                    &meta_path,
+                    if job_ok { 0 } else { 1 },
+                    duration_ms,
+                    sys_start,
+                    &build_id,
+                )
+                .ok();
             }
 
             match result {
                 Ok(dep_jars) => {
                     let classes_dir = crate::workspace::member_classes_dir(&ws.members[idx]);
-                    let extra_cp =
-                        collect_extra_cp(&ws.members[idx].workspace_deps, &artifacts);
+                    let extra_cp = collect_extra_cp(&ws.members[idx].workspace_deps, &artifacts);
                     let mut contribution = extra_cp;
                     contribution.extend(dep_jars);
-                    artifacts.insert(idx, Artifact { classes_dir, contribution });
+                    artifacts.insert(
+                        idx,
+                        Artifact {
+                            classes_dir,
+                            contribution,
+                        },
+                    );
 
                     // Unblock dependents.
-                    let newly_ready =
-                        on_completion(ws, subset, &mut pending, &dispatched, idx);
+                    let newly_ready = on_completion(ws, subset, &mut pending, &dispatched, idx);
                     ready.extend(newly_ready);
                 }
                 Err(e) => {
@@ -805,7 +828,10 @@ mod tests {
         MuxSlot {
             prefix: prefix.to_string(),
             prefix_visual_len: prefix.chars().count(), // approximate; fine for tests
-            pending: Mutex::new(SlotState { lines: Vec::new(), first_at: None }),
+            pending: Mutex::new(SlotState {
+                lines: Vec::new(),
+                first_at: None,
+            }),
             log: Mutex::new(log),
             shared_out: sink,
             flush_timeout: Duration::from_secs(5),
@@ -901,11 +927,14 @@ mod tests {
     fn display_names_mixed_unique_and_colliding() {
         let declared = ["app", "platform/core-lib", "services/core-lib"];
         let names = make_display_names(&declared);
-        assert_eq!(names, vec![
-            "app",           // unique → just the name
-            "pla/core-lib",  // collision → abbreviated path
-            "ser/core-lib",  // collision → abbreviated path
-        ]);
+        assert_eq!(
+            names,
+            vec![
+                "app",          // unique → just the name
+                "pla/core-lib", // collision → abbreviated path
+                "ser/core-lib", // collision → abbreviated path
+            ]
+        );
     }
 
     #[test]
@@ -920,11 +949,7 @@ mod tests {
     #[test]
     fn ready_set_respects_dag() {
         // core → lib → app; only core starts ready.
-        let (_dir, ws) = make_test_ws(&[
-            ("app", &["lib"]),
-            ("lib", &["core"]),
-            ("core", &[]),
-        ]);
+        let (_dir, ws) = make_test_ws(&[("app", &["lib"]), ("lib", &["core"]), ("core", &[])]);
         // After topo sort: core=0, lib=1, app=2.
         let subset: Vec<usize> = (0..ws.members.len()).collect();
         let pending = initial_pending(&ws, &subset, true);
@@ -943,7 +968,9 @@ mod tests {
         // Only core (no deps) is initially ready.
         assert_eq!(initial_ready.len(), 1);
         assert!(
-            ws.members[subset[initial_ready[0]]].workspace_deps.is_empty(),
+            ws.members[subset[initial_ready[0]]]
+                .workspace_deps
+                .is_empty(),
             "initial ready member must have no deps"
         );
     }
@@ -953,7 +980,10 @@ mod tests {
         let (_dir, ws) = make_test_ws(&[("app", &["lib"]), ("lib", &[])]);
         let subset: Vec<usize> = (0..ws.members.len()).collect();
         let pending = initial_pending(&ws, &subset, false);
-        assert!(pending.iter().all(|&p| p == 0), "all must be zero for clean");
+        assert!(
+            pending.iter().all(|&p| p == 0),
+            "all must be zero for clean"
+        );
     }
 
     #[test]
@@ -965,12 +995,19 @@ mod tests {
         let mut pending = initial_pending(&ws, &subset, true);
         assert_eq!(pending[1], 1); // lib waiting for core
 
-        let core_idx = ws.members.iter().position(|m| m.declared == "core").unwrap();
+        let core_idx = ws
+            .members
+            .iter()
+            .position(|m| m.declared == "core")
+            .unwrap();
         let mut dispatched = HashSet::new();
         dispatched.insert(core_idx);
 
         let newly_ready = on_completion(&ws, &subset, &mut pending, &dispatched, core_idx);
-        let lib_pos = subset.iter().position(|&i| ws.members[i].declared == "lib").unwrap();
+        let lib_pos = subset
+            .iter()
+            .position(|&i| ws.members[i].declared == "lib")
+            .unwrap();
         assert!(
             newly_ready.contains(&lib_pos),
             "lib must become ready after core completes"
@@ -1018,7 +1055,10 @@ mod tests {
         let slot = make_slot("svc │ ", sink);
 
         slot.push_line("build output".to_string());
-        assert!(buf.lock().unwrap().is_empty(), "should not flush until called");
+        assert!(
+            buf.lock().unwrap().is_empty(),
+            "should not flush until called"
+        );
 
         slot.flush(); // simulates job completion
         let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
@@ -1100,8 +1140,8 @@ mod tests {
         let screen = String::from_utf8(screen_buf.lock().unwrap().clone()).unwrap();
         let log = read_log(&slot);
 
-        assert_eq!(screen, "svc │ hello world\n");  // prefixed on screen
-        assert_eq!(log, "hello world\n");            // plain in log
+        assert_eq!(screen, "svc │ hello world\n"); // prefixed on screen
+        assert_eq!(log, "hello world\n"); // plain in log
     }
 
     // ── BuildMeta tests ────────────────────────────────────────────────────
@@ -1117,7 +1157,10 @@ mod tests {
         assert_eq!(meta.exit_code, 0);
         assert_eq!(meta.duration_ms, 1300);
         assert_eq!(meta.started_ms, 1_749_134_041_000);
-        assert!(meta.started_at.contains('T'), "started_at should be ISO 8601");
+        assert!(
+            meta.started_at.contains('T'),
+            "started_at should be ISO 8601"
+        );
         assert_eq!(meta.build_id, "test-build-id");
     }
 

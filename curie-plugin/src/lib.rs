@@ -129,7 +129,10 @@ mod tests {
         assert_eq!(m2.name, "test");
         assert_eq!(m2.inputs.dirs, vec![PathBuf::from("proto")]);
         assert_eq!(m2.inputs.file_regex.as_deref(), Some(r"\.proto$"));
-        assert_eq!(m2.outputs.source_dirs, vec![PathBuf::from("target/generated-sources/test")]);
+        assert_eq!(
+            m2.outputs.source_dirs,
+            vec![PathBuf::from("target/generated-sources/test")]
+        );
         assert_eq!(m2.artifacts[0].classifier, Some("linux-x86_64".to_string()));
     }
 
@@ -161,7 +164,10 @@ mod tests {
             executable: false,
         };
         let json = serde_json::to_string(&art).unwrap();
-        assert!(!json.contains("classifier"), "classifier key must be absent: {json}");
+        assert!(
+            !json.contains("classifier"),
+            "classifier key must be absent: {json}"
+        );
     }
 
     #[test]
@@ -172,7 +178,10 @@ mod tests {
             files: vec![PathBuf::from("spec.yaml")],
         };
         let json = serde_json::to_string(&inputs).unwrap();
-        assert!(!json.contains("file_regex"), "file_regex key must be absent: {json}");
+        assert!(
+            !json.contains("file_regex"),
+            "file_regex key must be absent: {json}"
+        );
     }
 
     #[test]

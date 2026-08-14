@@ -101,7 +101,10 @@ pub fn build_native(
         .to_string_lossy()
         .into_owned();
 
-    crate::parallel::emit(&crate::style::active("Native image", &format!("{} -> target/{}", exe.display(), output_name)));
+    crate::parallel::emit(&crate::style::active(
+        "Native image",
+        &format!("{} -> target/{}", exe.display(), output_name),
+    ));
 
     let status = crate::proc::spawn_cmd(&mut cmd)
         .with_context(|| format!("failed to invoke {}", exe.display()))?;
@@ -155,9 +158,7 @@ fn find_native_image_exe() -> Option<PathBuf> {
     // We return it here; the caller will get a useful OS error on `cmd.status()`.
     // But we also need to report "not found" before even trying, so check with
     // a quick `--version` probe.
-    let probe = Command::new("native-image")
-        .arg("--version")
-        .output();
+    let probe = Command::new("native-image").arg("--version").output();
     if probe.is_ok() {
         return Some(PathBuf::from("native-image"));
     }
@@ -241,10 +242,7 @@ mod tests {
     fn classpath_with_deps() {
         let sep = if cfg!(windows) { ";" } else { ":" };
         let jar = PathBuf::from("/target/app.jar");
-        let deps = vec![
-            PathBuf::from("/m2/foo.jar"),
-            PathBuf::from("/m2/bar.jar"),
-        ];
+        let deps = vec![PathBuf::from("/m2/foo.jar"), PathBuf::from("/m2/bar.jar")];
         let cp = build_classpath(&jar, &deps);
         let parts: Vec<&str> = cp.split(sep).collect();
         assert_eq!(parts.len(), 3);
@@ -256,7 +254,10 @@ mod tests {
     #[test]
     fn stamp_path_is_in_target_dir() {
         let target = PathBuf::from("/some/target");
-        assert_eq!(stamp_path(&target), PathBuf::from("/some/target/.native-stamp"));
+        assert_eq!(
+            stamp_path(&target),
+            PathBuf::from("/some/target/.native-stamp")
+        );
     }
 
     #[test]
@@ -301,7 +302,10 @@ mod tests {
         )
         .unwrap();
         let desc = crate::descriptor::load(root).unwrap();
-        assert_eq!(output_path(root, &desc), root.join("target").join("custom-binary"));
+        assert_eq!(
+            output_path(root, &desc),
+            root.join("target").join("custom-binary")
+        );
     }
 
     #[test]

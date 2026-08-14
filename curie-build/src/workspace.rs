@@ -3,9 +3,7 @@
 //! `curie_meta::workspace`; this module re-exports those types and adds the
 //! build-tool-specific orchestration on top.
 
-pub use curie_meta::workspace::{
-    discover, list, load, Member, Workspace, WorkspaceContext,
-};
+pub use curie_meta::workspace::{discover, list, load, Member, Workspace, WorkspaceContext};
 
 use crate::audit::{self, AuditOptions};
 use crate::descriptor;
@@ -115,7 +113,9 @@ fn transitive_closure_multi(ws: &Workspace, targets: &[usize]) -> Vec<usize> {
         }
     }
     // `ws.members` is already in topo order — filter preserves that.
-    (0..ws.members.len()).filter(|i| included.contains(i)).collect()
+    (0..ws.members.len())
+        .filter(|i| included.contains(i))
+        .collect()
 }
 
 /// Iterate (a subset of) the workspace's members in topo order, print a
@@ -154,12 +154,17 @@ where
         for j in own_dep_jars {
             contribution.push(j);
         }
-        artifacts.insert(idx, MemberArtifact { classes_dir, classpath_contribution: contribution });
+        artifacts.insert(
+            idx,
+            MemberArtifact {
+                classes_dir,
+                classpath_contribution: contribution,
+            },
+        );
         println!();
     }
     Ok(())
 }
-
 
 /// Fan `curie build` out over every member in topo order.  When `jobs > 1`
 /// and there are multiple members, runs them in parallel with PTY output.
@@ -171,9 +176,16 @@ pub fn build_all(workspace_root: &Path, opts: build::BuildOptions, jobs: usize) 
     }
     let subset: Vec<usize> = (0..ws.members.len()).collect();
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, crate::parallel::TuiMode::Full, "Done", |m, extra_cp| {
-            build_one_member(m, opts, extra_cp)
-        });
+        return crate::parallel::run_jobs(
+            &ws,
+            &subset,
+            "build",
+            jobs,
+            true,
+            crate::parallel::TuiMode::Full,
+            "Done",
+            |m, extra_cp| build_one_member(m, opts, extra_cp),
+        );
     }
     fan_out(&ws, "build", &subset, |m, extra_cp| {
         build_one_member(m, opts, extra_cp)
@@ -193,9 +205,16 @@ pub fn build_one(
         maven::sync_member_for_build(&ws, idx, opts.offline)?;
     }
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, crate::parallel::TuiMode::Full, "Done", |m, extra_cp| {
-            build_one_member(m, opts, extra_cp)
-        });
+        return crate::parallel::run_jobs(
+            &ws,
+            &subset,
+            "build",
+            jobs,
+            true,
+            crate::parallel::TuiMode::Full,
+            "Done",
+            |m, extra_cp| build_one_member(m, opts, extra_cp),
+        );
     }
     fan_out(&ws, "build", &subset, |m, extra_cp| {
         build_one_member(m, opts, extra_cp)
@@ -215,9 +234,16 @@ pub fn build_subtree(
         maven::sync_member_for_build(&ws, idx, opts.offline)?;
     }
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "build", jobs, true, crate::parallel::TuiMode::Full, "Done", |m, extra_cp| {
-            build_one_member(m, opts, extra_cp)
-        });
+        return crate::parallel::run_jobs(
+            &ws,
+            &subset,
+            "build",
+            jobs,
+            true,
+            crate::parallel::TuiMode::Full,
+            "Done",
+            |m, extra_cp| build_one_member(m, opts, extra_cp),
+        );
     }
     fan_out(&ws, "build", &subset, |m, extra_cp| {
         build_one_member(m, opts, extra_cp)
@@ -236,9 +262,18 @@ pub fn test_all(
     let ws = load(workspace_root)?;
     let subset: Vec<usize> = (0..ws.members.len()).collect();
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, crate::parallel::TuiMode::Full, "Done", |m, extra_cp| {
-            test_one_member(m, filter, offline, cli_coverage, update_snapshots, extra_cp)
-        });
+        return crate::parallel::run_jobs(
+            &ws,
+            &subset,
+            "test",
+            jobs,
+            true,
+            crate::parallel::TuiMode::Full,
+            "Done",
+            |m, extra_cp| {
+                test_one_member(m, filter, offline, cli_coverage, update_snapshots, extra_cp)
+            },
+        );
     }
     fan_out(&ws, "test", &subset, |m, extra_cp| {
         test_one_member(m, filter, offline, cli_coverage, update_snapshots, extra_cp)
@@ -258,9 +293,18 @@ pub fn test_one(
     let ws = load(workspace_root)?;
     let subset = transitive_closure(&ws, member_index);
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, crate::parallel::TuiMode::Full, "Done", |m, extra_cp| {
-            test_one_member(m, filter, offline, cli_coverage, update_snapshots, extra_cp)
-        });
+        return crate::parallel::run_jobs(
+            &ws,
+            &subset,
+            "test",
+            jobs,
+            true,
+            crate::parallel::TuiMode::Full,
+            "Done",
+            |m, extra_cp| {
+                test_one_member(m, filter, offline, cli_coverage, update_snapshots, extra_cp)
+            },
+        );
     }
     fan_out(&ws, "test", &subset, |m, extra_cp| {
         test_one_member(m, filter, offline, cli_coverage, update_snapshots, extra_cp)
@@ -280,9 +324,18 @@ pub fn test_subtree(
     let ws = load(workspace_root)?;
     let subset = transitive_closure_multi(&ws, member_indices);
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "test", jobs, true, crate::parallel::TuiMode::Full, "Done", |m, extra_cp| {
-            test_one_member(m, filter, offline, cli_coverage, update_snapshots, extra_cp)
-        });
+        return crate::parallel::run_jobs(
+            &ws,
+            &subset,
+            "test",
+            jobs,
+            true,
+            crate::parallel::TuiMode::Full,
+            "Done",
+            |m, extra_cp| {
+                test_one_member(m, filter, offline, cli_coverage, update_snapshots, extra_cp)
+            },
+        );
     }
     fan_out(&ws, "test", &subset, |m, extra_cp| {
         test_one_member(m, filter, offline, cli_coverage, update_snapshots, extra_cp)
@@ -316,15 +369,12 @@ fn test_one_member(
         return Ok(arts);
     }
     crate::parallel::emit(&crate::style::headline(
-        "Testing", m.descriptor.buildable_name(), m.descriptor.buildable_version(),
+        "Testing",
+        m.descriptor.buildable_name(),
+        m.descriptor.buildable_version(),
     ));
-    let compiled = compile::compile_with_options(
-        &m.path,
-        &m.descriptor,
-        offline,
-        update_snapshots,
-        extra_cp,
-    )?;
+    let compiled =
+        compile::compile_with_options(&m.path, &m.descriptor, offline, update_snapshots, extra_cp)?;
     let enable_coverage = cli_coverage || m.descriptor.test.coverage_enabled();
     let target_dir = compiled.classes_dir.parent().unwrap_or(&m.path);
     let (eff_main, eff_test) = crate::resources::effective_test_dirs(
@@ -438,7 +488,13 @@ pub fn run_one(
             let classes_dir = member_classes_dir(m);
             let mut contribution = extra_cp;
             contribution.extend(arts.iter().cloned());
-            artifacts.insert(idx, MemberArtifact { classes_dir, classpath_contribution: contribution });
+            artifacts.insert(
+                idx,
+                MemberArtifact {
+                    classes_dir,
+                    classpath_contribution: contribution,
+                },
+            );
             foreign_jars.insert(idx, arts);
         } else {
             let output = build::build_with_desc(&m.path, &m.descriptor, build_opts, &extra_cp)
@@ -449,7 +505,13 @@ pub fn run_one(
             for j in output.dep_jars.iter().cloned() {
                 contribution.push(j);
             }
-            artifacts.insert(idx, MemberArtifact { classes_dir, classpath_contribution: contribution });
+            artifacts.insert(
+                idx,
+                MemberArtifact {
+                    classes_dir,
+                    classpath_contribution: contribution,
+                },
+            );
             outputs.insert(idx, output);
         }
         println!();
@@ -465,10 +527,13 @@ pub fn run_one(
         &target_output.jar,
     )?;
 
-    println!("{}", crate::style::run_step(
-        target.descriptor.buildable_name(),
-        target.descriptor.buildable_version(),
-    ));
+    println!(
+        "{}",
+        crate::style::run_step(
+            target.descriptor.buildable_name(),
+            target.descriptor.buildable_version(),
+        )
+    );
     println!();
 
     // Assemble the runtime classpath.  Use JARs (not classes_dir) for
@@ -479,11 +544,12 @@ pub fn run_one(
     // dedup is order-preserving.
     let mut runtime_cp: Vec<PathBuf> = Vec::new();
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    let push = |cp: &mut Vec<PathBuf>, seen: &mut std::collections::HashSet<PathBuf>, p: PathBuf| {
-        if seen.insert(p.clone()) {
-            cp.push(p);
-        }
-    };
+    let push =
+        |cp: &mut Vec<PathBuf>, seen: &mut std::collections::HashSet<PathBuf>, p: PathBuf| {
+            if seen.insert(p.clone()) {
+                cp.push(p);
+            }
+        };
 
     // Target's own JAR + resources + Maven deps.
     push(&mut runtime_cp, &mut seen, target_output.jar.clone());
@@ -544,9 +610,16 @@ pub fn clean_all(workspace_root: &Path, jobs: usize) -> Result<()> {
     let ws = load(workspace_root)?;
     let subset: Vec<usize> = (0..ws.members.len()).collect();
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(&ws, &subset, "clean", jobs, false, crate::parallel::TuiMode::StatusOnly, "Cleaned", |m, _extra_cp| {
-            clean_one_member(m)
-        });
+        return crate::parallel::run_jobs(
+            &ws,
+            &subset,
+            "clean",
+            jobs,
+            false,
+            crate::parallel::TuiMode::StatusOnly,
+            "Cleaned",
+            |m, _extra_cp| clean_one_member(m),
+        );
     }
     fan_out(&ws, "clean", &subset, |m, _extra_cp| clean_one_member(m))
 }
@@ -563,11 +636,20 @@ pub fn clean_one(workspace_root: &Path, member_index: usize) -> Result<()> {
 pub fn clean_subtree(workspace_root: &Path, member_indices: &[usize], jobs: usize) -> Result<()> {
     let ws = load(workspace_root)?;
     if member_indices.len() > 1 {
-        return crate::parallel::run_jobs(&ws, member_indices, "clean", jobs, false, crate::parallel::TuiMode::StatusOnly, "Cleaned", |m, _: &[PathBuf]| {
-            clean_one_member(m)
-        });
+        return crate::parallel::run_jobs(
+            &ws,
+            member_indices,
+            "clean",
+            jobs,
+            false,
+            crate::parallel::TuiMode::StatusOnly,
+            "Cleaned",
+            |m, _: &[PathBuf]| clean_one_member(m),
+        );
     }
-    fan_out(&ws, "clean", member_indices, |m, _extra_cp| clean_one_member(m))
+    fan_out(&ws, "clean", member_indices, |m, _extra_cp| {
+        clean_one_member(m)
+    })
 }
 
 /// Indices of non-foreign members within `indices` (preserves order).
@@ -609,15 +691,15 @@ pub fn audit_all(workspace_root: &Path, opts: &AuditOptions) -> Result<bool> {
 }
 
 /// Run audit on a single workspace member (by index).
-pub fn audit_one(
-    workspace_root: &Path,
-    member_index: usize,
-    opts: &AuditOptions,
-) -> Result<bool> {
+pub fn audit_one(workspace_root: &Path, member_index: usize, opts: &AuditOptions) -> Result<bool> {
     let ws = load(workspace_root)?;
     let m = &ws.members[member_index];
     if m.descriptor.is_foreign() {
-        let tool = m.descriptor.foreign_project().map(|f| f.tool.label()).unwrap_or("foreign");
+        let tool = m
+            .descriptor
+            .foreign_project()
+            .map(|f| f.tool.label())
+            .unwrap_or("foreign");
         bail!(
             "`curie audit` is not supported for foreign member {} ({tool}); \
              use the foreign tool directly",
@@ -700,7 +782,11 @@ pub fn update_one(
     let ws = load(workspace_root)?;
     let m = &ws.members[member_index];
     if m.descriptor.is_foreign() {
-        let tool = m.descriptor.foreign_project().map(|f| f.tool.label()).unwrap_or("foreign");
+        let tool = m
+            .descriptor
+            .foreign_project()
+            .map(|f| f.tool.label())
+            .unwrap_or("foreign");
         bail!(
             "`curie update` is not supported for foreign member {} ({tool}); \
              use the foreign tool directly",
@@ -800,10 +886,19 @@ fn fmt_members(
     };
 
     if subset.len() > 1 {
-        return crate::parallel::run_jobs(ws, &subset, "fmt", jobs, false, crate::parallel::TuiMode::Full, "Formatted", |m, _| {
-            fmt::run_fmt_with_jars(&m.path, check_only, &pjf_jars, &ktfmt_jars)
-                .map(|_| Vec::<PathBuf>::new())
-        });
+        return crate::parallel::run_jobs(
+            ws,
+            &subset,
+            "fmt",
+            jobs,
+            false,
+            crate::parallel::TuiMode::Full,
+            "Formatted",
+            |m, _| {
+                fmt::run_fmt_with_jars(&m.path, check_only, &pjf_jars, &ktfmt_jars)
+                    .map(|_| Vec::<PathBuf>::new())
+            },
+        );
     }
 
     for &i in &subset {

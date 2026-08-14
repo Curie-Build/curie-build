@@ -32,12 +32,17 @@ fn main() {
     // running Curie must have at least a JDK-21 `java` on PATH (the same
     // version they use to compile their projects).
     let status = Command::new("javac")
-        .arg("--release").arg("21")
-        .arg("-d").arg(&class_dir)
+        .arg("--release")
+        .arg("21")
+        .arg("-d")
+        .arg(&class_dir)
         .arg("javac-wrapper/Wrapper.java")
         .status()
         .unwrap_or_else(|e| panic!("building Curie requires javac on PATH ({e})"));
-    assert!(status.success(), "javac failed compiling javac-wrapper/Wrapper.java");
+    assert!(
+        status.success(),
+        "javac failed compiling javac-wrapper/Wrapper.java"
+    );
 
     // --- write JAR manifest with Add-Exports + Add-Opens --------------------
     // Add-Exports / Add-Opens as JAR manifest attributes (JEP 261) means
@@ -84,8 +89,12 @@ fn main() {
 
     // --- package into wrapper.jar -------------------------------------------
     let status = Command::new("jar")
-        .arg("cfm").arg(&jar_path).arg(&manifest_path)
-        .arg("-C").arg(&class_dir).arg(".")
+        .arg("cfm")
+        .arg(&jar_path)
+        .arg(&manifest_path)
+        .arg("-C")
+        .arg(&class_dir)
+        .arg(".")
         .status()
         .unwrap_or_else(|e| panic!("building Curie requires `jar` on PATH ({e})"));
     assert!(status.success(), "jar failed packaging wrapper.jar");

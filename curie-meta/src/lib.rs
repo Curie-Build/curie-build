@@ -64,7 +64,10 @@ mod tests {
         write_app(dir.path(), "my-app", "1.2.3");
         let ws = open(dir.path()).unwrap();
         assert_eq!(ws.members.len(), 1);
-        assert!(matches!(ws.members[0].descriptor.kind, DescriptorKind::Application(_)));
+        assert!(matches!(
+            ws.members[0].descriptor.kind,
+            DescriptorKind::Application(_)
+        ));
         assert_eq!(ws.members[0].descriptor.project_name(), Some("my-app"));
     }
 

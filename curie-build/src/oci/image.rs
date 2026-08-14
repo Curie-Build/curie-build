@@ -1,8 +1,8 @@
 //! Image config JSON and manifest assembly on top of a base image.
 
+use super::layer::sha256_digest;
 use super::layer::BuiltLayer;
 use super::layer::REPRODUCIBLE_EPOCH;
-use super::layer::sha256_digest;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -233,8 +233,7 @@ pub fn assemble_image(
 fn format_epoch_rfc3339(epoch: u64) -> String {
     // 2024-01-01T00:00:00Z
     let secs = epoch as i64;
-    let datetime = time::OffsetDateTime::from_unix_timestamp(secs)
-        .expect("epoch is valid");
+    let datetime = time::OffsetDateTime::from_unix_timestamp(secs).expect("epoch is valid");
     datetime
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "2024-01-01T00:00:00Z".into())
@@ -279,9 +278,7 @@ pub fn select_platform_manifest(index: &Value, platform: &str) -> Result<(String
             .and_then(|p| p.get("architecture"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let variant = p
-            .and_then(|p| p.get("variant"))
-            .and_then(|v| v.as_str());
+        let variant = p.and_then(|p| p.get("variant")).and_then(|v| v.as_str());
         available.push(format!(
             "{os}/{arch}{}",
             variant.map(|v| format!("/{v}")).unwrap_or_default()
@@ -451,7 +448,9 @@ mod tests {
                 "platform": {"os": "linux", "architecture": "arm64"}
             }]
         });
-        let err = select_platform_manifest(&index, "linux/amd64").unwrap_err().to_string();
+        let err = select_platform_manifest(&index, "linux/amd64")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("linux/arm64"), "got: {err}");
     }
 
@@ -476,9 +475,16 @@ mod tests {
             working_dir: Some("/app".into()),
             ..Default::default()
         };
-        let a = assemble_image(&minimal_base_config(), &base_layers, &[layer.clone()], &opts, true)
-            .unwrap();
-        let b = assemble_image(&minimal_base_config(), &base_layers, &[layer], &opts, true).unwrap();
+        let a = assemble_image(
+            &minimal_base_config(),
+            &base_layers,
+            &[layer.clone()],
+            &opts,
+            true,
+        )
+        .unwrap();
+        let b =
+            assemble_image(&minimal_base_config(), &base_layers, &[layer], &opts, true).unwrap();
         assert_eq!(a.manifest_digest, b.manifest_digest);
         assert_eq!(a.config_digest, b.config_digest);
         assert_eq!(a.config_bytes, b.config_bytes);

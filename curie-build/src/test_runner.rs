@@ -1,5 +1,5 @@
-use anyhow::{bail, Context, Result};
 use crate::jar::build_manifest;
+use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -32,21 +32,24 @@ pub fn ensure_runner_jar(standalone_jar: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(&cache)
         .with_context(|| format!("failed to create {}", cache.display()))?;
 
-    let tmp_dir = tempfile::tempdir().context("failed to create temp dir for runner compilation")?;
+    let tmp_dir =
+        tempfile::tempdir().context("failed to create temp dir for runner compilation")?;
     let src_path = tmp_dir.path().join("CurieTestRunner.java");
     std::fs::write(&src_path, RUNNER_SOURCE)
         .context("failed to write CurieTestRunner.java to temp dir")?;
 
     let classes_dir = tmp_dir.path().join("classes");
-    std::fs::create_dir_all(&classes_dir)
-        .context("failed to create classes dir")?;
+    std::fs::create_dir_all(&classes_dir).context("failed to create classes dir")?;
 
     let javac = find_javac().context("javac not found — Curie requires a JDK, not just a JRE")?;
 
     let status = Command::new(&javac)
-        .arg("--release").arg("21")
-        .arg("-cp").arg(standalone_jar)
-        .arg("-d").arg(&classes_dir)
+        .arg("--release")
+        .arg("21")
+        .arg("-cp")
+        .arg(standalone_jar)
+        .arg("-d")
+        .arg(&classes_dir)
         .arg(&src_path)
         .status()
         .with_context(|| format!("failed to invoke {}", javac.display()))?;
@@ -56,8 +59,7 @@ pub fn ensure_runner_jar(standalone_jar: &Path) -> Result<PathBuf> {
     }
 
     let tmp_jar = jar_path.with_extension("jar.part");
-    create_jar(&classes_dir, &tmp_jar)
-        .context("failed to create test-runner JAR")?;
+    create_jar(&classes_dir, &tmp_jar).context("failed to create test-runner JAR")?;
 
     // Atomic rename so a crashed write can't leave a partial JAR.
     if let Err(e) = std::fs::rename(&tmp_jar, &jar_path) {
@@ -88,8 +90,10 @@ pub fn build_runner_command(
 ) -> Command {
     let classpath = format!(
         "{}{}{}{}{}",
-        standalone_jar.display(), CP_SEP,
-        runner_jar.display(), CP_SEP,
+        standalone_jar.display(),
+        CP_SEP,
+        runner_jar.display(),
+        CP_SEP,
         test_classpath,
     );
 
@@ -103,7 +107,8 @@ pub fn build_runner_command(
     for arg in extra_jvm_args {
         cmd.arg(arg);
     }
-    cmd.arg("-cp").arg(&classpath)
+    cmd.arg("-cp")
+        .arg(&classpath)
         .arg("com.curie.runner.CurieTestRunner")
         .arg(output_path)
         .arg(output_dir);
@@ -120,7 +125,11 @@ pub fn build_runner_command(
 
 fn source_hash() -> String {
     let digest = Sha256::digest(RUNNER_SOURCE.as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect::<String>()[..8].to_string()
+    digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()[..8]
+        .to_string()
 }
 
 fn find_javac() -> Option<PathBuf> {
@@ -140,8 +149,7 @@ fn create_jar(classes_dir: &Path, jar_path: &Path) -> Result<()> {
     let file = std::fs::File::create(jar_path)
         .with_context(|| format!("failed to create {}", jar_path.display()))?;
     let mut zip = zip::ZipWriter::new(file);
-    let options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
     // Use the common manifest builder (standardizes on \r\n and ensures we
     // go through the single implementation used by every other JAR writer).

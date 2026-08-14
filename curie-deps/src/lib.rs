@@ -20,7 +20,7 @@ pub use repo::Repository;
 pub use resolver::{
     fetch_artifact, fetch_artifact_file, fetch_available_versions, fetch_pom_only, resolve,
     resolve_boms, resolve_declared_gavs, resolve_full, resolve_tree, resolve_with_pins, DepEntry,
-    DepTree, RangeViolation, ResolveResult, ResolvedDep, ResolveOptions, SkippedDep,
+    DepTree, RangeViolation, ResolveOptions, ResolveResult, ResolvedDep, SkippedDep,
     VersionRangeError,
 };
 pub use snapshot_meta::SnapshotMetadata;

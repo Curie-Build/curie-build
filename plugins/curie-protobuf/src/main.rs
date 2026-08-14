@@ -12,7 +12,9 @@ fn main() -> Result<()> {
         Some("manifest") => cmd_manifest(&args[2..]),
         Some("generate-sources") => cmd_generate_sources(&args[2..]),
         Some(other) => bail!("unknown subcommand: {other}"),
-        None => bail!("usage: curie-protobuf <manifest|generate-sources> [--project <dir>] [--offline]"),
+        None => {
+            bail!("usage: curie-protobuf <manifest|generate-sources> [--project <dir>] [--offline]")
+        }
     }
 }
 

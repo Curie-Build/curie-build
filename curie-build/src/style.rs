@@ -9,30 +9,30 @@
 
 // ── ANSI constants ──────────────────────────────────────────────────────────
 
-const BOLD:        &str = "\x1b[1m";
-const BOLD_GREEN:  &str = "\x1b[1;32m";
-const CYAN:        &str = "\x1b[36m";
-const BLUE:        &str = "\x1b[34m";
-const YELLOW:      &str = "\x1b[33m";
-const GRAY:        &str = "\x1b[38;5;240m";
-const RESET:       &str = "\x1b[0m";
+const BOLD: &str = "\x1b[1m";
+const BOLD_GREEN: &str = "\x1b[1;32m";
+const CYAN: &str = "\x1b[36m";
+const BLUE: &str = "\x1b[34m";
+const YELLOW: &str = "\x1b[33m";
+const GRAY: &str = "\x1b[38;5;240m";
+const RESET: &str = "\x1b[0m";
 
 // ── Icons ───────────────────────────────────────────────────────────────────
 // All single display-column characters so the label column stays aligned.
 
-const ICON_ACTIVE:   &str = "⚙";   // compile, package
-const ICON_RESOLVE:  &str = "↓";   // dependency resolution
-const ICON_DONE:     &str = "✓";   // final success
-const ICON_SKIP:     &str = "✓";   // up to date (same mark, dimmer)
-const ICON_STALE:    &str = "✗";   // stale / removed
-const ICON_INFO:     &str = "→";   // neutral informational
-const ICON_NEUTRAL:  &str = "·";   // truly neutral (no test sources, etc.)
-const ICON_RUN:      &str = "▸";   // curie run — launch / play
-const ICON_AUDIT:    &str = "⊙";   // curie audit — security scan / SBOM
-const ICON_FORMAT:   &str = "≡";   // curie fmt — code formatting
-const ICON_PUBLISH:  &str = "↑";   // curie publish — upload
-const ICON_CLEAN:    &str = "⌫";   // curie clean — erase / delete
-const ICON_WARN:     &str = "⚠";   // non-fatal caveat (e.g. unrepresentable config)
+const ICON_ACTIVE: &str = "⚙"; // compile, package
+const ICON_RESOLVE: &str = "↓"; // dependency resolution
+const ICON_DONE: &str = "✓"; // final success
+const ICON_SKIP: &str = "✓"; // up to date (same mark, dimmer)
+const ICON_STALE: &str = "✗"; // stale / removed
+const ICON_INFO: &str = "→"; // neutral informational
+const ICON_NEUTRAL: &str = "·"; // truly neutral (no test sources, etc.)
+const ICON_RUN: &str = "▸"; // curie run — launch / play
+const ICON_AUDIT: &str = "⊙"; // curie audit — security scan / SBOM
+const ICON_FORMAT: &str = "≡"; // curie fmt — code formatting
+const ICON_PUBLISH: &str = "↑"; // curie publish — upload
+const ICON_CLEAN: &str = "⌫"; // curie clean — erase / delete
+const ICON_WARN: &str = "⚠"; // non-fatal caveat (e.g. unrepresentable config)
 
 // ── Formatting helpers (internal) ───────────────────────────────────────────
 
@@ -275,7 +275,7 @@ mod tests {
         assert!(s.contains(GRAY));
         assert!(s.contains(ICON_SKIP));
         // RESET must appear after "up to date" so the detail text is also dimmed.
-        let reset_pos  = s.rfind(RESET).unwrap();
+        let reset_pos = s.rfind(RESET).unwrap();
         let detail_pos = s.find("up to date").unwrap();
         assert!(
             detail_pos < reset_pos,
@@ -287,7 +287,10 @@ mod tests {
     fn up_to_date_detail_places_value_before_suffix() {
         // A long value (e.g. a path) must not be squashed against "up to
         // date" the way a bare `up_to_date(long_label)` would be.
-        let s = up_to_date_detail("Maven", "examples/nested-workspace-demo/services/apps/hello-app/pom.xml");
+        let s = up_to_date_detail(
+            "Maven",
+            "examples/nested-workspace-demo/services/apps/hello-app/pom.xml",
+        );
         let stripped = strip_ansi(&s);
         assert!(stripped.contains("hello-app/pom.xml up to date"));
     }
@@ -311,13 +314,24 @@ mod tests {
 
     #[test]
     fn plain_warn_format() {
-        let s = plain_line("Maven", "plugin.protobuf sources not represented in pom.xml");
-        assert_eq!(s, "  Maven           plugin.protobuf sources not represented in pom.xml");
+        let s = plain_line(
+            "Maven",
+            "plugin.protobuf sources not represented in pom.xml",
+        );
+        assert_eq!(
+            s,
+            "  Maven           plugin.protobuf sources not represented in pom.xml"
+        );
     }
 
     #[test]
     fn colored_warn_contains_yellow_and_warning_icon() {
-        let s = colored_line(YELLOW, ICON_WARN, "Maven", "plugin.protobuf sources not represented in pom.xml");
+        let s = colored_line(
+            YELLOW,
+            ICON_WARN,
+            "Maven",
+            "plugin.protobuf sources not represented in pom.xml",
+        );
         assert!(s.contains(YELLOW));
         assert!(s.contains(ICON_WARN));
     }
@@ -387,7 +401,9 @@ mod tests {
             if c == '\x1b' {
                 while let Some(&next) = chars.peek() {
                     chars.next();
-                    if next.is_ascii_alphabetic() { break; }
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
                 }
             } else {
                 out.push(c);
@@ -397,9 +413,9 @@ mod tests {
     }
 
     fn char_index_of(haystack: &str, needle: &str) -> Option<usize> {
-        haystack.find(needle).map(|byte_idx| {
-            haystack[..byte_idx].chars().count()
-        })
+        haystack
+            .find(needle)
+            .map(|byte_idx| haystack[..byte_idx].chars().count())
     }
 
     fn plain_headline(action: &str, name: &str, version: &str) -> String {
@@ -443,7 +459,11 @@ mod tests {
     }
 
     fn colored_run_step(name: &str, version: &str) -> String {
-        let value = if version.is_empty() { name.to_string() } else { format!("{name} v{version}") };
+        let value = if version.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name} v{version}")
+        };
         format!("  {BOLD_GREEN}{ICON_RUN} {:<14}{RESET}{value}", "Running")
     }
 }

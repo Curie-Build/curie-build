@@ -100,9 +100,10 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
 
         // Modular launch: use --module-path + --module instead of -cp/-jar.
         if output.is_modular && output.fat_jar.is_none() {
-            let module_name = output.module_name.as_deref().expect(
-                "is_modular implies module_name is Some after a successful build"
-            );
+            let module_name = output
+                .module_name
+                .as_deref()
+                .expect("is_modular implies module_name is Some after a successful build");
             let resources_dir = output.resources_dir.as_deref();
 
             // Build the module path: module-path JARs + the project's own JAR.
@@ -127,7 +128,8 @@ pub fn run(project_root: &Path, opts: RunOptions, extra_args: &[String]) -> Resu
                 java.arg("-cp").arg(classpath_string(&cp_entries));
             }
 
-            java.arg("--module").arg(format!("{}/{}", module_name, main_class));
+            java.arg("--module")
+                .arg(format!("{}/{}", module_name, main_class));
         } else {
             // When running with deps (can't use -jar), build a full classpath.
             // Also include src/main/resources so resource loading via getResourceAsStream works.
@@ -184,12 +186,23 @@ mod tests {
     #[test]
     fn resolve_main_class_errors_with_guidance_when_absent() {
         let jar = PathBuf::from("target/app.jar");
-        let err = resolve_main_class(None, "app", &jar).unwrap_err().to_string();
+        let err = resolve_main_class(None, "app", &jar)
+            .unwrap_err()
+            .to_string();
         // The message must name the project, the JAR, and the two remedies, so
         // the user-facing guidance can't silently regress.
         assert!(err.contains("app"), "should name the project: {err}");
-        assert!(err.contains("target/app.jar"), "should show the jar path: {err}");
-        assert!(err.contains("mainClass"), "should suggest declaring mainClass: {err}");
-        assert!(err.contains("curie clean"), "should suggest curie clean: {err}");
+        assert!(
+            err.contains("target/app.jar"),
+            "should show the jar path: {err}"
+        );
+        assert!(
+            err.contains("mainClass"),
+            "should suggest declaring mainClass: {err}"
+        );
+        assert!(
+            err.contains("curie clean"),
+            "should suggest curie clean: {err}"
+        );
     }
 }

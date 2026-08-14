@@ -555,10 +555,7 @@ impl Java {
         if self.excludes.is_empty() {
             return false;
         }
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let rendered = path.to_string_lossy();
         self.excludes.iter().any(|pat| {
             let trimmed = pat.trim_start_matches("**/");
@@ -1807,7 +1804,10 @@ impl Descriptor {
     /// declared in both), the member-declared one wins — its entry is
     /// later in the returned Vec.
     pub fn ap_pairs(&self) -> Vec<(&str, &str)> {
-        ap_pairs_merged(&self.inherited_annotation_processors, &self.annotation_processors)
+        ap_pairs_merged(
+            &self.inherited_annotation_processors,
+            &self.annotation_processors,
+        )
     }
 
     /// Same as [`ap_pairs`] for `[test-annotation-processors]`.
@@ -1828,7 +1828,10 @@ impl Descriptor {
     /// compile's `-cp`.
     pub fn ap_on_compile_classpath_coords(&self) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
-        for map in [&self.inherited_annotation_processors, &self.annotation_processors] {
+        for map in [
+            &self.inherited_annotation_processors,
+            &self.annotation_processors,
+        ] {
             for (k, v) in map {
                 if v.on_compile_classpath() {
                     out.push(k.as_str());
@@ -1954,10 +1957,7 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     let path = project_root.join("Curie.toml");
 
     if !path.exists() {
-        bail!(
-            "no Curie.toml found in {}",
-            project_root.display()
-        );
+        bail!("no Curie.toml found in {}", project_root.display());
     }
 
     let content = std::fs::read_to_string(&path)
@@ -1969,25 +1969,30 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     // populate a default Docker struct — but its absence in the user's
     // file is meaningful (Docker is off unless [docker] OR a project
     // root Dockerfile exists).
-    let raw: toml::Value = toml::from_str(&content)
-        .map_err(|e| format_parse_error(e, &content, &path))?;
+    let raw: toml::Value =
+        toml::from_str(&content).map_err(|e| format_parse_error(e, &content, &path))?;
     let table = raw.as_table();
     let docker_section_present = table.map(|t| t.contains_key("docker")).unwrap_or(false);
 
-    let parsed: RawDescriptor = toml::from_str(&content)
-        .map_err(|e| format_parse_error(e, &content, &path))?;
+    let parsed: RawDescriptor =
+        toml::from_str(&content).map_err(|e| format_parse_error(e, &content, &path))?;
 
     // Exactly one of [application] / [library] / [workspace] / [bom] — enforced
     // both as a count check (for the diagnostic message) and by reifying
     // the kind into the DescriptorKind enum.
-    let kind = match (parsed.application, parsed.library, parsed.workspace, parsed.bom) {
+    let kind = match (
+        parsed.application,
+        parsed.library,
+        parsed.workspace,
+        parsed.bom,
+    ) {
         (Some(a), None, None, None) => DescriptorKind::Application(a),
         (None, Some(l), None, None) => DescriptorKind::Library(l),
         (None, None, Some(w), None) => DescriptorKind::Workspace(w),
         (None, None, None, Some(b)) => DescriptorKind::Bom(b),
-        (None, None, None, None) => bail!(
-            "Curie.toml must contain one of [application], [library], [workspace], or [bom]"
-        ),
+        (None, None, None, None) => {
+            bail!("Curie.toml must contain one of [application], [library], [workspace], or [bom]")
+        }
         _ => bail!(
             "Curie.toml must contain only one of [application], [library], [workspace], or [bom]"
         ),
@@ -1996,7 +2001,9 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     let mut docker = parsed.docker;
     docker.section_present = docker_section_present;
 
-    let native_image_section_present = table.map(|t| t.contains_key("native-image")).unwrap_or(false);
+    let native_image_section_present = table
+        .map(|t| t.contains_key("native-image"))
+        .unwrap_or(false);
     let mut native_image = parsed.native_image;
     native_image.section_present = native_image_section_present;
 
@@ -2016,8 +2023,9 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     let mut resources = parsed.resources;
     resources.section_present = resources_section_present;
 
-    let test_resources_section_present =
-        table.map(|t| t.contains_key("test-resources")).unwrap_or(false);
+    let test_resources_section_present = table
+        .map(|t| t.contains_key("test-resources"))
+        .unwrap_or(false);
     let mut test_resources = parsed.test_resources;
     test_resources.section_present = test_resources_section_present;
 
@@ -2102,7 +2110,8 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
                 "workspace-dependency \"{}\" must not declare a version — \
                  the depended-on member's own version is used.  Remove the \
                  `version` key from [workspace-dependencies.{}].",
-                label, label,
+                label,
+                label,
             );
         }
         if dep.path.trim().is_empty() {
@@ -2133,13 +2142,24 @@ pub fn load(project_root: &Path) -> Result<Descriptor> {
     }
 
     if descriptor.is_bom() {
-        validate_bom_restrictions(&descriptor, docker_section_present, native_image_section_present,
+        validate_bom_restrictions(
+            &descriptor,
+            docker_section_present,
+            native_image_section_present,
             jlink_section_present,
             table.map(|t| t.contains_key("test")).unwrap_or(false),
-            table.map(|t| t.contains_key("test-dependencies")).unwrap_or(false),
-            table.map(|t| t.contains_key("test-bom-imports")).unwrap_or(false),
-            table.map(|t| t.contains_key("annotation-processors")).unwrap_or(false),
-            table.map(|t| t.contains_key("test-annotation-processors")).unwrap_or(false),
+            table
+                .map(|t| t.contains_key("test-dependencies"))
+                .unwrap_or(false),
+            table
+                .map(|t| t.contains_key("test-bom-imports"))
+                .unwrap_or(false),
+            table
+                .map(|t| t.contains_key("annotation-processors"))
+                .unwrap_or(false),
+            table
+                .map(|t| t.contains_key("test-annotation-processors"))
+                .unwrap_or(false),
         )?;
     }
 
@@ -2254,7 +2274,10 @@ fn validate_resource_scope(scope: &Resources, section: &str) -> Result<()> {
                     bail!(
                         "[{}] filter stage directory '{}' is not one of the [{}] source \
                          directories {:?}",
-                        section, dir, section, scope.directories
+                        section,
+                        dir,
+                        section,
+                        scope.directories
                     );
                 }
             }
@@ -2361,7 +2384,8 @@ pub fn validate_dep_repo_refs(desc: &Descriptor) -> Result<()> {
                 bail!(
                     "dependency \"{}\" references unknown repository \"{}\"; \
                      declare it with [[repositories]]",
-                    coord, repo_id
+                    coord,
+                    repo_id
                 );
             }
         }
@@ -2372,7 +2396,8 @@ pub fn validate_dep_repo_refs(desc: &Descriptor) -> Result<()> {
                 bail!(
                     "test-dependency \"{}\" references unknown repository \"{}\"; \
                      declare it with [[repositories]]",
-                    coord, repo_id
+                    coord,
+                    repo_id
                 );
             }
         }
@@ -2445,9 +2470,7 @@ fn format_parse_error(err: toml::de::Error, _source: &str, path: &Path) -> anyho
 
     let raw_display = err.to_string();
     let contextual = if let Some(rest) = raw_display.strip_prefix("TOML parse error at ") {
-        let reformatted = rest
-            .replacen("line ", "", 1)
-            .replacen(", column ", ":", 1);
+        let reformatted = rest.replacen("line ", "", 1).replacen(", column ", ":", 1);
         format!(
             "failed to parse {}\n\n  --> {}:{}",
             path.display(),
@@ -2478,9 +2501,7 @@ fn format_parse_error(err: toml::de::Error, _source: &str, path: &Path) -> anyho
 
 fn hint_for(message: &str, _file_name: &str) -> Option<String> {
     if message.contains("missing field") && message.contains("name") {
-        return Some(
-            "[application], [library], and [bom] all require a `name` field.".to_string(),
-        );
+        return Some("[application], [library], and [bom] all require a `name` field.".to_string());
     }
     if message.contains("missing field") && message.contains("version") {
         return Some(
@@ -2692,7 +2713,10 @@ name = "x"
 version = "1.0"
 "#;
         let d = load_str(toml).unwrap();
-        assert!(d.build_info.enabled, "build-info must be enabled by default");
+        assert!(
+            d.build_info.enabled,
+            "build-info must be enabled by default"
+        );
     }
 
     #[test]
@@ -2795,11 +2819,17 @@ mainClass = "X"
 "org.projectlombok:lombok" = { version = "1.18.30", on-compile-classpath = true }
 "#;
         let d = load_str(toml).unwrap();
-        let dagger = d.annotation_processors.get("com.google.dagger:dagger-compiler").unwrap();
+        let dagger = d
+            .annotation_processors
+            .get("com.google.dagger:dagger-compiler")
+            .unwrap();
         assert_eq!(dagger.version(), "2.50");
         assert!(!dagger.on_compile_classpath());
 
-        let lombok = d.annotation_processors.get("org.projectlombok:lombok").unwrap();
+        let lombok = d
+            .annotation_processors
+            .get("org.projectlombok:lombok")
+            .unwrap();
         assert_eq!(lombok.version(), "1.18.30");
         assert!(lombok.on_compile_classpath());
     }
@@ -2816,10 +2846,8 @@ mainClass = "X"
 "own:proc" = "2.0"
 "#;
         let mut d = load_str(toml).unwrap();
-        d.inherited_annotation_processors.insert(
-            "ws:proc".into(),
-            AnnotationProcessor::Version("1.0".into()),
-        );
+        d.inherited_annotation_processors
+            .insert("ws:proc".into(), AnnotationProcessor::Version("1.0".into()));
         let pairs = d.ap_pairs();
         assert_eq!(
             pairs,
@@ -2905,8 +2933,14 @@ suppressGeneratorTimestamp = "true"
             flat,
             vec![
                 ("dagger.fastInit".to_string(), "enabled".to_string()),
-                ("dagger.formatGeneratedSource".to_string(), "disabled".to_string()),
-                ("mapstruct.suppressGeneratorTimestamp".to_string(), "true".to_string()),
+                (
+                    "dagger.formatGeneratedSource".to_string(),
+                    "disabled".to_string()
+                ),
+                (
+                    "mapstruct.suppressGeneratorTimestamp".to_string(),
+                    "true".to_string()
+                ),
             ],
         );
     }
@@ -2926,14 +2960,18 @@ fastInit = "enabled"
         let mut ws_dagger = BTreeMap::new();
         ws_dagger.insert("fastInit".to_string(), "disabled".to_string());
         ws_dagger.insert("formatGeneratedSource".to_string(), "disabled".to_string());
-        d.inherited_annotation_processor_options.insert("dagger".to_string(), ws_dagger);
+        d.inherited_annotation_processor_options
+            .insert("dagger".to_string(), ws_dagger);
 
         let flat = d.flat_ap_options();
         assert_eq!(
             flat,
             vec![
                 ("dagger.fastInit".to_string(), "enabled".to_string()),
-                ("dagger.formatGeneratedSource".to_string(), "disabled".to_string()),
+                (
+                    "dagger.formatGeneratedSource".to_string(),
+                    "disabled".to_string()
+                ),
             ],
         );
     }
@@ -3056,8 +3094,14 @@ version = "0.1"
 mainClass = "X"
 "#;
         let d = load_str(toml).unwrap();
-        assert_eq!(d.test.junit_platform_version(), crate::descriptor::DEFAULT_JUNIT_PLATFORM_VERSION);
-        assert_eq!(d.kotlin.version(), crate::descriptor::DEFAULT_KOTLIN_VERSION);
+        assert_eq!(
+            d.test.junit_platform_version(),
+            crate::descriptor::DEFAULT_JUNIT_PLATFORM_VERSION
+        );
+        assert_eq!(
+            d.kotlin.version(),
+            crate::descriptor::DEFAULT_KOTLIN_VERSION
+        );
     }
 
     #[test]
@@ -3120,7 +3164,13 @@ version = "1.0"
         let d = load_str(toml).unwrap();
         let v = d.dependencies.get("org.apache.pdfbox:pdfbox").unwrap();
         assert_eq!(v.version(), "3.0.7");
-        assert_eq!(v.exclusions(), vec!["org.bouncycastle:bcprov-jdk18on", "org.bouncycastle:bcmail-jdk18on"]);
+        assert_eq!(
+            v.exclusions(),
+            vec![
+                "org.bouncycastle:bcprov-jdk18on",
+                "org.bouncycastle:bcmail-jdk18on"
+            ]
+        );
     }
 
     #[test]
@@ -3175,8 +3225,14 @@ version = "1.0"
 "com.example:foo" = { version = "1.0", repository = "does-not-exist" }
 "#;
         let err = load_str(toml).unwrap_err().to_string();
-        assert!(err.contains("does-not-exist"), "expected unknown-repo error, got: {err}");
-        assert!(err.contains("[[repositories]]"), "should hint about [[repositories]], got: {err}");
+        assert!(
+            err.contains("does-not-exist"),
+            "expected unknown-repo error, got: {err}"
+        );
+        assert!(
+            err.contains("[[repositories]]"),
+            "should hint about [[repositories]], got: {err}"
+        );
     }
 
     #[test]
@@ -3192,7 +3248,10 @@ url = "https://build.shibboleth.net/nexus/content/repositories/releases/"
 "net.shibboleth.oidc:oidc-common-crypto-api" = { version = "3.3.0", repository = "shibboleth" }
 "#;
         let d = load_str(toml).unwrap();
-        let v = d.dependencies.get("net.shibboleth.oidc:oidc-common-crypto-api").unwrap();
+        let v = d
+            .dependencies
+            .get("net.shibboleth.oidc:oidc-common-crypto-api")
+            .unwrap();
         assert_eq!(v.version(), "3.3.0");
         assert_eq!(v.repository(), Some("shibboleth"));
     }
@@ -3207,7 +3266,10 @@ version = "1.0"
 "com.example:foo" = { version = "1.0", repository = "ghost" }
 "#;
         let err = load_str(toml).unwrap_err().to_string();
-        assert!(err.contains("ghost"), "expected unknown-repo error, got: {err}");
+        assert!(
+            err.contains("ghost"),
+            "expected unknown-repo error, got: {err}"
+        );
     }
 
     #[test]
@@ -3249,7 +3311,10 @@ version = "0.1"
 mainClass = "X"
 "#;
         let d = load_str(toml).unwrap();
-        assert!(!d.spock.enabled(), "absent [spock] must leave enabled = false");
+        assert!(
+            !d.spock.enabled(),
+            "absent [spock] must leave enabled = false"
+        );
     }
 
     #[test]
@@ -3264,7 +3329,10 @@ mainClass = "X"
 enabled = false
 "#;
         let d = load_str(toml).unwrap();
-        assert!(!d.spock.enabled(), "explicit enabled=false must override section presence");
+        assert!(
+            !d.spock.enabled(),
+            "explicit enabled=false must override section presence"
+        );
     }
 
     #[test]
@@ -3307,7 +3375,10 @@ version = "0.1"
 mainClass = "X"
 "#;
         let d = load_str(toml).unwrap();
-        assert_eq!(d.groovy.version(), crate::descriptor::DEFAULT_GROOVY_VERSION);
+        assert_eq!(
+            d.groovy.version(),
+            crate::descriptor::DEFAULT_GROOVY_VERSION
+        );
     }
 
     #[test]
@@ -3334,8 +3405,14 @@ version = "0.1"
 mainClass = "X"
 "#;
         let d = load_str(toml).unwrap();
-        assert!(!d.java.preview_enabled(), "enablePreview must default to false");
-        assert!(d.java.enable_preview.is_none(), "absent key must stay None for inheritance");
+        assert!(
+            !d.java.preview_enabled(),
+            "enablePreview must default to false"
+        );
+        assert!(
+            d.java.enable_preview.is_none(),
+            "absent key must stay None for inheritance"
+        );
     }
 
     #[test]
@@ -3351,7 +3428,11 @@ enablePreview = false
 "#;
         let d = load_str(toml).unwrap();
         assert!(!d.java.preview_enabled());
-        assert_eq!(d.java.enable_preview, Some(false), "explicit false must be Some(false), not None");
+        assert_eq!(
+            d.java.enable_preview,
+            Some(false),
+            "explicit false must be Some(false), not None"
+        );
     }
 
     #[test]
@@ -3475,7 +3556,10 @@ version = "0.1"
 [native-image]
 "#;
         let err = load_str(toml).unwrap_err().to_string();
-        assert!(err.contains("library") && err.contains("native-image"), "got: {err}");
+        assert!(
+            err.contains("library") && err.contains("native-image"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -3560,7 +3644,10 @@ mainClass = "X"
 builder = "podman"
 "#;
         let err = load_str(toml).unwrap_err().to_string();
-        assert!(err.contains("builder") || err.contains("podman"), "got: {err}");
+        assert!(
+            err.contains("builder") || err.contains("podman"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -3576,7 +3663,10 @@ builder = "docker"
 jvmArgs = ["-Xmx1g"]
 "#;
         let err = load_str(toml).unwrap_err().to_string();
-        assert!(err.contains("daemonless") || err.contains("jvmArgs"), "got: {err}");
+        assert!(
+            err.contains("daemonless") || err.contains("jvmArgs"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -3688,7 +3778,10 @@ version = "0.1"
 [jlink]
 "#;
         let err = load_str(toml).unwrap_err().to_string();
-        assert!(err.contains("library") && err.contains("jlink"), "got: {err}");
+        assert!(
+            err.contains("library") && err.contains("jlink"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -3741,7 +3834,10 @@ version = "0.1"
 "com.example:foo" = "1.0"
 "#;
         let err = load_str(toml).unwrap_err().to_string();
-        assert!(err.contains("BOM") && err.contains("test-dependencies"), "got: {err}");
+        assert!(
+            err.contains("BOM") && err.contains("test-dependencies"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -3881,7 +3977,10 @@ mainClass = "X"
 "#;
         let d = load_str(toml).unwrap();
         assert!(!d.test.coverage_enabled(), "coverage must default to false");
-        assert!(d.test.coverage.is_none(), "absent key must stay None for inheritance");
+        assert!(
+            d.test.coverage.is_none(),
+            "absent key must stay None for inheritance"
+        );
     }
 
     #[test]
@@ -3913,7 +4012,11 @@ coverage = false
 "#;
         let d = load_str(toml).unwrap();
         assert!(!d.test.coverage_enabled());
-        assert_eq!(d.test.coverage, Some(false), "explicit false must be Some(false), not None");
+        assert_eq!(
+            d.test.coverage,
+            Some(false),
+            "explicit false must be Some(false), not None"
+        );
     }
 
     #[test]
@@ -4086,9 +4189,21 @@ shadeAll = false
 "#;
         let d = load_str(toml).unwrap();
         assert!(!d.fat_jar.shade_all);
-        assert!(d.dependencies.get("com.example:by-shade").unwrap().should_shade(false));
-        assert!(d.dependencies.get("com.example:by-reloc").unwrap().should_shade(false));
-        assert!(!d.dependencies.get("com.example:not-shaded").unwrap().should_shade(false));
+        assert!(d
+            .dependencies
+            .get("com.example:by-shade")
+            .unwrap()
+            .should_shade(false));
+        assert!(d
+            .dependencies
+            .get("com.example:by-reloc")
+            .unwrap()
+            .should_shade(false));
+        assert!(!d
+            .dependencies
+            .get("com.example:not-shaded")
+            .unwrap()
+            .should_shade(false));
     }
 
     #[test]
@@ -4100,7 +4215,10 @@ version = "0.1"
 mainClass = "X"
 "#;
         let d = load_str(toml).unwrap();
-        assert!(!d.maven.sync_enabled(), "absent [maven] must leave sync = false");
+        assert!(
+            !d.maven.sync_enabled(),
+            "absent [maven] must leave sync = false"
+        );
         assert!(
             !d.maven.pin_transitive_enabled(),
             "absent [maven] must leave pinTransitive = false"
@@ -4175,9 +4293,15 @@ add-reads   = ["my.module=ALL-UNNAMED"]
 test-mode   = "module"
 "#;
         let d = load_str(toml).unwrap();
-        assert_eq!(d.modules.add_modules, vec!["java.sql", "jdk.incubator.vector"]);
+        assert_eq!(
+            d.modules.add_modules,
+            vec!["java.sql", "jdk.incubator.vector"]
+        );
         assert_eq!(d.modules.add_opens, vec!["java.base/java.lang=ALL-UNNAMED"]);
-        assert_eq!(d.modules.add_exports, vec!["java.base/sun.nio.ch=ALL-UNNAMED"]);
+        assert_eq!(
+            d.modules.add_exports,
+            vec!["java.base/sun.nio.ch=ALL-UNNAMED"]
+        );
         assert_eq!(d.modules.add_reads, vec!["my.module=ALL-UNNAMED"]);
         assert_eq!(d.modules.test_mode(), "module");
         assert_eq!(d.modules.test_mode, Some("module".to_string()));
@@ -4241,7 +4365,10 @@ automaticModuleName = "com.example.mylib"
 "#;
         let d = load_str(toml).unwrap();
         if let DescriptorKind::Library(lib) = &d.kind {
-            assert_eq!(lib.automatic_module_name.as_deref(), Some("com.example.mylib"));
+            assert_eq!(
+                lib.automatic_module_name.as_deref(),
+                Some("com.example.mylib")
+            );
         } else {
             panic!("expected Library kind");
         }
@@ -4390,9 +4517,14 @@ foo = "bar"
 
     #[test]
     fn directories_parse() {
-        let toml = format!("{APP}\n[resources]\ndirectories = [\"src/main/resources\", \"src/main/config\"]\n");
+        let toml = format!(
+            "{APP}\n[resources]\ndirectories = [\"src/main/resources\", \"src/main/config\"]\n"
+        );
         let d = load_str(&toml).unwrap();
-        assert_eq!(d.resources.directories, vec!["src/main/resources", "src/main/config"]);
+        assert_eq!(
+            d.resources.directories,
+            vec!["src/main/resources", "src/main/config"]
+        );
         assert!(d.resources.is_active()); // custom directories activate the scope
     }
 
@@ -4421,7 +4553,10 @@ foo = "bar"
             "{APP}\n[[resources.filter]]\nengine = \"liquid\"\n[resources.filter.substitute]\nfailOnUnresolved = true\n"
         );
         let err = load_str(&toml).unwrap_err().to_string();
-        assert!(err.contains("not valid for the liquid engine"), "got: {err}");
+        assert!(
+            err.contains("not valid for the liquid engine"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -4436,7 +4571,8 @@ foo = "bar"
 
     #[test]
     fn deny_unknown_fields_rejects_typo_in_stage() {
-        let toml = format!("{APP}\n[[resources.filter]]\nengine = \"substitute\"\ninclude = [\"x\"]\n");
+        let toml =
+            format!("{APP}\n[[resources.filter]]\nengine = \"substitute\"\ninclude = [\"x\"]\n");
         let err = load_str(&toml).unwrap_err().to_string();
         assert!(err.contains("unknown field"), "got: {err}");
     }
@@ -4448,14 +4584,20 @@ foo = "bar"
              [[resources.filter]]\nengine = \"substitute\"\ndirectories = [\"src/main/other\"]\n"
         );
         let err = load_str(&toml).unwrap_err().to_string();
-        assert!(err.contains("is not one of the [resources] source directories"), "got: {err}");
+        assert!(
+            err.contains("is not one of the [resources] source directories"),
+            "got: {err}"
+        );
     }
 
     #[test]
     fn bom_rejects_resources() {
         let toml = "[bom]\nname = \"x\"\nversion = \"1.0\"\ngroupId = \"g\"\n[resources]\ndirectories = [\"r\"]\n";
         let err = load_str(toml).unwrap_err().to_string();
-        assert!(err.contains("BOM projects must not declare [resources]"), "got: {err}");
+        assert!(
+            err.contains("BOM projects must not declare [resources]"),
+            "got: {err}"
+        );
     }
 
     // -- foreign members ------------------------------------------------------
@@ -4482,9 +4624,15 @@ env = { LEGACY_HOME = "/opt/legacy" }
         assert_eq!(decl.dependencies, vec!["rust-tool"]);
         assert_eq!(decl.command.as_ref().unwrap(), &vec!["make", "jar"]);
         assert_eq!(decl.test_command.as_ref().unwrap(), &vec!["make", "check"]);
-        assert_eq!(decl.clean_command.as_ref().unwrap(), &vec!["make", "distclean"]);
+        assert_eq!(
+            decl.clean_command.as_ref().unwrap(),
+            &vec!["make", "distclean"]
+        );
         assert_eq!(decl.artifacts, vec!["out/legacy-lib.jar"]);
-        assert_eq!(decl.env.get("LEGACY_HOME").map(String::as_str), Some("/opt/legacy"));
+        assert_eq!(
+            decl.env.get("LEGACY_HOME").map(String::as_str),
+            Some("/opt/legacy")
+        );
     }
 
     #[test]
@@ -4496,7 +4644,10 @@ members = ["x"]
 bogus = true
 "#;
         let err = load_str(toml).unwrap_err().to_string();
-        assert!(err.contains("unknown field") || err.contains("bogus"), "got: {err}");
+        assert!(
+            err.contains("unknown field") || err.contains("bogus"),
+            "got: {err}"
+        );
     }
 
     #[test]

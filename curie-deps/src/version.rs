@@ -293,7 +293,10 @@ fn bound(raw: &str) -> Option<MavenVersion> {
 /// Pick the highest of `available` that satisfies **all** of `ranges`, matching
 /// Maven's "highest version that satisfies all the hard requirements" rule.
 /// Returns the original version string, or `None` if nothing qualifies.
-pub fn intersect_highest_satisfying(ranges: &[VersionRange], available: &[String]) -> Option<String> {
+pub fn intersect_highest_satisfying(
+    ranges: &[VersionRange],
+    available: &[String],
+) -> Option<String> {
     available
         .iter()
         .map(|v| MavenVersion::parse(v))

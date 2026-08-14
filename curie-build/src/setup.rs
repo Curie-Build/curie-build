@@ -10,8 +10,7 @@ use std::path::PathBuf;
 /// Git commit hash baked in at compile time by `build.rs`.
 const GIT_COMMIT_HASH: &str = env!("GIT_COMMIT_HASH");
 
-const GITHUB_RAW_BASE: &str =
-    "https://raw.githubusercontent.com/atteo/curie-build";
+const GITHUB_RAW_BASE: &str = "https://raw.githubusercontent.com/atteo/curie-build";
 
 // ── Shell ─────────────────────────────────────────────────────────────────────
 
@@ -28,7 +27,7 @@ impl Shell {
         match self {
             Shell::Fish => "curie.fish",
             Shell::Bash => "curie.bash",
-            Shell::Zsh  => "curie.zsh",
+            Shell::Zsh => "curie.zsh",
         }
     }
 
@@ -37,7 +36,7 @@ impl Shell {
         match self {
             Shell::Fish => "curie.fish",
             Shell::Bash => "curie",
-            Shell::Zsh  => "_curie",
+            Shell::Zsh => "_curie",
         }
     }
 
@@ -45,18 +44,16 @@ impl Shell {
     fn dest_dir(self) -> Result<PathBuf> {
         match self {
             Shell::Fish => {
-                let config = dirs::config_dir()
-                    .context("cannot determine XDG config directory")?;
+                let config = dirs::config_dir().context("cannot determine XDG config directory")?;
                 Ok(config.join("fish/completions"))
             }
             Shell::Bash => {
-                let data = dirs::data_local_dir()
-                    .context("cannot determine XDG local data directory")?;
+                let data =
+                    dirs::data_local_dir().context("cannot determine XDG local data directory")?;
                 Ok(data.join("bash-completion/completions"))
             }
             Shell::Zsh => {
-                let home = dirs::home_dir()
-                    .context("cannot determine home directory")?;
+                let home = dirs::home_dir().context("cannot determine home directory")?;
                 Ok(home.join(".zsh/completions"))
             }
         }
@@ -73,7 +70,7 @@ impl std::fmt::Display for Shell {
         match self {
             Shell::Fish => write!(f, "fish"),
             Shell::Bash => write!(f, "bash"),
-            Shell::Zsh  => write!(f, "zsh"),
+            Shell::Zsh => write!(f, "zsh"),
         }
     }
 }
@@ -85,8 +82,8 @@ pub fn shell_from_name(name: &str) -> Result<Shell> {
     match name {
         "fish" => Ok(Shell::Fish),
         "bash" => Ok(Shell::Bash),
-        "zsh"  => Ok(Shell::Zsh),
-        other  => bail!(
+        "zsh" => Ok(Shell::Zsh),
+        other => bail!(
             "unsupported shell {:?}; supported shells are: fish, bash, zsh",
             other
         ),
@@ -145,25 +142,22 @@ fn download_text(url: &str) -> Result<String> {
 
 fn write_completion(content: &str, dest: &std::path::Path) -> Result<()> {
     let dir = dest.parent().expect("dest path has no parent");
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
-    std::fs::write(dest, content)
-        .with_context(|| format!("failed to write {}", dest.display()))
+    std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    std::fs::write(dest, content).with_context(|| format!("failed to write {}", dest.display()))
 }
 
 fn post_install_hint(shell: Shell, dest: &std::path::Path) {
     match shell {
         Shell::Fish | Shell::Bash => {
-            println!(
-                "  Open a new terminal, or run: source {}",
-                dest.display()
-            );
+            println!("  Open a new terminal, or run: source {}", dest.display());
         }
         Shell::Zsh => {
             println!("  Add to ~/.zshrc if not already present:");
             println!(
                 "    fpath=({} $fpath)",
-                dest.parent().map(|p| p.display().to_string()).unwrap_or_default()
+                dest.parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
             );
             println!("    autoload -Uz compinit && compinit");
             println!("  Then open a new terminal.");
@@ -177,10 +171,10 @@ fn post_install_hint(shell: Shell, dest: &std::path::Path) {
 pub fn run_setup(shell_override: Option<String>) -> Result<()> {
     let shell = match shell_override {
         Some(ref name) => shell_from_name(name)?,
-        None           => detect_shell()?,
+        None => detect_shell()?,
     };
 
-    let url  = completion_url(shell);
+    let url = completion_url(shell);
     let dest = shell.dest_path()?;
 
     println!("  Shell           {shell}");
@@ -220,8 +214,14 @@ mod tests {
     #[test]
     fn completion_url_contains_commit_and_filename() {
         let url = completion_url(Shell::Fish);
-        assert!(url.contains(GIT_COMMIT_HASH), "URL should contain commit hash");
-        assert!(url.ends_with("curie.fish"), "fish URL should end with curie.fish");
+        assert!(
+            url.contains(GIT_COMMIT_HASH),
+            "URL should contain commit hash"
+        );
+        assert!(
+            url.ends_with("curie.fish"),
+            "fish URL should end with curie.fish"
+        );
 
         let url = completion_url(Shell::Bash);
         assert!(url.ends_with("curie.bash"));

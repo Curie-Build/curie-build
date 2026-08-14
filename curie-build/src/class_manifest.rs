@@ -54,8 +54,8 @@ pub fn load(path: &Path) -> Result<Option<Manifest>> {
     }
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let manifest: Manifest = toml::from_str(&content)
-        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let manifest: Manifest =
+        toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(Some(manifest))
 }
 
@@ -194,9 +194,7 @@ mod tests {
 
     #[test]
     fn pre_compile_keeps_classes_of_surviving_sources() {
-        let old = manifest_with(&[
-            ("/a/Foo.java", &["com/Foo.class", "com/Foo$Inner.class"]),
-        ]);
+        let old = manifest_with(&[("/a/Foo.java", &["com/Foo.class", "com/Foo$Inner.class"])]);
         let current = sources_set(&["/a/Foo.java"]);
         let stale = stale_classes(&old, None, &current, None);
         assert!(stale.is_empty(), "no source deleted → nothing stale");
@@ -234,12 +232,8 @@ mod tests {
     fn post_compile_drops_classes_kept_source_no_longer_produces() {
         // Foo.java used to declare a companion `class Bar`; that line is
         // gone, so the next build doesn't emit Bar.class.
-        let old = manifest_with(&[
-            ("/a/Foo.java", &["com/Foo.class", "com/Bar.class"]),
-        ]);
-        let now = manifest_with(&[
-            ("/a/Foo.java", &["com/Foo.class"]),
-        ]);
+        let old = manifest_with(&[("/a/Foo.java", &["com/Foo.class", "com/Bar.class"])]);
+        let now = manifest_with(&[("/a/Foo.java", &["com/Foo.class"])]);
         let stale = stale_classes(&old, Some(&now), &HashSet::new(), None);
         assert_eq!(stale, vec!["com/Bar.class"]);
     }
@@ -248,9 +242,7 @@ mod tests {
     fn post_compile_drops_everything_for_source_missing_from_new_manifest() {
         // Foo.java edited so it now produces no classes (e.g. left only
         // `package foo;`).  All its old classes are stale.
-        let old = manifest_with(&[
-            ("/a/Foo.java", &["com/Foo.class", "com/Foo$Inner.class"]),
-        ]);
+        let old = manifest_with(&[("/a/Foo.java", &["com/Foo.class", "com/Foo$Inner.class"])]);
         let now = Manifest::default();
         let stale = stale_classes(&old, Some(&now), &HashSet::new(), None);
         assert_eq!(stale, vec!["com/Foo.class", "com/Foo$Inner.class"]);
@@ -258,12 +250,8 @@ mod tests {
 
     #[test]
     fn post_compile_no_changes_means_nothing_stale() {
-        let old = manifest_with(&[
-            ("/a/Foo.java", &["com/Foo.class", "com/Foo$Inner.class"]),
-        ]);
-        let now = manifest_with(&[
-            ("/a/Foo.java", &["com/Foo.class", "com/Foo$Inner.class"]),
-        ]);
+        let old = manifest_with(&[("/a/Foo.java", &["com/Foo.class", "com/Foo$Inner.class"])]);
+        let now = manifest_with(&[("/a/Foo.java", &["com/Foo.class", "com/Foo$Inner.class"])]);
         let stale = stale_classes(&old, Some(&now), &HashSet::new(), None);
         assert!(stale.is_empty());
     }
@@ -293,14 +281,21 @@ mod tests {
     fn load_parses_wrapper_format() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("classes.toml");
-        std::fs::write(&path, r#"
+        std::fs::write(
+            &path,
+            r#"
 [sources]
 "/abs/Foo.java" = ["com/Foo.class", "com/Foo$Inner.class"]
 "/abs/Bar.java" = ["com/Bar.class"]
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let m = load(&path).unwrap().unwrap();
         assert_eq!(m.sources.len(), 2);
-        assert_eq!(m.sources["/abs/Foo.java"], vec!["com/Foo.class", "com/Foo$Inner.class"]);
+        assert_eq!(
+            m.sources["/abs/Foo.java"],
+            vec!["com/Foo.class", "com/Foo$Inner.class"]
+        );
     }
 
     // -- delete_classes -----------------------------------------------------
@@ -324,7 +319,10 @@ mod tests {
             ("/a/Foo.java", &["com/Foo.class", "com/Foo$Inner.class"]),
             ("/a/Bar.java", &["com/Bar.class"]),
         ]);
-        touch_classes(&classes, &["com/Foo.class", "com/Foo$Inner.class", "com/Bar.class"]);
+        touch_classes(
+            &classes,
+            &["com/Foo.class", "com/Foo$Inner.class", "com/Bar.class"],
+        );
         assert!(!has_missing_classes(&manifest, &classes));
     }
 
@@ -361,7 +359,8 @@ mod tests {
         let removed = delete_classes(
             &classes,
             &["com/A.class".to_string(), "com/ghost.class".to_string()],
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(removed, 1);
         assert!(!a.exists());

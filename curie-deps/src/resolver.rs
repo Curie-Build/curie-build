@@ -47,13 +47,13 @@ use crate::gav::Gav;
 use crate::pom::{self, BomRef, Pom};
 use crate::repo::{default_repositories, Repository};
 use crate::snapshot_meta;
-use reqwest::blocking::Client;
 use anyhow::{bail, Context, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use reqwest::blocking::Client;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -416,7 +416,10 @@ fn format_range_error(violations: &[RangeViolation]) -> String {
 
     let mut grouped: BTreeMap<&str, Vec<(&str, &Gav)>> = BTreeMap::new();
     for v in violations {
-        grouped.entry(&v.dep_key).or_default().push((&v.range, &v.declared_in));
+        grouped
+            .entry(&v.dep_key)
+            .or_default()
+            .push((&v.range, &v.declared_in));
     }
 
     let mut msg = String::from("non-deterministic version ranges in dependency graph");
@@ -486,11 +489,16 @@ fn merge_parent_chain(
             None,
             None,
         )
-            .with_context(|| format!("failed to fetch parent POM {parent_gav} (parent of {child})"))?;
-        let xml = std::fs::read_to_string(&pom_path)
-            .with_context(|| format!("failed to read parent POM {} (parent of {child})", pom_path.display()))?;
-        let parent_pom = pom::parse(&xml)
-            .with_context(|| format!("failed to parse parent POM {parent_gav} (parent of {child})"))?;
+        .with_context(|| format!("failed to fetch parent POM {parent_gav} (parent of {child})"))?;
+        let xml = std::fs::read_to_string(&pom_path).with_context(|| {
+            format!(
+                "failed to read parent POM {} (parent of {child})",
+                pom_path.display()
+            )
+        })?;
+        let parent_pom = pom::parse(&xml).with_context(|| {
+            format!("failed to parse parent POM {parent_gav} (parent of {child})")
+        })?;
 
         // Properties: parent fills gaps.
         for (k, v) in &parent_pom.properties {
@@ -498,11 +506,15 @@ fn merge_parent_chain(
         }
         // Managed versions: parent fills gaps.
         for (k, v) in &parent_pom.managed_versions {
-            pom.managed_versions.entry(k.clone()).or_insert_with(|| v.clone());
+            pom.managed_versions
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
         }
         // Managed scopes: parent fills gaps (same Maven rule as versions).
         for (k, v) in &parent_pom.managed_scopes {
-            pom.managed_scopes.entry(k.clone()).or_insert_with(|| v.clone());
+            pom.managed_scopes
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
         }
         // BOM imports from parent are appended (parent has lower priority than own).
         for bom_ref in &parent_pom.bom_imports {
@@ -596,11 +608,10 @@ fn fetch_and_parse_pom(
         None,
         None,
     )
-        .with_context(|| format!("failed to fetch POM for {}", gav))?;
+    .with_context(|| format!("failed to fetch POM for {}", gav))?;
     let xml = std::fs::read_to_string(&pom_path)
         .with_context(|| format!("failed to read POM {}", pom_path.display()))?;
-    let mut pom = pom::parse(&xml)
-        .with_context(|| format!("failed to parse POM for {}", gav))?;
+    let mut pom = pom::parse(&xml).with_context(|| format!("failed to parse POM for {}", gav))?;
     merge_parent_chain(&mut pom, gav, repos, client, opts)?;
 
     // Resolve the POM's own <dependencyManagement> BOM imports so that
@@ -621,7 +632,9 @@ fn fetch_and_parse_pom(
             // any placeholder remains keeps an unresolved `${...}` from ever
             // reaching the filesystem (which previously created junk cache
             // directories literally named e.g. `${idp.groupId}`).
-            let Some(mut bom_gav) = resolve_bom_ref_gav(bom_ref, &pom) else { continue; };
+            let Some(mut bom_gav) = resolve_bom_ref_gav(bom_ref, &pom) else {
+                continue;
+            };
             let _ = prepare_snapshot_gav(&mut bom_gav, repos, client, opts);
             // Fetch the BOM POM directly without further BOM-import expansion.
             if let Ok(path) = ensure_artifact(
@@ -690,11 +703,14 @@ fn parallel_pom_fetch(
                     let mut local = Vec::new();
                     loop {
                         let i = next_idx.fetch_add(1, Ordering::Relaxed);
-                        if i >= level_n { break; }
+                        if i >= level_n {
+                            break;
+                        }
                         let work = &level[i];
-                        local.push((i, fetch_and_parse_pom(
-                            &work.gav, &work.fetch_repos, client, opts,
-                        )));
+                        local.push((
+                            i,
+                            fetch_and_parse_pom(&work.gav, &work.fetch_repos, client, opts),
+                        ));
                     }
                     local
                 })
@@ -810,14 +826,16 @@ fn resolve_bom_ref_gav(bom_ref: &BomRef, importing_pom: &Pom) -> Option<Gav> {
 /// Resolve the version of a nested BOM reference, using the importing POM's
 /// properties and managed versions for `${...}` substitution.
 fn resolve_bom_ref_version(bom_ref: &BomRef, importing_pom: &Pom) -> Option<String> {
-    importing_pom.try_resolve_value(&bom_ref.version).or_else(|| {
-        // Try managed_versions as a last resort.
-        let key = format!("{}:{}", bom_ref.group_id, bom_ref.artifact_id);
-        importing_pom
-            .managed_versions
-            .get(&key)
-            .and_then(|v| importing_pom.try_resolve_value(v))
-    })
+    importing_pom
+        .try_resolve_value(&bom_ref.version)
+        .or_else(|| {
+            // Try managed_versions as a last resort.
+            let key = format!("{}:{}", bom_ref.group_id, bom_ref.artifact_id);
+            importing_pom
+                .managed_versions
+                .get(&key)
+                .and_then(|v| importing_pom.try_resolve_value(v))
+        })
 }
 
 /// Resolve `${...}` placeholders in a `groupId:artifactId` managed-versions key
@@ -828,7 +846,11 @@ fn resolve_bom_ref_version(bom_ref: &BomRef, importing_pom: &Pom) -> Option<Stri
 fn resolve_ga_key(pom: &Pom, key: &str) -> String {
     match key.split_once(':') {
         Some((group, artifact)) => {
-            format!("{}:{}", pom.resolve_value(group), pom.resolve_value(artifact))
+            format!(
+                "{}:{}",
+                pom.resolve_value(group),
+                pom.resolve_value(artifact)
+            )
         }
         None => key.to_string(),
     }
@@ -839,10 +861,7 @@ fn resolve_ga_key(pom: &Pom, key: &str) -> String {
 ///
 /// Runs Phase 1 of the resolver (BFS over POMs) but skips Phase 2 (JAR
 /// downloads) — suitable for `curie deps` queries that don't need the JARs.
-pub fn resolve_tree(
-    deps: &[DepEntry],
-    opts: &ResolveOptions,
-) -> Result<DepTree> {
+pub fn resolve_tree(deps: &[DepEntry], opts: &ResolveOptions) -> Result<DepTree> {
     let central = effective_repos(&opts.default_repos);
 
     let named_map: std::collections::HashMap<&str, &Repository> = opts
@@ -866,10 +885,12 @@ pub fn resolve_tree(
         let resolved_version: String = if dep.version.is_empty() {
             global_managed
                 .get(dep.key)
-                .with_context(|| format!(
-                    "dependency \"{}\" has no version and is not managed by any BOM",
-                    dep.key
-                ))?
+                .with_context(|| {
+                    format!(
+                        "dependency \"{}\" has no version and is not managed by any BOM",
+                        dep.key
+                    )
+                })?
                 .clone()
         } else {
             dep.version.to_string()
@@ -885,13 +906,13 @@ pub fn resolve_tree(
         }
 
         let (fetch_repos, child_repos) = if let Some(repo_id) = dep.repo_id {
-            let named: Repository = (*named_map
-                .get(repo_id)
-                .with_context(|| format!(
+            let named: Repository = (*named_map.get(repo_id).with_context(|| {
+                format!(
                     "dependency \"{}\" references unknown repository \"{}\"",
                     dep.key, repo_id
-                ))?)
-                .clone();
+                )
+            })?)
+            .clone();
             let mut child = central.clone();
             child.push(named.clone());
             (vec![named], child)
@@ -903,7 +924,14 @@ pub fn resolve_tree(
         let ga = format!("{}:{}", gav.group, gav.artifact);
         let user_exclusions = parse_exclusion_strings(&dep.exclusions);
         if visited.insert(ga) {
-            current_level.push(BfsWork { gav, fetch_repos, child_repos, depth: 0, via: None, exclusions: user_exclusions });
+            current_level.push(BfsWork {
+                gav,
+                fetch_repos,
+                child_repos,
+                depth: 0,
+                via: None,
+                exclusions: user_exclusions,
+            });
         }
     }
 
@@ -941,7 +969,10 @@ pub fn resolve_tree(
 
                     if visited.contains(&ga_key) {
                         if let Some(raw_version) = resolve_transitive_version(
-                            &ga_key, dep.version.as_deref(), pom, &global_managed,
+                            &ga_key,
+                            dep.version.as_deref(),
+                            pom,
+                            &global_managed,
                         ) {
                             skipped.entry(ga_key).or_default().push(SkippedDep {
                                 version: raw_version,
@@ -953,7 +984,10 @@ pub fn resolve_tree(
                     }
 
                     let raw_version = match resolve_transitive_version(
-                        &ga_key, dep.version.as_deref(), pom, &global_managed,
+                        &ga_key,
+                        dep.version.as_deref(),
+                        pom,
+                        &global_managed,
                     ) {
                         Some(v) => v,
                         None => continue,
@@ -994,7 +1028,9 @@ pub fn resolve_tree(
     }
 
     if !range_violations.is_empty() {
-        return Err(anyhow::Error::new(VersionRangeError { violations: range_violations }));
+        return Err(anyhow::Error::new(VersionRangeError {
+            violations: range_violations,
+        }));
     }
 
     Ok(DepTree { resolved, skipped })
@@ -1007,10 +1043,7 @@ pub fn resolve_tree(
 /// no POM/JAR downloads.  Intended for tooling such as `curie publish` that
 /// needs to know the resolved versions of the declared deps but doesn't
 /// need the full transitive closure.
-pub fn resolve_declared_gavs(
-    deps: &[DepEntry],
-    opts: &ResolveOptions,
-) -> Result<Vec<Gav>> {
+pub fn resolve_declared_gavs(deps: &[DepEntry], opts: &ResolveOptions) -> Result<Vec<Gav>> {
     let central = effective_repos(&opts.default_repos);
     let client = build_http_client()?;
     let global_managed = resolve_boms_with_opts(&opts.bom_imports, &central, &client, opts)?;
@@ -1020,10 +1053,12 @@ pub fn resolve_declared_gavs(
         let version: String = if dep.version.is_empty() {
             global_managed
                 .get(dep.key)
-                .with_context(|| format!(
-                    "dependency \"{}\" has no version and is not managed by any BOM",
-                    dep.key
-                ))?
+                .with_context(|| {
+                    format!(
+                        "dependency \"{}\" has no version and is not managed by any BOM",
+                        dep.key
+                    )
+                })?
                 .clone()
         } else {
             dep.version.to_string()
@@ -1114,12 +1149,14 @@ pub fn resolve_full(
             // Version comes from a BOM — hard error if not found.
             global_managed
                 .get(dep.key)
-                .with_context(|| format!(
-                    "dependency \"{}\" has no version and is not managed by any BOM \
+                .with_context(|| {
+                    format!(
+                        "dependency \"{}\" has no version and is not managed by any BOM \
                      in [bom-imports]; either add a version or import a BOM that \
                      manages this artifact",
-                    dep.key
-                ))?
+                        dep.key
+                    )
+                })?
                 .clone()
         } else {
             dep.version.to_string()
@@ -1141,14 +1178,14 @@ pub fn resolve_full(
         //   may come from Central OR X.
         let (fetch_repos, child_repos): (Vec<Repository>, Vec<Repository>) =
             if let Some(repo_id) = dep.repo_id {
-                let named: Repository = (*named_map
-                    .get(repo_id)
-                    .with_context(|| format!(
+                let named: Repository = (*named_map.get(repo_id).with_context(|| {
+                    format!(
                         "dependency \"{}\" references unknown repository \"{}\"; \
                          declare it with [[repositories]]",
                         dep.key, repo_id
-                    ))?)
-                    .clone();
+                    )
+                })?)
+                .clone();
                 let mut child = central.clone();
                 child.push(named.clone());
                 (vec![named], child)
@@ -1170,7 +1207,14 @@ pub fn resolve_full(
         let user_exclusions = parse_exclusion_strings(&dep.exclusions);
         if visited.insert(ga.clone()) {
             chosen.insert(ga, resolved_version);
-            current_level.push(BfsWork { gav, fetch_repos, child_repos, depth: 0, via: None, exclusions: user_exclusions });
+            current_level.push(BfsWork {
+                gav,
+                fetch_repos,
+                child_repos,
+                depth: 0,
+                via: None,
+                exclusions: user_exclusions,
+            });
         } else if let Some(kept) = chosen.get(&ga) {
             // A second declaration of the same group:artifact is dropped (first
             // wins).  If the dropped version's major differs, that's a conflict.
@@ -1327,7 +1371,9 @@ pub fn resolve_full(
     }
 
     if !range_violations.is_empty() {
-        return Err(anyhow::Error::new(VersionRangeError { violations: range_violations }));
+        return Err(anyhow::Error::new(VersionRangeError {
+            violations: range_violations,
+        }));
     }
 
     // Major-version conflicts are a hard error for user-declared dependency
@@ -1397,11 +1443,9 @@ pub fn resolve_full(
 
         let summary = mp.add(ProgressBar::new(missing));
         summary.set_style(
-            ProgressStyle::with_template(
-                "  Downloading     [{bar:40.cyan/blue}] {pos}/{len}",
-            )
-            .unwrap()
-            .progress_chars("=>-"),
+            ProgressStyle::with_template("  Downloading     [{bar:40.cyan/blue}] {pos}/{len}")
+                .unwrap()
+                .progress_chars("=>-"),
         );
 
         let spinner_style = ProgressStyle::with_template("    {spinner} {msg}")
@@ -1774,8 +1818,24 @@ pub fn fetch_artifact(gav: &Gav, repos: &[Repository], offline: bool) -> Result<
     };
     let mut resolved = gav.clone();
     prepare_snapshot_gav(&mut resolved, repos, &client, &opts)?;
-    ensure_artifact(&resolved, repos, &client, ArtifactKind::Pom, offline, None, None)?;
-    ensure_artifact(&resolved, repos, &client, ArtifactKind::Jar, offline, None, None)
+    ensure_artifact(
+        &resolved,
+        repos,
+        &client,
+        ArtifactKind::Pom,
+        offline,
+        None,
+        None,
+    )?;
+    ensure_artifact(
+        &resolved,
+        repos,
+        &client,
+        ArtifactKind::Jar,
+        offline,
+        None,
+        None,
+    )
 }
 
 /// Download only the POM for an artifact — no JAR.  Used for BOM and
@@ -1788,7 +1848,15 @@ pub fn fetch_pom_only(gav: &Gav, repos: &[Repository], offline: bool) -> Result<
     };
     let mut resolved = gav.clone();
     prepare_snapshot_gav(&mut resolved, repos, &client, &opts)?;
-    ensure_artifact(&resolved, repos, &client, ArtifactKind::Pom, offline, None, None)
+    ensure_artifact(
+        &resolved,
+        repos,
+        &client,
+        ArtifactKind::Pom,
+        offline,
+        None,
+        None,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1803,14 +1871,22 @@ pub fn fetch_pom_only(gav: &Gav, repos: &[Repository], offline: bool) -> Result<
 /// `~/.m2/repository`.  Used by `curie fetch` to turn a version range into a
 /// concrete suggestion; a range cannot be resolved offline, so `offline` is a
 /// hard error.
-pub fn fetch_available_versions(ga: &str, repos: &[Repository], offline: bool) -> Result<Vec<String>> {
+pub fn fetch_available_versions(
+    ga: &str,
+    repos: &[Repository],
+    offline: bool,
+) -> Result<Vec<String>> {
     if offline {
         bail!("cannot resolve a version range for {ga} without network access (--offline)");
     }
-    let (group, artifact) = ga.split_once(':').with_context(|| {
-        format!("invalid coordinate key {ga:?}; expected \"group:artifact\"")
-    })?;
-    let relative = format!("{}/{}/maven-metadata.xml", group.replace('.', "/"), artifact);
+    let (group, artifact) = ga
+        .split_once(':')
+        .with_context(|| format!("invalid coordinate key {ga:?}; expected \"group:artifact\""))?;
+    let relative = format!(
+        "{}/{}/maven-metadata.xml",
+        group.replace('.', "/"),
+        artifact
+    );
 
     let client = build_http_client()?;
     for repo in &effective_repos(repos) {
@@ -2021,14 +2097,8 @@ fn ensure_artifact(
         release_download_slot(&local_key);
     }
 
-    let err = last_err.unwrap_or_else(|| {
-        anyhow::anyhow!("no repositories configured")
-    });
-    bail!(
-        "failed to download {} from all repositories: {}",
-        gav,
-        err
-    );
+    let err = last_err.unwrap_or_else(|| anyhow::anyhow!("no repositories configured"));
+    bail!("failed to download {} from all repositories: {}", gav, err);
 }
 
 /// Build a unique collocated staging path next to `dest`.
@@ -2059,8 +2129,7 @@ fn stage_and_rename_atomically(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create staging dir {}", parent.display()))?;
     }
-    std::fs::write(&part, bytes)
-        .with_context(|| format!("failed to write {}", part.display()))?;
+    std::fs::write(&part, bytes).with_context(|| format!("failed to write {}", part.display()))?;
 
     match std::fs::rename(&part, dest) {
         Ok(()) => {
@@ -2079,7 +2148,11 @@ fn stage_and_rename_atomically(
                 Ok(())
             } else {
                 Err(e).with_context(|| {
-                    format!("failed to rename {} \u{2192} {}", part.display(), dest.display())
+                    format!(
+                        "failed to rename {} \u{2192} {}",
+                        part.display(),
+                        dest.display()
+                    )
                 })
             }
         }
@@ -2097,17 +2170,12 @@ fn stage_and_rename_atomically(
 /// them on upload).  A missing sidecar usually means a misconfigured proxy or
 /// a manually-uploaded artifact, and either way we refuse to install an
 /// unverifiable JAR.
-fn download(
-    client: &reqwest::blocking::Client,
-    url: &str,
-    dest: &Path,
-) -> Result<()> {
+fn download(client: &reqwest::blocking::Client, url: &str, dest: &Path) -> Result<()> {
     let bytes = if let Some(path) = file_url_to_path(url) {
         if !path.exists() {
             bail!("HTTP 404 for {}", url);
         }
-        std::fs::read(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?
+        std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?
     } else {
         let response = client
             .get(url)
@@ -2237,7 +2305,10 @@ fn fetch_remote_checksum(
         None => return Ok(None),
     };
     let hex = parse_checksum_text(&body).with_context(|| {
-        format!("sidecar {} returned malformed checksum text {:?}", sidecar_url, body)
+        format!(
+            "sidecar {} returned malformed checksum text {:?}",
+            sidecar_url, body
+        )
     })?;
     Ok(Some(hex))
 }
@@ -2354,7 +2425,7 @@ mod tests {
         group: &str,
         artifact: &str,
         version: &str,
-        managed: &[(&str, &str, &str)],   // (group, artifact, version)
+        managed: &[(&str, &str, &str)], // (group, artifact, version)
         bom_imports: &[(&str, &str, &str)], // (group, artifact, version) with scope=import type=pom
     ) -> String {
         let mut xml = format!(
@@ -2460,7 +2531,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gav = write_fake_bom(
             dir.path(),
-            "com.example", "my-bom", "1.0.0",
+            "com.example",
+            "my-bom",
+            "1.0.0",
             &[("org.foo", "bar", "3.2.1"), ("org.foo", "baz", "3.2.1")],
             &[],
         );
@@ -2474,13 +2547,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bom_a = write_fake_bom(
             dir.path(),
-            "com.example", "bom-a", "1.0.0",
+            "com.example",
+            "bom-a",
+            "1.0.0",
             &[("org.foo", "bar", "1.0.0")],
             &[],
         );
         let bom_b = write_fake_bom(
             dir.path(),
-            "com.example", "bom-b", "1.0.0",
+            "com.example",
+            "bom-b",
+            "1.0.0",
             &[("org.foo", "bar", "2.0.0")],
             &[],
         );
@@ -2495,14 +2572,18 @@ mod tests {
         // nested-bom says org.foo:bar = 1.0.0
         write_fake_bom(
             dir.path(),
-            "com.example", "nested-bom", "1.0.0",
+            "com.example",
+            "nested-bom",
+            "1.0.0",
             &[("org.foo", "bar", "1.0.0")],
             &[],
         );
         // outer-bom imports nested-bom AND overrides org.foo:bar to 9.9.9
         let outer = write_fake_bom(
             dir.path(),
-            "com.example", "outer-bom", "1.0.0",
+            "com.example",
+            "outer-bom",
+            "1.0.0",
             &[("org.foo", "bar", "9.9.9")],
             &[("com.example", "nested-bom", "1.0.0")],
         );
@@ -2517,17 +2598,28 @@ mod tests {
         // bom-a imports bom-b, bom-b imports bom-a → cycle
         write_fake_bom(
             dir.path(),
-            "com.example", "bom-a", "1.0.0",
+            "com.example",
+            "bom-a",
+            "1.0.0",
             &[("org.foo", "x", "1.0")],
             &[("com.example", "bom-b", "1.0.0")],
         );
         write_fake_bom(
             dir.path(),
-            "com.example", "bom-b", "1.0.0",
+            "com.example",
+            "bom-b",
+            "1.0.0",
             &[("org.foo", "y", "2.0")],
             &[("com.example", "bom-a", "1.0.0")],
         );
-        let bom_a = Gav { group: "com.example".into(), artifact: "bom-a".into(), version: "1.0.0".into(), classifier: None, extension: None, snapshot_version: None };
+        let bom_a = Gav {
+            group: "com.example".into(),
+            artifact: "bom-a".into(),
+            version: "1.0.0".into(),
+            classifier: None,
+            extension: None,
+            snapshot_version: None,
+        };
         let result = run_resolve_boms(dir.path(), &[bom_a]).unwrap();
         assert_eq!(result.get("org.foo:x").map(String::as_str), Some("1.0"));
         assert_eq!(result.get("org.foo:y").map(String::as_str), Some("2.0"));
@@ -2555,7 +2647,7 @@ mod tests {
         group: &str,
         artifact: &str,
         version: &str,
-        deps: &[(&str, &str, &str)],  // (group, artifact, version)
+        deps: &[(&str, &str, &str)], // (group, artifact, version)
     ) -> String {
         let mut xml = format!(
             r#"<?xml version="1.0"?>
@@ -2582,7 +2674,12 @@ mod tests {
 
     /// Like [`make_pom`] but marks the artifact `<packaging>pom</packaging>`
     /// (an aggregator with no JAR of its own).
-    fn make_aggregator_pom(group: &str, artifact: &str, version: &str, deps: &[(&str, &str, &str)]) -> String {
+    fn make_aggregator_pom(
+        group: &str,
+        artifact: &str,
+        version: &str,
+        deps: &[(&str, &str, &str)],
+    ) -> String {
         let mut xml = format!(
             r#"<?xml version="1.0"?>
 <project>
@@ -2616,7 +2713,13 @@ mod tests {
         version: &str,
         deps: &[(&str, &str, &str)],
     ) -> Gav {
-        write_fake_artifact_with_pom(home_dir, group, artifact, version, &make_pom(group, artifact, version, deps))
+        write_fake_artifact_with_pom(
+            home_dir,
+            group,
+            artifact,
+            version,
+            &make_pom(group, artifact, version, deps),
+        )
     }
 
     /// Like [`write_fake_artifact`], but with caller-supplied POM XML — for
@@ -2653,7 +2756,13 @@ mod tests {
     /// Write a POM-only artifact (no JAR) into the fake local Maven cache —
     /// for parent POMs, which `merge_parent_chain` fetches but never needs a
     /// JAR for.
-    fn write_fake_pom(home_dir: &std::path::Path, group: &str, artifact: &str, version: &str, pom_xml: &str) -> Gav {
+    fn write_fake_pom(
+        home_dir: &std::path::Path,
+        group: &str,
+        artifact: &str,
+        version: &str,
+        pom_xml: &str,
+    ) -> Gav {
         let gav = Gav {
             group: group.to_string(),
             artifact: artifact.to_string(),
@@ -2662,14 +2771,22 @@ mod tests {
             extension: None,
             snapshot_version: None,
         };
-        let pom_path = home_dir.join(".m2").join("repository").join(gav.relative_pom_path());
+        let pom_path = home_dir
+            .join(".m2")
+            .join("repository")
+            .join(gav.relative_pom_path());
         write_with_sidecar(&pom_path, pom_xml.as_bytes());
         gav
     }
 
     /// Build a POM with `<properties>` and no dependencies — used as a
     /// parent POM whose properties are inherited by a child's `<parent>`.
-    fn make_pom_with_properties(group: &str, artifact: &str, version: &str, properties: &[(&str, &str)]) -> String {
+    fn make_pom_with_properties(
+        group: &str,
+        artifact: &str,
+        version: &str,
+        properties: &[(&str, &str)],
+    ) -> String {
         let mut xml = format!(
             r#"<?xml version="1.0"?>
 <project>
@@ -2782,7 +2899,14 @@ mod tests {
         // cache miss produces an immediate error rather than a network attempt.
         let entries: Vec<DepEntry> = deps
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false })
+            .map(|(k, v)| DepEntry {
+                key: k,
+                version: v,
+                repo_id: None,
+                exclusions: vec![],
+                classifier: None,
+                allow_version_conflict: false,
+            })
             .collect();
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -2792,10 +2916,11 @@ mod tests {
             offline: true,
             // These helpers exercise the user-dependency path, so conflict
             // errors are enabled (matching compile.rs / test.rs).
-            skip_version_ranges: false, error_on_version_conflict: true,
+            skip_version_ranges: false,
+            error_on_version_conflict: true,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            };
+        };
         let result = resolve(&entries, &opts);
 
         match prev_home {
@@ -2818,7 +2943,14 @@ mod tests {
 
         let entries: Vec<DepEntry> = deps
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false })
+            .map(|(k, v)| DepEntry {
+                key: k,
+                version: v,
+                repo_id: None,
+                exclusions: vec![],
+                classifier: None,
+                allow_version_conflict: false,
+            })
             .collect();
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -2826,10 +2958,11 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true,
-            skip_version_ranges: false, error_on_version_conflict: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            };
+        };
         let pins: Vec<String> = pins.iter().map(|s| s.to_string()).collect();
         let result = resolve_with_pins(&entries, &opts, &pins);
 
@@ -2870,10 +3003,11 @@ mod tests {
             offline: true,
             // These helpers exercise the user-dependency path, so conflict
             // errors are enabled (matching compile.rs / test.rs).
-            skip_version_ranges: false, error_on_version_conflict: true,
+            skip_version_ranges: false,
+            error_on_version_conflict: true,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            };
+        };
         let result = resolve(&entries, &opts);
 
         match prev_home {
@@ -2922,25 +3056,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
         write_fake_artifact(dir.path(), "foo", "bar", "1.5", &[]);
-        write_fake_artifact(
-            dir.path(), "foo", "other", "1.0",
-            &[("foo", "bar", "1.5")],
-        );
+        write_fake_artifact(dir.path(), "foo", "other", "1.0", &[("foo", "bar", "1.5")]);
 
         let result = run_resolve(
             dir.path(),
             &[("foo:bar", "1.0"), ("foo:other", "1.0")],
             vec![],
-        ).unwrap();
+        )
+        .unwrap();
 
         let gavs = jar_gavs(&result);
         assert!(
             gavs.contains(&"foo:bar:1.0".to_string()),
-            "expected foo:bar:1.0 in {:?}", gavs,
+            "expected foo:bar:1.0 in {:?}",
+            gavs,
         );
         assert!(
             !gavs.contains(&"foo:bar:1.5".to_string()),
-            "foo:bar:1.5 must not appear (nearest wins): {:?}", gavs,
+            "foo:bar:1.5 must not appear (nearest wins): {:?}",
+            gavs,
         );
     }
 
@@ -2950,19 +3084,23 @@ mod tests {
         // Nearest-wins keeps 2.0, but the major differs (2 vs 5) -> hard error.
         let dir = tempfile::tempdir().unwrap();
         write_fake_artifact(dir.path(), "foo", "bar", "2.0", &[]);
-        write_fake_artifact(
-            dir.path(), "foo", "other", "1.0",
-            &[("foo", "bar", "5.0")],
-        );
+        write_fake_artifact(dir.path(), "foo", "other", "1.0", &[("foo", "bar", "5.0")]);
 
         let err = run_resolve(
             dir.path(),
             &[("foo:bar", "2.0"), ("foo:other", "1.0")],
             vec![],
-        ).unwrap_err();
+        )
+        .unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("foo:bar"), "should name the conflicting artifact: {msg}");
-        assert!(msg.contains("2.0") && msg.contains("5.0"), "should show both versions: {msg}");
+        assert!(
+            msg.contains("foo:bar"),
+            "should name the conflicting artifact: {msg}"
+        );
+        assert!(
+            msg.contains("2.0") && msg.contains("5.0"),
+            "should show both versions: {msg}"
+        );
     }
 
     #[test]
@@ -2970,19 +3108,20 @@ mod tests {
         // Same graph as above, but foo:bar opts out with allowVersionConflict.
         let dir = tempfile::tempdir().unwrap();
         write_fake_artifact(dir.path(), "foo", "bar", "2.0", &[]);
-        write_fake_artifact(
-            dir.path(), "foo", "other", "1.0",
-            &[("foo", "bar", "5.0")],
-        );
+        write_fake_artifact(dir.path(), "foo", "other", "1.0", &[("foo", "bar", "5.0")]);
 
         let result = run_resolve_with_allow(
             dir.path(),
             &[("foo:bar", "2.0", true), ("foo:other", "1.0", false)],
             vec![],
-        ).unwrap();
+        )
+        .unwrap();
 
         let gavs = jar_gavs(&result);
-        assert!(gavs.contains(&"foo:bar:2.0".to_string()), "expected foo:bar:2.0: {gavs:?}");
+        assert!(
+            gavs.contains(&"foo:bar:2.0".to_string()),
+            "expected foo:bar:2.0: {gavs:?}"
+        );
     }
 
     #[test]
@@ -2990,19 +3129,20 @@ mod tests {
         // Transitive needs foo:bar 2.5 while 2.0 is kept — same major, no error.
         let dir = tempfile::tempdir().unwrap();
         write_fake_artifact(dir.path(), "foo", "bar", "2.0", &[]);
-        write_fake_artifact(
-            dir.path(), "foo", "other", "1.0",
-            &[("foo", "bar", "2.5")],
-        );
+        write_fake_artifact(dir.path(), "foo", "other", "1.0", &[("foo", "bar", "2.5")]);
 
         let result = run_resolve(
             dir.path(),
             &[("foo:bar", "2.0"), ("foo:other", "1.0")],
             vec![],
-        ).unwrap();
+        )
+        .unwrap();
 
         let gavs = jar_gavs(&result);
-        assert!(gavs.contains(&"foo:bar:2.0".to_string()), "expected foo:bar:2.0: {gavs:?}");
+        assert!(
+            gavs.contains(&"foo:bar:2.0".to_string()),
+            "expected foo:bar:2.0: {gavs:?}"
+        );
     }
 
     #[test]
@@ -3016,15 +3156,20 @@ mod tests {
             dir.path(),
             &[("foo:bar", "1.0"), ("foo:bar", "3.0")],
             vec![],
-        ).unwrap_err();
-        assert!(format!("{err:#}").contains("foo:bar"), "should name foo:bar");
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("foo:bar"),
+            "should name foo:bar"
+        );
 
         // Opting out makes it succeed, keeping the first declaration.
         let result = run_resolve_with_allow(
             dir.path(),
             &[("foo:bar", "1.0", true), ("foo:bar", "3.0", true)],
             vec![],
-        ).unwrap();
+        )
+        .unwrap();
         assert!(jar_gavs(&result).contains(&"foo:bar:1.0".to_string()));
     }
 
@@ -3048,14 +3193,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
         write_fake_artifact(dir.path(), "foo", "bar", "1.1", &[]);
-        write_fake_artifact(
-            dir.path(), "grp", "a", "1.0",
-            &[("foo", "bar", "1.0")],
-        );
-        write_fake_artifact(
-            dir.path(), "grp", "b", "1.0",
-            &[("foo", "bar", "1.1")],
-        );
+        write_fake_artifact(dir.path(), "grp", "a", "1.0", &[("foo", "bar", "1.0")]);
+        write_fake_artifact(dir.path(), "grp", "b", "1.0", &[("foo", "bar", "1.1")]);
 
         let result = run_resolve(
             dir.path(),
@@ -3064,16 +3203,19 @@ mod tests {
             // order, so a comes before b here.
             &[("grp:a", "1.0"), ("grp:b", "1.0")],
             vec![],
-        ).unwrap();
+        )
+        .unwrap();
 
         let gavs = jar_gavs(&result);
         assert!(
             gavs.contains(&"foo:bar:1.0".to_string()),
-            "first-declared a's choice (foo:bar:1.0) must win: {:?}", gavs,
+            "first-declared a's choice (foo:bar:1.0) must win: {:?}",
+            gavs,
         );
         assert!(
             !gavs.contains(&"foo:bar:1.1".to_string()),
-            "b's choice (foo:bar:1.1) must lose to a's: {:?}", gavs,
+            "b's choice (foo:bar:1.1) must lose to a's: {:?}",
+            gavs,
         );
     }
 
@@ -3086,31 +3228,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_fake_artifact(dir.path(), "foo", "bar", "2.0", &[]);
         write_fake_artifact(dir.path(), "foo", "bar", "9.9.9", &[]);
-        write_fake_artifact(
-            dir.path(), "grp", "lib", "1.0",
-            &[("foo", "bar", "2.0")],
-        );
+        write_fake_artifact(dir.path(), "grp", "lib", "1.0", &[("foo", "bar", "2.0")]);
         let bom = write_fake_bom(
             dir.path(),
-            "com.example", "pin-bom", "1.0.0",
+            "com.example",
+            "pin-bom",
+            "1.0.0",
             &[("foo", "bar", "9.9.9")],
             &[],
         );
 
-        let result = run_resolve(
-            dir.path(),
-            &[("grp:lib", "1.0")],
-            vec![bom],
-        ).unwrap();
+        let result = run_resolve(dir.path(), &[("grp:lib", "1.0")], vec![bom]).unwrap();
 
         let gavs = jar_gavs(&result);
         assert!(
             gavs.contains(&"foo:bar:9.9.9".to_string()),
-            "top-level BOM (9.9.9) must override transitive explicit (2.0): {:?}", gavs,
+            "top-level BOM (9.9.9) must override transitive explicit (2.0): {:?}",
+            gavs,
         );
         assert!(
             !gavs.contains(&"foo:bar:2.0".to_string()),
-            "transitive explicit 2.0 must be overridden by BOM: {:?}", gavs,
+            "transitive explicit 2.0 must be overridden by BOM: {:?}",
+            gavs,
         );
     }
 
@@ -3124,25 +3263,25 @@ mod tests {
         write_fake_artifact(dir.path(), "foo", "bar", "9.9.9", &[]);
         let bom = write_fake_bom(
             dir.path(),
-            "com.example", "pin-bom", "1.0.0",
+            "com.example",
+            "pin-bom",
+            "1.0.0",
             &[("foo", "bar", "9.9.9")],
             &[],
         );
 
-        let result = run_resolve(
-            dir.path(),
-            &[("foo:bar", "1.0")],
-            vec![bom],
-        ).unwrap();
+        let result = run_resolve(dir.path(), &[("foo:bar", "1.0")], vec![bom]).unwrap();
 
         let gavs = jar_gavs(&result);
         assert!(
             gavs.contains(&"foo:bar:1.0".to_string()),
-            "user's explicit declaration (1.0) must win over BOM (9.9.9): {:?}", gavs,
+            "user's explicit declaration (1.0) must win over BOM (9.9.9): {:?}",
+            gavs,
         );
         assert!(
             !gavs.contains(&"foo:bar:9.9.9".to_string()),
-            "BOM-pinned version must lose to user's explicit version: {:?}", gavs,
+            "BOM-pinned version must lose to user's explicit version: {:?}",
+            gavs,
         );
     }
 
@@ -3156,13 +3295,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_fake_artifact(dir.path(), "com.google.guava", "guava", "30.0-jre", &[]);
         write_fake_pom(
-            dir.path(), "com.example", "parent-pom", "1.0",
-            &make_pom_with_properties("com.example", "parent-pom", "1.0", &[("guava.version", "30.0-jre")]),
+            dir.path(),
+            "com.example",
+            "parent-pom",
+            "1.0",
+            &make_pom_with_properties(
+                "com.example",
+                "parent-pom",
+                "1.0",
+                &[("guava.version", "30.0-jre")],
+            ),
         );
         write_fake_artifact_with_pom(
-            dir.path(), "com.example", "my-app", "1.0",
+            dir.path(),
+            "com.example",
+            "my-app",
+            "1.0",
             &make_pom_with_parent(
-                "com.example", "my-app", "1.0",
+                "com.example",
+                "my-app",
+                "1.0",
                 ("com.example", "parent-pom", "1.0"),
                 &[("com.google.guava", "guava", "${guava.version}")],
             ),
@@ -3173,7 +3325,8 @@ mod tests {
         let gavs = jar_gavs(&result);
         assert!(
             gavs.contains(&"com.google.guava:guava:30.0-jre".to_string()),
-            "guava version from parent POM property must resolve: {:?}", gavs,
+            "guava version from parent POM property must resolve: {:?}",
+            gavs,
         );
     }
 
@@ -3184,12 +3337,19 @@ mod tests {
         // must not become compile transitives of a consumer.
         let dir = tempfile::tempdir().unwrap();
         write_fake_artifact(dir.path(), "junit", "junit", "4.0", &[]);
-        write_fake_artifact(dir.path(), "jmock", "jmock", "1.1.0", &[
-            ("junit", "junit", "3.8.1"),
-        ]);
+        write_fake_artifact(
+            dir.path(),
+            "jmock",
+            "jmock",
+            "1.1.0",
+            &[("junit", "junit", "3.8.1")],
+        );
         write_fake_artifact(dir.path(), "junit", "junit", "3.8.1", &[]);
         write_fake_pom(
-            dir.path(), "org.hamcrest", "hamcrest-parent", "1.1",
+            dir.path(),
+            "org.hamcrest",
+            "hamcrest-parent",
+            "1.1",
             r#"<?xml version="1.0"?>
 <project>
   <groupId>org.hamcrest</groupId>
@@ -3225,7 +3385,10 @@ mod tests {
 </project>"#,
         );
         write_fake_artifact_with_pom(
-            dir.path(), "org.hamcrest", "hamcrest-core", "1.1",
+            dir.path(),
+            "org.hamcrest",
+            "hamcrest-core",
+            "1.1",
             r#"<?xml version="1.0"?>
 <project>
   <parent>
@@ -3237,7 +3400,8 @@ mod tests {
 </project>"#,
         );
 
-        let result = run_resolve(dir.path(), &[("org.hamcrest:hamcrest-core", "1.1")], vec![]).unwrap();
+        let result =
+            run_resolve(dir.path(), &[("org.hamcrest:hamcrest-core", "1.1")], vec![]).unwrap();
         let gavs = jar_gavs(&result);
         assert!(
             gavs.contains(&"org.hamcrest:hamcrest-core:1.1".to_string()),
@@ -3259,16 +3423,26 @@ mod tests {
         write_fake_artifact(dir.path(), "org.yaml", "snakeyaml", "2.0", &[]);
         write_fake_artifact(dir.path(), "junit", "junit", "4.13.2", &[]);
         write_fake_pom(
-            dir.path(), "com.example", "parent-pom", "1.0",
+            dir.path(),
+            "com.example",
+            "parent-pom",
+            "1.0",
             &make_pom(
-                "com.example", "parent-pom", "1.0",
+                "com.example",
+                "parent-pom",
+                "1.0",
                 &[("org.yaml", "snakeyaml", "2.0")],
             ),
         );
         write_fake_artifact_with_pom(
-            dir.path(), "com.example", "child", "1.0",
+            dir.path(),
+            "com.example",
+            "child",
+            "1.0",
             &make_pom_with_parent(
-                "com.example", "child", "1.0",
+                "com.example",
+                "child",
+                "1.0",
                 ("com.example", "parent-pom", "1.0"),
                 &[("junit", "junit", "4.13.2")],
             ),
@@ -3292,16 +3466,26 @@ mod tests {
         write_fake_artifact(dir.path(), "org.yaml", "snakeyaml", "2.0", &[]);
         write_fake_artifact(dir.path(), "org.yaml", "snakeyaml", "2.2", &[]);
         write_fake_pom(
-            dir.path(), "com.example", "parent-pom", "1.0",
+            dir.path(),
+            "com.example",
+            "parent-pom",
+            "1.0",
             &make_pom(
-                "com.example", "parent-pom", "1.0",
+                "com.example",
+                "parent-pom",
+                "1.0",
                 &[("org.yaml", "snakeyaml", "2.0")],
             ),
         );
         write_fake_artifact_with_pom(
-            dir.path(), "com.example", "child", "1.0",
+            dir.path(),
+            "com.example",
+            "child",
+            "1.0",
             &make_pom_with_parent(
-                "com.example", "child", "1.0",
+                "com.example",
+                "child",
+                "1.0",
                 ("com.example", "parent-pom", "1.0"),
                 &[("org.yaml", "snakeyaml", "2.2")],
             ),
@@ -3327,9 +3511,14 @@ mod tests {
         // naming the missing parent (bug #15).
         let dir = tempfile::tempdir().unwrap();
         write_fake_artifact_with_pom(
-            dir.path(), "com.example", "my-app", "1.0",
+            dir.path(),
+            "com.example",
+            "my-app",
+            "1.0",
             &make_pom_with_parent(
-                "com.example", "my-app", "1.0",
+                "com.example",
+                "my-app",
+                "1.0",
                 ("com.example", "parent-pom", "1.0"), // never written to the cache
                 &[],
             ),
@@ -3372,14 +3561,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
         write_fake_pom(
-            dir.path(), "agg", "bundle", "1.0",
+            dir.path(),
+            "agg",
+            "bundle",
+            "1.0",
             &make_aggregator_pom("agg", "bundle", "1.0", &[("foo", "bar", "1.0")]),
         );
         write_fake_artifact(dir.path(), "grp", "app", "1.0", &[("agg", "bundle", "1.0")]);
 
         let gavs = jar_gavs(&run_resolve(dir.path(), &[("grp:app", "1.0")], vec![]).unwrap());
-        assert!(gavs.contains(&"grp:app:1.0".to_string()), "app jar present: {gavs:?}");
-        assert!(gavs.contains(&"foo:bar:1.0".to_string()), "aggregator's dep present: {gavs:?}");
+        assert!(
+            gavs.contains(&"grp:app:1.0".to_string()),
+            "app jar present: {gavs:?}"
+        );
+        assert!(
+            gavs.contains(&"foo:bar:1.0".to_string()),
+            "aggregator's dep present: {gavs:?}"
+        );
         assert!(
             !gavs.iter().any(|g| g.starts_with("agg:bundle")),
             "pom-packaged aggregator must not be on the classpath: {gavs:?}",
@@ -3393,12 +3591,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
         write_fake_pom(
-            dir.path(), "agg", "bundle", "1.0",
+            dir.path(),
+            "agg",
+            "bundle",
+            "1.0",
             &make_aggregator_pom("agg", "bundle", "1.0", &[("foo", "bar", "1.0")]),
         );
 
         let gavs = jar_gavs(&run_resolve(dir.path(), &[("agg:bundle", "1.0")], vec![]).unwrap());
-        assert!(gavs.contains(&"foo:bar:1.0".to_string()), "aggregator's dep present: {gavs:?}");
+        assert!(
+            gavs.contains(&"foo:bar:1.0".to_string()),
+            "aggregator's dep present: {gavs:?}"
+        );
         assert!(
             !gavs.iter().any(|g| g.starts_with("agg:bundle")),
             "directly-declared pom aggregator must not be on the classpath: {gavs:?}",
@@ -3421,7 +3625,14 @@ mod tests {
 
         // grp:lib 1.0 depends on foo:bar 1.0 with an exclusion on foo:baz.
         // Build the POM manually to include <exclusions>.
-        let lib_gav = Gav { group: "grp".into(), artifact: "lib".into(), version: "1.0".into(), classifier: None, extension: None, snapshot_version: None };
+        let lib_gav = Gav {
+            group: "grp".into(),
+            artifact: "lib".into(),
+            version: "1.0".into(),
+            classifier: None,
+            extension: None,
+            snapshot_version: None,
+        };
         let m2 = dir.path().join(".m2").join("repository");
         let pom_xml = r#"<?xml version="1.0"?>
 <project>
@@ -3443,18 +3654,23 @@ mod tests {
         write_with_sidecar(&m2.join(lib_gav.relative_pom_path()), pom_xml.as_bytes());
         write_with_sidecar(&m2.join(lib_gav.relative_path()), b"");
 
-        let result = run_resolve(
-            dir.path(),
-            &[("grp:lib", "1.0")],
-            vec![],
-        ).unwrap();
+        let result = run_resolve(dir.path(), &[("grp:lib", "1.0")], vec![]).unwrap();
 
         let gavs = jar_gavs(&result);
-        assert!(gavs.contains(&"grp:lib:1.0".to_string()), "lib must be present: {:?}", gavs);
-        assert!(gavs.contains(&"foo:bar:1.0".to_string()), "bar must be present: {:?}", gavs);
+        assert!(
+            gavs.contains(&"grp:lib:1.0".to_string()),
+            "lib must be present: {:?}",
+            gavs
+        );
+        assert!(
+            gavs.contains(&"foo:bar:1.0".to_string()),
+            "bar must be present: {:?}",
+            gavs
+        );
         assert!(
             !gavs.contains(&"foo:baz:1.0".to_string()),
-            "baz must be excluded by POM exclusion: {:?}", gavs,
+            "baz must be excluded by POM exclusion: {:?}",
+            gavs,
         );
     }
 
@@ -3486,10 +3702,11 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true,
-            skip_version_ranges: false, error_on_version_conflict: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            };
+        };
         let result = resolve(&entries, &opts).unwrap();
 
         match prev_home {
@@ -3498,10 +3715,15 @@ mod tests {
         }
 
         let gavs = jar_gavs(&result);
-        assert!(gavs.contains(&"foo:bar:1.0".to_string()), "bar must be present: {:?}", gavs);
+        assert!(
+            gavs.contains(&"foo:bar:1.0".to_string()),
+            "bar must be present: {:?}",
+            gavs
+        );
         assert!(
             !gavs.contains(&"foo:baz:1.0".to_string()),
-            "baz must be excluded by user exclusion: {:?}", gavs,
+            "baz must be excluded by user exclusion: {:?}",
+            gavs,
         );
     }
 
@@ -3513,8 +3735,13 @@ mod tests {
 
         write_fake_artifact(dir.path(), "foo", "a", "1.0", &[]);
         write_fake_artifact(dir.path(), "foo", "b", "1.0", &[]);
-        write_fake_artifact(dir.path(), "grp", "lib", "1.0",
-            &[("foo", "a", "1.0"), ("foo", "b", "1.0")]);
+        write_fake_artifact(
+            dir.path(),
+            "grp",
+            "lib",
+            "1.0",
+            &[("foo", "a", "1.0"), ("foo", "b", "1.0")],
+        );
 
         let _guard = HOME_LOCK.lock().unwrap();
         let prev_home = std::env::var("HOME").ok();
@@ -3534,10 +3761,11 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true,
-            skip_version_ranges: false, error_on_version_conflict: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            };
+        };
         let result = resolve(&entries, &opts).unwrap();
 
         match prev_home {
@@ -3546,8 +3774,17 @@ mod tests {
         }
 
         let gavs = jar_gavs(&result);
-        assert!(gavs.contains(&"grp:lib:1.0".to_string()), "lib itself must be present: {:?}", gavs);
-        assert_eq!(gavs.len(), 1, "only lib should be in result — all transitives excluded: {:?}", gavs);
+        assert!(
+            gavs.contains(&"grp:lib:1.0".to_string()),
+            "lib itself must be present: {:?}",
+            gavs
+        );
+        assert_eq!(
+            gavs.len(),
+            1,
+            "only lib should be in result — all transitives excluded: {:?}",
+            gavs
+        );
     }
 
     #[test]
@@ -3579,10 +3816,11 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true,
-            skip_version_ranges: false, error_on_version_conflict: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            };
+        };
         let result = resolve(&entries, &opts).unwrap();
 
         match prev_home {
@@ -3595,7 +3833,8 @@ mod tests {
         assert!(gavs.contains(&"grp:mid:1.0".to_string()));
         assert!(
             !gavs.contains(&"foo:leaf:1.0".to_string()),
-            "leaf must be excluded transitively: {:?}", gavs,
+            "leaf must be excluded transitively: {:?}",
+            gavs,
         );
     }
 
@@ -3650,12 +3889,10 @@ mod tests {
     /// SHA-256 of the empty byte string — used by `write_with_sidecar` when
     /// the JAR placeholder content is `b""`.  Pinned here as a sanity check
     /// on `DigestKind::hash_hex`.
-    const EMPTY_SHA256: &str =
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     const EMPTY_SHA1: &str = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
     // SHA-256("abc")
-    const ABC_SHA256: &str =
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
     #[test]
     fn hex_encode_pads_each_byte_to_two_chars() {
@@ -3719,7 +3956,8 @@ mod tests {
             .to_string();
         assert!(
             err.contains("checksum mismatch") && err.contains("SHA-256"),
-            "expected SHA-256 mismatch error, got {:?}", err,
+            "expected SHA-256 mismatch error, got {:?}",
+            err,
         );
     }
 
@@ -3771,11 +4009,7 @@ mod tests {
         let jar = dir.path().join("foo.jar");
         std::fs::write(&jar, b"").unwrap();
         // No .sha256, only .sha1.
-        std::fs::write(
-            sidecar_path(&jar, DigestKind::Sha1),
-            EMPTY_SHA1.as_bytes(),
-        )
-        .unwrap();
+        std::fs::write(sidecar_path(&jar, DigestKind::Sha1), EMPTY_SHA1.as_bytes()).unwrap();
         assert_eq!(verify_with_local_sidecar(&jar).unwrap(), true);
     }
 
@@ -3793,7 +4027,8 @@ mod tests {
         let err = verify_with_local_sidecar(&jar).unwrap_err().to_string();
         assert!(
             err.contains("checksum"),
-            "expected checksum failure, got {:?}", err,
+            "expected checksum failure, got {:?}",
+            err,
         );
     }
 
@@ -3802,11 +4037,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let jar = dir.path().join("foo.jar");
         std::fs::write(&jar, b"").unwrap();
-        std::fs::write(
-            sidecar_path(&jar, DigestKind::Sha256),
-            b"not-a-hex-digest",
-        )
-        .unwrap();
+        std::fs::write(sidecar_path(&jar, DigestKind::Sha256), b"not-a-hex-digest").unwrap();
         assert!(verify_with_local_sidecar(&jar).is_err());
     }
 
@@ -3872,12 +4103,12 @@ mod tests {
             .join(gav.relative_path());
         std::fs::write(&jar, b"tampered bytes").unwrap();
 
-        let err = run_resolve(dir.path(), &[("foo:bar", "1.0")], vec![])
-            .unwrap_err();
+        let err = run_resolve(dir.path(), &[("foo:bar", "1.0")], vec![]).unwrap_err();
         let chain = format!("{:#}", err);
         assert!(
             chain.contains("checksum"),
-            "expected checksum error in chain, got {:?}", chain,
+            "expected checksum error in chain, got {:?}",
+            chain,
         );
     }
 
@@ -3896,12 +4127,12 @@ mod tests {
         let _ = std::fs::remove_file(sidecar_path(&jar, DigestKind::Sha256));
         let _ = std::fs::remove_file(sidecar_path(&jar, DigestKind::Sha1));
 
-        let err = run_resolve(dir.path(), &[("foo:bar", "1.0")], vec![])
-            .unwrap_err();
+        let err = run_resolve(dir.path(), &[("foo:bar", "1.0")], vec![]).unwrap_err();
         let chain = format!("{:#}", err);
         assert!(
             chain.contains("sidecar"),
-            "expected missing-sidecar error in chain, got {:?}", chain,
+            "expected missing-sidecar error in chain, got {:?}",
+            chain,
         );
     }
 
@@ -3921,7 +4152,14 @@ mod tests {
 
         let entries: Vec<DepEntry> = deps
             .iter()
-            .map(|(k, v, r)| DepEntry { key: k, version: v, repo_id: *r, exclusions: vec![], classifier: None, allow_version_conflict: false })
+            .map(|(k, v, r)| DepEntry {
+                key: k,
+                version: v,
+                repo_id: *r,
+                exclusions: vec![],
+                classifier: None,
+                allow_version_conflict: false,
+            })
             .collect();
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -3931,10 +4169,11 @@ mod tests {
             offline: true,
             // These helpers exercise the user-dependency path, so conflict
             // errors are enabled (matching compile.rs / test.rs).
-            skip_version_ranges: false, error_on_version_conflict: true,
+            skip_version_ranges: false,
+            error_on_version_conflict: true,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            };
+        };
         let result = resolve(&entries, &opts);
 
         match prev_home {
@@ -3977,13 +4216,25 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true, // cache-hit path; no network call made
-            skip_version_ranges: false, error_on_version_conflict: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            };
-        let entries = [DepEntry { key: "foo:bar", version: "1.0", repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }];
+        };
+        let entries = [DepEntry {
+            key: "foo:bar",
+            version: "1.0",
+            repo_id: None,
+            exclusions: vec![],
+            classifier: None,
+            allow_version_conflict: false,
+        }];
         let result = resolve(&entries, &opts).unwrap();
-        assert_eq!(result.len(), 1, "should find cached artifact regardless of mirror URL");
+        assert_eq!(
+            result.len(),
+            1,
+            "should find cached artifact regardless of mirror URL"
+        );
 
         match prev_home {
             Some(h) => std::env::set_var("HOME", h),
@@ -4006,7 +4257,8 @@ mod tests {
         let msg = format!("{:#}", err);
         assert!(
             msg.contains("unknown-repo"),
-            "expected unknown-repo error, got {:?}", msg,
+            "expected unknown-repo error, got {:?}",
+            msg,
         );
     }
 
@@ -4021,12 +4273,8 @@ mod tests {
         write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
 
         // Dep has no repo_id — should succeed from "Central" (fake local cache).
-        let result = run_resolve_with_repo(
-            dir.path(),
-            &[("foo:bar", "1.0", None)],
-            vec![],
-        )
-        .unwrap();
+        let result =
+            run_resolve_with_repo(dir.path(), &[("foo:bar", "1.0", None)], vec![]).unwrap();
         assert_eq!(result.len(), 1, "expected 1 resolved JAR");
     }
 
@@ -4069,7 +4317,14 @@ mod tests {
 
         let entries: Vec<DepEntry> = deps
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false })
+            .map(|(k, v)| DepEntry {
+                key: k,
+                version: v,
+                repo_id: None,
+                exclusions: vec![],
+                classifier: None,
+                allow_version_conflict: false,
+            })
             .collect();
         let opts = ResolveOptions {
             default_repos: vec![],
@@ -4077,10 +4332,11 @@ mod tests {
             progress: false,
             bom_imports,
             offline: true,
-            skip_version_ranges: false, error_on_version_conflict: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            };
+        };
         let result = resolve_tree(&entries, &opts);
 
         match prev_home {
@@ -4109,9 +4365,21 @@ mod tests {
         let tree = run_resolve_tree(dir.path(), &[("foo:bar", "1.0")], vec![]).unwrap();
         assert_eq!(tree.resolved.len(), 3);
 
-        let bar = tree.resolved.iter().find(|d| d.gav.artifact == "bar").unwrap();
-        let baz = tree.resolved.iter().find(|d| d.gav.artifact == "baz").unwrap();
-        let qux = tree.resolved.iter().find(|d| d.gav.artifact == "qux").unwrap();
+        let bar = tree
+            .resolved
+            .iter()
+            .find(|d| d.gav.artifact == "bar")
+            .unwrap();
+        let baz = tree
+            .resolved
+            .iter()
+            .find(|d| d.gav.artifact == "baz")
+            .unwrap();
+        let qux = tree
+            .resolved
+            .iter()
+            .find(|d| d.gav.artifact == "qux")
+            .unwrap();
 
         assert_eq!(bar.depth, 0);
         assert_eq!(baz.depth, 1);
@@ -4122,12 +4390,26 @@ mod tests {
     fn tree_records_via_correctly() {
         let dir = tempfile::tempdir().unwrap();
         write_fake_artifact(dir.path(), "foo", "child", "1.0", &[]);
-        write_fake_artifact(dir.path(), "foo", "parent", "1.0", &[("foo", "child", "1.0")]);
+        write_fake_artifact(
+            dir.path(),
+            "foo",
+            "parent",
+            "1.0",
+            &[("foo", "child", "1.0")],
+        );
 
         let tree = run_resolve_tree(dir.path(), &[("foo:parent", "1.0")], vec![]).unwrap();
 
-        let parent_dep = tree.resolved.iter().find(|d| d.gav.artifact == "parent").unwrap();
-        let child_dep  = tree.resolved.iter().find(|d| d.gav.artifact == "child").unwrap();
+        let parent_dep = tree
+            .resolved
+            .iter()
+            .find(|d| d.gav.artifact == "parent")
+            .unwrap();
+        let child_dep = tree
+            .resolved
+            .iter()
+            .find(|d| d.gav.artifact == "child")
+            .unwrap();
 
         assert!(parent_dep.via.is_none(), "depth-0 dep has no via");
         let via = child_dep.via.as_ref().expect("child must have a via");
@@ -4142,22 +4424,26 @@ mod tests {
         // Direct dep B → C pulls child:2.0 at depth 2 — should be skipped.
         write_fake_artifact(dir.path(), "foo", "child", "1.0", &[]);
         write_fake_artifact(dir.path(), "foo", "child", "2.0", &[]);
-        write_fake_artifact(dir.path(), "foo", "c",     "1.0", &[("foo", "child", "2.0")]);
-        write_fake_artifact(dir.path(), "foo", "a",     "1.0", &[("foo", "child", "1.0")]);
-        write_fake_artifact(dir.path(), "foo", "b",     "1.0", &[("foo", "c", "1.0")]);
+        write_fake_artifact(dir.path(), "foo", "c", "1.0", &[("foo", "child", "2.0")]);
+        write_fake_artifact(dir.path(), "foo", "a", "1.0", &[("foo", "child", "1.0")]);
+        write_fake_artifact(dir.path(), "foo", "b", "1.0", &[("foo", "c", "1.0")]);
 
-        let tree = run_resolve_tree(
-            dir.path(),
-            &[("foo:a", "1.0"), ("foo:b", "1.0")],
-            vec![],
-        ).unwrap();
+        let tree =
+            run_resolve_tree(dir.path(), &[("foo:a", "1.0"), ("foo:b", "1.0")], vec![]).unwrap();
 
         // child:1.0 was chosen (depth 1 via a).
-        let child = tree.resolved.iter().find(|d| d.gav.artifact == "child").unwrap();
+        let child = tree
+            .resolved
+            .iter()
+            .find(|d| d.gav.artifact == "child")
+            .unwrap();
         assert_eq!(child.gav.version, "1.0");
 
         // child:2.0 (depth 2, via c) should appear in skipped.
-        let skips = tree.skipped.get("foo:child").expect("foo:child should have skipped entries");
+        let skips = tree
+            .skipped
+            .get("foo:child")
+            .expect("foo:child should have skipped entries");
         assert_eq!(skips.len(), 1);
         assert_eq!(skips[0].version, "2.0");
         assert_eq!(skips[0].depth, 2);
@@ -4173,23 +4459,30 @@ mod tests {
     fn version_range_in_transitive_pom_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         // parent:1.0 declares a transitive dep on child with a range version.
-        write_fake_artifact(dir.path(), "foo", "parent", "1.0",
-            &[("foo", "child", "[1.0,2.0)")]);
+        write_fake_artifact(
+            dir.path(),
+            "foo",
+            "parent",
+            "1.0",
+            &[("foo", "child", "[1.0,2.0)")],
+        );
 
-        let err = run_resolve(dir.path(), &[("foo:parent", "1.0")], vec![])
-            .unwrap_err();
+        let err = run_resolve(dir.path(), &[("foo:parent", "1.0")], vec![]).unwrap_err();
         let msg = format!("{:#}", err);
         assert!(
             msg.contains("[1.0,2.0)"),
-            "expected range in error, got {:?}", msg,
+            "expected range in error, got {:?}",
+            msg,
         );
         assert!(
             msg.contains("foo:parent:1.0"),
-            "expected declaring POM in error, got {:?}", msg,
+            "expected declaring POM in error, got {:?}",
+            msg,
         );
         assert!(
             msg.contains("foo:child"),
-            "expected the ranged artifact in error, got {:?}", msg,
+            "expected the ranged artifact in error, got {:?}",
+            msg,
         );
     }
 
@@ -4197,16 +4490,17 @@ mod tests {
     fn version_range_in_direct_dep_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         // No files needed — error must fire before any artifact is fetched.
-        let err = run_resolve(dir.path(), &[("foo:bar", "[1.0,)")], vec![])
-            .unwrap_err();
+        let err = run_resolve(dir.path(), &[("foo:bar", "[1.0,)")], vec![]).unwrap_err();
         let msg = format!("{:#}", err);
         assert!(
             msg.contains("[1.0,)"),
-            "expected range in error, got {:?}", msg,
+            "expected range in error, got {:?}",
+            msg,
         );
         assert!(
             msg.contains("Curie.toml"),
-            "expected 'Curie.toml' as the declared-in location, got {:?}", msg,
+            "expected 'Curie.toml' as the declared-in location, got {:?}",
+            msg,
         );
     }
 
@@ -4214,20 +4508,41 @@ mod tests {
     fn multiple_ranges_grouped_in_one_error() {
         let dir = tempfile::tempdir().unwrap();
         // lib:1.0 declares two transitive deps, both using ranges.
-        write_fake_artifact(dir.path(), "grp", "lib", "1.0",
-            &[("foo", "alpha", "[1.0,2.0)"), ("foo", "beta", "(,1.5]")]);
+        write_fake_artifact(
+            dir.path(),
+            "grp",
+            "lib",
+            "1.0",
+            &[("foo", "alpha", "[1.0,2.0)"), ("foo", "beta", "(,1.5]")],
+        );
 
-        let err = run_resolve(dir.path(), &[("grp:lib", "1.0")], vec![])
-            .unwrap_err();
+        let err = run_resolve(dir.path(), &[("grp:lib", "1.0")], vec![]).unwrap_err();
         let msg = format!("{:#}", err);
-        assert!(msg.contains("[1.0,2.0)"), "expected [1.0,2.0) in error: {:?}", msg);
-        assert!(msg.contains("(,1.5]"),    "expected (,1.5] in error: {:?}", msg);
-        assert!(msg.contains("foo:alpha"), "expected foo:alpha in error: {:?}", msg);
-        assert!(msg.contains("foo:beta"),  "expected foo:beta in error: {:?}", msg);
+        assert!(
+            msg.contains("[1.0,2.0)"),
+            "expected [1.0,2.0) in error: {:?}",
+            msg
+        );
+        assert!(
+            msg.contains("(,1.5]"),
+            "expected (,1.5] in error: {:?}",
+            msg
+        );
+        assert!(
+            msg.contains("foo:alpha"),
+            "expected foo:alpha in error: {:?}",
+            msg
+        );
+        assert!(
+            msg.contains("foo:beta"),
+            "expected foo:beta in error: {:?}",
+            msg
+        );
         // Both should appear in the pin block.
         assert!(
             msg.contains("Pin these artifacts"),
-            "expected pin hint in error: {:?}", msg,
+            "expected pin hint in error: {:?}",
+            msg,
         );
     }
 
@@ -4236,8 +4551,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_fake_artifact(dir.path(), "foo", "bar", "1.0", &[]);
         write_fake_artifact(dir.path(), "foo", "bar", "2.17.2", &[]);
-        write_fake_artifact(dir.path(), "grp", "lib", "1.0",
-            &[("foo", "bar", "2.17.2")]);
+        write_fake_artifact(dir.path(), "grp", "lib", "1.0", &[("foo", "bar", "2.17.2")]);
 
         // Direct dep with exact version.
         run_resolve(dir.path(), &[("foo:bar", "1.0")], vec![]).unwrap();
@@ -4250,38 +4564,50 @@ mod tests {
         // [1.0] is still range syntax even though it pins a single version.
         // Users should write "1.0" instead.
         let dir = tempfile::tempdir().unwrap();
-        let err = run_resolve(dir.path(), &[("foo:bar", "[1.0]")], vec![])
-            .unwrap_err();
+        let err = run_resolve(dir.path(), &[("foo:bar", "[1.0]")], vec![]).unwrap_err();
         let msg = format!("{:#}", err);
         assert!(
             msg.contains("[1.0]"),
-            "expected [1.0] range notation in error, got {:?}", msg,
+            "expected [1.0] range notation in error, got {:?}",
+            msg,
         );
     }
 
     #[test]
     fn range_error_is_downcastable_to_version_range_error() {
         let dir = tempfile::tempdir().unwrap();
-        write_fake_artifact(dir.path(), "foo", "parent", "1.0",
-            &[("foo", "child", "[1.0,2.0)")]);
+        write_fake_artifact(
+            dir.path(),
+            "foo",
+            "parent",
+            "1.0",
+            &[("foo", "child", "[1.0,2.0)")],
+        );
 
-        let err = run_resolve(dir.path(), &[("foo:parent", "1.0")], vec![])
-            .unwrap_err();
+        let err = run_resolve(dir.path(), &[("foo:parent", "1.0")], vec![]).unwrap_err();
         let range_err = err
             .downcast_ref::<VersionRangeError>()
             .expect("error should downcast to VersionRangeError");
         assert_eq!(range_err.violations.len(), 1);
         assert_eq!(range_err.violations[0].dep_key, "foo:child");
         assert_eq!(range_err.violations[0].range, "[1.0,2.0)");
-        assert_eq!(range_err.violations[0].declared_in.notation(), "foo:parent:1.0");
+        assert_eq!(
+            range_err.violations[0].declared_in.notation(),
+            "foo:parent:1.0"
+        );
     }
 
     #[test]
     fn pinning_a_transitive_range_suppresses_the_error() {
         let dir = tempfile::tempdir().unwrap();
         // parent:1.0 declares child via a range; child:1.5 is available.
-        write_fake_artifact(dir.path(), "foo", "parent", "1.0",
-            &[("foo", "child", "[1.0,2.0)")]);
+        write_fake_artifact(
+            dir.path(),
+            "foo",
+            "parent",
+            "1.0",
+            &[("foo", "child", "[1.0,2.0)")],
+        );
         write_fake_artifact(dir.path(), "foo", "child", "1.5", &[]);
 
         // Without the pin the transitive range is a hard error.
@@ -4297,7 +4623,8 @@ mod tests {
         .unwrap();
         assert!(
             jars.iter().any(|p| p.to_string_lossy().contains("child")),
-            "expected child JAR to be fetched, got {:?}", jars,
+            "expected child JAR to be fetched, got {:?}",
+            jars,
         );
     }
 
@@ -4356,10 +4683,11 @@ mod tests {
             progress: false,
             bom_imports: vec![],
             offline: true,
-            skip_version_ranges: false, error_on_version_conflict: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            };
+        };
         let result = resolve(&entries, &opts).unwrap();
 
         if let Some(h) = prev_home {
@@ -4394,7 +4722,9 @@ mod tests {
     /// begins with `${` — the symptom of an unresolved Maven property reaching
     /// the filesystem.
     fn has_unresolved_placeholder_dir(root: &std::path::Path) -> bool {
-        let Ok(entries) = std::fs::read_dir(root) else { return false; };
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return false;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() {
@@ -4451,7 +4781,9 @@ mod tests {
         // The real target BOM at the *resolved* coordinate.
         write_fake_bom(
             dir.path(),
-            "net.shibboleth.idp", "idp-bom", "5.0.0",
+            "net.shibboleth.idp",
+            "idp-bom",
+            "5.0.0",
             &[("net.shibboleth.idp", "idp-core", "5.0.0")],
             &[],
         );
@@ -4460,7 +4792,9 @@ mod tests {
 
         // The managed version from idp-bom is resolved through the property.
         assert_eq!(
-            result.get("net.shibboleth.idp:idp-core").map(String::as_str),
+            result
+                .get("net.shibboleth.idp:idp-core")
+                .map(String::as_str),
             Some("5.0.0"),
         );
         // And no junk `${...}` directory was ever created in the cache.
@@ -4506,7 +4840,9 @@ mod tests {
 
         // Key must be resolved to the concrete group:artifact, not left literal.
         assert_eq!(
-            result.get("net.shibboleth.idp:idp-core").map(String::as_str),
+            result
+                .get("net.shibboleth.idp:idp-core")
+                .map(String::as_str),
             Some("5.0.0"),
         );
         assert!(
@@ -4553,7 +4889,10 @@ mod tests {
         assert!(ok, "final file was corrupted or mixed: {:?}", final_bytes);
 
         let sidecar = sidecar_path(&dest, DigestKind::Sha256);
-        assert!(sidecar.exists(), "sidecar should exist after concurrent staging");
+        assert!(
+            sidecar.exists(),
+            "sidecar should exist after concurrent staging"
+        );
     }
 
     #[test]
@@ -4630,7 +4969,10 @@ mod tests {
                 .rsplit_once('-')
                 .and_then(|(left, _bn)| left.rsplit_once('-').map(|(_, ts)| ts))
                 .unwrap_or("20260101.000000"),
-            bn = unique_version.rsplit_once('-').map(|(_, bn)| bn).unwrap_or("1"),
+            bn = unique_version
+                .rsplit_once('-')
+                .map(|(_, bn)| bn)
+                .unwrap_or("1"),
         );
         std::fs::write(dir.join("maven-metadata.xml"), meta).unwrap();
     }

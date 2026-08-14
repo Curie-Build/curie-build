@@ -64,7 +64,11 @@ fn rev_parse_head(dir: &Path) -> Option<String> {
 
     let id = String::from_utf8(out.stdout).ok()?;
     let id = id.trim().to_owned();
-    if id.is_empty() { None } else { Some(id) }
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
 }
 
 /// Return `true` when there are any local modifications (staged, unstaged, or
@@ -116,13 +120,17 @@ mod tests {
 
     #[test]
     fn commit_id_dirty_suffix() {
-        let info = GitInfo { commit_id: "abc123-dirty".to_owned() };
+        let info = GitInfo {
+            commit_id: "abc123-dirty".to_owned(),
+        };
         assert!(info.commit_id.ends_with("-dirty"));
     }
 
     #[test]
     fn commit_id_clean_no_suffix() {
-        let info = GitInfo { commit_id: "abc123def456".to_owned() };
+        let info = GitInfo {
+            commit_id: "abc123def456".to_owned(),
+        };
         assert!(!info.commit_id.ends_with("-dirty"));
     }
 

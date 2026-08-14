@@ -32,7 +32,10 @@ pub fn run_foreign(
     action: ForeignAction,
 ) -> Result<Vec<PathBuf>> {
     let (label, cmd) = match action {
-        ForeignAction::Build => ("Building", ForeignCommand::Explicit(f.build_command.clone())),
+        ForeignAction::Build => (
+            "Building",
+            ForeignCommand::Explicit(f.build_command.clone()),
+        ),
         ForeignAction::Test => ("Testing", f.test_command.clone()),
         ForeignAction::Clean => ("Cleaning", f.clean_command.clone()),
     };
@@ -85,7 +88,11 @@ fn run_command(
     action: ForeignAction,
 ) -> Result<()> {
     if argv.is_empty() {
-        bail!("foreign {} command for \"{}\" is empty", action_name(action), f.name);
+        bail!(
+            "foreign {} command for \"{}\" is empty",
+            action_name(action),
+            f.name
+        );
     }
 
     // Foreign-curie recursion guard.
@@ -245,10 +252,7 @@ fn package_json_has_script(member_dir: &Path, script: &str) -> Result<bool> {
         .with_context(|| format!("failed to read {}", path.display()))?;
     let v: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse {}", path.display()))?;
-    Ok(v
-        .get("scripts")
-        .and_then(|s| s.get(script))
-        .is_some())
+    Ok(v.get("scripts").and_then(|s| s.get(script)).is_some())
 }
 
 /// Expand artifact globs relative to `member_dir`.  Each pattern must match
@@ -325,7 +329,12 @@ mod tests {
         // Sorted.
         let names: Vec<_> = dd
             .iter()
-            .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"))
+            .map(|p| {
+                p.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
             .collect();
         assert_eq!(names, vec!["deep/x/c.jar", "out/a.jar", "out/b.jar"]);
     }
@@ -417,7 +426,9 @@ mod tests {
             artifacts: vec![],
             env: BTreeMap::new(),
         };
-        let err = run_foreign(root, &f, ForeignAction::Test).unwrap_err().to_string();
+        let err = run_foreign(root, &f, ForeignAction::Test)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("failed"), "got: {err}");
     }
 
@@ -442,14 +453,16 @@ mod tests {
     fn cmake_default_test_skips_without_build_dir() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        fs::write(root.join("CMakeLists.txt"), "cmake_minimum_required(VERSION 3.16)\n").unwrap();
+        fs::write(
+            root.join("CMakeLists.txt"),
+            "cmake_minimum_required(VERSION 3.16)\n",
+        )
+        .unwrap();
         let f = ForeignProject {
             name: "native".into(),
             tool: ForeignTool::CMake,
             build_command: ForeignTool::CMake.default_build_command(root),
-            test_command: ForeignCommand::Default(
-                ForeignTool::CMake.default_test_command(root),
-            ),
+            test_command: ForeignCommand::Default(ForeignTool::CMake.default_test_command(root)),
             clean_command: ForeignCommand::Skip,
             artifacts: vec![],
             env: BTreeMap::new(),
@@ -467,9 +480,7 @@ mod tests {
             tool: ForeignTool::CMake,
             build_command: ForeignTool::CMake.default_build_command(root),
             test_command: ForeignCommand::Skip,
-            clean_command: ForeignCommand::Default(
-                ForeignTool::CMake.default_clean_command(root),
-            ),
+            clean_command: ForeignCommand::Default(ForeignTool::CMake.default_clean_command(root)),
             artifacts: vec![],
             env: BTreeMap::new(),
         };

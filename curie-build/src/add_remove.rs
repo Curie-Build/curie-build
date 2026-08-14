@@ -122,7 +122,8 @@ pub fn run_add(project_root: &Path, coord_arg: Option<&str>, opts: AddOptions) -
         bail!(
             "\"{}\" is already present in [{}].\n\
              Run `curie update` to upgrade it.",
-            coord, section
+            coord,
+            section
         );
     }
 
@@ -134,7 +135,10 @@ pub fn run_add(project_root: &Path, coord_arg: Option<&str>, opts: AddOptions) -
 
     // -- report --------------------------------------------------------------
     if version.is_empty() {
-        println!("  Added \"{}\" = \"\" (BOM-managed) to [{}]", coord, section);
+        println!(
+            "  Added \"{}\" = \"\" (BOM-managed) to [{}]",
+            coord, section
+        );
     } else {
         println!("  Added \"{}\" = \"{}\" to [{}]", coord, version, section);
     }
@@ -149,7 +153,10 @@ pub fn run_add(project_root: &Path, coord_arg: Option<&str>, opts: AddOptions) -
 /// Open the full interactive add flow — artifact search, then version+scope picker —
 /// in a single alternate-screen session.  Esc on the version picker returns to
 /// the artifact search rather than cancelling the whole command.
-fn run_interactive_flow(opts: &AddOptions, desc: &Descriptor) -> Result<Option<(String, String, &'static str)>> {
+fn run_interactive_flow(
+    opts: &AddOptions,
+    desc: &Descriptor,
+) -> Result<Option<(String, String, &'static str)>> {
     let mut stdout = std::io::stdout();
     terminal::enable_raw_mode()?;
     execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
@@ -178,27 +185,32 @@ fn interactive_flow_inner(
         api_state = Some(st);
         let coord = match coord {
             Some(c) => c,
-            None    => return Ok(None), // Esc at search → cancel add
+            None => return Ok(None), // Esc at search → cancel add
         };
 
         // ── Loading placeholder while we fetch version data ────────────────
         show_loading_screen(stdout, &coord)?;
 
-        let bom_version   = bom_managed_version(&coord, desc, opts.test);
-        let all_versions  = fetch_coord_versions(&coord, desc, opts);
+        let bom_version = bom_managed_version(&coord, desc, opts.test);
+        let all_versions = fetch_coord_versions(&coord, desc, opts);
         let version_dates = fetch_coord_version_dates(&coord, opts);
 
         // ── Phase 2: version+scope selection ──────────────────────────────
         let pick = run_version_phase(
-            &coord, &all_versions, bom_version.as_deref(), &version_dates, initial_scope_idx, stdout,
+            &coord,
+            &all_versions,
+            bom_version.as_deref(),
+            &version_dates,
+            initial_scope_idx,
+            stdout,
         )?;
 
         match pick {
             Some(VersionAndScope { version, scope }) => {
                 let section = section_for(scope.bom, scope.annotation_processor, scope.test);
                 let v = match version {
-                    VersionPick::BomManaged   => String::new(),
-                    VersionPick::Explicit(v)  => v,
+                    VersionPick::BomManaged => String::new(),
+                    VersionPick::Explicit(v) => v,
                 };
                 return Ok(Some((coord, v, section)));
             }
@@ -213,16 +225,25 @@ fn interactive_flow_inner(
 /// Returns a map of `version → "YYYY-MM-DD"`.  Returns an empty map when
 /// offline or on any network/parse failure (graceful degradation).
 fn fetch_coord_version_dates(coord: &str, opts: &AddOptions) -> HashMap<String, String> {
-    if opts.offline { return HashMap::new(); }
+    if opts.offline {
+        return HashMap::new();
+    }
     let Ok(client) = reqwest::blocking::Client::builder()
         .user_agent("curie-add/0.1")
         .timeout(std::time::Duration::from_secs(15))
-        .build() else { return HashMap::new(); };
+        .build()
+    else {
+        return HashMap::new();
+    };
     fetch_version_timestamps(&client, coord)
         .into_iter()
         .filter_map(|(v, ms)| {
             let date = epoch_ms_to_date(ms);
-            if date.is_empty() { None } else { Some((v, date)) }
+            if date.is_empty() {
+                None
+            } else {
+                Some((v, date))
+            }
         })
         .collect()
 }
@@ -234,12 +255,15 @@ fn fetch_coord_versions(coord: &str, desc: &Descriptor, opts: &AddOptions) -> Ve
         return vec![];
     }
     let default_repos = central_repos();
-    let named_repos   = extra_repos(desc);
-    let repo_url      = resolve_repo_url(&None, &named_repos, &default_repos);
+    let named_repos = extra_repos(desc);
+    let repo_url = resolve_repo_url(&None, &named_repos, &default_repos);
     let Ok(client) = reqwest::blocking::Client::builder()
         .user_agent("curie-add/0.1")
         .timeout(std::time::Duration::from_secs(15))
-        .build() else { return vec![]; };
+        .build()
+    else {
+        return vec![];
+    };
     fetch_all_versions(&client, &repo_url, coord).unwrap_or_default()
 }
 
@@ -302,12 +326,12 @@ fn rewrite_toml(project_root: &Path, f: impl FnOnce(&mut DocumentMut) -> Result<
 /// Map the three section-routing flags to the Curie.toml table name.
 fn section_for(bom: bool, annotation_processor: bool, test: bool) -> &'static str {
     match (bom, annotation_processor, test) {
-        (true,  _,     false) => "bom-imports",
-        (true,  _,     true)  => "test-bom-imports",
-        (false, true,  false) => "annotation-processors",
-        (false, true,  true)  => "test-annotation-processors",
+        (true, _, false) => "bom-imports",
+        (true, _, true) => "test-bom-imports",
+        (false, true, false) => "annotation-processors",
+        (false, true, true) => "test-annotation-processors",
         (false, false, false) => "dependencies",
-        (false, false, true)  => "test-dependencies",
+        (false, false, true) => "test-dependencies",
     }
 }
 
@@ -345,7 +369,10 @@ fn parse_coord_arg(arg: &str) -> Result<(String, Option<String>)> {
     let group = parts.next().unwrap_or("").trim();
     let artifact = parts.next().unwrap_or("").trim();
     if group.is_empty() || artifact.is_empty() {
-        bail!("invalid coordinate \"{}\": group and artifact must be non-empty", arg);
+        bail!(
+            "invalid coordinate \"{}\": group and artifact must be non-empty",
+            arg
+        );
     }
 
     Ok((coord_part.to_string(), version_part))
@@ -357,11 +384,11 @@ fn parse_coord_arg(arg: &str) -> Result<(String, Option<String>)> {
 
 fn coord_exists_in_section(desc: &Descriptor, section: &str, coord: &str) -> bool {
     match section {
-        "dependencies"              => desc.dependencies.contains_key(coord),
-        "test-dependencies"         => desc.test_dependencies.contains_key(coord),
-        "bom-imports"               => desc.bom_imports.contains_key(coord),
-        "test-bom-imports"          => desc.test_bom_imports.contains_key(coord),
-        "annotation-processors"     => desc.annotation_processors.contains_key(coord),
+        "dependencies" => desc.dependencies.contains_key(coord),
+        "test-dependencies" => desc.test_dependencies.contains_key(coord),
+        "bom-imports" => desc.bom_imports.contains_key(coord),
+        "test-bom-imports" => desc.test_bom_imports.contains_key(coord),
+        "annotation-processors" => desc.annotation_processors.contains_key(coord),
         "test-annotation-processors" => desc.test_annotation_processors.contains_key(coord),
         _ => false,
     }
@@ -376,11 +403,7 @@ fn coord_exists_in_section(desc: &Descriptor, section: &str, coord: &str) -> boo
 /// * Offline: auto-accept BOM if available, otherwise fail.
 /// * Online:  open an interactive version picker (pre-selecting the BOM version,
 ///   the latest stable, or the newest available — in that priority order).
-fn resolve_version(
-    coord: &str,
-    desc: &Descriptor,
-    opts: &AddOptions,
-) -> Result<String> {
+fn resolve_version(coord: &str, desc: &Descriptor, opts: &AddOptions) -> Result<String> {
     let bom_version = bom_managed_version(coord, desc, opts.test);
 
     // Offline path: no TUI, no network.
@@ -392,7 +415,8 @@ fn resolve_version(
             "\"{}\" is not managed by any declared BOM and no version was \
              specified.\nRe-run without --offline or pass an explicit version:\n  \
              curie add {}@<version>",
-            coord, coord
+            coord,
+            coord
         );
     }
 
@@ -410,10 +434,22 @@ fn resolve_version(
     if let Some(versions) = fetch_all_versions(&client, &repo_url, coord) {
         let version_dates = fetch_coord_version_dates(coord, opts);
         let initial_scope_idx = scope_idx_for(opts.bom, opts.annotation_processor, opts.test);
-        let pick = run_version_ui(coord, &versions, bom_version.as_deref(), &version_dates, initial_scope_idx)?;
+        let pick = run_version_ui(
+            coord,
+            &versions,
+            bom_version.as_deref(),
+            &version_dates,
+            initial_scope_idx,
+        )?;
         return match pick {
-            Some(VersionAndScope { version: VersionPick::BomManaged, .. })  => Ok(String::new()),
-            Some(VersionAndScope { version: VersionPick::Explicit(v), .. }) => Ok(v),
+            Some(VersionAndScope {
+                version: VersionPick::BomManaged,
+                ..
+            }) => Ok(String::new()),
+            Some(VersionAndScope {
+                version: VersionPick::Explicit(v),
+                ..
+            }) => Ok(v),
             None => bail!("add cancelled"),
         };
     }
@@ -427,7 +463,9 @@ fn resolve_version(
         None => bail!(
             "could not find any release of \"{}\" in {}.\n\
              Specify a version explicitly:  curie add {}@<version>",
-            coord, repo_url, coord
+            coord,
+            repo_url,
+            coord
         ),
     }
 }
@@ -458,10 +496,7 @@ fn bom_managed_version(coord: &str, desc: &Descriptor, test: bool) -> Option<Str
 
     let default_repos = central_repos();
     let named_repos = extra_repos(desc);
-    let all_repos: Vec<Repository> = default_repos
-        .into_iter()
-        .chain(named_repos)
-        .collect();
+    let all_repos: Vec<Repository> = default_repos.into_iter().chain(named_repos).collect();
 
     let client = reqwest::blocking::Client::builder()
         .user_agent("curie-add/0.1")
@@ -557,37 +592,67 @@ mod tests {
 
     #[test]
     fn section_defaults_to_dependencies() {
-        let opts = AddOptions { test: false, annotation_processor: false, bom: false, offline: false };
+        let opts = AddOptions {
+            test: false,
+            annotation_processor: false,
+            bom: false,
+            offline: false,
+        };
         assert_eq!(section_name(&opts), "dependencies");
     }
 
     #[test]
     fn section_test_flag() {
-        let opts = AddOptions { test: true, annotation_processor: false, bom: false, offline: false };
+        let opts = AddOptions {
+            test: true,
+            annotation_processor: false,
+            bom: false,
+            offline: false,
+        };
         assert_eq!(section_name(&opts), "test-dependencies");
     }
 
     #[test]
     fn section_annotation_processor() {
-        let opts = AddOptions { test: false, annotation_processor: true, bom: false, offline: false };
+        let opts = AddOptions {
+            test: false,
+            annotation_processor: true,
+            bom: false,
+            offline: false,
+        };
         assert_eq!(section_name(&opts), "annotation-processors");
     }
 
     #[test]
     fn section_test_annotation_processor() {
-        let opts = AddOptions { test: true, annotation_processor: true, bom: false, offline: false };
+        let opts = AddOptions {
+            test: true,
+            annotation_processor: true,
+            bom: false,
+            offline: false,
+        };
         assert_eq!(section_name(&opts), "test-annotation-processors");
     }
 
     #[test]
     fn section_bom() {
-        let opts = AddOptions { test: false, annotation_processor: false, bom: true, offline: false };
+        let opts = AddOptions {
+            test: false,
+            annotation_processor: false,
+            bom: true,
+            offline: false,
+        };
         assert_eq!(section_name(&opts), "bom-imports");
     }
 
     #[test]
     fn section_test_bom() {
-        let opts = AddOptions { test: true, annotation_processor: false, bom: true, offline: false };
+        let opts = AddOptions {
+            test: true,
+            annotation_processor: false,
+            bom: true,
+            offline: false,
+        };
         assert_eq!(section_name(&opts), "test-bom-imports");
     }
 
@@ -602,7 +667,11 @@ mod tests {
         insert_entry(&mut doc, "dependencies", "com.example:foo", "1.0.0");
         let out = doc.to_string();
         assert!(out.contains("[dependencies]"), "got: {}", out);
-        assert!(out.contains("\"com.example:foo\" = \"1.0.0\""), "got: {}", out);
+        assert!(
+            out.contains("\"com.example:foo\" = \"1.0.0\""),
+            "got: {}",
+            out
+        );
     }
 
     #[test]
@@ -611,8 +680,16 @@ mod tests {
         let mut doc: DocumentMut = toml.parse().unwrap();
         insert_entry(&mut doc, "dependencies", "com.example:foo", "1.5.0");
         let out = doc.to_string();
-        assert!(out.contains("\"org.existing:lib\" = \"2.0\""), "got: {}", out);
-        assert!(out.contains("\"com.example:foo\" = \"1.5.0\""), "got: {}", out);
+        assert!(
+            out.contains("\"org.existing:lib\" = \"2.0\""),
+            "got: {}",
+            out
+        );
+        assert!(
+            out.contains("\"com.example:foo\" = \"1.5.0\""),
+            "got: {}",
+            out
+        );
     }
 
     #[test]
@@ -639,11 +716,21 @@ mod tests {
         run_add(
             dir.path(),
             Some("com.google.guava:guava@33.0.0-jre"),
-            AddOptions { test: false, annotation_processor: false, bom: false, offline: false },
-        ).unwrap();
+            AddOptions {
+                test: false,
+                annotation_processor: false,
+                bom: false,
+                offline: false,
+            },
+        )
+        .unwrap();
         let out = read_toml(&dir);
         assert!(out.contains("[dependencies]"), "got: {}", out);
-        assert!(out.contains("\"com.google.guava:guava\" = \"33.0.0-jre\""), "got: {}", out);
+        assert!(
+            out.contains("\"com.google.guava:guava\" = \"33.0.0-jre\""),
+            "got: {}",
+            out
+        );
     }
 
     #[test]
@@ -652,12 +739,26 @@ mod tests {
         run_add(
             dir.path(),
             Some("org.junit.jupiter:junit-jupiter@5.10.0"),
-            AddOptions { test: true, annotation_processor: false, bom: false, offline: false },
-        ).unwrap();
+            AddOptions {
+                test: true,
+                annotation_processor: false,
+                bom: false,
+                offline: false,
+            },
+        )
+        .unwrap();
         let out = read_toml(&dir);
         assert!(out.contains("[test-dependencies]"), "got: {}", out);
-        assert!(out.contains("\"org.junit.jupiter:junit-jupiter\" = \"5.10.0\""), "got: {}", out);
-        assert!(!out.contains("[dependencies]"), "should not have prod deps section, got: {}", out);
+        assert!(
+            out.contains("\"org.junit.jupiter:junit-jupiter\" = \"5.10.0\""),
+            "got: {}",
+            out
+        );
+        assert!(
+            !out.contains("[dependencies]"),
+            "should not have prod deps section, got: {}",
+            out
+        );
     }
 
     #[test]
@@ -666,11 +767,21 @@ mod tests {
         run_add(
             dir.path(),
             Some("org.projectlombok:lombok@1.18.30"),
-            AddOptions { test: false, annotation_processor: true, bom: false, offline: false },
-        ).unwrap();
+            AddOptions {
+                test: false,
+                annotation_processor: true,
+                bom: false,
+                offline: false,
+            },
+        )
+        .unwrap();
         let out = read_toml(&dir);
         assert!(out.contains("[annotation-processors]"), "got: {}", out);
-        assert!(out.contains("\"org.projectlombok:lombok\" = \"1.18.30\""), "got: {}", out);
+        assert!(
+            out.contains("\"org.projectlombok:lombok\" = \"1.18.30\""),
+            "got: {}",
+            out
+        );
     }
 
     #[test]
@@ -679,11 +790,21 @@ mod tests {
         run_add(
             dir.path(),
             Some("com.example:proc@2.0.0"),
-            AddOptions { test: true, annotation_processor: true, bom: false, offline: false },
-        ).unwrap();
+            AddOptions {
+                test: true,
+                annotation_processor: true,
+                bom: false,
+                offline: false,
+            },
+        )
+        .unwrap();
         let out = read_toml(&dir);
         assert!(out.contains("[test-annotation-processors]"), "got: {}", out);
-        assert!(out.contains("\"com.example:proc\" = \"2.0.0\""), "got: {}", out);
+        assert!(
+            out.contains("\"com.example:proc\" = \"2.0.0\""),
+            "got: {}",
+            out
+        );
     }
 
     #[test]
@@ -692,13 +813,20 @@ mod tests {
         run_add(
             dir.path(),
             Some("org.springframework.boot:spring-boot-dependencies@3.2.0"),
-            AddOptions { test: false, annotation_processor: false, bom: true, offline: false },
-        ).unwrap();
+            AddOptions {
+                test: false,
+                annotation_processor: false,
+                bom: true,
+                offline: false,
+            },
+        )
+        .unwrap();
         let out = read_toml(&dir);
         assert!(out.contains("[bom-imports]"), "got: {}", out);
         assert!(
             out.contains("\"org.springframework.boot:spring-boot-dependencies\" = \"3.2.0\""),
-            "got: {}", out
+            "got: {}",
+            out
         );
     }
 
@@ -708,8 +836,14 @@ mod tests {
         run_add(
             dir.path(),
             Some("com.example:test-bom@1.0.0"),
-            AddOptions { test: true, annotation_processor: false, bom: true, offline: false },
-        ).unwrap();
+            AddOptions {
+                test: true,
+                annotation_processor: false,
+                bom: true,
+                offline: false,
+            },
+        )
+        .unwrap();
         let out = read_toml(&dir);
         assert!(out.contains("[test-bom-imports]"), "got: {}", out);
     }
@@ -720,10 +854,18 @@ mod tests {
         let result = run_add(
             dir.path(),
             Some("org.springframework.boot:spring-boot-dependencies"),
-            AddOptions { test: false, annotation_processor: false, bom: true, offline: false },
+            AddOptions {
+                test: false,
+                annotation_processor: false,
+                bom: true,
+                offline: false,
+            },
         );
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("require an explicit version"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("require an explicit version"));
     }
 
     #[test]
@@ -734,7 +876,12 @@ mod tests {
         let result = run_add(
             dir.path(),
             Some("com.example:foo@2.0.0"),
-            AddOptions { test: false, annotation_processor: false, bom: false, offline: false },
+            AddOptions {
+                test: false,
+                annotation_processor: false,
+                bom: false,
+                offline: false,
+            },
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already present"));
@@ -746,11 +893,20 @@ mod tests {
         let result = run_add(
             dir.path(),
             Some("com.example:foo"),
-            AddOptions { test: false, annotation_processor: false, bom: false, offline: true },
+            AddOptions {
+                test: false,
+                annotation_processor: false,
+                bom: false,
+                offline: true,
+            },
         );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("offline") || msg.contains("--offline"), "got: {}", msg);
+        assert!(
+            msg.contains("offline") || msg.contains("--offline"),
+            "got: {}",
+            msg
+        );
     }
 
     #[test]
@@ -761,13 +917,19 @@ mod tests {
         let toml_path = dir.path().join("Curie.toml");
         let content = std::fs::read_to_string(&toml_path).unwrap();
         let mut doc: DocumentMut = content.parse().unwrap();
-        insert_entry(&mut doc, "dependencies", "com.fasterxml.jackson.core:jackson-databind", "");
+        insert_entry(
+            &mut doc,
+            "dependencies",
+            "com.fasterxml.jackson.core:jackson-databind",
+            "",
+        );
         std::fs::write(&toml_path, doc.to_string()).unwrap();
 
         let out = read_toml(&dir);
         assert!(
             out.contains("\"com.fasterxml.jackson.core:jackson-databind\" = \"\""),
-            "got: {}", out
+            "got: {}",
+            out
         );
     }
 
@@ -784,8 +946,13 @@ mod tests {
         run_remove(
             dir.path(),
             "com.example:foo",
-            RemoveOptions { test: false, annotation_processor: false, bom: false },
-        ).unwrap();
+            RemoveOptions {
+                test: false,
+                annotation_processor: false,
+                bom: false,
+            },
+        )
+        .unwrap();
         let out = read_toml(&dir);
         assert!(!out.contains("\"com.example:foo\""), "got: {}", out);
         assert!(out.contains("\"com.example:bar\""), "got: {}", out);
@@ -797,7 +964,11 @@ mod tests {
         let result = run_remove(
             dir.path(),
             "com.example:nonexistent",
-            RemoveOptions { test: false, annotation_processor: false, bom: false },
+            RemoveOptions {
+                test: false,
+                annotation_processor: false,
+                bom: false,
+            },
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
@@ -811,8 +982,13 @@ mod tests {
         run_remove(
             dir.path(),
             "org.junit.jupiter:junit-jupiter",
-            RemoveOptions { test: true, annotation_processor: false, bom: false },
-        ).unwrap();
+            RemoveOptions {
+                test: true,
+                annotation_processor: false,
+                bom: false,
+            },
+        )
+        .unwrap();
         let out = read_toml(&dir);
         assert!(!out.contains("junit-jupiter"), "got: {}", out);
     }
@@ -825,8 +1001,13 @@ mod tests {
         run_remove(
             dir.path(),
             "org.springframework.boot:spring-boot-dependencies",
-            RemoveOptions { test: false, annotation_processor: false, bom: true },
-        ).unwrap();
+            RemoveOptions {
+                test: false,
+                annotation_processor: false,
+                bom: true,
+            },
+        )
+        .unwrap();
         let out = read_toml(&dir);
         assert!(!out.contains("spring-boot-dependencies"), "got: {}", out);
     }
@@ -839,8 +1020,13 @@ mod tests {
         run_remove(
             dir.path(),
             "org.projectlombok:lombok",
-            RemoveOptions { test: false, annotation_processor: true, bom: false },
-        ).unwrap();
+            RemoveOptions {
+                test: false,
+                annotation_processor: true,
+                bom: false,
+            },
+        )
+        .unwrap();
         let out = read_toml(&dir);
         assert!(!out.contains("lombok"), "got: {}", out);
     }
@@ -854,7 +1040,11 @@ mod tests {
         let result = run_remove(
             dir.path(),
             "com.example:foo",
-            RemoveOptions { test: true, annotation_processor: false, bom: false },
+            RemoveOptions {
+                test: true,
+                annotation_processor: false,
+                bom: false,
+            },
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
@@ -869,8 +1059,13 @@ mod tests {
         run_remove(
             dir.path(),
             "com.example:foo@1.0.0",
-            RemoveOptions { test: false, annotation_processor: false, bom: false },
-        ).unwrap();
+            RemoveOptions {
+                test: false,
+                annotation_processor: false,
+                bom: false,
+            },
+        )
+        .unwrap();
         let out = read_toml(&dir);
         assert!(!out.contains("\"com.example:foo\""), "got: {}", out);
     }
@@ -883,8 +1078,13 @@ mod tests {
         run_remove(
             dir.path(),
             "c:d",
-            RemoveOptions { test: false, annotation_processor: false, bom: false },
-        ).unwrap();
+            RemoveOptions {
+                test: false,
+                annotation_processor: false,
+                bom: false,
+            },
+        )
+        .unwrap();
         let out = read_toml(&dir);
         assert!(out.contains("# top"), "got: {}", out);
         assert!(out.contains("# keep"), "got: {}", out);

@@ -211,11 +211,13 @@ mod tests {
         assert_eq!(meta.build_number.as_deref(), Some("3"));
         assert_eq!(meta.snapshot_versions.len(), 3);
         assert_eq!(
-            meta.resolve_unique_version("1.0-SNAPSHOT", "jar", None).as_deref(),
+            meta.resolve_unique_version("1.0-SNAPSHOT", "jar", None)
+                .as_deref(),
             Some("1.0-20260610.123456-3")
         );
         assert_eq!(
-            meta.resolve_unique_version("1.0-SNAPSHOT", "pom", None).as_deref(),
+            meta.resolve_unique_version("1.0-SNAPSHOT", "pom", None)
+                .as_deref(),
             Some("1.0-20260610.123456-3")
         );
         assert_eq!(
@@ -238,7 +240,8 @@ mod tests {
 </metadata>"#;
         let meta = parse_snapshot_metadata(xml).unwrap();
         assert_eq!(
-            meta.resolve_unique_version("2.5-SNAPSHOT", "jar", None).as_deref(),
+            meta.resolve_unique_version("2.5-SNAPSHOT", "jar", None)
+                .as_deref(),
             Some("2.5-20260101.000001-7")
         );
     }
@@ -248,6 +251,8 @@ mod tests {
         // Non-unique / local install: no <snapshot> and no <snapshotVersions>.
         let xml = r#"<?xml version="1.0"?><metadata><versioning></versioning></metadata>"#;
         let meta = parse_snapshot_metadata(xml).unwrap();
-        assert!(meta.resolve_unique_version("1.0-SNAPSHOT", "jar", None).is_none());
+        assert!(meta
+            .resolve_unique_version("1.0-SNAPSHOT", "jar", None)
+            .is_none());
     }
 }

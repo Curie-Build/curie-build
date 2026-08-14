@@ -13,7 +13,7 @@
 //!   the "don't clobber a hand-written pom.xml" safety check.
 
 use crate::compile::{flat_package_src_dirs, flat_package_test_dirs};
-use crate::descriptor::{self, Descriptor, DependencyValue, Relocation, Resources};
+use crate::descriptor::{self, DependencyValue, Descriptor, Relocation, Resources};
 use crate::incremental::walk_files;
 use crate::workspace;
 use anyhow::{bail, Context, Result};
@@ -176,10 +176,16 @@ fn production_source_roots(project_root: &Path) -> Vec<PathBuf> {
             roots.push(PathBuf::from(candidate));
         }
     }
-    roots.extend(relative_to(project_root, flat_package_src_dirs(project_root)));
+    roots.extend(relative_to(
+        project_root,
+        flat_package_src_dirs(project_root),
+    ));
 
     let bare_src = project_root.join("src");
-    if bare_src.exists() && !roots.iter().any(|r| r == Path::new("src")) && has_direct_sources(&bare_src) {
+    if bare_src.exists()
+        && !roots.iter().any(|r| r == Path::new("src"))
+        && has_direct_sources(&bare_src)
+    {
         roots.push(PathBuf::from("src"));
     }
     roots
@@ -194,7 +200,10 @@ fn test_source_roots(project_root: &Path) -> Vec<PathBuf> {
             roots.push(PathBuf::from(candidate));
         }
     }
-    roots.extend(relative_to(project_root, flat_package_test_dirs(project_root)));
+    roots.extend(relative_to(
+        project_root,
+        flat_package_test_dirs(project_root),
+    ));
     roots
 }
 
@@ -265,13 +274,18 @@ fn colocated_test_exclude_patterns(project_root: &Path, src_roots: &[PathBuf]) -
 /// under any of `layout`'s source/test roots, mirroring `compile.rs`'s
 /// `has_kotlin`/`has_groovy` source-presence checks.
 fn layout_has_extension(project_root: &Path, layout: &MavenLayout, ext: &str) -> bool {
-    layout.src_roots.iter().chain(&layout.test_roots).any(|root| dir_has_extension(project_root, root, ext))
+    layout
+        .src_roots
+        .iter()
+        .chain(&layout.test_roots)
+        .any(|root| dir_has_extension(project_root, root, ext))
 }
 
 /// `true` if `project_root.join(root)` contains a file with extension `ext`
 /// (e.g. `"groovy"`).
 fn dir_has_extension(project_root: &Path, root: &Path, ext: &str) -> bool {
-    walk_files(&project_root.join(root)).any(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some(ext))
+    walk_files(&project_root.join(root))
+        .any(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some(ext))
 }
 
 // ---------------------------------------------------------------------------
@@ -356,7 +370,11 @@ impl XmlNode {
         XmlNode::Element(name.into(), children)
     }
 
-    pub fn element_with_attr(name: impl Into<String>, attr: (impl Into<String>, impl Into<String>), children: Vec<XmlNode>) -> Self {
+    pub fn element_with_attr(
+        name: impl Into<String>,
+        attr: (impl Into<String>, impl Into<String>),
+        children: Vec<XmlNode>,
+    ) -> Self {
         XmlNode::ElementWithAttr(name.into(), (attr.0.into(), attr.1.into()), children)
     }
 }
@@ -467,7 +485,9 @@ pub fn build_project(
     workspace_member_gavs: &BTreeMap<String, MavenCoordinate>,
 ) -> Result<MavenProject> {
     if desc.is_workspace() {
-        anyhow::bail!("build_project: workspace descriptors are handled by the aggregator generator");
+        anyhow::bail!(
+            "build_project: workspace descriptors are handled by the aggregator generator"
+        );
     }
     if desc.is_bom() {
         anyhow::bail!("build_project: BOM descriptors are handled by the BOM POM generator");
@@ -476,13 +496,19 @@ pub fn build_project(
     let layout = discover_layout(project_root, Some(desc));
     let has_kotlin = layout_has_extension(project_root, &layout, "kt");
     let has_groovy = layout_has_extension(project_root, &layout, "groovy");
-    let is_modular = layout.src_roots.iter().any(|root| root.join("module-info.java").exists())
+    let is_modular = layout
+        .src_roots
+        .iter()
+        .any(|root| root.join("module-info.java").exists())
         || layout.src_roots.iter().any(|root| {
-            std::fs::read_dir(root).ok().map(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .any(|e| e.file_name() == "module-info.java")
-            }).unwrap_or(false)
+            std::fs::read_dir(root)
+                .ok()
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .any(|e| e.file_name() == "module-info.java")
+                })
+                .unwrap_or(false)
         });
 
     let prod_ap = ap_coordinates(&desc.ap_pairs(), resolved_ap_versions)?;
@@ -513,7 +539,9 @@ pub fn build_project(
     if has_kotlin {
         plugins.push(build_kotlin_plugin(desc, &layout));
     }
-    plugins.extend(build_compiler_plugin(desc, &layout, &prod_ap, &test_ap, has_kotlin)?);
+    plugins.extend(build_compiler_plugin(
+        desc, &layout, &prod_ap, &test_ap, has_kotlin,
+    )?);
     if has_groovy {
         plugins.push(build_gmavenplus_plugin(project_root, &layout));
     }
@@ -522,7 +550,9 @@ pub fn build_project(
         plugins.push(build_jacoco_plugin());
     }
     plugins.push(build_jar_plugin(main_class, populate_libs));
-    if let Some(dep_plugin) = build_dependency_plugin(dependency_plugin_executions(desc, populate_libs)) {
+    if let Some(dep_plugin) =
+        build_dependency_plugin(dependency_plugin_executions(desc, populate_libs))
+    {
         plugins.push(dep_plugin);
     }
     if let Some(shade_plugin) = build_shade_plugin(desc, main_class) {
@@ -621,9 +651,9 @@ pub fn build_bom_project(desc: &Descriptor, pinned: &[PinnedDependency]) -> Resu
 /// [`GENERATED_GROUP_ID`] / [`GENERATED_VERSION`], with `artifactId`
 /// derived from `project_root`'s directory name.
 pub fn build_workspace_project(desc: &Descriptor, project_root: &Path) -> Result<MavenProject> {
-    let workspace = desc
-        .workspace()
-        .ok_or_else(|| anyhow::anyhow!("build_workspace_project: descriptor is not a [workspace]"))?;
+    let workspace = desc.workspace().ok_or_else(|| {
+        anyhow::anyhow!("build_workspace_project: descriptor is not a [workspace]")
+    })?;
 
     let artifact_id = project_root
         .file_name()
@@ -651,11 +681,20 @@ pub fn build_workspace_project(desc: &Descriptor, project_root: &Path) -> Result
 
 fn default_properties(desc: &Descriptor) -> Vec<(String, String)> {
     let mut props = vec![
-        ("project.build.sourceEncoding".to_string(), "UTF-8".to_string()),
-        ("project.build.outputTimestamp".to_string(), OUTPUT_TIMESTAMP.to_string()),
+        (
+            "project.build.sourceEncoding".to_string(),
+            "UTF-8".to_string(),
+        ),
+        (
+            "project.build.outputTimestamp".to_string(),
+            OUTPUT_TIMESTAMP.to_string(),
+        ),
     ];
     if let Some(release) = desc.java.effective() {
-        props.insert(0, ("maven.compiler.release".to_string(), release.to_string()));
+        props.insert(
+            0,
+            ("maven.compiler.release".to_string(), release.to_string()),
+        );
     }
     props
 }
@@ -681,7 +720,10 @@ fn workspace_dependency_entries(
     let mut deps = Vec::new();
     for (label, dep) in &desc.workspace_dependencies {
         let gav = workspace_member_gavs.get(&dep.path).ok_or_else(|| {
-            anyhow::anyhow!("[workspace-dependencies.{label}]: no resolved GAV for member path \"{}\"", dep.path)
+            anyhow::anyhow!(
+                "[workspace-dependencies.{label}]: no resolved GAV for member path \"{}\"",
+                dep.path
+            )
         })?;
         deps.push(MavenDependency {
             group_id: gav.group_id.clone(),
@@ -705,7 +747,11 @@ fn maven_dependency(coord: &str, dep: &DependencyValue, scope: &str) -> Result<M
     Ok(MavenDependency {
         group_id,
         artifact_id,
-        version: if version.is_empty() { None } else { Some(version.to_string()) },
+        version: if version.is_empty() {
+            None
+        } else {
+            Some(version.to_string())
+        },
         scope: Some(scope.to_string()),
         exclusions,
     })
@@ -722,7 +768,10 @@ fn maven_dependency(coord: &str, dep: &DependencyValue, scope: &str) -> Result<M
 /// 2. The member's own `[bom-imports]` + `[test-bom-imports]` (highest
 ///    precedence among imports — Maven's first-wins import semantics).
 /// 3. Workspace-inherited BOM imports (lower precedence).
-fn build_managed_dependencies(desc: &Descriptor, pinned: &[PinnedDependency]) -> Result<Vec<MavenManagedDependency>> {
+fn build_managed_dependencies(
+    desc: &Descriptor,
+    pinned: &[PinnedDependency],
+) -> Result<Vec<MavenManagedDependency>> {
     let mut managed = Vec::new();
 
     let mut sorted_pins = pinned.to_vec();
@@ -738,11 +787,25 @@ fn build_managed_dependencies(desc: &Descriptor, pinned: &[PinnedDependency]) ->
 
     for (coord, version) in desc.bom_imports.iter().chain(desc.test_bom_imports.iter()) {
         let (group_id, artifact_id) = split_coord(coord)?;
-        managed.push(MavenManagedDependency { group_id, artifact_id, version: version.clone(), is_import: true });
+        managed.push(MavenManagedDependency {
+            group_id,
+            artifact_id,
+            version: version.clone(),
+            is_import: true,
+        });
     }
-    for (coord, version) in desc.inherited_bom_imports.iter().chain(desc.inherited_test_bom_imports.iter()) {
+    for (coord, version) in desc
+        .inherited_bom_imports
+        .iter()
+        .chain(desc.inherited_test_bom_imports.iter())
+    {
         let (group_id, artifact_id) = split_coord(coord)?;
-        managed.push(MavenManagedDependency { group_id, artifact_id, version: version.clone(), is_import: true });
+        managed.push(MavenManagedDependency {
+            group_id,
+            artifact_id,
+            version: version.clone(),
+            is_import: true,
+        });
     }
 
     Ok(managed)
@@ -751,8 +814,12 @@ fn build_managed_dependencies(desc: &Descriptor, pinned: &[PinnedDependency]) ->
 /// Split `"group:artifact"` into owned `(group, artifact)` strings.
 fn split_coord(coord: &str) -> Result<(String, String)> {
     let mut parts = coord.splitn(2, ':');
-    let group = parts.next().ok_or_else(|| anyhow::anyhow!("invalid coordinate: {coord}"))?;
-    let artifact = parts.next().ok_or_else(|| anyhow::anyhow!("invalid coordinate (missing ':'): {coord}"))?;
+    let group = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("invalid coordinate: {coord}"))?;
+    let artifact = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("invalid coordinate (missing ':'): {coord}"))?;
     Ok((group.to_string(), artifact.to_string()))
 }
 
@@ -764,7 +831,11 @@ fn split_coord(coord: &str) -> Result<(String, String)> {
 /// `[annotation-processors]`/`[test-annotation-processors]` value as
 /// written (`""` means "supplied by an imported BOM"); for those, look up
 /// `coord` (`"group:artifact"`) in `resolved` — see [`build_project`].
-fn resolve_ap_version(coord: &str, declared: &str, resolved: &BTreeMap<String, String>) -> Result<String> {
+fn resolve_ap_version(
+    coord: &str,
+    declared: &str,
+    resolved: &BTreeMap<String, String>,
+) -> Result<String> {
     if !declared.is_empty() {
         return Ok(declared.to_string());
     }
@@ -776,13 +847,20 @@ fn resolve_ap_version(coord: &str, declared: &str, resolved: &BTreeMap<String, S
 /// Convert `desc.ap_pairs()`/`desc.test_ap_pairs()` output into
 /// [`MavenCoordinate`]s with concrete versions, resolving `""`
 /// (BOM-managed) entries via `resolved`.
-fn ap_coordinates(pairs: &[(&str, &str)], resolved: &BTreeMap<String, String>) -> Result<Vec<MavenCoordinate>> {
+fn ap_coordinates(
+    pairs: &[(&str, &str)],
+    resolved: &BTreeMap<String, String>,
+) -> Result<Vec<MavenCoordinate>> {
     pairs
         .iter()
         .map(|(coord, version)| {
             let (group_id, artifact_id) = split_coord(coord)?;
             let version = resolve_ap_version(coord, version, resolved)?;
-            Ok(MavenCoordinate { group_id, artifact_id, version })
+            Ok(MavenCoordinate {
+                group_id,
+                artifact_id,
+                version,
+            })
         })
         .collect()
 }
@@ -799,11 +877,18 @@ fn merge_ap_coordinates(
     let mut merged = prod.to_vec();
     for (coord, version) in test_pairs {
         let (group_id, artifact_id) = split_coord(coord)?;
-        if merged.iter().any(|c| c.group_id == group_id && c.artifact_id == artifact_id) {
+        if merged
+            .iter()
+            .any(|c| c.group_id == group_id && c.artifact_id == artifact_id)
+        {
             continue;
         }
         let version = resolve_ap_version(coord, version, resolved)?;
-        merged.push(MavenCoordinate { group_id, artifact_id, version });
+        merged.push(MavenCoordinate {
+            group_id,
+            artifact_id,
+            version,
+        });
     }
     Ok(merged)
 }
@@ -813,7 +898,11 @@ fn merge_ap_coordinates(
 /// Curie putting their jars on javac's `-cp` in addition to
 /// `-processorpath`. `provided` keeps them off the JAR's runtime
 /// `Class-Path`/`libs/`.
-fn provided_dependencies(desc: &Descriptor, prod_ap: &[MavenCoordinate], test_ap: &[MavenCoordinate]) -> Result<Vec<MavenDependency>> {
+fn provided_dependencies(
+    desc: &Descriptor,
+    prod_ap: &[MavenCoordinate],
+    test_ap: &[MavenCoordinate],
+) -> Result<Vec<MavenDependency>> {
     let mut deps = Vec::new();
     for coord in desc.test_ap_on_compile_classpath_coords() {
         let (group_id, artifact_id) = split_coord(coord)?;
@@ -924,8 +1013,16 @@ fn compiler_executions(
     }
 
     vec![
-        MavenExecution { id: Some("default-compile".to_string()), phase: Some("none".to_string()), ..Default::default() },
-        MavenExecution { id: Some("default-testCompile".to_string()), phase: Some("none".to_string()), ..Default::default() },
+        MavenExecution {
+            id: Some("default-compile".to_string()),
+            phase: Some("none".to_string()),
+            ..Default::default()
+        },
+        MavenExecution {
+            id: Some("default-testCompile".to_string()),
+            phase: Some("none".to_string()),
+            ..Default::default()
+        },
         MavenExecution {
             id: Some("java-compile".to_string()),
             phase: Some("compile".to_string()),
@@ -956,7 +1053,13 @@ fn compiler_args(preview: bool, options: &[(String, String)]) -> Vec<String> {
 
 /// `<excludes><exclude>pattern</exclude>...</excludes>`.
 fn excludes_node(patterns: &[String]) -> XmlNode {
-    XmlNode::element("excludes", patterns.iter().map(|p| XmlNode::text("exclude", p.clone())).collect())
+    XmlNode::element(
+        "excludes",
+        patterns
+            .iter()
+            .map(|p| XmlNode::text("exclude", p.clone()))
+            .collect(),
+    )
 }
 
 /// `<annotationProcessorPaths><path><groupId>…</groupId>…</path>...</annotationProcessorPaths>`.
@@ -981,7 +1084,12 @@ fn annotation_processor_paths_node(coords: &[MavenCoordinate]) -> XmlNode {
 
 /// `<compilerArgs><arg>...</arg>...</compilerArgs>`.
 fn compiler_args_node(args: &[String]) -> XmlNode {
-    XmlNode::element("compilerArgs", args.iter().map(|a| XmlNode::text("arg", a.clone())).collect())
+    XmlNode::element(
+        "compilerArgs",
+        args.iter()
+            .map(|a| XmlNode::text("arg", a.clone()))
+            .collect(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,7 +1126,13 @@ fn build_kotlin_plugin(desc: &Descriptor, layout: &MavenLayout) -> MavenPlugin {
 
 /// `<sourceDirs><sourceDir>...</sourceDir>...</sourceDirs>`.
 fn source_dirs_node(roots: &[PathBuf]) -> XmlNode {
-    XmlNode::element("sourceDirs", roots.iter().map(|r| XmlNode::text("sourceDir", path_to_maven(r))).collect())
+    XmlNode::element(
+        "sourceDirs",
+        roots
+            .iter()
+            .map(|r| XmlNode::text("sourceDir", path_to_maven(r)))
+            .collect(),
+    )
 }
 
 /// `org.jetbrains.kotlin:kotlin-stdlib` at `[kotlin].version()`, a `compile`
@@ -1051,7 +1165,11 @@ fn build_gmavenplus_plugin(project_root: &Path, layout: &MavenLayout) -> MavenPl
     // Production sources exclude co-located *Spec/*Test files, mirroring
     // maven-compiler-plugin's <excludes> for the same `colocated_test_excludes`
     // (compile.rs/test.rs treat these as test sources, not production ones).
-    let source_filesets = groovy_filesets(project_root, &layout.src_roots, &layout.colocated_test_excludes);
+    let source_filesets = groovy_filesets(
+        project_root,
+        &layout.src_roots,
+        &layout.colocated_test_excludes,
+    );
     if !source_filesets.is_empty() {
         configuration.push(XmlNode::element("sources", source_filesets));
     }
@@ -1160,7 +1278,12 @@ fn default_openapi_output_dir() -> String {
 /// Render a `BTreeMap<String,String>` as `<tag><k1>v1</k1><k2>v2</k2>...</tag>`.
 /// BTreeMap iteration is sorted, so output is deterministic.
 fn string_map_node(tag: &str, map: &BTreeMap<String, String>) -> XmlNode {
-    XmlNode::element(tag, map.iter().map(|(k, v)| XmlNode::text(k.clone(), v.clone())).collect())
+    XmlNode::element(
+        tag,
+        map.iter()
+            .map(|(k, v)| XmlNode::text(k.clone(), v.clone()))
+            .collect(),
+    )
 }
 
 /// `io.github.ascopes:protobuf-maven-plugin` for `[plugin.protobuf]`.
@@ -1213,7 +1336,10 @@ fn build_protobuf_plugin(cfg: &ProtobufSyncConfig) -> MavenPlugin {
 /// `target/generated-sources/openapi/src/main/java`.
 fn build_openapi_plugin(cfg: &OpenApiSyncConfig) -> MavenPlugin {
     let mut exe_config = vec![
-        XmlNode::text("inputSpec", format!("${{project.basedir}}/{}", cfg.spec_file)),
+        XmlNode::text(
+            "inputSpec",
+            format!("${{project.basedir}}/{}", cfg.spec_file),
+        ),
         XmlNode::text("generatorName", cfg.generator_name.clone()),
         XmlNode::text("output", cfg.output_dir.clone()),
     ];
@@ -1257,15 +1383,17 @@ fn build_source_generator_plugins(desc: &Descriptor) -> Result<Vec<MavenPlugin>>
     for (name, raw) in &desc.plugins {
         match name.as_str() {
             "protobuf" => {
-                let cfg: ProtobufSyncConfig = raw.clone().try_into().with_context(|| {
-                    format!("[plugin.protobuf]: invalid configuration — {raw}")
-                })?;
+                let cfg: ProtobufSyncConfig = raw
+                    .clone()
+                    .try_into()
+                    .with_context(|| format!("[plugin.protobuf]: invalid configuration — {raw}"))?;
                 plugins.push(build_protobuf_plugin(&cfg));
             }
             "openapi" => {
-                let cfg: OpenApiSyncConfig = raw.clone().try_into().with_context(|| {
-                    format!("[plugin.openapi]: invalid configuration — {raw}")
-                })?;
+                let cfg: OpenApiSyncConfig = raw
+                    .clone()
+                    .try_into()
+                    .with_context(|| format!("[plugin.openapi]: invalid configuration — {raw}"))?;
                 plugins.push(build_openapi_plugin(&cfg));
             }
             _ => {}
@@ -1329,7 +1457,12 @@ fn spock_core_dependency(desc: &Descriptor) -> MavenDependency {
 /// satisfy a `$`-anchored pattern ending in `Test`), so Surefire silently
 /// ran zero tests.
 pub mod surefire_includes {
-    pub const DEFAULT: &[&str] = &["**/Test*.java", "**/*Test.java", "**/*Tests.java", "**/*TestCase.java"];
+    pub const DEFAULT: &[&str] = &[
+        "**/Test*.java",
+        "**/*Test.java",
+        "**/*Tests.java",
+        "**/*TestCase.java",
+    ];
     pub const SPOCK_EXTRA: &str = "**/*Spec.java";
 }
 
@@ -1400,7 +1533,10 @@ fn build_jacoco_plugin() -> MavenPlugin {
         artifact_id: "jacoco-maven-plugin".to_string(),
         version: plugin_versions::JACOCO.to_string(),
         executions: vec![
-            MavenExecution { goals: vec!["prepare-agent".to_string()], ..Default::default() },
+            MavenExecution {
+                goals: vec!["prepare-agent".to_string()],
+                ..Default::default()
+            },
             MavenExecution {
                 id: Some("report".to_string()),
                 phase: Some("test".to_string()),
@@ -1477,7 +1613,10 @@ fn build_resources_plugin(filtering: &ResourceFiltering) -> Option<MavenPlugin> 
 fn dependency_plugin_executions(desc: &Descriptor, populate_libs: bool) -> Vec<MavenExecution> {
     let mut executions = Vec::new();
     if !desc.test_dep_java_agent_coords().is_empty() {
-        executions.push(MavenExecution { goals: vec!["properties".to_string()], ..Default::default() });
+        executions.push(MavenExecution {
+            goals: vec!["properties".to_string()],
+            ..Default::default()
+        });
     }
     if populate_libs {
         executions.push(MavenExecution {
@@ -1485,7 +1624,10 @@ fn dependency_plugin_executions(desc: &Descriptor, populate_libs: bool) -> Vec<M
             phase: Some("package".to_string()),
             goals: vec!["copy-dependencies".to_string()],
             configuration: vec![
-                XmlNode::text("outputDirectory", "${project.build.directory}/libs".to_string()),
+                XmlNode::text(
+                    "outputDirectory",
+                    "${project.build.directory}/libs".to_string(),
+                ),
                 XmlNode::text("includeScope", "runtime".to_string()),
             ],
         });
@@ -1553,7 +1695,9 @@ fn build_helper_plugins(layout: &MavenLayout) -> Vec<MavenPlugin> {
     let extra_test = layout.test_roots.iter().skip(1);
 
     let mut executions = Vec::new();
-    let src_sources: Vec<XmlNode> = extra_src.map(|r| XmlNode::text("source", path_to_maven(r))).collect();
+    let src_sources: Vec<XmlNode> = extra_src
+        .map(|r| XmlNode::text("source", path_to_maven(r)))
+        .collect();
     if !src_sources.is_empty() {
         executions.push(MavenExecution {
             id: Some("add-source".to_string()),
@@ -1562,7 +1706,9 @@ fn build_helper_plugins(layout: &MavenLayout) -> Vec<MavenPlugin> {
             configuration: vec![XmlNode::element("sources", src_sources)],
         });
     }
-    let test_sources: Vec<XmlNode> = extra_test.map(|r| XmlNode::text("source", path_to_maven(r))).collect();
+    let test_sources: Vec<XmlNode> = extra_test
+        .map(|r| XmlNode::text("source", path_to_maven(r)))
+        .collect();
     if !test_sources.is_empty() {
         executions.push(MavenExecution {
             id: Some("add-test-source".to_string()),
@@ -1587,15 +1733,20 @@ fn build_helper_plugins(layout: &MavenLayout) -> Vec<MavenPlugin> {
 /// Render a path relative to the project root using `/` separators
 /// regardless of host OS, for portable POM output.
 fn path_to_maven(p: &Path) -> String {
-    p.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
+    p.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 // ---------------------------------------------------------------------------
 // Fat JAR (maven-shade-plugin)
 // ---------------------------------------------------------------------------
 
-const SHADE_SERVICES_TRANSFORMER: &str = "org.apache.maven.plugins.shade.resource.ServicesResourceTransformer";
-const SHADE_MANIFEST_TRANSFORMER: &str = "org.apache.maven.plugins.shade.resource.ManifestResourceTransformer";
+const SHADE_SERVICES_TRANSFORMER: &str =
+    "org.apache.maven.plugins.shade.resource.ServicesResourceTransformer";
+const SHADE_MANIFEST_TRANSFORMER: &str =
+    "org.apache.maven.plugins.shade.resource.ManifestResourceTransformer";
 
 /// `maven-shade-plugin`, present only when `[fat-jar]` is enabled.  Produces
 /// an attached `<artifactId>-<version>-fat.jar` (Curie's naming, via
@@ -1635,7 +1786,11 @@ fn build_shade_plugin(desc: &Descriptor, main_class: Option<&str>) -> Option<Mav
 /// and additionally sets `Main-Class` in the shaded manifest
 /// (`ManifestResourceTransformer`) when `main_class` is known.
 fn shade_transformers_node(main_class: Option<&str>) -> XmlNode {
-    let mut transformers = vec![XmlNode::element_with_attr("transformer", ("implementation", SHADE_SERVICES_TRANSFORMER), vec![])];
+    let mut transformers = vec![XmlNode::element_with_attr(
+        "transformer",
+        ("implementation", SHADE_SERVICES_TRANSFORMER),
+        vec![],
+    )];
     if let Some(main_class) = main_class {
         transformers.push(XmlNode::element_with_attr(
             "transformer",
@@ -1657,21 +1812,35 @@ fn shade_transformers_node(main_class: Option<&str>) -> XmlNode {
 ///   included by Shade regardless.
 fn shade_artifact_set_node(desc: &Descriptor) -> Option<XmlNode> {
     let shade_all = desc.fat_jar.shade_all;
-    let mut coords: Vec<String> =
-        desc.dependencies.iter().filter(|(_, dep)| dep.should_shade(shade_all) != shade_all).map(|(coord, _)| coord.clone()).collect();
+    let mut coords: Vec<String> = desc
+        .dependencies
+        .iter()
+        .filter(|(_, dep)| dep.should_shade(shade_all) != shade_all)
+        .map(|(coord, _)| coord.clone())
+        .collect();
     if coords.is_empty() {
         return None;
     }
     coords.sort();
 
-    let list = if shade_all { excludes_node(&coords) } else { includes_node(&coords) };
+    let list = if shade_all {
+        excludes_node(&coords)
+    } else {
+        includes_node(&coords)
+    };
     Some(XmlNode::element("artifactSet", vec![list]))
 }
 
 /// `<includes><include>...</include>...</includes>`, the `<excludes>`
 /// counterpart of [`excludes_node`].
 fn includes_node(patterns: &[String]) -> XmlNode {
-    XmlNode::element("includes", patterns.iter().map(|p| XmlNode::text("include", p.clone())).collect())
+    XmlNode::element(
+        "includes",
+        patterns
+            .iter()
+            .map(|p| XmlNode::text("include", p.clone()))
+            .collect(),
+    )
 }
 
 /// `<relocations>` for `[[fat-jar.relocations]]` (global) plus per-dependency
@@ -1692,13 +1861,19 @@ fn shade_relocations_node(desc: &Descriptor) -> Option<XmlNode> {
     if relocations.is_empty() {
         return None;
     }
-    Some(XmlNode::element("relocations", relocations.into_iter().map(relocation_node).collect()))
+    Some(XmlNode::element(
+        "relocations",
+        relocations.into_iter().map(relocation_node).collect(),
+    ))
 }
 
 /// `<relocation><pattern>from</pattern><shadedPattern>to</shadedPattern>
 /// [<excludes>...</excludes>]</relocation>`.
 fn relocation_node(reloc: &Relocation) -> XmlNode {
-    let mut children = vec![XmlNode::text("pattern", reloc.from.clone()), XmlNode::text("shadedPattern", reloc.to.clone())];
+    let mut children = vec![
+        XmlNode::text("pattern", reloc.from.clone()),
+        XmlNode::text("shadedPattern", reloc.to.clone()),
+    ];
     if !reloc.excludes.is_empty() {
         children.push(excludes_node(&reloc.excludes));
     }
@@ -1753,7 +1928,8 @@ pub fn render(project: &MavenProject, fingerprint_hex: &str) -> Result<String> {
 }
 
 fn text_elem(w: &mut XmlWriter<'_>, name: &str, text: &str) -> Result<()> {
-    w.create_element(name).write_text_content(BytesText::new(text))?;
+    w.create_element(name)
+        .write_text_content(BytesText::new(text))?;
     Ok(())
 }
 
@@ -1781,7 +1957,10 @@ fn write_properties(w: &mut XmlWriter<'_>, props: &[(String, String)]) -> Result
     Ok(())
 }
 
-fn write_dependency_management(w: &mut XmlWriter<'_>, managed: &[MavenManagedDependency]) -> Result<()> {
+fn write_dependency_management(
+    w: &mut XmlWriter<'_>,
+    managed: &[MavenManagedDependency],
+) -> Result<()> {
     if managed.is_empty() {
         return Ok(());
     }
@@ -1890,7 +2069,12 @@ fn write_build(w: &mut XmlWriter<'_>, project: &MavenProject) -> Result<()> {
         write_filters(w, &filtering.filters)?;
     } else {
         write_resource_block(w, "resources", "resource", layout.resources.as_deref())?;
-        write_resource_block(w, "testResources", "testResource", layout.test_resources.as_deref())?;
+        write_resource_block(
+            w,
+            "testResources",
+            "testResource",
+            layout.test_resources.as_deref(),
+        )?;
     }
     write_plugins(w, &project.plugins)?;
     w.write_event(Event::End(BytesEnd::new("build")))?;
@@ -1970,7 +2154,13 @@ fn build_resource_filtering(desc: &Descriptor, layout: &MavenLayout) -> Result<R
     let delimiter = resolve_maven_delimiter(desc)?;
     let filters = merge_filter_files(desc);
 
-    Ok(ResourceFiltering { active: true, main, test, filters, delimiter })
+    Ok(ResourceFiltering {
+        active: true,
+        main,
+        test,
+        filters,
+        delimiter,
+    })
 }
 
 /// A scope reaches Maven faithfully only with at most one `substitute` stage.
@@ -2007,12 +2197,19 @@ fn scope_resource_entries(scope: &Resources, auto: Option<&Path>) -> Vec<MavenRe
     directories
         .into_iter()
         .map(|directory| {
-            let filtering = stage.map(|s| stage_covers_dir(s, &directory)).unwrap_or(false);
+            let filtering = stage
+                .map(|s| stage_covers_dir(s, &directory))
+                .unwrap_or(false);
             let (includes, excludes) = match (filtering, stage) {
                 (true, Some(s)) => (s.includes.clone(), s.excludes.clone()),
                 _ => (Vec::new(), Vec::new()),
             };
-            MavenResourceEntry { directory, filtering, includes, excludes }
+            MavenResourceEntry {
+                directory,
+                filtering,
+                includes,
+                excludes,
+            }
         })
         .collect()
 }
@@ -2023,7 +2220,10 @@ fn scope_directories(scope: &Resources, auto: Option<&Path>) -> Vec<String> {
     if !scope.directories.is_empty() {
         return scope.directories.clone();
     }
-    auto.map(|p| vec![path_to_maven(p)]).into_iter().flatten().collect()
+    auto.map(|p| vec![path_to_maven(p)])
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Whether a stage filters files from `directory` (no `directories` restriction
@@ -2039,7 +2239,8 @@ fn resolve_maven_delimiter(desc: &Descriptor) -> Result<Option<String>> {
     for scope in [&desc.resources, &desc.test_resources] {
         if let Some(stage) = scope.filter.first() {
             let opts = stage.substitute.clone().unwrap_or_default();
-            let delim = maven_delimiter_spec(opts.delimiter.begin_token(), opts.delimiter.end_token());
+            let delim =
+                maven_delimiter_spec(opts.delimiter.begin_token(), opts.delimiter.end_token());
             match &found {
                 Some(prev) if prev != &delim => anyhow::bail!(
                     "curie maven sync: [resources] and [test-resources] use different \
@@ -2105,7 +2306,12 @@ fn merge_resource_properties(desc: &Descriptor) -> Result<Vec<(String, String)>>
 /// (or the `testResources`/`testResource` equivalent), explicit even for
 /// Maven's default locations so the POM is self-describing. No-op if `dir`
 /// is `None`.
-fn write_resource_block(w: &mut XmlWriter<'_>, outer: &str, inner: &str, dir: Option<&Path>) -> Result<()> {
+fn write_resource_block(
+    w: &mut XmlWriter<'_>,
+    outer: &str,
+    inner: &str,
+    dir: Option<&Path>,
+) -> Result<()> {
     let Some(dir) = dir else { return Ok(()) };
     w.write_event(Event::Start(BytesStart::new(outer)))?;
     w.write_event(Event::Start(BytesStart::new(inner)))?;
@@ -2129,7 +2335,14 @@ fn write_plugins(w: &mut XmlWriter<'_>, plugins: &[MavenPlugin]) -> Result<()> {
 
 fn write_plugin(w: &mut XmlWriter<'_>, plugin: &MavenPlugin) -> Result<()> {
     w.write_event(Event::Start(BytesStart::new("plugin")))?;
-    text_elem(w, "groupId", plugin.group_id.as_deref().unwrap_or(DEFAULT_PLUGIN_GROUP_ID))?;
+    text_elem(
+        w,
+        "groupId",
+        plugin
+            .group_id
+            .as_deref()
+            .unwrap_or(DEFAULT_PLUGIN_GROUP_ID),
+    )?;
     text_elem(w, "artifactId", &plugin.artifact_id)?;
     text_elem(w, "version", &plugin.version)?;
     write_xml_nodes_in(w, "configuration", &plugin.configuration)?;
@@ -2288,7 +2501,13 @@ fn sync_project(
     force: bool,
     check: bool,
 ) -> Result<SyncOutcome> {
-    let fp = fingerprint(SCHEMA_VERSION, member_toml, workspace_toml, &project.layout, pinned);
+    let fp = fingerprint(
+        SCHEMA_VERSION,
+        member_toml,
+        workspace_toml,
+        &project.layout,
+        pinned,
+    );
 
     if let Ok(existing) = std::fs::read_to_string(pom_path) {
         match extract_fingerprint(&existing) {
@@ -2299,7 +2518,9 @@ fn sync_project(
     }
 
     let rendered = render(project, &fp)?;
-    let unchanged = std::fs::read(pom_path).map(|existing| existing == rendered.as_bytes()).unwrap_or(false);
+    let unchanged = std::fs::read(pom_path)
+        .map(|existing| existing == rendered.as_bytes())
+        .unwrap_or(false);
     if unchanged {
         return Ok(SyncOutcome::UpToDate);
     }
@@ -2309,7 +2530,8 @@ fn sync_project(
     }
 
     if let Some(parent) = pom_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     std::fs::write(pom_path, rendered.as_bytes())
         .with_context(|| format!("failed to write {}", pom_path.display()))?;
@@ -2338,8 +2560,23 @@ pub fn sync_pom(
     force: bool,
     check: bool,
 ) -> Result<SyncOutcome> {
-    let project = build_project(desc, project_root, pinned, resolved_ap_versions, main_class, workspace_member_gavs)?;
-    sync_project(pom_path, &project, member_toml, workspace_toml, pinned, force, check)
+    let project = build_project(
+        desc,
+        project_root,
+        pinned,
+        resolved_ap_versions,
+        main_class,
+        workspace_member_gavs,
+    )?;
+    sync_project(
+        pom_path,
+        &project,
+        member_toml,
+        workspace_toml,
+        pinned,
+        force,
+        check,
+    )
 }
 
 /// Generate (or refresh) `pom_path` for a `[bom]` `desc`. See [`sync_pom`]
@@ -2354,7 +2591,15 @@ pub fn sync_bom_pom(
     check: bool,
 ) -> Result<SyncOutcome> {
     let project = build_bom_project(desc, pinned)?;
-    sync_project(pom_path, &project, member_toml, workspace_toml, pinned, force, check)
+    sync_project(
+        pom_path,
+        &project,
+        member_toml,
+        workspace_toml,
+        pinned,
+        force,
+        check,
+    )
 }
 
 /// Generate (or refresh) the aggregator `pom_path` for a `[workspace]`
@@ -2371,13 +2616,23 @@ pub fn sync_workspace_pom(
     check: bool,
 ) -> Result<SyncOutcome> {
     let project = build_workspace_project(desc, project_root)?;
-    sync_project(pom_path, &project, member_toml, workspace_toml, &[], force, check)
+    sync_project(
+        pom_path,
+        &project,
+        member_toml,
+        workspace_toml,
+        &[],
+        force,
+        check,
+    )
 }
 
 /// Extract the `curie-maven-fingerprint: <hex>` value from a generated
 /// POM's header comment, if present.
 fn extract_fingerprint(xml: &str) -> Option<String> {
-    xml.lines().find_map(|line| line.trim().strip_prefix(FINGERPRINT_PREFIX)).map(|s| s.trim().to_string())
+    xml.lines()
+        .find_map(|line| line.trim().strip_prefix(FINGERPRINT_PREFIX))
+        .map(|s| s.trim().to_string())
 }
 
 fn unmarked_pom_error(pom_path: &Path) -> anyhow::Error {
@@ -2400,7 +2655,11 @@ fn unmarked_pom_error(pom_path: &Path) -> anyhow::Error {
 /// [`crate::main_class::detect_main_class_from_source`] picks the single
 /// source candidate via Curie's Phase-1 heuristic. `None` for
 /// libraries/BOMs (anything without an `[application]` section).
-fn resolve_main_class_for_sync(desc: &Descriptor, project_root: &Path, layout: &MavenLayout) -> Result<Option<String>> {
+fn resolve_main_class_for_sync(
+    desc: &Descriptor,
+    project_root: &Path,
+    layout: &MavenLayout,
+) -> Result<Option<String>> {
     let app = match desc.application() {
         Some(a) => a,
         None => return Ok(None),
@@ -2408,7 +2667,11 @@ fn resolve_main_class_for_sync(desc: &Descriptor, project_root: &Path, layout: &
     if let Some(declared) = &app.main_class {
         return Ok(Some(declared.clone()));
     }
-    let src_roots: Vec<PathBuf> = layout.src_roots.iter().map(|r| project_root.join(r)).collect();
+    let src_roots: Vec<PathBuf> = layout
+        .src_roots
+        .iter()
+        .map(|r| project_root.join(r))
+        .collect();
     let sources = production_sources(&src_roots);
     crate::main_class::detect_main_class_from_source(&src_roots, &sources)
         .with_context(|| format!("in project {}", project_root.display()))
@@ -2424,8 +2687,12 @@ fn production_sources(src_roots: &[PathBuf]) -> Vec<PathBuf> {
     for src_root in src_roots {
         for entry in walk_files(src_root) {
             let name = entry.file_name().to_string_lossy();
-            let is_test = name.ends_with("Test.java") || name.ends_with("Tests.java") || name.ends_with("Spec.java")
-                || name.ends_with("Test.kt") || name.ends_with("Tests.kt") || name.ends_with("Spec.kt");
+            let is_test = name.ends_with("Test.java")
+                || name.ends_with("Tests.java")
+                || name.ends_with("Spec.java")
+                || name.ends_with("Test.kt")
+                || name.ends_with("Tests.kt")
+                || name.ends_with("Spec.kt");
             if !is_test && (name.ends_with(".java") || name.ends_with(".kt")) {
                 sources.push(entry.into_path());
             }
@@ -2441,7 +2708,10 @@ fn production_sources(src_roots: &[PathBuf]) -> Vec<PathBuf> {
 /// `workspace_member_gavs` parameter. `member.descriptor.workspace_dependencies`
 /// (label-sorted, `BTreeMap`) and `member.workspace_deps` correspond
 /// entry-by-entry (see `curie-meta/src/workspace.rs::load`).
-fn workspace_member_gavs(ws: &workspace::Workspace, member_index: usize) -> Result<BTreeMap<String, MavenCoordinate>> {
+fn workspace_member_gavs(
+    ws: &workspace::Workspace,
+    member_index: usize,
+) -> Result<BTreeMap<String, MavenCoordinate>> {
     let member = &ws.members[member_index];
     let mut out = BTreeMap::new();
     for (k, (_label, dep)) in member.descriptor.workspace_dependencies.iter().enumerate() {
@@ -2484,20 +2754,40 @@ fn sync_member_pom(
     offline: bool,
 ) -> Result<(PathBuf, SyncOutcome)> {
     let pom_path = project_root.join("pom.xml");
-    let member_toml = std::fs::read(project_root.join("Curie.toml"))
-        .with_context(|| format!("failed to read {}", project_root.join("Curie.toml").display()))?;
+    let member_toml = std::fs::read(project_root.join("Curie.toml")).with_context(|| {
+        format!(
+            "failed to read {}",
+            project_root.join("Curie.toml").display()
+        )
+    })?;
     let pinned = crate::deps::resolve_pinned_dependencies(desc, offline)?;
 
     let outcome = if desc.is_bom() {
-        sync_bom_pom(&pom_path, desc, &member_toml, workspace_toml, &pinned, force, check)?
+        sync_bom_pom(
+            &pom_path,
+            desc,
+            &member_toml,
+            workspace_toml,
+            &pinned,
+            force,
+            check,
+        )?
     } else {
         let resolved_ap_versions = crate::deps::resolve_ap_versions_for_sync(desc, offline)?;
         let layout = discover_layout(project_root, Some(desc));
         let main_class = resolve_main_class_for_sync(desc, project_root, &layout)?;
         sync_pom(
-            project_root, &pom_path, desc, &member_toml, workspace_toml,
-            &pinned, &resolved_ap_versions, main_class.as_deref(),
-            workspace_member_gavs, force, check,
+            project_root,
+            &pom_path,
+            desc,
+            &member_toml,
+            workspace_toml,
+            &pinned,
+            &resolved_ap_versions,
+            main_class.as_deref(),
+            workspace_member_gavs,
+            force,
+            check,
         )?
     };
     print_plugin_source_warning(desc);
@@ -2524,7 +2814,11 @@ fn print_plugin_source_warning(desc: &Descriptor) {
     if names.is_empty() {
         return;
     }
-    let plugins = names.iter().map(|name| format!("plugin.{name}")).collect::<Vec<_>>().join(", ");
+    let plugins = names
+        .iter()
+        .map(|name| format!("plugin.{name}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let plural = if names.len() == 1 { "" } else { "s" };
     crate::parallel::emit(&crate::style::warn(
         "Maven",
@@ -2538,20 +2832,40 @@ fn print_plugin_source_warning(desc: &Descriptor) {
 /// members of a nested workspace, since `Member.path` is built by joining
 /// path segments down through each nested `[workspace.members]` entry (see
 /// `_design/MAVEN-SYNC.md`).
-fn sync_one_workspace_member(ws: &workspace::Workspace, member_index: usize, force: bool, check: bool, offline: bool) -> Result<bool> {
+fn sync_one_workspace_member(
+    ws: &workspace::Workspace,
+    member_index: usize,
+    force: bool,
+    check: bool,
+    offline: bool,
+) -> Result<bool> {
     let member = &ws.members[member_index];
     if member.descriptor.is_foreign() {
         return Ok(false);
     }
     let gavs = workspace_member_gavs(ws, member_index)?;
-    let workspace_dir = member
-        .path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("workspace member {} has no parent directory", member.path.display()))?;
-    let workspace_toml = std::fs::read(workspace_dir.join("Curie.toml"))
-        .with_context(|| format!("failed to read {}", workspace_dir.join("Curie.toml").display()))?;
+    let workspace_dir = member.path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "workspace member {} has no parent directory",
+            member.path.display()
+        )
+    })?;
+    let workspace_toml = std::fs::read(workspace_dir.join("Curie.toml")).with_context(|| {
+        format!(
+            "failed to read {}",
+            workspace_dir.join("Curie.toml").display()
+        )
+    })?;
 
-    let (pom_path, outcome) = sync_member_pom(&member.path, &member.descriptor, Some(&workspace_toml), &gavs, force, check, offline)?;
+    let (pom_path, outcome) = sync_member_pom(
+        &member.path,
+        &member.descriptor,
+        Some(&workspace_toml),
+        &gavs,
+        force,
+        check,
+        offline,
+    )?;
     print_sync_outcome(&pom_path, outcome);
     Ok(outcome == SyncOutcome::Written)
 }
@@ -2562,11 +2876,23 @@ fn sync_one_workspace_member(ws: &workspace::Workspace, member_index: usize, for
 fn sync_aggregators_recursive(workspace_root: &Path, force: bool, check: bool) -> Result<bool> {
     let desc = descriptor::load(workspace_root)
         .with_context(|| format!("failed to load workspace at {}", workspace_root.display()))?;
-    let member_toml = std::fs::read(workspace_root.join("Curie.toml"))
-        .with_context(|| format!("failed to read {}", workspace_root.join("Curie.toml").display()))?;
+    let member_toml = std::fs::read(workspace_root.join("Curie.toml")).with_context(|| {
+        format!(
+            "failed to read {}",
+            workspace_root.join("Curie.toml").display()
+        )
+    })?;
 
     let pom_path = workspace_root.join("pom.xml");
-    let outcome = sync_workspace_pom(workspace_root, &pom_path, &desc, &member_toml, None, force, check)?;
+    let outcome = sync_workspace_pom(
+        workspace_root,
+        &pom_path,
+        &desc,
+        &member_toml,
+        None,
+        force,
+        check,
+    )?;
     print_sync_outcome(&pom_path, outcome);
     let mut any_written = outcome == SyncOutcome::Written;
 
@@ -2603,8 +2929,12 @@ fn sync_aggregators_recursive(workspace_root: &Path, force: bool, check: bool) -
 fn print_sync_outcome(pom_path: &Path, outcome: SyncOutcome) {
     let rel = path_to_maven(&display_path(pom_path));
     match outcome {
-        SyncOutcome::Written => crate::parallel::emit(&crate::style::active("Maven", &format!("{rel} written"))),
-        SyncOutcome::UpToDate => crate::parallel::emit(&crate::style::up_to_date_detail("Maven", &rel)),
+        SyncOutcome::Written => {
+            crate::parallel::emit(&crate::style::active("Maven", &format!("{rel} written")))
+        }
+        SyncOutcome::UpToDate => {
+            crate::parallel::emit(&crate::style::up_to_date_detail("Maven", &rel))
+        }
     }
 }
 
@@ -2612,7 +2942,9 @@ fn print_sync_outcome(pom_path: &Path, outcome: SyncOutcome) {
 /// current working directory when both it and `pom_path`'s parent
 /// directory can be canonicalized, else `pom_path` as given.
 fn display_path(pom_path: &Path) -> PathBuf {
-    let cwd = std::env::current_dir().ok().and_then(|c| c.canonicalize().ok());
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|c| c.canonicalize().ok());
     let parent = pom_path.parent().and_then(|p| p.canonicalize().ok());
     match (cwd, parent) {
         (Some(cwd), Some(parent)) => {
@@ -2625,9 +2957,22 @@ fn display_path(pom_path: &Path) -> PathBuf {
 
 /// `curie maven sync` for a standalone (non-workspace) project. Returns
 /// `true` if `pom.xml` was written (or, under `--check`, would be).
-pub fn run_maven_sync_standalone(project_root: &Path, force: bool, check: bool, offline: bool) -> Result<bool> {
+pub fn run_maven_sync_standalone(
+    project_root: &Path,
+    force: bool,
+    check: bool,
+    offline: bool,
+) -> Result<bool> {
     let desc = descriptor::load(project_root)?;
-    let (pom_path, outcome) = sync_member_pom(project_root, &desc, None, &BTreeMap::new(), force, check, offline)?;
+    let (pom_path, outcome) = sync_member_pom(
+        project_root,
+        &desc,
+        None,
+        &BTreeMap::new(),
+        force,
+        check,
+        offline,
+    )?;
     print_sync_outcome(&pom_path, outcome);
     Ok(outcome == SyncOutcome::Written)
 }
@@ -2635,7 +2980,13 @@ pub fn run_maven_sync_standalone(project_root: &Path, force: bool, check: bool, 
 /// `curie maven sync` for a single workspace member (`--project <member>`).
 /// Syncs only that member's `pom.xml` — the aggregator POM(s) come from
 /// running the command at the workspace root.
-pub fn run_maven_sync_workspace_member(workspace_root: &Path, member_index: usize, force: bool, check: bool, offline: bool) -> Result<bool> {
+pub fn run_maven_sync_workspace_member(
+    workspace_root: &Path,
+    member_index: usize,
+    force: bool,
+    check: bool,
+    offline: bool,
+) -> Result<bool> {
     let ws = workspace::load(workspace_root)?;
     sync_one_workspace_member(&ws, member_index, force, check, offline)
 }
@@ -2643,7 +2994,13 @@ pub fn run_maven_sync_workspace_member(workspace_root: &Path, member_index: usiz
 /// `curie maven sync` for a `--project <nested-workspace>` subtree: syncs
 /// every flattened member under it. The subtree's own aggregator POM(s) are
 /// produced by [`run_maven_sync_workspace_root`] at the outermost root.
-pub fn run_maven_sync_workspace_subtree(workspace_root: &Path, member_indices: &[usize], force: bool, check: bool, offline: bool) -> Result<bool> {
+pub fn run_maven_sync_workspace_subtree(
+    workspace_root: &Path,
+    member_indices: &[usize],
+    force: bool,
+    check: bool,
+    offline: bool,
+) -> Result<bool> {
     let ws = workspace::load(workspace_root)?;
     let mut any_written = false;
     for &member_index in member_indices {
@@ -2661,7 +3018,12 @@ pub fn run_maven_sync_workspace_subtree(workspace_root: &Path, member_indices: &
 /// it walks the same `[workspace.members]` structure
 /// [`sync_aggregators_recursive`] recurses over and rejects cycles/duplicate
 /// members, so a successful load guarantees that recursion terminates.
-pub fn run_maven_sync_workspace_root(workspace_root: &Path, force: bool, check: bool, offline: bool) -> Result<bool> {
+pub fn run_maven_sync_workspace_root(
+    workspace_root: &Path,
+    force: bool,
+    check: bool,
+    offline: bool,
+) -> Result<bool> {
     let ws = workspace::load(workspace_root)?;
     let mut any_written = sync_aggregators_recursive(workspace_root, force, check)?;
     for member_index in 0..ws.members.len() {
@@ -2684,7 +3046,15 @@ pub fn sync_for_build(project_root: &Path, desc: &Descriptor, offline: bool) -> 
     if !desc.maven.sync_enabled() {
         return Ok(());
     }
-    let (pom_path, outcome) = sync_member_pom(project_root, desc, None, &BTreeMap::new(), false, false, offline)?;
+    let (pom_path, outcome) = sync_member_pom(
+        project_root,
+        desc,
+        None,
+        &BTreeMap::new(),
+        false,
+        false,
+        offline,
+    )?;
     print_sync_outcome(&pom_path, outcome);
     Ok(())
 }
@@ -2692,7 +3062,11 @@ pub fn sync_for_build(project_root: &Path, desc: &Descriptor, offline: bool) -> 
 /// Sync `member_index`'s `pom.xml` at the start of `curie build`, when that
 /// member's effective (possibly inherited) `[maven] sync = true`. No-op
 /// otherwise.  Foreign members are always skipped.
-pub fn sync_member_for_build(ws: &workspace::Workspace, member_index: usize, offline: bool) -> Result<()> {
+pub fn sync_member_for_build(
+    ws: &workspace::Workspace,
+    member_index: usize,
+    offline: bool,
+) -> Result<()> {
     if ws.members[member_index].descriptor.is_foreign() {
         return Ok(());
     }
@@ -2793,7 +3167,10 @@ mod tests {
     fn minimal_workspace(members: &[&str]) -> Descriptor {
         let mut desc = minimal_app("unused", None);
         desc.kind = DescriptorKind::Workspace(WorkspaceSection {
-            members: members.iter().map(|m| curie_meta::MemberEntry::Local(m.to_string())).collect(),
+            members: members
+                .iter()
+                .map(|m| curie_meta::MemberEntry::Local(m.to_string()))
+                .collect(),
             missing_members: curie_meta::MissingMembers::default(),
             foreign: BTreeMap::new(),
         });
@@ -2812,14 +3189,30 @@ mod tests {
     fn coordinates_and_groupid_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let with_group = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&with_group, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &with_group,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(project.group_id, "com.example");
         assert_eq!(project.artifact_id, "my-app");
         assert_eq!(project.version, "1.0.0");
         assert_eq!(project.packaging, "jar");
 
         let without_group = minimal_app("my-app", None);
-        let project = build_project(&without_group, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &without_group,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(project.group_id, GENERATED_GROUP_ID);
     }
 
@@ -2828,11 +3221,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.java.release_version = Some("17".to_string());
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<maven.compiler.release>17</maven.compiler.release>"));
         assert!(xml.contains("<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>"));
-        assert!(xml.contains(&format!("<project.build.outputTimestamp>{OUTPUT_TIMESTAMP}</project.build.outputTimestamp>")));
+        assert!(xml.contains(&format!(
+            "<project.build.outputTimestamp>{OUTPUT_TIMESTAMP}</project.build.outputTimestamp>"
+        )));
     }
 
     // -- dependencies -----------------------------------------------------------
@@ -2857,13 +3260,35 @@ mod tests {
             "org.junit.jupiter:junit-jupiter".to_string(),
             DependencyValue::Version("5.10.0".to_string()),
         );
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
 
-        let prod = project.dependencies.iter().find(|d| d.artifact_id == "jackson-databind").unwrap();
+        let prod = project
+            .dependencies
+            .iter()
+            .find(|d| d.artifact_id == "jackson-databind")
+            .unwrap();
         assert_eq!(prod.scope.as_deref(), Some("compile"));
-        assert_eq!(prod.exclusions, vec![("com.fasterxml.jackson.core".to_string(), "jackson-annotations".to_string())]);
+        assert_eq!(
+            prod.exclusions,
+            vec![(
+                "com.fasterxml.jackson.core".to_string(),
+                "jackson-annotations".to_string()
+            )]
+        );
 
-        let test = project.dependencies.iter().find(|d| d.artifact_id == "junit-jupiter").unwrap();
+        let test = project
+            .dependencies
+            .iter()
+            .find(|d| d.artifact_id == "junit-jupiter")
+            .unwrap();
         assert_eq!(test.scope.as_deref(), Some("test"));
 
         let xml = render(&project, "deadbeef").unwrap();
@@ -2887,16 +3312,29 @@ mod tests {
             name: None,
             url: "https://example.com/repo".to_string(),
         });
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
 
         assert_eq!(project.repositories.len(), 2);
-        assert_eq!(project.repositories[1].name, "unnamed", "name defaults to id when absent");
+        assert_eq!(
+            project.repositories[1].name, "unnamed",
+            "name defaults to id when absent"
+        );
 
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<repositories>"));
         assert!(xml.contains("<id>shibboleth</id>"));
         assert!(xml.contains("<name>Shibboleth Releases</name>"));
-        assert!(xml.contains("<url>https://build.shibboleth.net/nexus/content/repositories/releases/</url>"));
+        assert!(xml.contains(
+            "<url>https://build.shibboleth.net/nexus/content/repositories/releases/</url>"
+        ));
         assert!(xml.contains("<id>unnamed</id>"));
         assert!(xml.contains("<name>unnamed</name>"));
 
@@ -2914,7 +3352,15 @@ mod tests {
     fn no_repositories_entries_omits_repositories_element() {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
 
         assert!(project.repositories.is_empty());
         let xml = render(&project, "deadbeef").unwrap();
@@ -2929,13 +3375,31 @@ mod tests {
             "com.fasterxml.jackson.core:jackson-databind".to_string(),
             DependencyValue::Version(String::new()),
         );
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
-        let dep = project.dependencies.iter().find(|d| d.artifact_id == "jackson-databind").unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let dep = project
+            .dependencies
+            .iter()
+            .find(|d| d.artifact_id == "jackson-databind")
+            .unwrap();
         assert_eq!(dep.version, None);
 
         let xml = render(&project, "deadbeef").unwrap();
-        let dep_block = xml.split("<dependency>").find(|b| b.contains("jackson-databind")).unwrap();
-        assert!(!dep_block.contains("<version>"), "blank version must not render <version>: {dep_block}");
+        let dep_block = xml
+            .split("<dependency>")
+            .find(|b| b.contains("jackson-databind"))
+            .unwrap();
+        assert!(
+            !dep_block.contains("<version>"),
+            "blank version must not render <version>: {dep_block}"
+        );
     }
 
     // -- BOM imports / pinTransitive ---------------------------------------------
@@ -2944,9 +3408,19 @@ mod tests {
     fn bom_imports_member_before_workspace() {
         let dir = tempfile::tempdir().unwrap();
         let mut desc = minimal_app("my-app", Some("com.example"));
-        desc.bom_imports.insert("com.example:member-bom".to_string(), "1.0".to_string());
-        desc.inherited_bom_imports.insert("com.example:workspace-bom".to_string(), "2.0".to_string());
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        desc.bom_imports
+            .insert("com.example:member-bom".to_string(), "1.0".to_string());
+        desc.inherited_bom_imports
+            .insert("com.example:workspace-bom".to_string(), "2.0".to_string());
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
 
         assert_eq!(project.managed_dependencies.len(), 2);
         assert_eq!(project.managed_dependencies[0].artifact_id, "member-bom");
@@ -2963,7 +3437,15 @@ mod tests {
     fn pin_transitive_off_by_default_no_pinned_entries() {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert!(project.managed_dependencies.is_empty());
         assert!(!desc.maven.pin_transitive_enabled());
     }
@@ -2972,12 +3454,29 @@ mod tests {
     fn pin_transitive_emits_sorted_dependency_management_before_bom_imports() {
         let dir = tempfile::tempdir().unwrap();
         let mut desc = minimal_app("my-app", Some("com.example"));
-        desc.bom_imports.insert("com.example:member-bom".to_string(), "1.0".to_string());
+        desc.bom_imports
+            .insert("com.example:member-bom".to_string(), "1.0".to_string());
         let pinned = vec![
-            PinnedDependency { group_id: "org.slf4j".into(), artifact_id: "slf4j-api".into(), version: "2.0.12".into() },
-            PinnedDependency { group_id: "com.google.guava".into(), artifact_id: "guava".into(), version: "33.2.0-jre".into() },
+            PinnedDependency {
+                group_id: "org.slf4j".into(),
+                artifact_id: "slf4j-api".into(),
+                version: "2.0.12".into(),
+            },
+            PinnedDependency {
+                group_id: "com.google.guava".into(),
+                artifact_id: "guava".into(),
+                version: "33.2.0-jre".into(),
+            },
         ];
-        let project = build_project(&desc, dir.path(), &pinned, &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &pinned,
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
 
         // Sorted by group:artifact, listed before BOM imports, not marked as imports.
         assert_eq!(project.managed_dependencies[0].group_id, "com.google.guava");
@@ -2997,8 +3496,12 @@ mod tests {
     #[test]
     fn bom_project_renders_packaging_pom() {
         let mut desc = minimal_bom("my-bom", Some("com.example"));
-        desc.bom_imports.insert("com.example:other-bom".to_string(), "2.0".to_string());
-        desc.dependencies.insert("org.slf4j:slf4j-api".to_string(), DependencyValue::Version("2.0.13".to_string()));
+        desc.bom_imports
+            .insert("com.example:other-bom".to_string(), "2.0".to_string());
+        desc.dependencies.insert(
+            "org.slf4j:slf4j-api".to_string(),
+            DependencyValue::Version("2.0.13".to_string()),
+        );
 
         let project = build_bom_project(&desc, &[]).unwrap();
 
@@ -3010,9 +3513,17 @@ mod tests {
         assert!(project.modules.is_empty());
 
         assert_eq!(project.managed_dependencies.len(), 2);
-        let import = project.managed_dependencies.iter().find(|d| d.artifact_id == "other-bom").unwrap();
+        let import = project
+            .managed_dependencies
+            .iter()
+            .find(|d| d.artifact_id == "other-bom")
+            .unwrap();
         assert!(import.is_import);
-        let plain = project.managed_dependencies.iter().find(|d| d.artifact_id == "slf4j-api").unwrap();
+        let plain = project
+            .managed_dependencies
+            .iter()
+            .find(|d| d.artifact_id == "slf4j-api")
+            .unwrap();
         assert!(!plain.is_import);
         assert_eq!(plain.version, "2.0.13");
 
@@ -3039,7 +3550,11 @@ mod tests {
         for name in ["b-member", "a-member", "nested-workspace-demo"] {
             let m = workspace_root.join(name);
             std::fs::create_dir_all(&m).unwrap();
-            std::fs::write(m.join("Curie.toml"), "[library]\nname = \"x\"\nversion = \"0.1.0\"\n").unwrap();
+            std::fs::write(
+                m.join("Curie.toml"),
+                "[library]\nname = \"x\"\nversion = \"0.1.0\"\n",
+            )
+            .unwrap();
         }
         let desc = minimal_workspace(&["b-member", "a-member", "nested-workspace-demo"]);
 
@@ -3049,7 +3564,10 @@ mod tests {
         assert_eq!(project.artifact_id, "my-workspace");
         assert_eq!(project.version, GENERATED_VERSION);
         assert_eq!(project.packaging, "pom");
-        assert_eq!(project.modules, vec!["b-member", "a-member", "nested-workspace-demo"]);
+        assert_eq!(
+            project.modules,
+            vec!["b-member", "a-member", "nested-workspace-demo"]
+        );
         assert!(project.dependencies.is_empty());
         assert!(project.managed_dependencies.is_empty());
         assert!(project.plugins.is_empty());
@@ -3059,7 +3577,10 @@ mod tests {
         let b_pos = xml.find("<module>b-member</module>").unwrap();
         let a_pos = xml.find("<module>a-member</module>").unwrap();
         let nested_pos = xml.find("<module>nested-workspace-demo</module>").unwrap();
-        assert!(b_pos < a_pos && a_pos < nested_pos, "modules must render in declaration order: {xml}");
+        assert!(
+            b_pos < a_pos && a_pos < nested_pos,
+            "modules must render in declaration order: {xml}"
+        );
         assert!(!xml.contains("<dependencyManagement>"));
         assert!(!xml.contains("<build>"));
     }
@@ -3068,35 +3589,67 @@ mod tests {
     fn member_pom_has_no_parent_element() {
         let dir = tempfile::tempdir().unwrap();
         let mut desc = minimal_app("my-app", Some("com.example"));
-        desc.inherited_bom_imports.insert("com.example:workspace-bom".to_string(), "2.0".to_string());
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        desc.inherited_bom_imports
+            .insert("com.example:workspace-bom".to_string(), "2.0".to_string());
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
 
         let xml = render(&project, "deadbeef").unwrap();
-        assert!(!xml.contains("<parent>"), "member POMs must be self-contained, with no <parent>: {xml}");
-        assert!(xml.contains("workspace-bom"), "inherited BOM imports must be materialized into the member POM: {xml}");
+        assert!(
+            !xml.contains("<parent>"),
+            "member POMs must be self-contained, with no <parent>: {xml}"
+        );
+        assert!(
+            xml.contains("workspace-bom"),
+            "inherited BOM imports must be materialized into the member POM: {xml}"
+        );
     }
 
     #[test]
     fn workspace_dep_becomes_module_gav() {
         let dir = tempfile::tempdir().unwrap();
         let mut desc = minimal_app("app", Some("com.example"));
-        desc.workspace_dependencies.insert("core".to_string(), WorkspaceDep { path: "../core".to_string(), version: None });
+        desc.workspace_dependencies.insert(
+            "core".to_string(),
+            WorkspaceDep {
+                path: "../core".to_string(),
+                version: None,
+            },
+        );
 
         let mut gavs = BTreeMap::new();
         gavs.insert(
             "../core".to_string(),
-            MavenCoordinate { group_id: "com.example".to_string(), artifact_id: "core".to_string(), version: "1.0.0".to_string() },
+            MavenCoordinate {
+                group_id: "com.example".to_string(),
+                artifact_id: "core".to_string(),
+                version: "1.0.0".to_string(),
+            },
         );
 
         let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &gavs).unwrap();
 
-        let dep = project.dependencies.iter().find(|d| d.artifact_id == "core").unwrap();
+        let dep = project
+            .dependencies
+            .iter()
+            .find(|d| d.artifact_id == "core")
+            .unwrap();
         assert_eq!(dep.group_id, "com.example");
         assert_eq!(dep.version, Some("1.0.0".to_string()));
         assert_eq!(dep.scope, Some("compile".to_string()));
 
         let xml = render(&project, "deadbeef").unwrap();
-        let dep_block = xml.split("<dependency>").find(|b| b.contains("<artifactId>core</artifactId>")).unwrap();
+        let dep_block = xml
+            .split("<dependency>")
+            .find(|b| b.contains("<artifactId>core</artifactId>"))
+            .unwrap();
         assert!(dep_block.contains("<groupId>com.example</groupId>"));
         assert!(dep_block.contains("<version>1.0.0</version>"));
         assert!(dep_block.contains("<scope>compile</scope>"));
@@ -3106,9 +3659,24 @@ mod tests {
     fn workspace_dep_without_resolved_gav_errors() {
         let dir = tempfile::tempdir().unwrap();
         let mut desc = minimal_app("app", Some("com.example"));
-        desc.workspace_dependencies.insert("core".to_string(), WorkspaceDep { path: "../core".to_string(), version: None });
+        desc.workspace_dependencies.insert(
+            "core".to_string(),
+            WorkspaceDep {
+                path: "../core".to_string(),
+                version: None,
+            },
+        );
 
-        let err = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap_err().to_string();
+        let err = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("workspace-dependencies"), "got: {err}");
         assert!(err.contains("../core"), "got: {err}");
     }
@@ -3118,8 +3686,16 @@ mod tests {
     #[test]
     fn maven_layout_keeps_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
-        write_file(dir.path(), "src/test/java/com/example/HelloTest.java", "package com.example; class HelloTest {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
+        write_file(
+            dir.path(),
+            "src/test/java/com/example/HelloTest.java",
+            "package com.example; class HelloTest {}",
+        );
 
         let layout = discover_layout(dir.path(), None);
         assert_eq!(layout.src_roots, vec![PathBuf::from("src/main/java")]);
@@ -3127,7 +3703,15 @@ mod tests {
         assert!(layout.colocated_test_excludes.is_empty());
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(!xml.contains("<sourceDirectory>"));
         assert!(!xml.contains("<testSourceDirectory>"));
@@ -3136,15 +3720,34 @@ mod tests {
     #[test]
     fn flat_layout_sets_sourcedir_and_testdir() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/com.example.app/Hello.java", "package com.example.app; class Hello {}");
-        write_file(dir.path(), "tests/com.example.app/HelloTest.java", "package com.example.app; class HelloTest {}");
+        write_file(
+            dir.path(),
+            "src/com.example.app/Hello.java",
+            "package com.example.app; class Hello {}",
+        );
+        write_file(
+            dir.path(),
+            "tests/com.example.app/HelloTest.java",
+            "package com.example.app; class HelloTest {}",
+        );
 
         let layout = discover_layout(dir.path(), None);
         assert_eq!(layout.src_roots, vec![PathBuf::from("src/com.example.app")]);
-        assert_eq!(layout.test_roots, vec![PathBuf::from("tests/com.example.app")]);
+        assert_eq!(
+            layout.test_roots,
+            vec![PathBuf::from("tests/com.example.app")]
+        );
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<sourceDirectory>src/com.example.app</sourceDirectory>"));
         assert!(xml.contains("<testSourceDirectory>tests/com.example.app</testSourceDirectory>"));
@@ -3153,14 +3756,36 @@ mod tests {
     #[test]
     fn extra_source_root_becomes_build_helper_add_source() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
-        write_file(dir.path(), "src/main/kotlin/com/example/World.kt", "package com.example\nclass World");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
+        write_file(
+            dir.path(),
+            "src/main/kotlin/com/example/World.kt",
+            "package com.example\nclass World",
+        );
 
         let layout = discover_layout(dir.path(), None);
-        assert_eq!(layout.src_roots, vec![PathBuf::from("src/main/java"), PathBuf::from("src/main/kotlin")]);
+        assert_eq!(
+            layout.src_roots,
+            vec![
+                PathBuf::from("src/main/java"),
+                PathBuf::from("src/main/kotlin")
+            ]
+        );
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         // src/main/java is the Maven default and stays implicit.
         assert!(!xml.contains("<sourceDirectory>"));
@@ -3172,11 +3797,26 @@ mod tests {
     #[test]
     fn colocated_test_patterns_excluded_from_main_compile() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
-        write_file(dir.path(), "src/main/java/com/example/HelloTest.java", "package com.example; class HelloTest {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/HelloTest.java",
+            "package com.example; class HelloTest {}",
+        );
 
         let layout = discover_layout(dir.path(), None);
-        assert_eq!(layout.colocated_test_excludes, vec!["**/*Test.java".to_string(), "**/*Tests.java".to_string(), "**/*Spec.java".to_string()]);
+        assert_eq!(
+            layout.colocated_test_excludes,
+            vec![
+                "**/*Test.java".to_string(),
+                "**/*Tests.java".to_string(),
+                "**/*Spec.java".to_string()
+            ]
+        );
         // The production root is also a test source root for the co-located tests.
         assert!(layout.test_roots.contains(&PathBuf::from("src/main/java")));
     }
@@ -3184,11 +3824,23 @@ mod tests {
     #[test]
     fn resources_are_explicit_even_at_default_location() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
         write_file(dir.path(), "src/main/resources/app.properties", "a=b");
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<resources>"));
         assert!(xml.contains("<directory>src/main/resources</directory>"));
@@ -3196,7 +3848,10 @@ mod tests {
 
     // -- resource filtering -------------------------------------------------------
 
-    fn substitute_stage_for(includes: &[&str], directories: &[&str]) -> crate::descriptor::FilterStage {
+    fn substitute_stage_for(
+        includes: &[&str],
+        directories: &[&str],
+    ) -> crate::descriptor::FilterStage {
         crate::descriptor::FilterStage {
             engine: crate::descriptor::Engine::Substitute,
             directories: directories.iter().map(|s| s.to_string()).collect(),
@@ -3210,26 +3865,52 @@ mod tests {
     #[test]
     fn pom_emits_filtering_and_at_delimiter_for_single_substitute_stage() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
-        write_file(dir.path(), "src/main/resources/app.properties", "v=@project.version@");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
+        write_file(
+            dir.path(),
+            "src/main/resources/app.properties",
+            "v=@project.version@",
+        );
 
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.resources.section_present = true;
         desc.resources.filter = vec![substitute_stage_for(&["**/*.properties"], &[])];
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<filtering>true</filtering>"), "got: {xml}");
-        assert!(xml.contains("<include>**/*.properties</include>"), "got: {xml}");
+        assert!(
+            xml.contains("<include>**/*.properties</include>"),
+            "got: {xml}"
+        );
         assert!(xml.contains("maven-resources-plugin"), "got: {xml}");
         assert!(xml.contains("<delimiter>@</delimiter>"), "got: {xml}");
-        assert!(xml.contains("<useDefaultDelimiters>false</useDefaultDelimiters>"), "got: {xml}");
+        assert!(
+            xml.contains("<useDefaultDelimiters>false</useDefaultDelimiters>"),
+            "got: {xml}"
+        );
     }
 
     #[test]
     fn pom_emits_resources_and_testresources_per_directory() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
 
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.resources.section_present = true;
@@ -3237,12 +3918,29 @@ mod tests {
         desc.test_resources.section_present = true;
         desc.test_resources.directories = vec!["src/test/resources".into()];
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
-        assert!(xml.contains("<directory>src/main/resources</directory>"), "got: {xml}");
-        assert!(xml.contains("<directory>src/main/config</directory>"), "got: {xml}");
+        assert!(
+            xml.contains("<directory>src/main/resources</directory>"),
+            "got: {xml}"
+        );
+        assert!(
+            xml.contains("<directory>src/main/config</directory>"),
+            "got: {xml}"
+        );
         assert!(xml.contains("<testResources>"), "got: {xml}");
-        assert!(xml.contains("<directory>src/test/resources</directory>"), "got: {xml}");
+        assert!(
+            xml.contains("<directory>src/test/resources</directory>"),
+            "got: {xml}"
+        );
         // Pure merge (no filter stages) → no filtering flag.
         assert!(!xml.contains("<filtering>true</filtering>"), "got: {xml}");
     }
@@ -3256,10 +3954,20 @@ mod tests {
             substitute_stage_for(&["**/a"], &[]),
             substitute_stage_for(&["**/b"], &[]),
         ];
-        let err = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("single `substitute` filter stage"), "got: {err}");
+        let err = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("single `substitute` filter stage"),
+            "got: {err}"
+        );
         assert!(err.contains("test-resources"), "got: {err}");
     }
 
@@ -3271,27 +3979,51 @@ mod tests {
         let mut stage = substitute_stage_for(&[], &[]);
         stage.engine = crate::descriptor::Engine::Liquid;
         desc.resources.filter = vec![stage];
-        let err = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new())
-            .unwrap_err()
-            .to_string();
+        let err = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("substitute"), "got: {err}");
     }
 
     #[test]
     fn pom_emits_properties_and_filters_from_scopes() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
 
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.resources.section_present = true;
         desc.resources.filter = vec![substitute_stage_for(&["**/*.properties"], &[])];
-        desc.resources.properties.insert("api.url".into(), "https://x".into());
+        desc.resources
+            .properties
+            .insert("api.url".into(), "https://x".into());
         desc.resources.filter_files = vec!["build.properties".into()];
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<api.url>https://x</api.url>"), "got: {xml}");
-        assert!(xml.contains("<filter>build.properties</filter>"), "got: {xml}");
+        assert!(
+            xml.contains("<filter>build.properties</filter>"),
+            "got: {xml}"
+        );
     }
 
     // -- annotation processors / compiler plugin ---------------------------------
@@ -3309,9 +4041,13 @@ mod tests {
             AnnotationProcessor::Version(String::new()),
         );
         let mut resolved = BTreeMap::new();
-        resolved.insert("com.example:bom-managed-processor".to_string(), "1.2.3".to_string());
+        resolved.insert(
+            "com.example:bom-managed-processor".to_string(),
+            "1.2.3".to_string(),
+        );
 
-        let project = build_project(&desc, dir.path(), &[], &resolved, None, &BTreeMap::new()).unwrap();
+        let project =
+            build_project(&desc, dir.path(), &[], &resolved, None, &BTreeMap::new()).unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         assert!(xml.contains("<id>default-compile</id>"));
@@ -3332,7 +4068,16 @@ mod tests {
             AnnotationProcessor::Version(String::new()),
         );
 
-        let err = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap_err().to_string();
+        let err = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("com.example:bom-managed-processor"), "{err}");
     }
 
@@ -3348,14 +4093,29 @@ mod tests {
             }),
         );
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
-        let dep = project.dependencies.iter().find(|d| d.artifact_id == "lombok").unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let dep = project
+            .dependencies
+            .iter()
+            .find(|d| d.artifact_id == "lombok")
+            .unwrap();
         assert_eq!(dep.group_id, "org.projectlombok");
         assert_eq!(dep.version.as_deref(), Some("1.18.34"));
         assert_eq!(dep.scope.as_deref(), Some("provided"));
 
         let xml = render(&project, "deadbeef").unwrap();
-        let dep_block = xml.split("<dependency>").find(|b| b.contains("lombok")).unwrap();
+        let dep_block = xml
+            .split("<dependency>")
+            .find(|b| b.contains("lombok"))
+            .unwrap();
         assert!(dep_block.contains("<scope>provided</scope>"));
     }
 
@@ -3369,9 +4129,18 @@ mod tests {
         );
         let mut options = BTreeMap::new();
         options.insert("verbose".to_string(), "true".to_string());
-        desc.annotation_processor_options.insert("dagger".to_string(), options);
+        desc.annotation_processor_options
+            .insert("dagger".to_string(), options);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<compilerArgs>"));
         assert!(xml.contains("<arg>-Adagger.verbose=true</arg>"));
@@ -3383,27 +4152,60 @@ mod tests {
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.java.enable_preview = Some(true);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
-        let compile = xml.split("<execution>").find(|b| b.contains("default-compile")).unwrap();
+        let compile = xml
+            .split("<execution>")
+            .find(|b| b.contains("default-compile"))
+            .unwrap();
         assert!(compile.contains("<arg>--enable-preview</arg>"));
 
-        let test_compile = xml.split("<execution>").find(|b| b.contains("default-testCompile")).unwrap();
+        let test_compile = xml
+            .split("<execution>")
+            .find(|b| b.contains("default-testCompile"))
+            .unwrap();
         assert!(test_compile.contains("<arg>--enable-preview</arg>"));
     }
 
     #[test]
     fn colocated_test_excludes_applied_to_default_compile() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
-        write_file(dir.path(), "src/main/java/com/example/HelloTest.java", "package com.example; class HelloTest {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/HelloTest.java",
+            "package com.example; class HelloTest {}",
+        );
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
-        let compile = xml.split("<execution>").find(|b| b.contains("default-compile")).unwrap();
+        let compile = xml
+            .split("<execution>")
+            .find(|b| b.contains("default-compile"))
+            .unwrap();
         assert!(compile.contains("<excludes>"));
         assert!(compile.contains("<exclude>**/*Test.java</exclude>"));
         assert!(compile.contains("<exclude>**/*Tests.java</exclude>"));
@@ -3423,14 +4225,28 @@ mod tests {
             AnnotationProcessor::Version("5.12.0".to_string()),
         );
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
-        let compile = xml.split("<execution>").find(|b| b.contains("default-compile")).unwrap();
+        let compile = xml
+            .split("<execution>")
+            .find(|b| b.contains("default-compile"))
+            .unwrap();
         assert!(compile.contains("<artifactId>dagger-compiler</artifactId>"));
         assert!(!compile.contains("<artifactId>mockito-core</artifactId>"));
 
-        let test_compile = xml.split("<execution>").find(|b| b.contains("default-testCompile")).unwrap();
+        let test_compile = xml
+            .split("<execution>")
+            .find(|b| b.contains("default-testCompile"))
+            .unwrap();
         assert!(test_compile.contains("<artifactId>dagger-compiler</artifactId>"));
         assert!(test_compile.contains("<artifactId>mockito-core</artifactId>"));
     }
@@ -3440,20 +4256,43 @@ mod tests {
     #[test]
     fn kotlin_sources_get_kotlin_plugin_and_stdlib_dependency() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/kotlin/com/example/Hello.kt", "package com.example\nclass Hello");
-        write_file(dir.path(), "src/test/kotlin/com/example/HelloTest.kt", "package com.example\nclass HelloTest");
+        write_file(
+            dir.path(),
+            "src/main/kotlin/com/example/Hello.kt",
+            "package com.example\nclass Hello",
+        );
+        write_file(
+            dir.path(),
+            "src/test/kotlin/com/example/HelloTest.kt",
+            "package com.example\nclass HelloTest",
+        );
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
-        let kotlin_plugin = xml.split("<plugin>").find(|b| b.contains("kotlin-maven-plugin")).unwrap();
+        let kotlin_plugin = xml
+            .split("<plugin>")
+            .find(|b| b.contains("kotlin-maven-plugin"))
+            .unwrap();
         assert!(kotlin_plugin.contains("<groupId>org.jetbrains.kotlin</groupId>"));
         assert!(kotlin_plugin.contains(&format!("<version>{DEFAULT_KOTLIN_VERSION}</version>")));
         assert!(kotlin_plugin.contains("<sourceDir>src/main/kotlin</sourceDir>"));
         assert!(kotlin_plugin.contains("<sourceDir>src/test/kotlin</sourceDir>"));
 
-        let dep = project.dependencies.iter().find(|d| d.artifact_id == "kotlin-stdlib").unwrap();
+        let dep = project
+            .dependencies
+            .iter()
+            .find(|d| d.artifact_id == "kotlin-stdlib")
+            .unwrap();
         assert_eq!(dep.group_id, "org.jetbrains.kotlin");
         assert_eq!(dep.version.as_deref(), Some(DEFAULT_KOTLIN_VERSION));
         assert_eq!(dep.scope, None);
@@ -3462,26 +4301,57 @@ mod tests {
     #[test]
     fn kotlin_sources_rebind_default_compile_executions() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/kotlin/com/example/Hello.kt", "package com.example\nclass Hello");
-        write_file(dir.path(), "src/test/kotlin/com/example/HelloTest.kt", "package com.example\nclass HelloTest");
+        write_file(
+            dir.path(),
+            "src/main/kotlin/com/example/Hello.kt",
+            "package com.example\nclass Hello",
+        );
+        write_file(
+            dir.path(),
+            "src/test/kotlin/com/example/HelloTest.kt",
+            "package com.example\nclass HelloTest",
+        );
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
-        let compiler_plugin = xml.split("<plugin>").find(|b| b.contains("maven-compiler-plugin")).unwrap();
+        let compiler_plugin = xml
+            .split("<plugin>")
+            .find(|b| b.contains("maven-compiler-plugin"))
+            .unwrap();
 
-        let default_compile = compiler_plugin.split("<execution>").find(|b| b.contains("default-compile")).unwrap();
+        let default_compile = compiler_plugin
+            .split("<execution>")
+            .find(|b| b.contains("default-compile"))
+            .unwrap();
         assert!(default_compile.contains("<phase>none</phase>"));
 
-        let default_test_compile = compiler_plugin.split("<execution>").find(|b| b.contains("default-testCompile")).unwrap();
+        let default_test_compile = compiler_plugin
+            .split("<execution>")
+            .find(|b| b.contains("default-testCompile"))
+            .unwrap();
         assert!(default_test_compile.contains("<phase>none</phase>"));
 
-        let java_compile = compiler_plugin.split("<execution>").find(|b| b.contains("java-compile")).unwrap();
+        let java_compile = compiler_plugin
+            .split("<execution>")
+            .find(|b| b.contains("java-compile"))
+            .unwrap();
         assert!(java_compile.contains("<phase>compile</phase>"));
         assert!(java_compile.contains("<goal>compile</goal>"));
 
-        let java_test_compile = compiler_plugin.split("<execution>").find(|b| b.contains("java-test-compile")).unwrap();
+        let java_test_compile = compiler_plugin
+            .split("<execution>")
+            .find(|b| b.contains("java-test-compile"))
+            .unwrap();
         assert!(java_test_compile.contains("<phase>test-compile</phase>"));
         assert!(java_test_compile.contains("<goal>testCompile</goal>"));
     }
@@ -3489,16 +4359,38 @@ mod tests {
     #[test]
     fn groovy_sources_get_gmavenplus_plugin_and_dependency() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/groovy/com/example/Hello.groovy", "package com.example\nclass Hello {}");
-        write_file(dir.path(), "src/test/groovy/com/example/HelloTest.groovy", "package com.example\nclass HelloTest {}");
+        write_file(
+            dir.path(),
+            "src/main/groovy/com/example/Hello.groovy",
+            "package com.example\nclass Hello {}",
+        );
+        write_file(
+            dir.path(),
+            "src/test/groovy/com/example/HelloTest.groovy",
+            "package com.example\nclass HelloTest {}",
+        );
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
-        let gmavenplus = xml.split("<plugin>").find(|b| b.contains("gmavenplus-plugin")).unwrap();
+        let gmavenplus = xml
+            .split("<plugin>")
+            .find(|b| b.contains("gmavenplus-plugin"))
+            .unwrap();
         assert!(gmavenplus.contains("<groupId>org.codehaus.gmavenplus</groupId>"));
-        assert!(gmavenplus.contains(&format!("<version>{}</version>", plugin_versions::GMAVENPLUS)));
+        assert!(gmavenplus.contains(&format!(
+            "<version>{}</version>",
+            plugin_versions::GMAVENPLUS
+        )));
         for goal in [
             "addSources",
             "addTestSources",
@@ -3509,7 +4401,10 @@ mod tests {
             "removeStubs",
             "removeTestStubs",
         ] {
-            assert!(gmavenplus.contains(&format!("<goal>{goal}</goal>")), "missing goal {goal}");
+            assert!(
+                gmavenplus.contains(&format!("<goal>{goal}</goal>")),
+                "missing goal {goal}"
+            );
         }
 
         // Groovy 5+ rejects gmavenplus-plugin's own "1.8" default.
@@ -3521,7 +4416,11 @@ mod tests {
         assert!(gmavenplus.contains("<directory>src/test/groovy</directory>"));
         assert!(gmavenplus.contains("<include>**/*.groovy</include>"));
 
-        let dep = project.dependencies.iter().find(|d| d.artifact_id == "groovy").unwrap();
+        let dep = project
+            .dependencies
+            .iter()
+            .find(|d| d.artifact_id == "groovy")
+            .unwrap();
         assert_eq!(dep.group_id, "org.apache.groovy");
         assert_eq!(dep.version.as_deref(), Some(DEFAULT_GROOVY_VERSION));
         assert_eq!(dep.scope, None);
@@ -3530,14 +4429,33 @@ mod tests {
     #[test]
     fn groovy_flat_package_layout_gets_gmavenplus_source_filesets() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/com.example/Hello.groovy", "package com.example\nclass Hello {}");
-        write_file(dir.path(), "tests/com.example/HelloSpec.groovy", "package com.example\nclass HelloSpec {}");
+        write_file(
+            dir.path(),
+            "src/com.example/Hello.groovy",
+            "package com.example\nclass Hello {}",
+        );
+        write_file(
+            dir.path(),
+            "tests/com.example/HelloSpec.groovy",
+            "package com.example\nclass HelloSpec {}",
+        );
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
-        let gmavenplus = xml.split("<plugin>").find(|b| b.contains("gmavenplus-plugin")).unwrap();
+        let gmavenplus = xml
+            .split("<plugin>")
+            .find(|b| b.contains("gmavenplus-plugin"))
+            .unwrap();
         assert!(gmavenplus.contains("<directory>src/com.example</directory>"));
         assert!(gmavenplus.contains("<directory>tests/com.example</directory>"));
     }
@@ -3545,29 +4463,72 @@ mod tests {
     #[test]
     fn groovy_colocated_spec_excluded_from_production_sources_fileset() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/com.example/Calculator.groovy", "package com.example\nclass Calculator {}");
-        write_file(dir.path(), "src/com.example/CalculatorSpec.groovy", "package com.example\nclass CalculatorSpec {}");
+        write_file(
+            dir.path(),
+            "src/com.example/Calculator.groovy",
+            "package com.example\nclass Calculator {}",
+        );
+        write_file(
+            dir.path(),
+            "src/com.example/CalculatorSpec.groovy",
+            "package com.example\nclass CalculatorSpec {}",
+        );
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
-        let gmavenplus = xml.split("<plugin>").find(|b| b.contains("gmavenplus-plugin")).unwrap();
-        let sources = gmavenplus.split("<sources>").nth(1).unwrap().split("</sources>").next().unwrap();
+        let gmavenplus = xml
+            .split("<plugin>")
+            .find(|b| b.contains("gmavenplus-plugin"))
+            .unwrap();
+        let sources = gmavenplus
+            .split("<sources>")
+            .nth(1)
+            .unwrap()
+            .split("</sources>")
+            .next()
+            .unwrap();
         assert!(sources.contains("<exclude>**/*Spec.groovy</exclude>"));
 
         // <testSources> compiles everything in the shared root, unfiltered.
-        let test_sources = gmavenplus.split("<testSources>").nth(1).unwrap().split("</testSources>").next().unwrap();
+        let test_sources = gmavenplus
+            .split("<testSources>")
+            .nth(1)
+            .unwrap()
+            .split("</testSources>")
+            .next()
+            .unwrap();
         assert!(!test_sources.contains("<excludes>"));
     }
 
     #[test]
     fn application_with_groovy_and_no_dependencies_populates_libs() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/groovy/com/example/Hello.groovy", "package com.example\nclass Hello {}");
+        write_file(
+            dir.path(),
+            "src/main/groovy/com/example/Hello.groovy",
+            "package com.example\nclass Hello {}",
+        );
 
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main"), &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            Some("com.example.Main"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         // Curie always bundles the Groovy stdlib into target/libs/, so the
@@ -3579,7 +4540,11 @@ mod tests {
 
     // -- fat jar (maven-shade-plugin) ----------------------------------------------
 
-    fn shaded_dependency(version: &str, shade: Option<bool>, relocations: Vec<Relocation>) -> DependencyValue {
+    fn shaded_dependency(
+        version: &str,
+        shade: Option<bool>,
+        relocations: Vec<Relocation>,
+    ) -> DependencyValue {
         DependencyValue::Detailed(DependencyDetailed {
             version: version.to_string(),
             repository: None,
@@ -3605,19 +4570,37 @@ mod tests {
             }],
             section_present: true,
         };
-        desc.dependencies.insert("org.slf4j:slf4j-api".to_string(), shaded_dependency("2.0.13", Some(false), vec![]));
+        desc.dependencies.insert(
+            "org.slf4j:slf4j-api".to_string(),
+            shaded_dependency("2.0.13", Some(false), vec![]),
+        );
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main"), &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            Some("com.example.Main"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
-        let shade_plugin = xml.split("<plugin>").find(|b| b.contains("maven-shade-plugin")).unwrap();
+        let shade_plugin = xml
+            .split("<plugin>")
+            .find(|b| b.contains("maven-shade-plugin"))
+            .unwrap();
         assert!(shade_plugin.contains(&format!("<version>{}</version>", plugin_versions::SHADE)));
         assert!(shade_plugin.contains("<phase>package</phase>"));
         assert!(shade_plugin.contains("<goal>shade</goal>"));
         assert!(shade_plugin.contains("<shadedClassifierName>fat</shadedClassifierName>"));
         assert!(shade_plugin.contains("<shadedArtifactAttached>true</shadedArtifactAttached>"));
-        assert!(shade_plugin.contains(&format!(r#"<transformer implementation="{SHADE_SERVICES_TRANSFORMER}"/>"#)));
-        assert!(shade_plugin.contains(&format!(r#"<transformer implementation="{SHADE_MANIFEST_TRANSFORMER}">"#)));
+        assert!(shade_plugin.contains(&format!(
+            r#"<transformer implementation="{SHADE_SERVICES_TRANSFORMER}"/>"#
+        )));
+        assert!(shade_plugin.contains(&format!(
+            r#"<transformer implementation="{SHADE_MANIFEST_TRANSFORMER}">"#
+        )));
         assert!(shade_plugin.contains("<mainClass>com.example.Main</mainClass>"));
 
         // shadeAll = true + per-dep shade = false -> <artifactSet><excludes>
@@ -3636,14 +4619,36 @@ mod tests {
     fn shade_all_false_uses_includes() {
         let dir = tempfile::tempdir().unwrap();
         let mut desc = minimal_app("my-app", Some("com.example"));
-        desc.fat_jar = FatJar { enabled: true, shade_all: false, relocations: vec![], section_present: true };
-        desc.dependencies.insert("com.google.guava:guava".to_string(), shaded_dependency("33.2.1-jre", Some(true), vec![]));
-        desc.dependencies.insert("org.slf4j:slf4j-api".to_string(), DependencyValue::Version("2.0.13".to_string()));
+        desc.fat_jar = FatJar {
+            enabled: true,
+            shade_all: false,
+            relocations: vec![],
+            section_present: true,
+        };
+        desc.dependencies.insert(
+            "com.google.guava:guava".to_string(),
+            shaded_dependency("33.2.1-jre", Some(true), vec![]),
+        );
+        desc.dependencies.insert(
+            "org.slf4j:slf4j-api".to_string(),
+            DependencyValue::Version("2.0.13".to_string()),
+        );
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
-        let shade_plugin = xml.split("<plugin>").find(|b| b.contains("maven-shade-plugin")).unwrap();
+        let shade_plugin = xml
+            .split("<plugin>")
+            .find(|b| b.contains("maven-shade-plugin"))
+            .unwrap();
         assert!(shade_plugin.contains("<artifactSet>"));
         assert!(shade_plugin.contains("<includes>"));
         assert!(shade_plugin.contains("<include>com.google.guava:guava</include>"));
@@ -3651,7 +4656,9 @@ mod tests {
         assert!(!shade_plugin.contains("<relocations>"));
 
         // No main class -> no ManifestResourceTransformer, but services are still merged.
-        assert!(shade_plugin.contains(&format!(r#"<transformer implementation="{SHADE_SERVICES_TRANSFORMER}"/>"#)));
+        assert!(shade_plugin.contains(&format!(
+            r#"<transformer implementation="{SHADE_SERVICES_TRANSFORMER}"/>"#
+        )));
         assert!(!shade_plugin.contains(SHADE_MANIFEST_TRANSFORMER));
     }
 
@@ -3659,7 +4666,15 @@ mod tests {
     fn fat_jar_disabled_omits_shade_plugin() {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_app("my-app", Some("com.example"));
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main"), &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            Some("com.example.Main"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(!xml.contains("maven-shade-plugin"));
     }
@@ -3675,7 +4690,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_app("my-app", Some("com.example"));
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(!xml.contains("<includes>"));
         assert!(!xml.contains("<argLine>"));
@@ -3687,12 +4710,26 @@ mod tests {
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.spock.enabled = Some(true);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         for pattern in surefire_includes::DEFAULT {
-            assert!(xml.contains(&format!("<include>{pattern}</include>")), "missing {pattern}");
+            assert!(
+                xml.contains(&format!("<include>{pattern}</include>")),
+                "missing {pattern}"
+            );
         }
-        assert!(xml.contains(&format!("<include>{}</include>", surefire_includes::SPOCK_EXTRA)));
+        assert!(xml.contains(&format!(
+            "<include>{}</include>",
+            surefire_includes::SPOCK_EXTRA
+        )));
     }
 
     #[test]
@@ -3701,7 +4738,15 @@ mod tests {
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.java.enable_preview = Some(true);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<argLine>--enable-preview</argLine>"));
     }
@@ -3723,7 +4768,15 @@ mod tests {
             }),
         );
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<argLine>-javaagent:${org.mockito:mockito-core:jar}</argLine>"));
         assert!(xml.contains("<artifactId>maven-dependency-plugin</artifactId>"));
@@ -3737,13 +4790,24 @@ mod tests {
         desc.test.coverage = Some(true);
         desc.java.enable_preview = Some(true);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<argLine>@{argLine} --enable-preview</argLine>"));
         assert!(xml.contains("<artifactId>jacoco-maven-plugin</artifactId>"));
         assert!(xml.contains("<goal>prepare-agent</goal>"));
 
-        let report = xml.split("<execution>").find(|b| b.contains("<id>report</id>")).unwrap();
+        let report = xml
+            .split("<execution>")
+            .find(|b| b.contains("<id>report</id>"))
+            .unwrap();
         assert!(report.contains("<phase>test</phase>"));
         assert!(report.contains("<goal>report</goal>"));
     }
@@ -3753,7 +4817,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_app("my-app", Some("com.example"));
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(!xml.contains("jacoco-maven-plugin"));
     }
@@ -3763,14 +4835,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_app("my-app", Some("com.example"));
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let dep = project
             .dependencies
             .iter()
-            .find(|d| d.group_id == JUNIT_STANDALONE_GROUP_ID && d.artifact_id == JUNIT_STANDALONE_ARTIFACT_ID)
+            .find(|d| {
+                d.group_id == JUNIT_STANDALONE_GROUP_ID
+                    && d.artifact_id == JUNIT_STANDALONE_ARTIFACT_ID
+            })
             .unwrap();
         assert_eq!(dep.scope.as_deref(), Some("test"));
-        assert_eq!(dep.version.as_deref(), Some(desc.test.junit_platform_version()));
+        assert_eq!(
+            dep.version.as_deref(),
+            Some(desc.test.junit_platform_version())
+        );
     }
 
     #[test]
@@ -3782,7 +4868,15 @@ mod tests {
             DependencyValue::Version("5.10.0".to_string()),
         );
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert!(!project
             .dependencies
             .iter()
@@ -3795,7 +4889,15 @@ mod tests {
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.spock.enabled = Some(true);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert!(!project
             .dependencies
             .iter()
@@ -3808,8 +4910,20 @@ mod tests {
         let mut desc = minimal_app("my-app", Some("com.example"));
         desc.spock.enabled = Some(true);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
-        let dep = project.dependencies.iter().find(|d| d.artifact_id == "spock-core").unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let dep = project
+            .dependencies
+            .iter()
+            .find(|d| d.artifact_id == "spock-core")
+            .unwrap();
         assert_eq!(dep.group_id, "org.spockframework");
         assert_eq!(dep.version.as_deref(), Some(DEFAULT_SPOCK_VERSION));
         assert_eq!(dep.scope.as_deref(), Some("test"));
@@ -3829,7 +4943,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_library("my-lib", Some("com.example"));
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<artifactId>maven-jar-plugin</artifactId>"));
         assert!(xml.contains("<addMavenDescriptor>false</addMavenDescriptor>"));
@@ -3840,7 +4962,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_library("my-lib", Some("com.example"));
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(!xml.contains("<manifest>"));
     }
@@ -3851,7 +4981,15 @@ mod tests {
         let mut desc = minimal_app("my-app", Some("com.example"));
         jackson_databind_dep(&mut desc);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main"), &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            Some("com.example.Main"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         assert!(xml.contains("<mainClass>com.example.Main</mainClass>"));
@@ -3871,7 +5009,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let desc = minimal_app("my-app", Some("com.example"));
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main"), &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            Some("com.example.Main"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         assert!(xml.contains("<mainClass>com.example.Main</mainClass>"));
@@ -3887,7 +5033,15 @@ mod tests {
         jackson_databind_dep(&mut desc);
         desc.fat_jar.enabled = true;
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main"), &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            Some("com.example.Main"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         assert!(xml.contains("<mainClass>com.example.Main</mainClass>"));
@@ -3902,7 +5056,15 @@ mod tests {
         let mut desc = minimal_library("my-lib", Some("com.example"));
         jackson_databind_dep(&mut desc);
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
         assert!(!xml.contains("<manifest>"));
@@ -3927,8 +5089,23 @@ mod tests {
             }),
         );
 
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), Some("com.example.Main"), &BTreeMap::new()).unwrap();
-        assert_eq!(project.plugins.iter().filter(|p| p.artifact_id == "maven-dependency-plugin").count(), 1);
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            Some("com.example.Main"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            project
+                .plugins
+                .iter()
+                .filter(|p| p.artifact_id == "maven-dependency-plugin")
+                .count(),
+            1
+        );
 
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<goal>properties</goal>"));
@@ -3940,12 +5117,35 @@ mod tests {
     #[test]
     fn same_inputs_render_byte_identical_pom() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
         let desc = minimal_app("my-app", Some("com.example"));
 
-        let p1 = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
-        let p2 = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
-        assert_eq!(render(&p1, "deadbeef").unwrap(), render(&p2, "deadbeef").unwrap());
+        let p1 = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let p2 = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            render(&p1, "deadbeef").unwrap(),
+            render(&p2, "deadbeef").unwrap()
+        );
     }
 
     #[test]
@@ -3959,17 +5159,47 @@ mod tests {
     #[test]
     fn pom_not_rewritten_when_fingerprint_unchanged() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
         let desc = minimal_app("my-app", Some("com.example"));
         let pom_path = dir.path().join("pom.xml");
 
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml-bytes", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap();
+        let outcome = sync_pom(
+            dir.path(),
+            &pom_path,
+            &desc,
+            b"toml-bytes",
+            None,
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(outcome, SyncOutcome::Written);
 
         let metadata_before = std::fs::metadata(&pom_path).unwrap();
         let modified_before = metadata_before.modified().unwrap();
 
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml-bytes", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap();
+        let outcome = sync_pom(
+            dir.path(),
+            &pom_path,
+            &desc,
+            b"toml-bytes",
+            None,
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(outcome, SyncOutcome::UpToDate);
 
         let modified_after = std::fs::metadata(&pom_path).unwrap().modified().unwrap();
@@ -3979,55 +5209,172 @@ mod tests {
     #[test]
     fn pom_rewritten_when_curie_toml_changes() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
         let desc = minimal_app("my-app", Some("com.example"));
         let pom_path = dir.path().join("pom.xml");
 
-        sync_pom(dir.path(), &pom_path, &desc, b"v1", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap();
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"v2", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap();
+        sync_pom(
+            dir.path(),
+            &pom_path,
+            &desc,
+            b"v1",
+            None,
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+            false,
+            false,
+        )
+        .unwrap();
+        let outcome = sync_pom(
+            dir.path(),
+            &pom_path,
+            &desc,
+            b"v2",
+            None,
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(outcome, SyncOutcome::Written);
     }
 
     #[test]
     fn pom_rewritten_when_source_root_added() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
         let desc = minimal_app("my-app", Some("com.example"));
         let pom_path = dir.path().join("pom.xml");
 
-        sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap();
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap();
+        sync_pom(
+            dir.path(),
+            &pom_path,
+            &desc,
+            b"toml",
+            None,
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+            false,
+            false,
+        )
+        .unwrap();
+        let outcome = sync_pom(
+            dir.path(),
+            &pom_path,
+            &desc,
+            b"toml",
+            None,
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(outcome, SyncOutcome::UpToDate);
 
-        write_file(dir.path(), "src/main/kotlin/com/example/World.kt", "package com.example\nclass World");
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap();
+        write_file(
+            dir.path(),
+            "src/main/kotlin/com/example/World.kt",
+            "package com.example\nclass World",
+        );
+        let outcome = sync_pom(
+            dir.path(),
+            &pom_path,
+            &desc,
+            b"toml",
+            None,
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(outcome, SyncOutcome::Written);
     }
 
     #[test]
     fn refuses_to_overwrite_unmarked_pom() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
         let desc = minimal_app("my-app", Some("com.example"));
         let pom_path = dir.path().join("pom.xml");
         std::fs::write(&pom_path, "<project>hand written</project>").unwrap();
 
-        let err = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), false, false).unwrap_err().to_string();
+        let err = sync_pom(
+            dir.path(),
+            &pom_path,
+            &desc,
+            b"toml",
+            None,
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+            false,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("--force"), "got: {err}");
-        assert_eq!(std::fs::read_to_string(&pom_path).unwrap(), "<project>hand written</project>");
+        assert_eq!(
+            std::fs::read_to_string(&pom_path).unwrap(),
+            "<project>hand written</project>"
+        );
     }
 
     #[test]
     fn force_overwrites_unmarked_pom() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
         let desc = minimal_app("my-app", Some("com.example"));
         let pom_path = dir.path().join("pom.xml");
         std::fs::write(&pom_path, "<project>hand written</project>").unwrap();
 
-        let outcome = sync_pom(dir.path(), &pom_path, &desc, b"toml", None, &[], &BTreeMap::new(), None, &BTreeMap::new(), true, false).unwrap();
+        let outcome = sync_pom(
+            dir.path(),
+            &pom_path,
+            &desc,
+            b"toml",
+            None,
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+            true,
+            false,
+        )
+        .unwrap();
         assert_eq!(outcome, SyncOutcome::Written);
-        assert!(std::fs::read_to_string(&pom_path).unwrap().contains("curie-maven-fingerprint"));
+        assert!(std::fs::read_to_string(&pom_path)
+            .unwrap()
+            .contains("curie-maven-fingerprint"));
     }
 
     // -- `curie maven sync` entry points -----------------------------------------
@@ -4075,7 +5422,11 @@ mod tests {
     #[test]
     fn main_class_detection_fails_with_helpful_error_when_no_candidates() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
         let mut desc = minimal_app("my-app", Some("com.example"));
         match &mut desc.kind {
             DescriptorKind::Application(app) => app.main_class = None,
@@ -4092,7 +5443,11 @@ mod tests {
     /// Write a two-member workspace (`lib`, depended on by `app`) under
     /// `dir`'s root `Curie.toml`, returning the member directories.
     fn write_two_member_workspace(dir: &Path) -> (PathBuf, PathBuf) {
-        std::fs::write(dir.join("Curie.toml"), "[workspace]\nmembers = [\"lib\", \"app\"]\n").unwrap();
+        std::fs::write(
+            dir.join("Curie.toml"),
+            "[workspace]\nmembers = [\"lib\", \"app\"]\n",
+        )
+        .unwrap();
 
         let lib_dir = dir.join("lib");
         std::fs::create_dir_all(&lib_dir).unwrap();
@@ -4145,11 +5500,19 @@ mod tests {
         let ws = workspace::load(dir.path()).unwrap();
         let app_index = ws.members.iter().position(|m| m.declared == "app").unwrap();
 
-        assert!(run_maven_sync_workspace_member(dir.path(), app_index, false, false, true).unwrap());
+        assert!(
+            run_maven_sync_workspace_member(dir.path(), app_index, false, false, true).unwrap()
+        );
 
         assert!(app_dir.join("pom.xml").exists());
-        assert!(!dir.path().join("pom.xml").exists(), "aggregator POM is only synced at the workspace root");
-        assert!(!lib_dir.join("pom.xml").exists(), "only the targeted member is synced");
+        assert!(
+            !dir.path().join("pom.xml").exists(),
+            "aggregator POM is only synced at the workspace root"
+        );
+        assert!(
+            !lib_dir.join("pom.xml").exists(),
+            "only the targeted member is synced"
+        );
     }
 
     // -- `curie build` sync hooks -------------------------------------------------
@@ -4157,7 +5520,11 @@ mod tests {
     #[test]
     fn sync_for_build_noop_when_sync_disabled() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
         std::fs::write(
             dir.path().join("Curie.toml"),
             "[application]\nname = \"my-app\"\nversion = \"1.0.0\"\ngroupId = \"com.example\"\nmainClass = \"com.example.Main\"\n",
@@ -4172,7 +5539,11 @@ mod tests {
     #[test]
     fn sync_for_build_writes_pom_when_sync_enabled() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
         std::fs::write(
             dir.path().join("Curie.toml"),
             "[application]\nname = \"my-app\"\nversion = \"1.0.0\"\ngroupId = \"com.example\"\nmainClass = \"com.example.Main\"\n\
@@ -4189,7 +5560,11 @@ mod tests {
     #[test]
     fn sync_for_build_fails_on_unmarked_pom() {
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
         std::fs::write(
             dir.path().join("Curie.toml"),
             "[application]\nname = \"my-app\"\nversion = \"1.0.0\"\ngroupId = \"com.example\"\nmainClass = \"com.example.Main\"\n\
@@ -4200,9 +5575,14 @@ mod tests {
         std::fs::write(&pom_path, "<project>hand written</project>").unwrap();
         let desc = descriptor::load(dir.path()).unwrap();
 
-        let err = sync_for_build(dir.path(), &desc, true).unwrap_err().to_string();
+        let err = sync_for_build(dir.path(), &desc, true)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("--force"), "got: {err}");
-        assert_eq!(std::fs::read_to_string(&pom_path).unwrap(), "<project>hand written</project>");
+        assert_eq!(
+            std::fs::read_to_string(&pom_path).unwrap(),
+            "<project>hand written</project>"
+        );
     }
 
     /// Write a two-member workspace like [`write_two_member_workspace`], but
@@ -4226,8 +5606,14 @@ mod tests {
             sync_member_for_build(&ws, index, true).unwrap();
         }
 
-        assert!(app_dir.join("pom.xml").exists(), "app has [maven] sync = true");
-        assert!(!lib_dir.join("pom.xml").exists(), "lib has no [maven] section, sync stays disabled");
+        assert!(
+            app_dir.join("pom.xml").exists(),
+            "app has [maven] sync = true"
+        );
+        assert!(
+            !lib_dir.join("pom.xml").exists(),
+            "lib has no [maven] section, sync stays disabled"
+        );
     }
 
     #[test]
@@ -4301,7 +5687,11 @@ mod tests {
         // A [plugin.X] the generator does not know triggers a warning,
         // but sync still succeeds and writes a valid fingerprinted POM.
         let dir = tempfile::tempdir().unwrap();
-        write_file(dir.path(), "src/main/java/com/example/Hello.java", "package com.example; class Hello {}");
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
         std::fs::write(
             dir.path().join("Curie.toml"),
             "[application]\nname = \"my-app\"\nversion = \"1.0.0\"\ngroupId = \"com.example\"\nmainClass = \"com.example.Main\"\n\
@@ -4310,7 +5700,16 @@ mod tests {
         .unwrap();
         let desc = descriptor::load(dir.path()).unwrap();
 
-        let (pom_path, outcome) = sync_member_pom(dir.path(), &desc, None, &BTreeMap::new(), false, false, true).unwrap();
+        let (pom_path, outcome) = sync_member_pom(
+            dir.path(),
+            &desc,
+            None,
+            &BTreeMap::new(),
+            false,
+            false,
+            true,
+        )
+        .unwrap();
         assert_eq!(outcome, SyncOutcome::Written);
         let pom = std::fs::read_to_string(pom_path).unwrap();
         assert!(pom.contains("curie-maven-fingerprint"));
@@ -4334,12 +5733,26 @@ mod tests {
     fn protobuf_plugin_emitted_in_pom() {
         let dir = tempfile::tempdir().unwrap();
         let desc = protobuf_only_desc(dir.path(), "");
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
-        let proto_block = xml.split("<plugin>").find(|b| b.contains("protobuf-maven-plugin")).expect("protobuf-maven-plugin not found");
+        let proto_block = xml
+            .split("<plugin>")
+            .find(|b| b.contains("protobuf-maven-plugin"))
+            .expect("protobuf-maven-plugin not found");
         assert!(proto_block.contains("<groupId>io.github.ascopes</groupId>"));
-        assert!(proto_block.contains(&format!("<version>{}</version>", plugin_versions::PROTOBUF_MAVEN)));
+        assert!(proto_block.contains(&format!(
+            "<version>{}</version>",
+            plugin_versions::PROTOBUF_MAVEN
+        )));
         assert!(proto_block.contains("<protoc>3.25.0</protoc>"));
         assert!(proto_block.contains("<sourceDirectory>proto</sourceDirectory>"));
         assert!(proto_block.contains("<goal>generate</goal>"));
@@ -4350,7 +5763,15 @@ mod tests {
     fn protobuf_plugin_custom_source_dir() {
         let dir = tempfile::tempdir().unwrap();
         let desc = protobuf_only_desc(dir.path(), r#"sourceDir = "src/main/proto""#);
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
         assert!(xml.contains("<sourceDirectory>src/main/proto</sourceDirectory>"));
     }
@@ -4359,9 +5780,20 @@ mod tests {
     fn protobuf_grpc_adds_binary_plugin() {
         let dir = tempfile::tempdir().unwrap();
         let desc = protobuf_only_desc(dir.path(), "grpc = true\ngrpcVersion = \"1.60.0\"\n");
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
-        let proto_block = xml.split("<plugin>").find(|b| b.contains("protobuf-maven-plugin")).unwrap();
+        let proto_block = xml
+            .split("<plugin>")
+            .find(|b| b.contains("protobuf-maven-plugin"))
+            .unwrap();
         assert!(proto_block.contains("binaryMavenPlugin"));
         assert!(proto_block.contains("<artifactId>protoc-gen-grpc-java</artifactId>"));
         assert!(proto_block.contains("<version>1.60.0</version>"));
@@ -4379,10 +5811,21 @@ mod tests {
         )
         .unwrap();
         let desc = descriptor::load(dir.path()).unwrap();
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
 
-        let oa_block = xml.split("<plugin>").find(|b| b.contains("openapi-generator-maven-plugin")).expect("openapi-generator-maven-plugin not found");
+        let oa_block = xml
+            .split("<plugin>")
+            .find(|b| b.contains("openapi-generator-maven-plugin"))
+            .expect("openapi-generator-maven-plugin not found");
         assert!(oa_block.contains("<groupId>org.openapitools</groupId>"));
         assert!(oa_block.contains("<version>7.2.0</version>"));
         assert!(oa_block.contains("<goal>generate</goal>"));
@@ -4405,9 +5848,20 @@ mod tests {
         )
         .unwrap();
         let desc = descriptor::load(dir.path()).unwrap();
-        let project = build_project(&desc, dir.path(), &[], &BTreeMap::new(), None, &BTreeMap::new()).unwrap();
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let xml = render(&project, "deadbeef").unwrap();
-        let oa_block = xml.split("<plugin>").find(|b| b.contains("openapi-generator-maven-plugin")).unwrap();
+        let oa_block = xml
+            .split("<plugin>")
+            .find(|b| b.contains("openapi-generator-maven-plugin"))
+            .unwrap();
         assert!(oa_block.contains("<globalProperties>"));
         assert!(oa_block.contains("<apis></apis>"));
         assert!(oa_block.contains("<models></models>"));

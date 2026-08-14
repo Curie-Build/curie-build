@@ -31,7 +31,12 @@ pub fn run_fetch_workspace_member(
 }
 
 /// Entry point for standalone (non-workspace) projects.
-pub fn run_fetch(project_root: &Path, coords: &[String], no_transitive: bool, offline: bool) -> Result<()> {
+pub fn run_fetch(
+    project_root: &Path,
+    coords: &[String],
+    no_transitive: bool,
+    offline: bool,
+) -> Result<()> {
     let desc = descriptor::load(project_root)?;
     if desc.is_workspace() {
         bail!("`curie fetch` cannot run on a workspace root; target a member with --project");
@@ -139,13 +144,19 @@ fn fetch_coordinates(
 
     // POM-only coordinates (BOMs, parent POMs) are fetched individually.
     let pom_count = fetch_pom_coords(
-        parsed.iter().filter(|(_, t)| *t == ArtifactType::Pom).map(|(g, _)| g),
+        parsed
+            .iter()
+            .filter(|(_, t)| *t == ArtifactType::Pom)
+            .map(|(g, _)| g),
         &repos,
         offline,
     )?;
 
-    let jar_gavs: Vec<&Gav> =
-        parsed.iter().filter(|(_, t)| *t == ArtifactType::Jar).map(|(g, _)| g).collect();
+    let jar_gavs: Vec<&Gav> = parsed
+        .iter()
+        .filter(|(_, t)| *t == ArtifactType::Jar)
+        .map(|(g, _)| g)
+        .collect();
     let hint = RangeHintMode::Command { original: coords };
     let jar_count = if jar_gavs.is_empty() {
         0
@@ -156,7 +167,10 @@ fn fetch_coordinates(
     };
 
     let total = pom_count + jar_count;
-    crate::parallel::emit(&crate::style::done(&format!("{} artifact(s) cached", total)));
+    crate::parallel::emit(&crate::style::done(&format!(
+        "{} artifact(s) cached",
+        total
+    )));
     Ok(())
 }
 
@@ -184,36 +198,54 @@ fn fetch_jars_transitive(
     offline: bool,
     hint: &RangeHintMode,
 ) -> Result<usize> {
-    let pins: Vec<String> = gavs.iter().map(|g| format!("{}:{}", g.group, g.artifact)).collect();
+    let pins: Vec<String> = gavs
+        .iter()
+        .map(|g| format!("{}:{}", g.group, g.artifact))
+        .collect();
 
     let mut total = 0;
     let mut range_pairs: Vec<(String, String)> = Vec::new();
     for gav in gavs {
         let key = format!("{}:{}", gav.group, gav.artifact);
         let classifier = gav.classifier.as_deref();
-        let entry = DepEntry { key: &key, version: &gav.version, repo_id: None, exclusions: vec![], classifier, allow_version_conflict: false };
+        let entry = DepEntry {
+            key: &key,
+            version: &gav.version,
+            repo_id: None,
+            exclusions: vec![],
+            classifier,
+            allow_version_conflict: false,
+        };
         let opts = ResolveOptions {
             default_repos: repos.to_vec(),
             named_repos: vec![],
             progress: true,
             bom_imports: vec![],
             offline,
-            skip_version_ranges: false, error_on_version_conflict: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            };
+        };
         match resolve_with_pins(&[entry], &opts, &pins) {
             Ok(jars) => total += jars.len(),
             Err(e) => match e.downcast::<VersionRangeError>() {
-                Ok(range_err) => range_pairs
-                    .extend(range_err.violations.into_iter().map(|v| (v.dep_key, v.range))),
+                Ok(range_err) => range_pairs.extend(
+                    range_err
+                        .violations
+                        .into_iter()
+                        .map(|v| (v.dep_key, v.range)),
+                ),
                 Err(other) => return Err(other),
             },
         }
     }
 
     if !range_pairs.is_empty() {
-        bail!("{}", build_range_message(&range_pairs, repos, offline, hint));
+        bail!(
+            "{}",
+            build_range_message(&range_pairs, repos, offline, hint)
+        );
     }
     Ok(total)
 }
@@ -273,7 +305,11 @@ fn range_suggestions(
         .into_iter()
         .map(|(dep_key, ranges)| {
             let exact = compute_exact_version(&dep_key, &ranges, repos, offline);
-            RangeSuggestion { dep_key, ranges, exact }
+            RangeSuggestion {
+                dep_key,
+                ranges,
+                exact,
+            }
         })
         .collect()
 }
@@ -287,7 +323,10 @@ fn compute_exact_version(
     repos: &[Repository],
     offline: bool,
 ) -> Option<String> {
-    let parsed: Vec<VersionRange> = ranges.iter().filter_map(|r| VersionRange::parse(r).ok()).collect();
+    let parsed: Vec<VersionRange> = ranges
+        .iter()
+        .filter_map(|r| VersionRange::parse(r).ok())
+        .collect();
     if parsed.len() != ranges.len() {
         return None;
     }
@@ -318,7 +357,12 @@ fn range_diagnosis(suggestions: &[RangeSuggestion]) -> String {
             Some(v) => v.clone(),
             None => "(no published version satisfies the range — pick one manually)".to_string(),
         };
-        msg.push_str(&format!("\n\n  {}\n    {}  \u{2192}  {}", s.dep_key, s.ranges.join(", "), target));
+        msg.push_str(&format!(
+            "\n\n  {}\n    {}  \u{2192}  {}",
+            s.dep_key,
+            s.ranges.join(", "),
+            target
+        ));
     }
     msg
 }
@@ -375,40 +419,62 @@ fn fetch_project_dependencies(desc: &descriptor::Descriptor, offline: bool) -> R
 /// number of JARs in the resolved closure, or `0` without contacting the
 /// resolver if nothing is declared.
 fn fetch_dep_section(desc: &descriptor::Descriptor, tests: bool, offline: bool) -> Result<usize> {
-    let dep_map = if tests { &desc.test_dependencies } else { &desc.dependencies };
+    let dep_map = if tests {
+        &desc.test_dependencies
+    } else {
+        &desc.dependencies
+    };
     let mut entries: Vec<DepEntry> = dep_map
         .iter()
-        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
+        .map(|(k, v)| DepEntry {
+            key: k,
+            version: v.version(),
+            repo_id: v.repository(),
+            exclusions: v.exclusions(),
+            classifier: None,
+            allow_version_conflict: v.allow_version_conflict(),
+        })
         .collect();
 
     let mut ap_pairs = desc.ap_pairs();
     if tests {
         ap_pairs.extend(desc.test_ap_pairs());
     }
-    entries.extend(
-        ap_pairs
-            .into_iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }),
-    );
+    entries.extend(ap_pairs.into_iter().map(|(k, v)| DepEntry {
+        key: k,
+        version: v,
+        repo_id: None,
+        exclusions: vec![],
+        classifier: None,
+        allow_version_conflict: false,
+    }));
 
     if entries.is_empty() {
         return Ok(0);
     }
 
-    let bom_gavs = if tests { desc.test_bom_gavs()? } else { desc.prod_bom_gavs()? };
+    let bom_gavs = if tests {
+        desc.test_bom_gavs()?
+    } else {
+        desc.prod_bom_gavs()?
+    };
     let opts = ResolveOptions {
         default_repos: central_repos(),
         named_repos: extra_repos(desc),
         progress: true,
         bom_imports: bom_gavs,
         offline,
-        skip_version_ranges: false, error_on_version_conflict: false,
+        skip_version_ranges: false,
+        error_on_version_conflict: false,
         snapshot_pins: Default::default(),
         update_snapshots: false,
-        };
+    };
     let jars = curie_deps::resolve(&entries, &opts)?;
     let label = if tests { "Test deps" } else { "Dependencies" };
-    crate::parallel::emit(&crate::style::resolve(label, &format!("{} JAR(s)", jars.len())));
+    crate::parallel::emit(&crate::style::resolve(
+        label,
+        &format!("{} JAR(s)", jars.len()),
+    ));
     Ok(jars.len())
 }
 
@@ -456,7 +522,12 @@ fn repos_for_file_mode(project_root: &Path) -> Vec<Repository> {
 }
 
 /// Entry point for `curie fetch --file <path>`.
-pub fn run_fetch_file(project_root: &Path, path: &Path, no_transitive: bool, offline: bool) -> Result<()> {
+pub fn run_fetch_file(
+    project_root: &Path,
+    path: &Path,
+    no_transitive: bool,
+    offline: bool,
+) -> Result<()> {
     let lines = read_coordinate_file(path)?;
     let coords = parse_coordinate_lines(&lines)?;
 
@@ -469,10 +540,21 @@ pub fn run_fetch_file(project_root: &Path, path: &Path, no_transitive: bool, off
 
     // POM-only artifacts (BOMs, parent POMs) — always fetched individually,
     // regardless of --no-transitive (there is no JAR to resolve transitively).
-    let pom_count = fetch_pom_coords(coords.iter().filter(|(_, t)| *t == ArtifactType::Pom).map(|(g, _)| g), &repos, offline)?;
+    let pom_count = fetch_pom_coords(
+        coords
+            .iter()
+            .filter(|(_, t)| *t == ArtifactType::Pom)
+            .map(|(g, _)| g),
+        &repos,
+        offline,
+    )?;
 
     // JAR artifacts — flat (--no-transitive) or pin-aware transitive resolution.
-    let jar_gavs: Vec<&Gav> = coords.iter().filter(|(_, t)| *t == ArtifactType::Jar).map(|(g, _)| g).collect();
+    let jar_gavs: Vec<&Gav> = coords
+        .iter()
+        .filter(|(_, t)| *t == ArtifactType::Jar)
+        .map(|(g, _)| g)
+        .collect();
     let hint = RangeHintMode::File { path };
     let jar_count = if jar_gavs.is_empty() {
         0
@@ -483,7 +565,10 @@ pub fn run_fetch_file(project_root: &Path, path: &Path, no_transitive: bool, off
     };
 
     let total = pom_count + jar_count;
-    crate::parallel::emit(&crate::style::done(&format!("{} artifact(s) cached", total)));
+    crate::parallel::emit(&crate::style::done(&format!(
+        "{} artifact(s) cached",
+        total
+    )));
     Ok(())
 }
 
@@ -692,9 +777,7 @@ mod tests {
         let msg = format_command_hint(&suggestions, &original);
         assert!(msg.contains("non-deterministic version ranges"), "{msg}");
         assert!(
-            msg.contains(
-                "curie fetch ch.epfl.scala:bsp4j:2.1.1 com.google.code.gson:gson:2.10.1"
-            ),
+            msg.contains("curie fetch ch.epfl.scala:bsp4j:2.1.1 com.google.code.gson:gson:2.10.1"),
             "{msg}"
         );
     }

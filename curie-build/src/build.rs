@@ -5,13 +5,13 @@ use crate::compile;
 use crate::config;
 use crate::descriptor;
 use crate::git;
-use crate::oci;
 use crate::incremental::{self, needs_repackage};
 use crate::jar::{get_manifest_header, populate_libs_dir, write_deterministic_jar};
 use crate::jlink;
 use crate::main_class::{detect_main_class, validate_main_class};
 use crate::maven;
 use crate::native;
+use crate::oci;
 use crate::resources;
 use crate::test;
 use anyhow::{Context, Result};
@@ -30,8 +30,9 @@ const JAR_RESOURCES_STAMP: &str = ".jar-resources";
 fn current_resource_set(resources_dir: Option<&Path>) -> BTreeSet<String> {
     match resources_dir {
         Some(dir) => {
-            let files: Vec<PathBuf> =
-                incremental::walk_files(dir).map(|e| e.path().to_path_buf()).collect();
+            let files: Vec<PathBuf> = incremental::walk_files(dir)
+                .map(|e| e.path().to_path_buf())
+                .collect();
             incremental::canonical_source_set(&files)
         }
         None => BTreeSet::new(),
@@ -98,7 +99,9 @@ pub fn build_with_desc(
         );
     }
     crate::parallel::emit(&crate::style::headline(
-        "Building", desc.buildable_name(), desc.buildable_version(),
+        "Building",
+        desc.buildable_name(),
+        desc.buildable_version(),
     ));
 
     if desc.is_bom() {
@@ -127,7 +130,11 @@ pub fn build_with_desc(
     // When a fat JAR exists, downstream stages (docker, native, jlink) use it
     // instead of the regular JAR + libs/, since it is self-contained.
     let effective_jar = output.fat_jar.as_ref().unwrap_or(&output.jar);
-    let effective_deps: &[PathBuf] = if output.fat_jar.is_some() { &[] } else { &output.dep_jars };
+    let effective_deps: &[PathBuf] = if output.fat_jar.is_some() {
+        &[]
+    } else {
+        &output.dep_jars
+    };
 
     // native-image and jlink must run before docker: when either is
     // configured, the generated Dockerfile packages that artifact instead of
@@ -173,7 +180,10 @@ pub fn extra_repos(desc: &descriptor::Descriptor) -> Vec<Repository> {
 
 /// Like [`extra_repos`], but resolves relative `file:` repository URLs
 /// against `project_root` when provided.
-pub fn extra_repos_for(desc: &descriptor::Descriptor, project_root: Option<&Path>) -> Vec<Repository> {
+pub fn extra_repos_for(
+    desc: &descriptor::Descriptor,
+    project_root: Option<&Path>,
+) -> Vec<Repository> {
     let cfg = config::load_config().unwrap_or_default();
     let repos = desc
         .repositories
@@ -209,17 +219,15 @@ fn resolve_repo_url(url: &str, project_root: Option<&Path>) -> String {
     let rel = path_part.trim_start_matches("./");
     let abs = root.join(rel);
     // Prefer a canonical absolute path so file:// URLs are unambiguous.
-    let abs = abs
-        .canonicalize()
-        .unwrap_or_else(|_| {
-            if abs.is_absolute() {
-                abs
-            } else {
-                std::env::current_dir()
-                    .map(|cwd| cwd.join(&abs))
-                    .unwrap_or(abs)
-            }
-        });
+    let abs = abs.canonicalize().unwrap_or_else(|_| {
+        if abs.is_absolute() {
+            abs
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&abs))
+                .unwrap_or(abs)
+        }
+    });
     format!("file://{}", abs.display())
 }
 
@@ -281,7 +289,11 @@ pub fn do_build(
     // merged/filtered output dir under target/ and rebind every downstream
     // consumer to it (the "processed-dir swap"); inactive scopes keep the raw
     // dir via the `or_else` fallback.
-    let pkg_target_dir = compiled.jar_path.parent().unwrap_or(project_root).to_path_buf();
+    let pkg_target_dir = compiled
+        .jar_path
+        .parent()
+        .unwrap_or(project_root)
+        .to_path_buf();
     let filtered = resources::process_resources(
         project_root,
         desc,
@@ -290,9 +302,14 @@ pub fn do_build(
         git_info.as_ref().map(|i| i.commit_id.as_str()),
         &pkg_target_dir,
     )?;
-    let eff_resources_dir = filtered.main_dir.clone().or_else(|| compiled.resources_dir.clone());
-    let eff_test_resources_dir =
-        filtered.test_dir.clone().or_else(|| compiled.test_resources_dir.clone());
+    let eff_resources_dir = filtered
+        .main_dir
+        .clone()
+        .or_else(|| compiled.resources_dir.clone());
+    let eff_test_resources_dir = filtered
+        .test_dir
+        .clone()
+        .or_else(|| compiled.test_resources_dir.clone());
 
     // --- run tests before packaging ------------------------------------------
     test::run_tests_with_options(
@@ -320,9 +337,9 @@ pub fn do_build(
     // Build-info reuses the Git detection performed once above.
     // `None` when git is unavailable or the project is not in a repo.
     let build_info_content: Option<String> = if desc.build_info.enabled {
-        git_info.as_ref().map(|info| {
-            format!("git.commit.id={}\n", info.commit_id)
-        })
+        git_info
+            .as_ref()
+            .map(|info| format!("git.commit.id={}\n", info.commit_id))
     } else {
         None
     };
@@ -333,14 +350,20 @@ pub fn do_build(
     // Compare the current resource file set against the last packaged one.
     let target_dir = compiled.jar_path.parent().unwrap_or(project_root);
     let resource_set = current_resource_set(resources_dir);
-    let resource_set_prev = incremental::load_source_set(
-        &incremental::source_set_stamp_path(target_dir, JAR_RESOURCES_STAMP),
-    );
+    let resource_set_prev = incremental::load_source_set(&incremental::source_set_stamp_path(
+        target_dir,
+        JAR_RESOURCES_STAMP,
+    ));
     let resources_changed =
         incremental::source_set_changed(resource_set_prev.as_ref(), &resource_set);
 
     let resolved_main_class: Option<String> = if resources_changed
-        || needs_repackage(&compiled.jar_path, &compiled.classes_dir, resources_dir, &toml_path) {
+        || needs_repackage(
+            &compiled.jar_path,
+            &compiled.classes_dir,
+            resources_dir,
+            &toml_path,
+        ) {
         let main_class = if let Some(app) = desc.application() {
             let mc = match &app.main_class {
                 Some(declared) => {
@@ -355,7 +378,10 @@ pub fn do_build(
                         &compiled.dep_jars,
                     )
                     .with_context(|| format!("in project {}", project_root.display()))?;
-                    crate::parallel::emit(&crate::style::info("Detected", &format!("mainClass = {}", detected)));
+                    crate::parallel::emit(&crate::style::info(
+                        "Detected",
+                        &format!("mainClass = {}", detected),
+                    ));
                     detected
                 }
             };
@@ -366,11 +392,12 @@ pub fn do_build(
 
         crate::parallel::emit(&crate::style::active("Package", &compiled.jar_name));
         let manifest_dep_jars = manifest_dep_jars(desc, &compiled.dep_jars, &compiled.groovy_jars);
-        let automatic_module_name = if let crate::descriptor::DescriptorKind::Library(lib) = &desc.kind {
-            lib.automatic_module_name.as_deref()
-        } else {
-            None
-        };
+        let automatic_module_name =
+            if let crate::descriptor::DescriptorKind::Library(lib) = &desc.kind {
+                lib.automatic_module_name.as_deref()
+            } else {
+                None
+            };
         write_deterministic_jar(
             &compiled.jar_path,
             &compiled.classes_dir,
@@ -418,7 +445,8 @@ pub fn do_build(
         v.extend(compiled.kotlin_stdlib_jars);
         v
     };
-    if !effective_dep_jars.is_empty() && desc.application().is_some()
+    if !effective_dep_jars.is_empty()
+        && desc.application().is_some()
         && !descriptor::fat_jar_enabled(desc)
     {
         let libs_dir = project_root.join("target").join("libs");
@@ -553,8 +581,7 @@ pub fn clean(project_root: &Path) -> Result<()> {
             crate::parallel::emit(&crate::style::neutral("Target dir", "nothing to clean"));
         }
         Err(e) => {
-            return Err(e)
-                .with_context(|| format!("failed to remove {}", target_dir.display()));
+            return Err(e).with_context(|| format!("failed to remove {}", target_dir.display()));
         }
     }
 
@@ -623,10 +650,13 @@ mod manifest_dep_jars_tests {
 
         let result = manifest_dep_jars(&desc, &dep_jars, &groovy_jars);
 
-        assert_eq!(result, vec![
-            PathBuf::from("/m2/dep-1.0.jar"),
-            PathBuf::from("/m2/groovy-5.0.6.jar"),
-        ]);
+        assert_eq!(
+            result,
+            vec![
+                PathBuf::from("/m2/dep-1.0.jar"),
+                PathBuf::from("/m2/groovy-5.0.6.jar"),
+            ]
+        );
     }
 
     #[test]
@@ -644,7 +674,10 @@ mod manifest_dep_jars_tests {
 
         let result = manifest_dep_jars(&desc, &dep_jars, &groovy_jars);
 
-        assert!(result.is_empty(), "fat JAR's main JAR must have no Class-Path deps");
+        assert!(
+            result.is_empty(),
+            "fat JAR's main JAR must have no Class-Path deps"
+        );
     }
 }
 
@@ -684,10 +717,16 @@ mod resource_set_tests {
 
         write(&res.join("b.txt"), b"b"); // add
         let after_add = current_resource_set(Some(&res));
-        assert!(source_set_changed(Some(&before), &after_add), "addition must register");
+        assert!(
+            source_set_changed(Some(&before), &after_add),
+            "addition must register"
+        );
 
         std::fs::remove_file(res.join("a.txt")).unwrap(); // remove
         let after_remove = current_resource_set(Some(&res));
-        assert!(source_set_changed(Some(&after_add), &after_remove), "deletion must register");
+        assert!(
+            source_set_changed(Some(&after_add), &after_remove),
+            "deletion must register"
+        );
     }
 }

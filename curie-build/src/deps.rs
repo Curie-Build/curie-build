@@ -6,7 +6,7 @@
 use crate::build::{central_repos, extra_repos};
 use crate::{descriptor, maven, workspace};
 use anyhow::{bail, Context, Result};
-use curie_deps::{DepEntry, DepTree, ResolvedDep, ResolveOptions};
+use curie_deps::{DepEntry, DepTree, ResolveOptions, ResolvedDep};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
@@ -44,7 +44,11 @@ pub fn run_deps_with_desc(
     tests: bool,
     offline: bool,
 ) -> Result<()> {
-    let scope_label = if tests { "Test dependencies" } else { "Dependencies" };
+    let scope_label = if tests {
+        "Test dependencies"
+    } else {
+        "Dependencies"
+    };
     let dep_map = if tests {
         &desc.test_dependencies
     } else {
@@ -89,7 +93,10 @@ pub fn run_deps_with_desc(
 /// `<dependencyManagement>` so Maven's version mediation can't diverge from
 /// Curie's resolver. Returns `Ok(vec![])` without resolving anything when
 /// pinTransitive is disabled (the default).
-pub fn resolve_pinned_dependencies(desc: &descriptor::Descriptor, offline: bool) -> Result<Vec<maven::PinnedDependency>> {
+pub fn resolve_pinned_dependencies(
+    desc: &descriptor::Descriptor,
+    offline: bool,
+) -> Result<Vec<maven::PinnedDependency>> {
     if !desc.maven.pin_transitive_enabled() {
         return Ok(Vec::new());
     }
@@ -100,7 +107,14 @@ pub fn resolve_pinned_dependencies(desc: &descriptor::Descriptor, offline: bool)
         .iter()
         .chain(desc.test_dependencies.iter())
         .filter(|(k, _)| seen.insert(k.as_str()))
-        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
+        .map(|(k, v)| DepEntry {
+            key: k,
+            version: v.version(),
+            repo_id: v.repository(),
+            exclusions: v.exclusions(),
+            classifier: None,
+            allow_version_conflict: v.allow_version_conflict(),
+        })
         .collect();
 
     let tree = curie_deps::resolve_tree(
@@ -111,10 +125,11 @@ pub fn resolve_pinned_dependencies(desc: &descriptor::Descriptor, offline: bool)
             progress: false,
             bom_imports: desc.test_bom_gavs()?,
             offline,
-            skip_version_ranges: false, error_on_version_conflict: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            },
+        },
     )
     .context("pinTransitive: failed to resolve the transitive dependency closure")?;
 
@@ -136,7 +151,10 @@ pub fn resolve_pinned_dependencies(desc: &descriptor::Descriptor, offline: bool)
 /// `[test-annotation-processors]` entries declared with a blank version
 /// (BOM-managed), for `curie maven sync`. Returns `Ok(BTreeMap::new())`
 /// without resolving anything when every processor has an explicit version.
-pub fn resolve_ap_versions_for_sync(desc: &descriptor::Descriptor, offline: bool) -> Result<BTreeMap<String, String>> {
+pub fn resolve_ap_versions_for_sync(
+    desc: &descriptor::Descriptor,
+    offline: bool,
+) -> Result<BTreeMap<String, String>> {
     let mut seen = HashSet::new();
     let blank: Vec<&str> = desc
         .ap_pairs()
@@ -152,7 +170,14 @@ pub fn resolve_ap_versions_for_sync(desc: &descriptor::Descriptor, offline: bool
 
     let entries: Vec<DepEntry> = blank
         .iter()
-        .map(|coord| DepEntry { key: coord, version: "", repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false })
+        .map(|coord| DepEntry {
+            key: coord,
+            version: "",
+            repo_id: None,
+            exclusions: vec![],
+            classifier: None,
+            allow_version_conflict: false,
+        })
         .collect();
 
     let tree = curie_deps::resolve_tree(
@@ -163,16 +188,21 @@ pub fn resolve_ap_versions_for_sync(desc: &descriptor::Descriptor, offline: bool
             progress: false,
             bom_imports: desc.test_bom_gavs()?,
             offline,
-            skip_version_ranges: false, error_on_version_conflict: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            },
+        },
     )
     .context("failed to resolve BOM-managed annotation processor versions")?;
 
     let mut resolved = BTreeMap::new();
     for coord in blank {
-        if let Some(dep) = tree.resolved.iter().find(|d| format!("{}:{}", d.gav.group, d.gav.artifact) == coord) {
+        if let Some(dep) = tree
+            .resolved
+            .iter()
+            .find(|d| format!("{}:{}", d.gav.group, d.gav.artifact) == coord)
+        {
             resolved.insert(coord.to_string(), dep.gav.version.clone());
         }
     }
@@ -324,7 +354,7 @@ pub fn resolve_dep_tree(
         error_on_version_conflict: false,
         snapshot_pins: Default::default(),
         update_snapshots: false,
-        };
+    };
     curie_deps::resolve_tree(&entries, &opts)
 }
 
@@ -335,11 +365,7 @@ pub fn format_tree_lines(tree: &DepTree) -> Vec<String> {
     }
     let mut children_of: std::collections::HashMap<String, Vec<&ResolvedDep>> =
         std::collections::HashMap::new();
-    let roots: Vec<&ResolvedDep> = tree
-        .resolved
-        .iter()
-        .filter(|d| d.via.is_none())
-        .collect();
+    let roots: Vec<&ResolvedDep> = tree.resolved.iter().filter(|d| d.via.is_none()).collect();
     for dep in &tree.resolved {
         if let Some(via) = &dep.via {
             children_of.entry(via.notation()).or_default().push(dep);
@@ -378,7 +404,8 @@ fn append_node_lines(
 fn print_tree_with_label(label: &str, desc: &descriptor::Descriptor, tree: &DepTree) -> Result<()> {
     println!(
         "{} for {} v{}",
-        label, desc.buildable_name(),
+        label,
+        desc.buildable_name(),
         desc.buildable_version(),
     );
 
@@ -429,8 +456,12 @@ fn explain_why(coord: &str, tree: &DepTree) -> Result<()> {
     // Reconstruct the introduction chain for the chosen version.
     println!("  Introduced by:");
     let chain = build_chain(chosen, &tree.resolved);
-    println!("    {} → {}  (chosen — depth {})",
-        chain_to_string(&chain), chosen.gav.notation(), chosen.depth);
+    println!(
+        "    {} → {}  (chosen — depth {})",
+        chain_to_string(&chain),
+        chosen.gav.notation(),
+        chosen.depth
+    );
     println!();
 
     // Skipped losers for the same GA.
@@ -443,8 +474,14 @@ fn explain_why(coord: &str, tree: &DepTree) -> Result<()> {
             println!("  Skipped (nearest-wins):");
             for loser in &sorted {
                 // Build the introduction chain for the losing candidate.
-                let loser_chain: Vec<curie_deps::Gav> = loser.via.as_ref()
-                    .and_then(|v| tree.resolved.iter().find(|d| d.gav.notation() == v.notation()))
+                let loser_chain: Vec<curie_deps::Gav> = loser
+                    .via
+                    .as_ref()
+                    .and_then(|v| {
+                        tree.resolved
+                            .iter()
+                            .find(|d| d.gav.notation() == v.notation())
+                    })
                     .map(|via_dep| {
                         let mut c = build_chain(via_dep, &tree.resolved);
                         c.push(via_dep.gav.clone());
@@ -462,8 +499,10 @@ fn explain_why(coord: &str, tree: &DepTree) -> Result<()> {
                 );
             }
             println!();
-            println!("  → version {} wins because it is at depth {} (shallowest path wins).",
-                chosen.gav.version, chosen.depth);
+            println!(
+                "  → version {} wins because it is at depth {} (shallowest path wins).",
+                chosen.gav.version, chosen.depth
+            );
         }
     }
 
@@ -574,7 +613,9 @@ mod tests {
             resolved: vec![],
             skipped: std::collections::HashMap::new(),
         };
-        let err = explain_why("org.unknown:artifact", &tree).unwrap_err().to_string();
+        let err = explain_why("org.unknown:artifact", &tree)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("org.unknown:artifact"), "got: {err}");
         assert!(err.contains("not in the resolved"), "got: {err}");
     }
@@ -585,7 +626,9 @@ mod tests {
             resolved: vec![],
             skipped: std::collections::HashMap::new(),
         };
-        let err = explain_why("not-a-valid-coord", &tree).unwrap_err().to_string();
+        let err = explain_why("not-a-valid-coord", &tree)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("invalid coordinate"), "got: {err}");
     }
 

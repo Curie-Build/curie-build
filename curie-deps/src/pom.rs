@@ -79,7 +79,10 @@ impl PomDep {
         if self.optional {
             return false;
         }
-        matches!(self.scope.as_deref(), None | Some("compile") | Some("runtime"))
+        matches!(
+            self.scope.as_deref(),
+            None | Some("compile") | Some("runtime")
+        )
     }
 }
 
@@ -162,7 +165,11 @@ impl Pom {
     /// `resolve_value(v); if contains("${") { ... }` pattern.
     pub fn try_resolve_value(&self, value: &str) -> Option<String> {
         let resolved = self.resolve_value(value);
-        if resolved.contains("${") { None } else { Some(resolved) }
+        if resolved.contains("${") {
+            None
+        } else {
+            Some(resolved)
+        }
     }
 }
 
@@ -285,7 +292,8 @@ pub fn parse(xml: &str) -> Result<Pom> {
                 // new_ctx).
                 if new_ctx == Ctx::Dependency && parent_ctx != Ctx::Dependency {
                     cur_dep = Some(PomDep::empty());
-                } else if new_ctx == Ctx::ManagedDependency && parent_ctx != Ctx::ManagedDependency {
+                } else if new_ctx == Ctx::ManagedDependency && parent_ctx != Ctx::ManagedDependency
+                {
                     cur_mgd = Some(PomDep::empty());
                 }
 
@@ -299,8 +307,8 @@ pub fn parse(xml: &str) -> Result<Pom> {
                 // `Cow<str>` from the raw bytes; escape::unescape resolves
                 // `&lt;`, `&amp;`, &#…; sequences.
                 let decoded = e.decode().context("invalid encoding in POM text")?;
-                let s = quick_xml::escape::unescape(&decoded)
-                    .context("invalid XML escape in POM")?;
+                let s =
+                    quick_xml::escape::unescape(&decoded).context("invalid XML escape in POM")?;
                 text_buf.push_str(&s);
             }
             Event::End(e) => {
@@ -318,9 +326,15 @@ pub fn parse(xml: &str) -> Result<Pom> {
                     (Ctx::Project, "version") => pom.version = Some(text_buf.clone()),
                     (Ctx::Project, "packaging") => pom.packaging = Some(text_buf.clone()),
 
-                    (Ctx::Parent, "groupId") => parent_ref_mut(&mut pom.parent).group_id = text_buf.clone(),
-                    (Ctx::Parent, "artifactId") => parent_ref_mut(&mut pom.parent).artifact_id = text_buf.clone(),
-                    (Ctx::Parent, "version") => parent_ref_mut(&mut pom.parent).version = text_buf.clone(),
+                    (Ctx::Parent, "groupId") => {
+                        parent_ref_mut(&mut pom.parent).group_id = text_buf.clone()
+                    }
+                    (Ctx::Parent, "artifactId") => {
+                        parent_ref_mut(&mut pom.parent).artifact_id = text_buf.clone()
+                    }
+                    (Ctx::Parent, "version") => {
+                        parent_ref_mut(&mut pom.parent).version = text_buf.clone()
+                    }
 
                     (Ctx::Properties, key) => {
                         pom.properties.insert(key.to_string(), text_buf.clone());
@@ -403,8 +417,7 @@ pub fn parse(xml: &str) -> Result<Pom> {
 /// right field on `pom`: `bom_imports` when scope=import + type=pom,
 /// otherwise `managed_versions` (keyed `group:artifact`).
 fn finalize_managed_dep(d: PomDep, pom: &mut Pom) {
-    let is_bom_import =
-        d.scope.as_deref() == Some("import") && d.type_.as_deref() == Some("pom");
+    let is_bom_import = d.scope.as_deref() == Some("import") && d.type_.as_deref() == Some("pom");
     if is_bom_import {
         if let Some(v) = d.version {
             pom.bom_imports.push(BomRef {
@@ -475,7 +488,11 @@ mod tests {
     #[test]
     fn compile_scope_filter() {
         let pom = parse(SIMPLE_POM).unwrap();
-        let compile: Vec<_> = pom.dependencies.iter().filter(|d| d.is_compile_scope()).collect();
+        let compile: Vec<_> = pom
+            .dependencies
+            .iter()
+            .filter(|d| d.is_compile_scope())
+            .collect();
         assert_eq!(compile.len(), 1);
         assert_eq!(compile[0].artifact_id, "guava");
     }
@@ -543,8 +560,14 @@ mod tests {
   </properties>
 </project>"#;
         let pom = parse(xml).unwrap();
-        assert_eq!(pom.properties.get("my.lib.version").map(String::as_str), Some("3.5.1"));
-        assert_eq!(pom.properties.get("encoding").map(String::as_str), Some("UTF-8"));
+        assert_eq!(
+            pom.properties.get("my.lib.version").map(String::as_str),
+            Some("3.5.1")
+        );
+        assert_eq!(
+            pom.properties.get("encoding").map(String::as_str),
+            Some("UTF-8")
+        );
     }
 
     // --- parsing: dependencyManagement ------------------------------------------
@@ -568,7 +591,9 @@ mod tests {
 </project>"#;
         let pom = parse(xml).unwrap();
         assert_eq!(
-            pom.managed_versions.get("org.slf4j:slf4j-api").map(String::as_str),
+            pom.managed_versions
+                .get("org.slf4j:slf4j-api")
+                .map(String::as_str),
             Some("2.0.9")
         );
         // dependencyManagement entries are NOT in pom.dependencies
@@ -608,10 +633,14 @@ mod tests {
         assert_eq!(bom.group_id, "com.fasterxml.jackson");
         assert_eq!(bom.artifact_id, "jackson-bom");
         assert_eq!(bom.version, "2.17.2");
-        assert!(!pom.managed_versions.contains_key("com.fasterxml.jackson:jackson-bom"));
+        assert!(!pom
+            .managed_versions
+            .contains_key("com.fasterxml.jackson:jackson-bom"));
         // Regular managed dep is still captured
         assert_eq!(
-            pom.managed_versions.get("org.slf4j:slf4j-api").map(String::as_str),
+            pom.managed_versions
+                .get("org.slf4j:slf4j-api")
+                .map(String::as_str),
             Some("2.0.9")
         );
     }
@@ -638,11 +667,15 @@ mod tests {
         let pom = parse(xml).unwrap();
         assert!(pom.bom_imports.is_empty());
         assert_eq!(
-            pom.managed_versions.get("org.example:some-lib").map(String::as_str),
+            pom.managed_versions
+                .get("org.example:some-lib")
+                .map(String::as_str),
             Some("3.0.0")
         );
         assert_eq!(
-            pom.managed_scopes.get("org.example:some-lib").map(String::as_str),
+            pom.managed_scopes
+                .get("org.example:some-lib")
+                .map(String::as_str),
             Some("compile")
         );
     }
@@ -693,8 +726,15 @@ mod tests {
   </dependencies>
 </project>"#;
         let pom = parse(xml).unwrap();
-        let compile: Vec<_> = pom.dependencies.iter().filter(|d| d.is_compile_scope()).collect();
-        assert!(compile.is_empty(), "optional dep should be excluded from compile scope");
+        let compile: Vec<_> = pom
+            .dependencies
+            .iter()
+            .filter(|d| d.is_compile_scope())
+            .collect();
+        assert!(
+            compile.is_empty(),
+            "optional dep should be excluded from compile scope"
+        );
     }
 
     #[test]
@@ -712,7 +752,11 @@ mod tests {
   </dependencies>
 </project>"#;
         let pom = parse(xml).unwrap();
-        let compile: Vec<_> = pom.dependencies.iter().filter(|d| d.is_compile_scope()).collect();
+        let compile: Vec<_> = pom
+            .dependencies
+            .iter()
+            .filter(|d| d.is_compile_scope())
+            .collect();
         assert!(compile.is_empty(), "provided-scope dep should be excluded");
     }
 
@@ -731,7 +775,11 @@ mod tests {
   </dependencies>
 </project>"#;
         let pom = parse(xml).unwrap();
-        let compile: Vec<_> = pom.dependencies.iter().filter(|d| d.is_compile_scope()).collect();
+        let compile: Vec<_> = pom
+            .dependencies
+            .iter()
+            .filter(|d| d.is_compile_scope())
+            .collect();
         assert_eq!(compile.len(), 1, "runtime-scope dep should be included");
         assert_eq!(compile[0].artifact_id, "postgresql");
     }
@@ -763,12 +811,21 @@ mod tests {
         let pom = parse(xml).unwrap();
         assert_eq!(pom.dependencies.len(), 1);
         let dep = &pom.dependencies[0];
-        assert_eq!(dep.group_id, "org.codehaus.woodstox", "exclusion groupId must not overwrite dep groupId");
-        assert_eq!(dep.artifact_id, "stax2-api", "exclusion artifactId must not overwrite dep artifactId");
+        assert_eq!(
+            dep.group_id, "org.codehaus.woodstox",
+            "exclusion groupId must not overwrite dep groupId"
+        );
+        assert_eq!(
+            dep.artifact_id, "stax2-api",
+            "exclusion artifactId must not overwrite dep artifactId"
+        );
         assert_eq!(dep.version.as_deref(), Some("4.2.2"));
         // The exclusion itself is captured.
         assert_eq!(dep.exclusions.len(), 1);
-        assert_eq!(dep.exclusions[0], ("javax.xml.stream".to_string(), "stax-api".to_string()));
+        assert_eq!(
+            dep.exclusions[0],
+            ("javax.xml.stream".to_string(), "stax-api".to_string())
+        );
     }
 
     #[test]
@@ -800,8 +857,14 @@ mod tests {
         assert_eq!(dep.group_id, "org.apache.pdfbox");
         assert_eq!(dep.artifact_id, "pdfbox");
         assert_eq!(dep.exclusions.len(), 2);
-        assert_eq!(dep.exclusions[0], ("org.bouncycastle".to_string(), "bcprov-jdk18on".to_string()));
-        assert_eq!(dep.exclusions[1], ("org.bouncycastle".to_string(), "bcmail-jdk18on".to_string()));
+        assert_eq!(
+            dep.exclusions[0],
+            ("org.bouncycastle".to_string(), "bcprov-jdk18on".to_string())
+        );
+        assert_eq!(
+            dep.exclusions[1],
+            ("org.bouncycastle".to_string(), "bcmail-jdk18on".to_string())
+        );
     }
 
     #[test]
@@ -870,7 +933,12 @@ mod tests {
         // Managed deps currently only store version info, but the parser
         // should not crash when exclusions are present.
         let pom = parse(xml).unwrap();
-        assert_eq!(pom.managed_versions.get("org.example:managed-lib").map(String::as_str), Some("2.0"));
+        assert_eq!(
+            pom.managed_versions
+                .get("org.example:managed-lib")
+                .map(String::as_str),
+            Some("2.0")
+        );
     }
 
     #[test]
@@ -888,7 +956,11 @@ mod tests {
   </dependencies>
 </project>"#;
         let pom = parse(xml).unwrap();
-        let compile: Vec<_> = pom.dependencies.iter().filter(|d| d.is_compile_scope()).collect();
+        let compile: Vec<_> = pom
+            .dependencies
+            .iter()
+            .filter(|d| d.is_compile_scope())
+            .collect();
         assert!(compile.is_empty(), "test-scope dep should be excluded");
     }
 
@@ -940,7 +1012,8 @@ mod tests {
     fn resolve_custom_property() {
         let mut pom = Pom::default();
         pom.version = Some("1.0.0".to_string());
-        pom.properties.insert("jackson.version".to_string(), "2.17.2".to_string());
+        pom.properties
+            .insert("jackson.version".to_string(), "2.17.2".to_string());
         assert_eq!(pom.resolve_value("${jackson.version}"), "2.17.2");
     }
 
@@ -949,22 +1022,26 @@ mod tests {
         // Mirrors the real jackson-bom chain:
         //   ${jackson.version.annotations} -> ${jackson.version} -> 2.17.2
         let mut pom = Pom::default();
-        pom.properties.insert(
-            "jackson.version".to_string(),
-            "2.17.2".to_string(),
-        );
+        pom.properties
+            .insert("jackson.version".to_string(), "2.17.2".to_string());
         pom.properties.insert(
             "jackson.version.annotations".to_string(),
             "${jackson.version}".to_string(),
         );
-        assert_eq!(pom.resolve_value("${jackson.version.annotations}"), "2.17.2");
+        assert_eq!(
+            pom.resolve_value("${jackson.version.annotations}"),
+            "2.17.2"
+        );
     }
 
     #[test]
     fn resolve_unknown_property_unchanged() {
         let pom = Pom::default();
         // Should return the placeholder as-is, not panic.
-        assert_eq!(pom.resolve_value("${totally.unknown}"), "${totally.unknown}");
+        assert_eq!(
+            pom.resolve_value("${totally.unknown}"),
+            "${totally.unknown}"
+        );
     }
 
     // --- effective_group / effective_version ------------------------------------

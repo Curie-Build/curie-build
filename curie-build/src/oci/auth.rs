@@ -71,7 +71,10 @@ fn split_auth_params(s: &str) -> Vec<String> {
 /// 1. `CURIE_REGISTRY_USERNAME` / `CURIE_REGISTRY_PASSWORD`
 /// 2. `[[credentials]]` matched by `registry_id` (when provided)
 /// 3. `~/.docker/config.json` auths / credHelpers
-pub fn resolve_credentials(registry_host: &str, registry_id: Option<&str>) -> Result<Option<Credentials>> {
+pub fn resolve_credentials(
+    registry_host: &str,
+    registry_id: Option<&str>,
+) -> Result<Option<Credentials>> {
     if let (Ok(u), Ok(p)) = (
         std::env::var("CURIE_REGISTRY_USERNAME"),
         std::env::var("CURIE_REGISTRY_PASSWORD"),
@@ -109,7 +112,8 @@ pub fn fetch_bearer_token(
     creds: Option<&Credentials>,
 ) -> Result<String> {
     let realm = params.get("realm").context("missing realm")?;
-    let mut url = reqwest::Url::parse(realm).with_context(|| format!("invalid realm URL: {realm}"))?;
+    let mut url =
+        reqwest::Url::parse(realm).with_context(|| format!("invalid realm URL: {realm}"))?;
     {
         let mut q = url.query_pairs_mut();
         if let Some(service) = params.get("service") {
@@ -255,7 +259,9 @@ fn run_credential_helper(helper: &str, registry_host: &str) -> Result<Option<Cre
     if let Some(stdin) = child.stdin.as_mut() {
         let _ = writeln!(stdin, "{registry_host}");
     }
-    let output = child.wait_with_output().context("credential helper failed")?;
+    let output = child
+        .wait_with_output()
+        .context("credential helper failed")?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -281,10 +287,7 @@ mod tests {
         let p = parse_bearer_challenge(h).unwrap();
         assert_eq!(p.get("realm").unwrap(), "https://auth.docker.io/token");
         assert_eq!(p.get("service").unwrap(), "registry.docker.io");
-        assert_eq!(
-            p.get("scope").unwrap(),
-            "repository:library/ubuntu:pull"
-        );
+        assert_eq!(p.get("scope").unwrap(), "repository:library/ubuntu:pull");
     }
 
     #[test]

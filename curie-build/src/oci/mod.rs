@@ -148,13 +148,7 @@ fn oci_build(
 
     let new_layers = plan.build_layers()?;
     let opts = image_options(desc, &plan);
-    let assembled = assemble_image(
-        &base.config,
-        &base.layers,
-        &new_layers,
-        &opts,
-        base.use_oci,
-    )?;
+    let assembled = assemble_image(&base.config, &base.layers, &new_layers, &opts, base.use_oci)?;
 
     let image_dir = target_dir.join("image");
     layout::write_oci_layout(&image_dir, &assembled, &image_ref)?;
@@ -186,9 +180,7 @@ fn oci_inputs(project_root: &Path, desc: &Descriptor, plan: &LayerPlan) -> Input
     inputs.add_file(&project_root.join("Curie.toml"));
     match plan {
         LayerPlan::Jar {
-            jar_path,
-            dep_jars,
-            ..
+            jar_path, dep_jars, ..
         } => {
             inputs.add_file(jar_path);
             for d in dep_jars {

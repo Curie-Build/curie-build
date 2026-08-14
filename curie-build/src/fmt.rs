@@ -31,9 +31,9 @@
 //! and flat-package source/test roots.  Test files (`*Test.kt` etc.) are
 //! included — formatting tests is desirable.
 
+use crate::build::central_repos;
 use crate::compile::{flat_package_src_dirs, flat_package_test_dirs};
 use anyhow::{bail, Context, Result};
-use crate::build::central_repos;
 use curie_deps::resolver::{resolve, DepEntry, ResolveOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -63,7 +63,14 @@ const KTFMT_MAIN: &str = "com.facebook.ktfmt.cli.Main";
 /// `resolve()` calls would otherwise race on the same `~/.m2/.part` files.
 pub fn resolve_pjf(offline: bool) -> Result<Vec<PathBuf>> {
     resolve(
-        &[DepEntry { key: PJF_COORD, version: PJF_VERSION, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }],
+        &[DepEntry {
+            key: PJF_COORD,
+            version: PJF_VERSION,
+            repo_id: None,
+            exclusions: vec![],
+            classifier: None,
+            allow_version_conflict: false,
+        }],
         &ResolveOptions {
             default_repos: central_repos(),
             named_repos: vec![],
@@ -74,7 +81,7 @@ pub fn resolve_pjf(offline: bool) -> Result<Vec<PathBuf>> {
             error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            },
+        },
     )
     .context("failed to resolve palantir-java-format from Maven Central")
 }
@@ -85,7 +92,14 @@ pub fn resolve_pjf(offline: bool) -> Result<Vec<PathBuf>> {
 /// and pass the result to [`run_fmt_with_jars`] to avoid concurrent races.
 pub fn resolve_ktfmt(offline: bool) -> Result<Vec<PathBuf>> {
     resolve(
-        &[DepEntry { key: KTFMT_COORD, version: KTFMT_VERSION, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }],
+        &[DepEntry {
+            key: KTFMT_COORD,
+            version: KTFMT_VERSION,
+            repo_id: None,
+            exclusions: vec![],
+            classifier: None,
+            allow_version_conflict: false,
+        }],
         &ResolveOptions {
             default_repos: central_repos(),
             named_repos: vec![],
@@ -96,7 +110,7 @@ pub fn resolve_ktfmt(offline: bool) -> Result<Vec<PathBuf>> {
             error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            },
+        },
     )
     .context("failed to resolve ktfmt from Maven Central")
 }
@@ -110,10 +124,7 @@ pub fn has_kotlin_sources(project_root: &Path) -> bool {
         WalkDir::new(root)
             .into_iter()
             .filter_map(|e| e.ok())
-            .any(|e| {
-                e.file_type().is_file()
-                    && e.path().extension().map_or(false, |x| x == "kt")
-            })
+            .any(|e| e.file_type().is_file() && e.path().extension().map_or(false, |x| x == "kt"))
     })
 }
 
@@ -247,26 +258,36 @@ fn run_formatter(
 }
 
 fn fmt_java(java_files: &[PathBuf], pjf_jars: &[PathBuf], check_only: bool) -> Result<()> {
-    run_formatter(java_files, pjf_jars, check_only, &FormatterSpec {
-        main_class: PJF_MAIN,
-        jvm_flags: jvm_add_exports(),
-        reformat_args: &["--aosp", "--replace"],
-        check_args: &["--aosp", "--dry-run", "--set-exit-if-changed"],
-        name: "palantir-java-format",
-        language: "Java",
-    })
+    run_formatter(
+        java_files,
+        pjf_jars,
+        check_only,
+        &FormatterSpec {
+            main_class: PJF_MAIN,
+            jvm_flags: jvm_add_exports(),
+            reformat_args: &["--aosp", "--replace"],
+            check_args: &["--aosp", "--dry-run", "--set-exit-if-changed"],
+            name: "palantir-java-format",
+            language: "Java",
+        },
+    )
 }
 
 fn fmt_kotlin(kotlin_files: &[PathBuf], ktfmt_jars: &[PathBuf], check_only: bool) -> Result<()> {
     // ktfmt rewrites in-place by default — no --replace flag needed.
-    run_formatter(kotlin_files, ktfmt_jars, check_only, &FormatterSpec {
-        main_class: KTFMT_MAIN,
-        jvm_flags: vec!["--enable-native-access=ALL-UNNAMED".to_string()],
-        reformat_args: &["--kotlinlang-style"],
-        check_args: &["--kotlinlang-style", "--dry-run", "--set-exit-if-changed"],
-        name: "ktfmt",
-        language: "Kotlin",
-    })
+    run_formatter(
+        kotlin_files,
+        ktfmt_jars,
+        check_only,
+        &FormatterSpec {
+            main_class: KTFMT_MAIN,
+            jvm_flags: vec!["--enable-native-access=ALL-UNNAMED".to_string()],
+            reformat_args: &["--kotlinlang-style"],
+            check_args: &["--kotlinlang-style", "--dry-run", "--set-exit-if-changed"],
+            name: "ktfmt",
+            language: "Kotlin",
+        },
+    )
 }
 
 fn classpath(jars: &[PathBuf]) -> String {
@@ -308,8 +329,7 @@ pub(crate) fn collect_java_files(project_root: &Path) -> Vec<PathBuf> {
                 .into_iter()
                 .filter_map(|e| e.ok())
                 .filter(|e| {
-                    e.file_type().is_file()
-                        && e.path().extension().map_or(false, |x| x == "java")
+                    e.file_type().is_file() && e.path().extension().map_or(false, |x| x == "java")
                 })
                 .map(|e| e.into_path())
         })
@@ -338,8 +358,7 @@ pub(crate) fn collect_kotlin_files(project_root: &Path) -> Vec<PathBuf> {
                 .into_iter()
                 .filter_map(|e| e.ok())
                 .filter(|e| {
-                    e.file_type().is_file()
-                        && e.path().extension().map_or(false, |x| x == "kt")
+                    e.file_type().is_file() && e.path().extension().map_or(false, |x| x == "kt")
                 })
                 .map(|e| e.into_path())
         })
@@ -549,7 +568,12 @@ mod tests {
         fs::write(pkg.join("FooSpec.kt"), "class FooSpec").unwrap();
 
         let files = collect_kotlin_files(tmp.path());
-        assert_eq!(files.len(), 3, "test/spec files must be included in fmt: {:?}", files);
+        assert_eq!(
+            files.len(),
+            3,
+            "test/spec files must be included in fmt: {:?}",
+            files
+        );
     }
 
     #[test]

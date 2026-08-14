@@ -95,7 +95,13 @@ fn is_compact_source(text: &str) -> bool {
     // Strip line comments then block comments.
     let no_line: String = text
         .lines()
-        .map(|l| if let Some(i) = l.find("//") { &l[..i] } else { l })
+        .map(|l| {
+            if let Some(i) = l.find("//") {
+                &l[..i]
+            } else {
+                l
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -104,9 +110,13 @@ fn is_compact_source(text: &str) -> bool {
     let mut in_block = false;
     while let Some(ch) = chars.next() {
         if in_block {
-            if ch == '*' && chars.peek() == Some(&'/') { chars.next(); in_block = false; }
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block = false;
+            }
         } else if ch == '/' && chars.peek() == Some(&'*') {
-            chars.next(); in_block = true;
+            chars.next();
+            in_block = true;
         } else {
             stripped.push(ch);
         }
@@ -115,10 +125,22 @@ fn is_compact_source(text: &str) -> bool {
     for kw in ["class", "interface", "enum", "record"] {
         let mut s = stripped.as_str();
         while let Some(idx) = s.find(kw) {
-            let before = if idx == 0 { ' ' } else { s.as_bytes()[idx - 1] as char };
+            let before = if idx == 0 {
+                ' '
+            } else {
+                s.as_bytes()[idx - 1] as char
+            };
             let after_idx = idx + kw.len();
-            let after = if after_idx >= s.len() { ' ' } else { s.as_bytes()[after_idx] as char };
-            if !before.is_alphanumeric() && before != '_' && !after.is_alphanumeric() && after != '_' {
+            let after = if after_idx >= s.len() {
+                ' '
+            } else {
+                s.as_bytes()[after_idx] as char
+            };
+            if !before.is_alphanumeric()
+                && before != '_'
+                && !after.is_alphanumeric()
+                && after != '_'
+            {
                 return false;
             }
             s = &s[idx + kw.len()..];
@@ -176,7 +198,12 @@ fn kotlin_source_has_main(text: &str) -> bool {
         for ch in line.chars() {
             match ch {
                 '{' => depth += 1,
-                '}' => { depth -= 1; if depth < 0 { depth = 0; } }
+                '}' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        depth = 0;
+                    }
+                }
                 _ => {}
             }
         }
@@ -420,7 +447,9 @@ mod tests {
 
     #[test]
     fn kotlin_main_no_args() {
-        assert!(kotlin_source_has_main("fun main() {\n    println(\"hi\")\n}\n"));
+        assert!(kotlin_source_has_main(
+            "fun main() {\n    println(\"hi\")\n}\n"
+        ));
     }
 
     #[test]
@@ -493,7 +522,9 @@ mod tests {
 
     #[test]
     fn java_no_main() {
-        assert!(!java_source_has_main("public class Lib { public void run() {} }"));
+        assert!(!java_source_has_main(
+            "public class Lib { public void run() {} }"
+        ));
     }
 
     // --- javap_output_has_main ---
@@ -551,10 +582,15 @@ mod tests {
             "package com.example;\npublic class Lib { public void run() {} }",
         );
 
-        let err = detect_main_class_from_source(&[src_root], &[source.clone()]).unwrap_err().to_string();
+        let err = detect_main_class_from_source(&[src_root], &[source.clone()])
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no main method found"), "got: {err}");
         assert!(err.contains("mainClass"), "got: {err}");
-        assert!(err.contains(source.to_str().unwrap()), "scanned file missing from error: {err}");
+        assert!(
+            err.contains(source.to_str().unwrap()),
+            "scanned file missing from error: {err}"
+        );
     }
 
     #[test]
@@ -572,8 +608,13 @@ mod tests {
             "package com.example;\npublic class Bar { public static void main(String[] args) {} }",
         );
 
-        let err = detect_main_class_from_source(&[src_root], &[foo, bar]).unwrap_err().to_string();
-        assert!(err.contains("multiple source files contain a main method"), "got: {err}");
+        let err = detect_main_class_from_source(&[src_root], &[foo, bar])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("multiple source files contain a main method"),
+            "got: {err}"
+        );
         assert!(err.contains("com.example.Foo"), "got: {err}");
         assert!(err.contains("com.example.Bar"), "got: {err}");
         assert!(err.contains("curie build"), "got: {err}");

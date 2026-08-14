@@ -104,16 +104,19 @@ pub fn run_audit_with_desc(
     opts: &AuditOptions,
 ) -> Result<AuditReport> {
     crate::parallel::emit(&crate::style::headline(
-        "Auditing", desc.buildable_name(), desc.buildable_version(),
+        "Auditing",
+        desc.buildable_name(),
+        desc.buildable_version(),
     ));
 
     // 1. Resolve dependency closure.
     let components = resolve_components(project_root, desc, opts)?;
 
     // 2. Emit SBOM.
-    let sbom_path = opts.output.clone().unwrap_or_else(|| {
-        project_root.join("target").join("sbom.cdx.json")
-    });
+    let sbom_path = opts
+        .output
+        .clone()
+        .unwrap_or_else(|| project_root.join("target").join("sbom.cdx.json"));
     if let Some(parent) = sbom_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create directory {}", parent.display()))?;
@@ -124,18 +127,33 @@ pub fn run_audit_with_desc(
         .with_context(|| format!("failed to write SBOM to {}", sbom_path.display()))?;
     crate::parallel::emit(&crate::style::audit_step(
         "SBOM",
-        &sbom_path.strip_prefix(project_root).unwrap_or(&sbom_path).display().to_string(),
+        &sbom_path
+            .strip_prefix(project_root)
+            .unwrap_or(&sbom_path)
+            .display()
+            .to_string(),
     ));
 
     // 3. Optionally scan against OSV.
     if opts.offline || components.is_empty() {
-        return Ok(AuditReport { sbom_path, findings: vec![], max_score: None });
+        return Ok(AuditReport {
+            sbom_path,
+            findings: vec![],
+            max_score: None,
+        });
     }
 
     let raw_findings = osv_querybatch(&components)?;
     if raw_findings.is_empty() {
-        crate::parallel::emit(&crate::style::audit_step("Audit", "no vulnerabilities found"));
-        return Ok(AuditReport { sbom_path, findings: vec![], max_score: None });
+        crate::parallel::emit(&crate::style::audit_step(
+            "Audit",
+            "no vulnerabilities found",
+        ));
+        return Ok(AuditReport {
+            sbom_path,
+            findings: vec![],
+            max_score: None,
+        });
     }
 
     // 4. Optionally enrich with full details.
@@ -150,7 +168,11 @@ pub fn run_audit_with_desc(
 
     let max_score = findings.iter().filter_map(|f| f.score).reduce(f32::max);
 
-    Ok(AuditReport { sbom_path, findings, max_score })
+    Ok(AuditReport {
+        sbom_path,
+        findings,
+        max_score,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -193,15 +215,23 @@ fn resolve_components(
         progress: false,
         bom_imports: desc.prod_bom_gavs()?,
         offline: opts.offline,
-        skip_version_ranges: false, error_on_version_conflict: false,
+        skip_version_ranges: false,
+        error_on_version_conflict: false,
         snapshot_pins: Default::default(),
         update_snapshots: false,
-        };
+    };
 
     let prod_entries: Vec<DepEntry> = desc
         .dependencies
         .iter()
-        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
+        .map(|(k, v)| DepEntry {
+            key: k,
+            version: v.version(),
+            repo_id: v.repository(),
+            exclusions: v.exclusions(),
+            classifier: None,
+            allow_version_conflict: v.allow_version_conflict(),
+        })
         .collect();
 
     let mut components: Vec<Component> = Vec::new();
@@ -230,14 +260,22 @@ fn resolve_components(
             progress: false,
             bom_imports: desc.test_bom_gavs()?,
             offline: opts.offline,
-            skip_version_ranges: false, error_on_version_conflict: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            };
+        };
         let test_entries: Vec<DepEntry> = desc
             .test_dependencies
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
+            .map(|(k, v)| DepEntry {
+                key: k,
+                version: v.version(),
+                repo_id: v.repository(),
+                exclusions: v.exclusions(),
+                classifier: None,
+                allow_version_conflict: v.allow_version_conflict(),
+            })
             .collect();
         if !test_entries.is_empty() {
             let tree = curie_deps::resolve_tree(&test_entries, &opts_test)
@@ -316,7 +354,11 @@ fn build_bom(desc: &Descriptor, components: &[Component]) -> Bom {
 
     // Metadata component is only emitted when groupId is known.
     let meta_component: Option<BomComponent> = desc.group_id().map(|gid| BomComponent {
-        kind: if desc.is_library() { "library" } else { "application" },
+        kind: if desc.is_library() {
+            "library"
+        } else {
+            "application"
+        },
         group: Some(gid.to_string()),
         name: desc.buildable_name().to_string(),
         version: desc.buildable_version().to_string(),
@@ -383,7 +425,10 @@ fn chrono_utc_now() -> String {
     let hr = hr % 24;
     // Days since epoch → calendar date (Gregorian).
     let (y, mo, d) = days_to_ymd(days);
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, hr, min, sec)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, mo, d, hr, min, sec
+    )
 }
 
 /// Convert days since 1970-01-01 to (year, month, day).
@@ -626,8 +671,8 @@ fn severity_color(score: Option<f32>) -> (&'static str, &'static str) {
         Some(s) if s >= 9.0 => "\x1b[91m", // bright red  – Critical
         Some(s) if s >= 7.0 => "\x1b[31m", // red         – High
         Some(s) if s >= 4.0 => "\x1b[33m", // yellow      – Medium
-        Some(_)             => "\x1b[36m", // cyan        – Low
-        None                => "\x1b[33m", // yellow      – unknown
+        Some(_) => "\x1b[36m",             // cyan        – Low
+        None => "\x1b[33m",                // yellow      – unknown
     };
     (color, reset)
 }
@@ -749,7 +794,10 @@ mod tests {
     fn bom_metadata_component_present_when_group_id_known() {
         let desc = make_desc(Some("com.example"), "my-app", "1.0.0");
         let bom = build_bom(&desc, &[]);
-        let meta = bom.metadata.component.expect("should have metadata component");
+        let meta = bom
+            .metadata
+            .component
+            .expect("should have metadata component");
         assert_eq!(meta.group.as_deref(), Some("com.example"));
         assert_eq!(meta.name, "my-app");
         assert_eq!(meta.version, "1.0.0");
@@ -802,7 +850,10 @@ mod tests {
     #[test]
     fn extract_score_critical() {
         let mut m = BTreeMap::new();
-        m.insert("severity".into(), serde_json::Value::String("CRITICAL".into()));
+        m.insert(
+            "severity".into(),
+            serde_json::Value::String("CRITICAL".into()),
+        );
         assert_eq!(extract_score(&m), Some(9.0));
     }
 
@@ -816,7 +867,10 @@ mod tests {
     #[test]
     fn extract_score_medium() {
         let mut m = BTreeMap::new();
-        m.insert("severity".into(), serde_json::Value::String("MEDIUM".into()));
+        m.insert(
+            "severity".into(),
+            serde_json::Value::String("MEDIUM".into()),
+        );
         assert_eq!(extract_score(&m), Some(4.0));
     }
 
@@ -830,7 +884,10 @@ mod tests {
     #[test]
     fn extract_score_unknown_returns_none() {
         let mut m = BTreeMap::new();
-        m.insert("severity".into(), serde_json::Value::String("MODERATE".into()));
+        m.insert(
+            "severity".into(),
+            serde_json::Value::String("MODERATE".into()),
+        );
         assert_eq!(extract_score(&m), None);
     }
 
@@ -843,7 +900,11 @@ mod tests {
             findings: vec![],
             max_score: None,
         };
-        let opts = AuditOptions { full: true, severity: 7.0, ..Default::default() };
+        let opts = AuditOptions {
+            full: true,
+            severity: 7.0,
+            ..Default::default()
+        };
         assert!(!should_exit_nonzero(&report, &opts));
     }
 
@@ -860,7 +921,11 @@ mod tests {
             }],
             max_score: None,
         };
-        let opts = AuditOptions { full: false, severity: 7.0, ..Default::default() };
+        let opts = AuditOptions {
+            full: false,
+            severity: 7.0,
+            ..Default::default()
+        };
         assert!(should_exit_nonzero(&report, &opts));
     }
 
@@ -877,7 +942,11 @@ mod tests {
             }],
             max_score: Some(4.0),
         };
-        let opts = AuditOptions { full: true, severity: 7.0, ..Default::default() };
+        let opts = AuditOptions {
+            full: true,
+            severity: 7.0,
+            ..Default::default()
+        };
         assert!(!should_exit_nonzero(&report, &opts));
     }
 
@@ -894,7 +963,11 @@ mod tests {
             }],
             max_score: Some(7.0),
         };
-        let opts = AuditOptions { full: true, severity: 7.0, ..Default::default() };
+        let opts = AuditOptions {
+            full: true,
+            severity: 7.0,
+            ..Default::default()
+        };
         assert!(should_exit_nonzero(&report, &opts));
     }
 

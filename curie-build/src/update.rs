@@ -43,7 +43,11 @@ pub struct UpdateOptions {
 
 impl Default for UpdateOptions {
     fn default() -> Self {
-        UpdateOptions { offline: false, check: false, include_test: true }
+        UpdateOptions {
+            offline: false,
+            check: false,
+            include_test: true,
+        }
     }
 }
 
@@ -57,8 +61,9 @@ pub struct UpdateReport {
 impl UpdateReport {
     /// `true` when at least one entry has a newer version available.
     pub fn has_updates(&self) -> bool {
-        self.entries.iter().any(|e| e.latest.as_deref() != Some(e.current.as_str())
-            && e.latest.is_some())
+        self.entries
+            .iter()
+            .any(|e| e.latest.as_deref() != Some(e.current.as_str()) && e.latest.is_some())
     }
 }
 
@@ -104,16 +109,24 @@ pub fn run_update_with_desc(
     // [bom-imports]
     for (coord, version) in &desc.bom_imports {
         if !version.is_empty() {
-            items.push(DepItem { coord: coord.clone(), version: version.clone(),
-                repo_id: None, section: "bom-imports" });
+            items.push(DepItem {
+                coord: coord.clone(),
+                version: version.clone(),
+                repo_id: None,
+                section: "bom-imports",
+            });
         }
     }
     // [test-bom-imports]
     if opts.include_test {
         for (coord, version) in &desc.test_bom_imports {
             if !version.is_empty() {
-                items.push(DepItem { coord: coord.clone(), version: version.clone(),
-                    repo_id: None, section: "test-bom-imports" });
+                items.push(DepItem {
+                    coord: coord.clone(),
+                    version: version.clone(),
+                    repo_id: None,
+                    section: "test-bom-imports",
+                });
             }
         }
     }
@@ -121,8 +134,12 @@ pub fn run_update_with_desc(
     for (coord, val) in &desc.dependencies {
         let v = val.version();
         if !v.is_empty() {
-            items.push(DepItem { coord: coord.clone(), version: v.to_string(),
-                repo_id: val.repository().map(str::to_string), section: "dependencies" });
+            items.push(DepItem {
+                coord: coord.clone(),
+                version: v.to_string(),
+                repo_id: val.repository().map(str::to_string),
+                section: "dependencies",
+            });
         }
     }
     // [test-dependencies]
@@ -130,8 +147,12 @@ pub fn run_update_with_desc(
         for (coord, val) in &desc.test_dependencies {
             let v = val.version();
             if !v.is_empty() {
-                items.push(DepItem { coord: coord.clone(), version: v.to_string(),
-                    repo_id: val.repository().map(str::to_string), section: "test-dependencies" });
+                items.push(DepItem {
+                    coord: coord.clone(),
+                    version: v.to_string(),
+                    repo_id: val.repository().map(str::to_string),
+                    section: "test-dependencies",
+                });
             }
         }
     }
@@ -139,8 +160,12 @@ pub fn run_update_with_desc(
     for (coord, ap) in &desc.annotation_processors {
         let v = ap.version();
         if !v.is_empty() {
-            items.push(DepItem { coord: coord.clone(), version: v.to_string(),
-                repo_id: None, section: "annotation-processors" });
+            items.push(DepItem {
+                coord: coord.clone(),
+                version: v.to_string(),
+                repo_id: None,
+                section: "annotation-processors",
+            });
         }
     }
 
@@ -149,8 +174,11 @@ pub fn run_update_with_desc(
         return Ok(UpdateReport { entries: vec![] });
     }
 
-    println!("  Checking updates for {} versioned dependenc{}…",
-        items.len(), if items.len() == 1 { "y" } else { "ies" });
+    println!(
+        "  Checking updates for {} versioned dependenc{}…",
+        items.len(),
+        if items.len() == 1 { "y" } else { "ies" }
+    );
 
     // -----------------------------------------------------------------------
     // 2. Fetch maven-metadata.xml for each item.
@@ -183,19 +211,34 @@ pub fn run_update_with_desc(
     // 4. Rewrite Curie.toml (unless --check).
     // -----------------------------------------------------------------------
     if !opts.check {
-        let updated = entries.iter().filter(|e| {
-            e.latest.as_deref().map(|l| l != e.current.as_str()).unwrap_or(false)
-        }).count();
+        let updated = entries
+            .iter()
+            .filter(|e| {
+                e.latest
+                    .as_deref()
+                    .map(|l| l != e.current.as_str())
+                    .unwrap_or(false)
+            })
+            .count();
         if updated > 0 {
             rewrite_toml(project_root, &entries)?;
             println!("  {} update(s) applied to Curie.toml", updated);
         }
     } else {
-        let available = entries.iter().filter(|e| {
-            e.latest.as_deref().map(|l| l != e.current.as_str()).unwrap_or(false)
-        }).count();
+        let available = entries
+            .iter()
+            .filter(|e| {
+                e.latest
+                    .as_deref()
+                    .map(|l| l != e.current.as_str())
+                    .unwrap_or(false)
+            })
+            .count();
         if available > 0 {
-            println!("  {} update(s) available — re-run without --check to apply", available);
+            println!(
+                "  {} update(s) available — re-run without --check to apply",
+                available
+            );
         }
     }
 
@@ -234,7 +277,10 @@ pub fn resolve_repo_url(
 pub fn metadata_url(repo_base: &str, coord: &str) -> Option<String> {
     let (group, artifact) = coord.split_once(':')?;
     let group_path = group.replace('.', "/");
-    Some(format!("{}/{}/{}/maven-metadata.xml", repo_base, group_path, artifact))
+    Some(format!(
+        "{}/{}/{}/maven-metadata.xml",
+        repo_base, group_path, artifact
+    ))
 }
 
 /// Fetch `maven-metadata.xml` and return the latest stable version, or `None`
@@ -260,7 +306,11 @@ pub fn fetch_all_versions(
     let url = metadata_url(repo_base, coord)?;
     let body = client.get(&url).send().ok()?.text().ok()?;
     let versions = parse_versions(&body);
-    if versions.is_empty() { None } else { Some(versions) }
+    if versions.is_empty() {
+        None
+    } else {
+        Some(versions)
+    }
 }
 
 /// Extract all `<version>…</version>` values from a `maven-metadata.xml` body.
@@ -282,13 +332,19 @@ fn parse_versions(xml: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
-struct GavResponse { response: GavBody }
+struct GavResponse {
+    response: GavBody,
+}
 #[derive(Deserialize)]
-struct GavBody { docs: Vec<GavDoc> }
+struct GavBody {
+    docs: Vec<GavDoc>,
+}
 #[derive(Deserialize)]
 struct GavDoc {
-    #[serde(rename = "v")] version: String,
-    #[serde(default)]      timestamp: i64,
+    #[serde(rename = "v")]
+    version: String,
+    #[serde(default)]
+    timestamp: i64,
 }
 
 const GAV_API_BASE: &str = "https://search.maven.org/solrsearch/select";
@@ -319,7 +375,9 @@ fn fetch_timestamps_inner(
     let body = client.get(&url).send().ok()?.text().ok()?;
     let parsed: GavResponse = serde_json::from_str(&body).ok()?;
     Some(
-        parsed.response.docs
+        parsed
+            .response
+            .docs
             .into_iter()
             .filter(|d| d.timestamp > 0)
             .map(|d| (d.version, d.timestamp))
@@ -352,16 +410,30 @@ pub fn latest_stable(versions: &[String]) -> Option<String> {
 /// or a `-M<digits>` / `.M<digits>` milestone suffix.
 pub fn is_stable(version: &str) -> bool {
     let v = version.to_ascii_lowercase();
-    if v.contains("snapshot") { return false; }
-    if v.contains("alpha")    { return false; }
-    if v.contains("beta")     { return false; }
-    if v.contains("milestone") { return false; }
+    if v.contains("snapshot") {
+        return false;
+    }
+    if v.contains("alpha") {
+        return false;
+    }
+    if v.contains("beta") {
+        return false;
+    }
+    if v.contains("milestone") {
+        return false;
+    }
     // rc / cr as whole token (bounded by non-alpha or end), e.g. "3.0.0.rc1",
     // "1.0-RC2", "1.0.CR3" — but not "source" which contains no standalone rc.
-    if contains_token(&v, "rc") { return false; }
-    if contains_token(&v, "cr") { return false; }
+    if contains_token(&v, "rc") {
+        return false;
+    }
+    if contains_token(&v, "cr") {
+        return false;
+    }
     // Maven milestone: "-M1", ".M12", etc.
-    if is_maven_milestone(&v) { return false; }
+    if is_maven_milestone(&v) {
+        return false;
+    }
     true
 }
 
@@ -381,8 +453,7 @@ fn contains_token(v: &str, token: &str) -> bool {
             // Right boundary: end-of-string, non-alphanumeric, OR digits
             // (digits indicate rc1/rc2 etc — still a release candidate).
             // Only pure alpha continuation (e.g. "rcfoo") is rejected.
-            let right_ok = i + tlen == vlen
-                || !bytes[i + tlen].is_ascii_alphabetic();
+            let right_ok = i + tlen == vlen || !bytes[i + tlen].is_ascii_alphabetic();
             if left_ok && right_ok {
                 return true;
             }
@@ -428,7 +499,9 @@ fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 fn version_parts(v: &str) -> Vec<String> {
-    v.split(|c| c == '.' || c == '-').map(str::to_string).collect()
+    v.split(|c| c == '.' || c == '-')
+        .map(str::to_string)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -437,15 +510,15 @@ fn version_parts(v: &str) -> Vec<String> {
 
 fn print_update_table(entries: &[UpdateEntry]) {
     // Determine column widths.
-    let coord_w  = entries.iter().map(|e| e.coord.len()).max().unwrap_or(10);
-    let cur_w    = entries.iter().map(|e| e.current.len()).max().unwrap_or(7);
+    let coord_w = entries.iter().map(|e| e.coord.len()).max().unwrap_or(10);
+    let cur_w = entries.iter().map(|e| e.current.len()).max().unwrap_or(7);
 
     let use_color = use_color();
 
     let mut any_shown = false;
     for e in entries {
         let latest = match &e.latest {
-            None    => continue,   // fetch failed — skip silently
+            None => continue, // fetch failed — skip silently
             Some(l) => l,
         };
         let up_to_date = latest == &e.current;
@@ -453,15 +526,25 @@ fn print_update_table(entries: &[UpdateEntry]) {
             continue; // only print entries that have updates
         }
         any_shown = true;
-        let arrow = if use_color { "\x1b[32m→\x1b[0m" } else { "→" };
+        let arrow = if use_color {
+            "\x1b[32m→\x1b[0m"
+        } else {
+            "→"
+        };
         let new_ver = if use_color {
             format!("\x1b[32m{}\x1b[0m", latest)
         } else {
             latest.clone()
         };
-        println!("  {:<coord_w$}  {:<cur_w$}  {}  {}",
-            e.coord, e.current, arrow, new_ver,
-            coord_w = coord_w, cur_w = cur_w);
+        println!(
+            "  {:<coord_w$}  {:<cur_w$}  {}  {}",
+            e.coord,
+            e.current,
+            arrow,
+            new_ver,
+            coord_w = coord_w,
+            cur_w = cur_w
+        );
     }
     if !any_shown {
         println!("  all dependencies are up to date");
@@ -482,7 +565,8 @@ fn rewrite_toml(project_root: &Path, entries: &[UpdateEntry]) -> Result<()> {
     let toml_path = project_root.join("Curie.toml");
     let content = std::fs::read_to_string(&toml_path)
         .with_context(|| format!("failed to read {}", toml_path.display()))?;
-    let mut doc: DocumentMut = content.parse()
+    let mut doc: DocumentMut = content
+        .parse()
         .with_context(|| format!("failed to parse {} as TOML", toml_path.display()))?;
 
     for entry in entries {
@@ -501,12 +585,7 @@ fn rewrite_toml(project_root: &Path, entries: &[UpdateEntry]) -> Result<()> {
 /// Find the `coord` key in the given TOML `section` table and update its
 /// version to `new_ver`, handling both the shorthand string form and the
 /// inline-table detailed form.
-fn update_version_in_doc(
-    doc: &mut DocumentMut,
-    section: &str,
-    coord: &str,
-    new_ver: &str,
-) {
+fn update_version_in_doc(doc: &mut DocumentMut, section: &str, coord: &str, new_ver: &str) {
     let table = match doc.get_mut(section).and_then(|v| v.as_table_mut()) {
         Some(t) => t,
         None => return,
@@ -608,21 +687,27 @@ mod tests {
     #[test]
     fn latest_stable_picks_highest() {
         let vs: Vec<String> = ["1.0.0", "1.2.0", "1.1.5"]
-            .iter().map(|s| s.to_string()).collect();
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(latest_stable(&vs).as_deref(), Some("1.2.0"));
     }
 
     #[test]
     fn latest_stable_skips_snapshot() {
         let vs: Vec<String> = ["1.0.0", "1.1.0-SNAPSHOT", "1.0.9"]
-            .iter().map(|s| s.to_string()).collect();
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(latest_stable(&vs).as_deref(), Some("1.0.9"));
     }
 
     #[test]
     fn latest_stable_all_unstable_returns_none() {
         let vs: Vec<String> = ["1.0.0-RC1", "1.1.0-SNAPSHOT"]
-            .iter().map(|s| s.to_string()).collect();
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(latest_stable(&vs), None);
     }
 
@@ -705,7 +790,9 @@ mod tests {
 
     fn parse_timestamps(json: &str) -> HashMap<String, i64> {
         let parsed: GavResponse = serde_json::from_str(json).unwrap();
-        parsed.response.docs
+        parsed
+            .response
+            .docs
             .into_iter()
             .filter(|d| d.timestamp > 0)
             .map(|d| (d.version, d.timestamp))

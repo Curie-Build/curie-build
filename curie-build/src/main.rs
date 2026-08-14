@@ -1,11 +1,7 @@
 mod add_remove;
 mod api_search;
 mod api_search_ui;
-mod version_ui;
 mod audit;
-mod dev;
-mod setup;
-mod inspect_ui;
 mod build;
 mod class_manifest;
 mod compile;
@@ -13,24 +9,26 @@ mod config;
 mod coverage;
 mod deps;
 mod descriptor;
+mod dev;
 mod docker;
-mod oci;
 mod fat_jar;
 mod fetch;
-mod foreign;
 mod fmt;
+mod foreign;
 mod git;
 mod incremental;
+mod inspect_ui;
 mod jar;
-mod jpms;
 mod java_agent;
 mod jlink;
+mod jpms;
 mod kt_stale;
 mod lock;
 mod main_class;
 mod maven;
 mod native;
 mod new;
+mod oci;
 mod parallel;
 mod plugin;
 mod pom_writer;
@@ -38,6 +36,7 @@ mod proc;
 mod publish;
 mod resources;
 mod run;
+mod setup;
 mod sources_jar;
 mod style;
 mod term;
@@ -47,6 +46,7 @@ mod test_runner;
 mod testenv;
 mod tui;
 mod update;
+mod version_ui;
 mod workspace;
 mod wrapper;
 
@@ -380,18 +380,24 @@ fn main() {
     // don't require an existing Curie.toml project.  Skip workspace
     // discovery entirely for them.
     let early_result = match &cli.command {
-        Cmd::New { kind, name, package } => {
-            Some(new::run_new(*kind, name.clone(), package.clone()))
-        }
-        Cmd::Init { kind, package } => {
-            Some(new::run_init(*kind, package.clone()))
-        }
-        Cmd::Setup { shell } => {
-            Some(setup::run_setup(shell.clone()))
-        }
-        Cmd::Fetch { file: Some(path), no_transitive, offline, .. } => {
-            Some(fetch::run_fetch_file(&cli.project, path, *no_transitive, *offline))
-        }
+        Cmd::New {
+            kind,
+            name,
+            package,
+        } => Some(new::run_new(*kind, name.clone(), package.clone())),
+        Cmd::Init { kind, package } => Some(new::run_init(*kind, package.clone())),
+        Cmd::Setup { shell } => Some(setup::run_setup(shell.clone())),
+        Cmd::Fetch {
+            file: Some(path),
+            no_transitive,
+            offline,
+            ..
+        } => Some(fetch::run_fetch_file(
+            &cli.project,
+            path,
+            *no_transitive,
+            *offline,
+        )),
         _ => None,
     };
     if let Some(result) = early_result {
@@ -417,7 +423,11 @@ fn main() {
     // Foreign members only support build/test/clean/list.  Other commands
     // get a clear error rather than a confusing "no Curie.toml" from a
     // later descriptor::load.
-    if let workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } = &ctx {
+    if let workspace::WorkspaceContext::WorkspaceMember {
+        workspace_root,
+        member_index,
+    } = &ctx
+    {
         if let Ok(ws) = workspace::load(workspace_root) {
             if let Some(m) = ws.members.get(*member_index) {
                 if let Some(f) = m.descriptor.foreign_project() {
@@ -440,7 +450,14 @@ fn main() {
     }
 
     let result = match cli.command {
-        Cmd::Build { no_docker, no_native, no_jlink, offline, update_snapshots, jobs } => {
+        Cmd::Build {
+            no_docker,
+            no_native,
+            no_jlink,
+            offline,
+            update_snapshots,
+            jobs,
+        } => {
             let opts = build::BuildOptions {
                 no_docker,
                 no_native,
@@ -454,42 +471,82 @@ fn main() {
                 workspace::WorkspaceContext::WorkspaceRoot(root) => {
                     workspace::build_all(root, opts, jobs)
                 }
-                workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
-                    workspace::build_one(workspace_root, *member_index, opts, jobs)
-                }
-                workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
-                    workspace::build_subtree(workspace_root, member_indices, opts, jobs)
-                }
-                workspace::WorkspaceContext::Standalone(project) => {
-                    build::build(project, opts)
-                }
+                workspace::WorkspaceContext::WorkspaceMember {
+                    workspace_root,
+                    member_index,
+                } => workspace::build_one(workspace_root, *member_index, opts, jobs),
+                workspace::WorkspaceContext::WorkspaceSubtree {
+                    workspace_root,
+                    member_indices,
+                } => workspace::build_subtree(workspace_root, member_indices, opts, jobs),
+                workspace::WorkspaceContext::Standalone(project) => build::build(project, opts),
             }
         }
-        Cmd::Test { filter, offline, coverage, update_snapshots, jobs } => {
+        Cmd::Test {
+            filter,
+            offline,
+            coverage,
+            update_snapshots,
+            jobs,
+        } => {
             let jobs = resolve_jobs(jobs);
             match &ctx {
-                workspace::WorkspaceContext::WorkspaceRoot(root) => {
-                    workspace::test_all(root, filter.as_deref(), offline, coverage, update_snapshots, jobs)
-                }
-                workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
-                    workspace::test_one(workspace_root, *member_index, filter.as_deref(), offline, coverage, update_snapshots, jobs)
-                }
-                workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
-                    workspace::test_subtree(workspace_root, member_indices, filter.as_deref(), offline, coverage, update_snapshots, jobs)
-                }
-                workspace::WorkspaceContext::Standalone(project) => {
-                    test_single_module(project, filter.as_deref(), offline, coverage, update_snapshots)
-                }
+                workspace::WorkspaceContext::WorkspaceRoot(root) => workspace::test_all(
+                    root,
+                    filter.as_deref(),
+                    offline,
+                    coverage,
+                    update_snapshots,
+                    jobs,
+                ),
+                workspace::WorkspaceContext::WorkspaceMember {
+                    workspace_root,
+                    member_index,
+                } => workspace::test_one(
+                    workspace_root,
+                    *member_index,
+                    filter.as_deref(),
+                    offline,
+                    coverage,
+                    update_snapshots,
+                    jobs,
+                ),
+                workspace::WorkspaceContext::WorkspaceSubtree {
+                    workspace_root,
+                    member_indices,
+                } => workspace::test_subtree(
+                    workspace_root,
+                    member_indices,
+                    filter.as_deref(),
+                    offline,
+                    coverage,
+                    update_snapshots,
+                    jobs,
+                ),
+                workspace::WorkspaceContext::Standalone(project) => test_single_module(
+                    project,
+                    filter.as_deref(),
+                    offline,
+                    coverage,
+                    update_snapshots,
+                ),
             }
         }
-        Cmd::Run { no_docker, offline, args } => match &ctx {
+        Cmd::Run {
+            no_docker,
+            offline,
+            args,
+        } => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(_)
             | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
                 "`curie run` is ambiguous in a workspace.  Re-run with \
                  --project <member> to choose one, e.g.\n  \
                  curie --project examples/hello-world run"
             )),
-            workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+            workspace::WorkspaceContext::WorkspaceMember {
+                workspace_root,
+                member_index,
+            } => {
                 let opts = run::RunOptions { no_docker, offline };
                 // Members without [workspace-dependencies] don't need
                 // the workspace-aware runtime classpath; the standalone
@@ -525,13 +582,17 @@ fn main() {
         Cmd::Clean { jobs } => {
             let jobs = resolve_jobs(jobs);
             match &ctx {
-                workspace::WorkspaceContext::WorkspaceRoot(root) => workspace::clean_all(root, jobs),
-                workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
-                    workspace::clean_subtree(workspace_root, member_indices, jobs)
+                workspace::WorkspaceContext::WorkspaceRoot(root) => {
+                    workspace::clean_all(root, jobs)
                 }
-                workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
-                    workspace::clean_one(workspace_root, *member_index)
-                }
+                workspace::WorkspaceContext::WorkspaceSubtree {
+                    workspace_root,
+                    member_indices,
+                } => workspace::clean_subtree(workspace_root, member_indices, jobs),
+                workspace::WorkspaceContext::WorkspaceMember {
+                    workspace_root,
+                    member_index,
+                } => workspace::clean_one(workspace_root, *member_index),
                 workspace::WorkspaceContext::Standalone(project) => build::clean(project),
             }
         }
@@ -561,46 +622,70 @@ fn main() {
         },
         Cmd::List { all } => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(root)
-            | workspace::WorkspaceContext::WorkspaceMember { workspace_root: root, .. }
-            | workspace::WorkspaceContext::WorkspaceSubtree { workspace_root: root, .. } => {
-                workspace::list(root, &cli.project, all, crate::term::use_color())
+            | workspace::WorkspaceContext::WorkspaceMember {
+                workspace_root: root,
+                ..
             }
+            | workspace::WorkspaceContext::WorkspaceSubtree {
+                workspace_root: root,
+                ..
+            } => workspace::list(root, &cli.project, all, crate::term::use_color()),
             workspace::WorkspaceContext::Standalone(project) => {
                 workspace::list(project, project, all, crate::term::use_color())
             }
         },
-        Cmd::Fmt { check, offline, jobs } => {
+        Cmd::Fmt {
+            check,
+            offline,
+            jobs,
+        } => {
             let jobs = resolve_jobs(jobs);
             match &ctx {
-            workspace::WorkspaceContext::WorkspaceRoot(root) => {
-                workspace::fmt_all(root, check, offline, jobs)
+                workspace::WorkspaceContext::WorkspaceRoot(root) => {
+                    workspace::fmt_all(root, check, offline, jobs)
+                }
+                workspace::WorkspaceContext::WorkspaceSubtree {
+                    workspace_root,
+                    member_indices,
+                } => workspace::fmt_subtree(workspace_root, member_indices, check, offline, jobs),
+                workspace::WorkspaceContext::WorkspaceMember { .. } => {
+                    fmt::run_fmt(&cli.project, check, offline)
+                }
+                workspace::WorkspaceContext::Standalone(project) => {
+                    fmt::run_fmt(project, check, offline)
+                }
             }
-            workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
-                workspace::fmt_subtree(workspace_root, member_indices, check, offline, jobs)
-            }
-            workspace::WorkspaceContext::WorkspaceMember { .. } => {
-                fmt::run_fmt(&cli.project, check, offline)
-            }
-            workspace::WorkspaceContext::Standalone(project) => {
-                fmt::run_fmt(project, check, offline)
-            }
-        }},
-        Cmd::Deps { why, tests, offline } => match &ctx {
+        }
+        Cmd::Deps {
+            why,
+            tests,
+            offline,
+        } => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(_)
             | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
                 "`curie deps` cannot run on a workspace root; \
                  target a member with --project"
             )),
-            workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
-                deps::run_deps_workspace_member(
-                    workspace_root, *member_index, why.as_deref(), tests, offline,
-                )
-            }
+            workspace::WorkspaceContext::WorkspaceMember {
+                workspace_root,
+                member_index,
+            } => deps::run_deps_workspace_member(
+                workspace_root,
+                *member_index,
+                why.as_deref(),
+                tests,
+                offline,
+            ),
             workspace::WorkspaceContext::Standalone(project) => {
                 deps::run_deps(project, why.as_deref(), tests, offline)
             }
         },
-        Cmd::Fetch { coords, file, no_transitive, offline } => {
+        Cmd::Fetch {
+            coords,
+            file,
+            no_transitive,
+            offline,
+        } => {
             if let Some(path) = file {
                 fetch::run_fetch_file(&cli.project, &path, no_transitive, offline)
             } else {
@@ -610,18 +695,28 @@ fn main() {
                         "`curie fetch` cannot run on a workspace root; \
                          target a member with --project"
                     )),
-                    workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
-                        fetch::run_fetch_workspace_member(
-                            workspace_root, *member_index, &coords, no_transitive, offline,
-                        )
-                    }
+                    workspace::WorkspaceContext::WorkspaceMember {
+                        workspace_root,
+                        member_index,
+                    } => fetch::run_fetch_workspace_member(
+                        workspace_root,
+                        *member_index,
+                        &coords,
+                        no_transitive,
+                        offline,
+                    ),
                     workspace::WorkspaceContext::Standalone(project) => {
                         fetch::run_fetch(project, &coords, no_transitive, offline)
                     }
                 }
             }
-        },
-        Cmd::Publish { repo, no_sign, no_javadoc, dry_run } => {
+        }
+        Cmd::Publish {
+            repo,
+            no_sign,
+            no_javadoc,
+            dry_run,
+        } => {
             let target = match &ctx {
                 workspace::WorkspaceContext::WorkspaceRoot(_)
                 | workspace::WorkspaceContext::WorkspaceSubtree { .. } => {
@@ -646,7 +741,11 @@ fn main() {
                 Err(e) => Err(e),
             }
         }
-        Cmd::Update { check, offline, no_test } => {
+        Cmd::Update {
+            check,
+            offline,
+            no_test,
+        } => {
             let opts = update::UpdateOptions {
                 check,
                 offline,
@@ -656,12 +755,14 @@ fn main() {
                 workspace::WorkspaceContext::WorkspaceRoot(root) => {
                     workspace::update_all(root, &opts)
                 }
-                workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
-                    workspace::update_one(workspace_root, *member_index, &opts)
-                }
-                workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
-                    workspace::update_subtree(workspace_root, member_indices, &opts)
-                }
+                workspace::WorkspaceContext::WorkspaceMember {
+                    workspace_root,
+                    member_index,
+                } => workspace::update_one(workspace_root, *member_index, &opts),
+                workspace::WorkspaceContext::WorkspaceSubtree {
+                    workspace_root,
+                    member_indices,
+                } => workspace::update_subtree(workspace_root, member_indices, &opts),
                 workspace::WorkspaceContext::Standalone(project) => {
                     match update::run_update(project, &opts) {
                         Ok(report) => Ok(report.has_updates()),
@@ -677,7 +778,13 @@ fn main() {
                 Err(e) => Err(e),
             }
         }
-        Cmd::Audit { include_test, offline, short, severity, output } => {
+        Cmd::Audit {
+            include_test,
+            offline,
+            short,
+            severity,
+            output,
+        } => {
             let opts = audit::AuditOptions {
                 include_test,
                 offline,
@@ -689,12 +796,14 @@ fn main() {
                 workspace::WorkspaceContext::WorkspaceRoot(root) => {
                     workspace::audit_all(root, &opts)
                 }
-                workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
-                    workspace::audit_one(workspace_root, *member_index, &opts)
-                }
-                workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
-                    workspace::audit_subtree(workspace_root, member_indices, &opts)
-                }
+                workspace::WorkspaceContext::WorkspaceMember {
+                    workspace_root,
+                    member_index,
+                } => workspace::audit_one(workspace_root, *member_index, &opts),
+                workspace::WorkspaceContext::WorkspaceSubtree {
+                    workspace_root,
+                    member_indices,
+                } => workspace::audit_subtree(workspace_root, member_indices, &opts),
                 workspace::WorkspaceContext::Standalone(project) => {
                     match audit::run_audit(project, &opts) {
                         Ok(report) => Ok(audit::should_exit_nonzero(&report, &opts)),
@@ -710,7 +819,9 @@ fn main() {
                 Err(e) => Err(e),
             }
         }
-        Cmd::Maven { cmd: MavenCmd::Sync { check, force } } => {
+        Cmd::Maven {
+            cmd: MavenCmd::Sync { check, force },
+        } => {
             // Phase 1 has no `--offline` flag for `maven sync`; pinTransitive
             // and BOM-managed annotation-processor resolution (when needed)
             // are allowed to hit the network.
@@ -718,12 +829,26 @@ fn main() {
                 workspace::WorkspaceContext::WorkspaceRoot(root) => {
                     maven::run_maven_sync_workspace_root(root, force, check, false)
                 }
-                workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
-                    maven::run_maven_sync_workspace_member(workspace_root, *member_index, force, check, false)
-                }
-                workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
-                    maven::run_maven_sync_workspace_subtree(workspace_root, member_indices, force, check, false)
-                }
+                workspace::WorkspaceContext::WorkspaceMember {
+                    workspace_root,
+                    member_index,
+                } => maven::run_maven_sync_workspace_member(
+                    workspace_root,
+                    *member_index,
+                    force,
+                    check,
+                    false,
+                ),
+                workspace::WorkspaceContext::WorkspaceSubtree {
+                    workspace_root,
+                    member_indices,
+                } => maven::run_maven_sync_workspace_subtree(
+                    workspace_root,
+                    member_indices,
+                    force,
+                    check,
+                    false,
+                ),
                 workspace::WorkspaceContext::Standalone(project) => {
                     maven::run_maven_sync_standalone(project, force, check, false)
                 }
@@ -740,35 +865,51 @@ fn main() {
 
         // Handled above in the early-exit block; unreachable at runtime.
         Cmd::New { .. } | Cmd::Init { .. } => unreachable!(),
-        Cmd::Add { coord, test, annotation_processor, bom, offline } => match &ctx {
+        Cmd::Add {
+            coord,
+            test,
+            annotation_processor,
+            bom,
+            offline,
+        } => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(_)
             | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
                 "`curie add` cannot run on a workspace root; \
                  target a member with --project"
             )),
             workspace::WorkspaceContext::WorkspaceMember { .. }
-            | workspace::WorkspaceContext::Standalone(_) => {
-                add_remove::run_add(
-                    &cli.project,
-                    coord.as_deref(),
-                    add_remove::AddOptions { test, annotation_processor, bom, offline },
-                )
-            }
+            | workspace::WorkspaceContext::Standalone(_) => add_remove::run_add(
+                &cli.project,
+                coord.as_deref(),
+                add_remove::AddOptions {
+                    test,
+                    annotation_processor,
+                    bom,
+                    offline,
+                },
+            ),
         },
-        Cmd::Remove { coord, test, annotation_processor, bom } => match &ctx {
+        Cmd::Remove {
+            coord,
+            test,
+            annotation_processor,
+            bom,
+        } => match &ctx {
             workspace::WorkspaceContext::WorkspaceRoot(_)
             | workspace::WorkspaceContext::WorkspaceSubtree { .. } => Err(anyhow::anyhow!(
                 "`curie remove` cannot run on a workspace root; \
                  target a member with --project"
             )),
             workspace::WorkspaceContext::WorkspaceMember { .. }
-            | workspace::WorkspaceContext::Standalone(_) => {
-                add_remove::run_remove(
-                    &cli.project,
-                    &coord,
-                    add_remove::RemoveOptions { test, annotation_processor, bom },
-                )
-            }
+            | workspace::WorkspaceContext::Standalone(_) => add_remove::run_remove(
+                &cli.project,
+                &coord,
+                add_remove::RemoveOptions {
+                    test,
+                    annotation_processor,
+                    bom,
+                },
+            ),
         },
         // Handled before workspace discovery in the early_result block above.
         Cmd::Setup { .. } => unreachable!(),
@@ -863,7 +1004,11 @@ fn native_single_module(project: &std::path::Path, offline: bool) -> anyhow::Res
     let output = build::build_with_desc(project, &desc, opts, &[])?;
 
     let effective_jar = output.fat_jar.as_ref().unwrap_or(&output.jar);
-    let effective_deps: &[std::path::PathBuf] = if output.fat_jar.is_some() { &[] } else { &output.dep_jars };
+    let effective_deps: &[std::path::PathBuf] = if output.fat_jar.is_some() {
+        &[]
+    } else {
+        &output.dep_jars
+    };
     native::build_native(project, &desc, effective_jar, effective_deps)?;
 
     Ok(())
@@ -903,7 +1048,11 @@ fn jlink_single_module(project: &std::path::Path, offline: bool) -> anyhow::Resu
     let output = build::build_with_desc(project, &desc, opts, &[])?;
 
     let effective_jar = output.fat_jar.as_ref().unwrap_or(&output.jar);
-    let effective_deps: &[std::path::PathBuf] = if output.fat_jar.is_some() { &[] } else { &output.dep_jars };
+    let effective_deps: &[std::path::PathBuf] = if output.fat_jar.is_some() {
+        &[]
+    } else {
+        &output.dep_jars
+    };
     jlink::build_jlink(project, &desc, effective_jar, effective_deps)?;
 
     Ok(())
@@ -911,34 +1060,45 @@ fn jlink_single_module(project: &std::path::Path, offline: bool) -> anyhow::Resu
 
 /// Dispatch `curie inspect` for all four workspace contexts.
 fn run_inspect(ctx: &workspace::WorkspaceContext) -> anyhow::Result<()> {
-    use inspect_ui::{LogTarget, run_inspect_ui};
+    use inspect_ui::{run_inspect_ui, LogTarget};
     match ctx {
         workspace::WorkspaceContext::WorkspaceRoot(root) => {
-            let ws      = workspace::load(root)?;
+            let ws = workspace::load(root)?;
             let targets = member_targets(&ws.members);
             run_inspect_ui(root, &targets, "build", None)
         }
-        workspace::WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
-            let ws      = workspace::load(workspace_root)?;
+        workspace::WorkspaceContext::WorkspaceMember {
+            workspace_root,
+            member_index,
+        } => {
+            let ws = workspace::load(workspace_root)?;
             let targets = member_targets(&ws.members);
             run_inspect_ui(workspace_root, &targets, "build", Some(*member_index))
         }
-        workspace::WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
-            let ws      = workspace::load(workspace_root)?;
-            let targets: Vec<LogTarget> = member_indices.iter()
+        workspace::WorkspaceContext::WorkspaceSubtree {
+            workspace_root,
+            member_indices,
+        } => {
+            let ws = workspace::load(workspace_root)?;
+            let targets: Vec<LogTarget> = member_indices
+                .iter()
                 .map(|&i| LogTarget {
                     declared: ws.members[i].declared.clone(),
-                    path:     ws.members[i].path.clone(),
+                    path: ws.members[i].path.clone(),
                 })
                 .collect();
             run_inspect_ui(workspace_root, &targets, "build", None)
         }
         workspace::WorkspaceContext::Standalone(path) => {
-            let name = path.file_name()
+            let name = path
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("project")
                 .to_string();
-            let targets = vec![LogTarget { declared: name, path: path.clone() }];
+            let targets = vec![LogTarget {
+                declared: name,
+                path: path.clone(),
+            }];
             run_inspect_ui(path, &targets, "build", None)
         }
     }
@@ -946,10 +1106,13 @@ fn run_inspect(ctx: &workspace::WorkspaceContext) -> anyhow::Result<()> {
 
 /// Build a `LogTarget` slice from workspace members for `curie inspect`.
 fn member_targets(members: &[workspace::Member]) -> Vec<inspect_ui::LogTarget> {
-    members.iter().map(|m| inspect_ui::LogTarget {
-        declared: m.declared.clone(),
-        path:     m.path.clone(),
-    }).collect()
+    members
+        .iter()
+        .map(|m| inspect_ui::LogTarget {
+            declared: m.declared.clone(),
+            path: m.path.clone(),
+        })
+        .collect()
 }
 
 /// Resolve `--jobs` option: explicit value wins; default to available parallelism.
@@ -978,6 +1141,9 @@ groupId = "com.example"
         )
         .unwrap();
         let result = test_single_module(dir.path(), None, true, false, false);
-        assert!(result.is_ok(), "expected Ok for BOM project, got: {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected Ok for BOM project, got: {result:?}"
+        );
     }
 }

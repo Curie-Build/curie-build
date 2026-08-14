@@ -47,13 +47,21 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
         bail!("`curie publish` cannot run on a workspace root; target a member with --project");
     }
 
-    let section = if desc.is_library() { "library" } else if desc.is_bom() { "bom" } else { "application" };
+    let section = if desc.is_library() {
+        "library"
+    } else if desc.is_bom() {
+        "bom"
+    } else {
+        "application"
+    };
     let group_id = desc
         .group_id()
-        .ok_or_else(|| anyhow::anyhow!(
-            "groupId is required for publishing — add `groupId = \"...\"` to the [{}] section",
-            section,
-        ))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "groupId is required for publishing — add `groupId = \"...\"` to the [{}] section",
+                section,
+            )
+        })?
         .to_string();
 
     validate_for_publish(&desc)?;
@@ -94,7 +102,10 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
         // BOM projects publish the POM only — no JAR, no sources, no javadoc.
         // build_with_desc already wrote the BOM POM; its path is in build_out.jar.
         let pom_path = &build_out.jar;
-        println!("{}", crate::style::publish_step("POM", &pom_path.file_name().unwrap().to_string_lossy()));
+        println!(
+            "{}",
+            crate::style::publish_step("POM", &pom_path.file_name().unwrap().to_string_lossy())
+        );
         artifacts.push(UploadArtifact::pom(pom_path));
     } else {
         // --- sources jar -----------------------------------------------------
@@ -103,14 +114,26 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
         let resources_dir = build_out.resources_dir.as_deref();
         sources_jar::write_sources_jar(&sources_jar_path, &src_roots, resources_dir)
             .context("failed to build sources jar")?;
-        println!("{}", crate::style::publish_step("Sources jar", &sources_jar_path.file_name().unwrap().to_string_lossy()));
+        println!(
+            "{}",
+            crate::style::publish_step(
+                "Sources jar",
+                &sources_jar_path.file_name().unwrap().to_string_lossy()
+            )
+        );
 
         // --- javadoc jar (optional) ------------------------------------------
         let javadoc_jar_path: Option<PathBuf> = if javadoc {
             let p = target_dir.join(format!("{}-javadoc.jar", base_name));
             build_javadoc_jar(project_root, &src_roots, &p)
                 .context("failed to build javadoc jar")?;
-            println!("{}", crate::style::publish_step("Javadoc jar", &p.file_name().unwrap().to_string_lossy()));
+            println!(
+                "{}",
+                crate::style::publish_step(
+                    "Javadoc jar",
+                    &p.file_name().unwrap().to_string_lossy()
+                )
+            );
             Some(p)
         } else {
             None
@@ -119,9 +142,11 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
         // --- POM -------------------------------------------------------------
         let declared_gavs = resolve_declared_dep_gavs(&desc)?;
         let pom_path = target_dir.join(format!("{}.pom", base_name));
-        pom_writer::write_pom(&desc, &declared_gavs, &pom_path)
-            .context("failed to write POM")?;
-        println!("{}", crate::style::publish_step("POM", &pom_path.file_name().unwrap().to_string_lossy()));
+        pom_writer::write_pom(&desc, &declared_gavs, &pom_path).context("failed to write POM")?;
+        println!(
+            "{}",
+            crate::style::publish_step("POM", &pom_path.file_name().unwrap().to_string_lossy())
+        );
 
         artifacts.push(UploadArtifact::new(&build_out.jar, "")); // main jar
         artifacts.push(UploadArtifact::new(&sources_jar_path, "-sources"));
@@ -137,7 +162,10 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
             let asc = gpg_sign(&a.path)?;
             a.signature = Some(asc);
         }
-        println!("{}", crate::style::publish_step("Signed", &format!("{} artifact(s)", artifacts.len())));
+        println!(
+            "{}",
+            crate::style::publish_step("Signed", &format!("{} artifact(s)", artifacts.len()))
+        );
     }
 
     // --- build and print upload plan ----------------------------------------
@@ -157,7 +185,13 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
     }
 
     if opts.dry_run {
-        println!("{}", crate::style::info("Dry-run", &format!("{} file(s) would be uploaded", upload_jobs.len())));
+        println!(
+            "{}",
+            crate::style::info(
+                "Dry-run",
+                &format!("{} file(s) would be uploaded", upload_jobs.len())
+            )
+        );
         return Ok(());
     }
 
@@ -173,7 +207,10 @@ pub fn publish(project_root: &Path, opts: PublishOptions) -> Result<()> {
         upload_one(&client, &credentials, job)
             .with_context(|| format!("upload failed: {}", job.url))?;
     }
-    println!("{}", crate::style::publish_step("Uploaded", &format!("{} file(s)", upload_jobs.len())));
+    println!(
+        "{}",
+        crate::style::publish_step("Uploaded", &format!("{} file(s)", upload_jobs.len()))
+    );
     Ok(())
 }
 
@@ -258,18 +295,25 @@ fn resolve_credentials(
         let pw = std::env::var("CURIE_PUBLISH_PASSWORD").context(
             "CURIE_PUBLISH_PASSWORD env var must be set when publishing to an inline URL",
         )?;
-        return Ok(Credentials { username: u, password: pw });
+        return Ok(Credentials {
+            username: u,
+            password: pw,
+        });
     }
-    let repo_id = p.repository.as_deref().ok_or_else(|| anyhow::anyhow!(
-        "internal: resolve_target_url should have rejected this case",
-    ))?;
-    let cred_entry = config::credentials_for(cfg, repo_id)
-        .ok_or_else(|| anyhow::anyhow!(
+    let repo_id = p.repository.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("internal: resolve_target_url should have rejected this case",)
+    })?;
+    let cred_entry = config::credentials_for(cfg, repo_id).ok_or_else(|| {
+        anyhow::anyhow!(
             "no [[credentials]] entry for repo_id = \"{}\" in ~/.curie/config.toml",
             repo_id,
-        ))?;
+        )
+    })?;
     let (u, pw) = cred_entry.resolve()?;
-    Ok(Credentials { username: u, password: pw })
+    Ok(Credentials {
+        username: u,
+        password: pw,
+    })
 }
 
 /// Build the same source-root list `compile.rs` uses, so the sources jar
@@ -289,11 +333,7 @@ fn collect_src_roots(project_root: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn build_javadoc_jar(
-    project_root: &Path,
-    src_roots: &[PathBuf],
-    out_jar: &Path,
-) -> Result<()> {
+fn build_javadoc_jar(project_root: &Path, src_roots: &[PathBuf], out_jar: &Path) -> Result<()> {
     use std::process::Command;
     if which::which("javadoc").is_err() {
         bail!("`javadoc` not found on PATH — install a JDK or pass --no-javadoc");
@@ -304,7 +344,10 @@ fn build_javadoc_jar(
 
     let mut all_java_files: Vec<PathBuf> = Vec::new();
     for root in src_roots {
-        for entry in walkdir::WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             if entry.file_type().is_file()
                 && entry.path().extension().and_then(|s| s.to_str()) == Some("java")
             {
@@ -340,35 +383,42 @@ fn write_dir_as_jar(jar_path: &Path, src_dir: &Path) -> Result<()> {
 
     let part = staging_path(jar_path);
     if let Some(parent) = part.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent for staging file {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create parent for staging file {}",
+                parent.display()
+            )
+        })?;
     }
 
     {
         let file = std::fs::File::create(&part)
             .with_context(|| format!("cannot create {}", part.display()))?;
         let mut zip = ZipWriter::new(file);
-    let opts = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .last_modified_time(zip::DateTime::from_date_and_time(2024, 1, 1, 0, 0, 0).unwrap())
-        .unix_permissions(0o644);
+        let opts = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .last_modified_time(zip::DateTime::from_date_and_time(2024, 1, 1, 0, 0, 0).unwrap())
+            .unix_permissions(0o644);
 
-    let mut entries: std::collections::BTreeMap<String, PathBuf> = Default::default();
-    for entry in walkdir::WalkDir::new(src_dir).into_iter().filter_map(|e| e.ok()) {
-        if entry.file_type().is_file() {
-            let rel = entry.path().strip_prefix(src_dir).unwrap();
-            entries.insert(
-                rel.to_string_lossy().replace('\\', "/"),
-                entry.path().to_path_buf(),
-            );
+        let mut entries: std::collections::BTreeMap<String, PathBuf> = Default::default();
+        for entry in walkdir::WalkDir::new(src_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_file() {
+                let rel = entry.path().strip_prefix(src_dir).unwrap();
+                entries.insert(
+                    rel.to_string_lossy().replace('\\', "/"),
+                    entry.path().to_path_buf(),
+                );
+            }
         }
-    }
-    for (name, fs_path) in &entries {
-        let bytes = std::fs::read(fs_path)?;
-        zip.start_file(name.as_str(), opts)?;
-        zip.write_all(&bytes)?;
-    }
-    zip.finish().context("failed to finalize javadoc jar")?;
+        for (name, fs_path) in &entries {
+            let bytes = std::fs::read(fs_path)?;
+            zip.start_file(name.as_str(), opts)?;
+            zip.write_all(&bytes)?;
+        }
+        zip.finish().context("failed to finalize javadoc jar")?;
     } // drop writer + file for part
 
     finalize_staged(&part, jar_path)?;
@@ -466,15 +516,39 @@ fn build_upload_plan(artifacts: &[UploadArtifact], base_dir: &str) -> Vec<Upload
         let _ = a.classifier; // classifier is purely informational here
         let main_url = format!("{}/{}.{}", base_dir, base_name, ext);
 
-        jobs.push(UploadJob { source: a.path.clone(), url: main_url.clone(), body_kind: BodyKind::File });
-        jobs.push(UploadJob { source: a.path.clone(), url: format!("{main_url}.sha1"),   body_kind: BodyKind::Sha1   });
-        jobs.push(UploadJob { source: a.path.clone(), url: format!("{main_url}.sha256"), body_kind: BodyKind::Sha256 });
-        jobs.push(UploadJob { source: a.path.clone(), url: format!("{main_url}.sha512"), body_kind: BodyKind::Sha512 });
+        jobs.push(UploadJob {
+            source: a.path.clone(),
+            url: main_url.clone(),
+            body_kind: BodyKind::File,
+        });
+        jobs.push(UploadJob {
+            source: a.path.clone(),
+            url: format!("{main_url}.sha1"),
+            body_kind: BodyKind::Sha1,
+        });
+        jobs.push(UploadJob {
+            source: a.path.clone(),
+            url: format!("{main_url}.sha256"),
+            body_kind: BodyKind::Sha256,
+        });
+        jobs.push(UploadJob {
+            source: a.path.clone(),
+            url: format!("{main_url}.sha512"),
+            body_kind: BodyKind::Sha512,
+        });
 
         if let Some(asc) = &a.signature {
             let asc_url = format!("{main_url}.asc");
-            jobs.push(UploadJob { source: asc.clone(), url: asc_url.clone(),         body_kind: BodyKind::File });
-            jobs.push(UploadJob { source: asc.clone(), url: format!("{asc_url}.sha1"), body_kind: BodyKind::Sha1 });
+            jobs.push(UploadJob {
+                source: asc.clone(),
+                url: asc_url.clone(),
+                body_kind: BodyKind::File,
+            });
+            jobs.push(UploadJob {
+                source: asc.clone(),
+                url: format!("{asc_url}.sha1"),
+                body_kind: BodyKind::Sha1,
+            });
         }
     }
     jobs
@@ -542,7 +616,14 @@ fn resolve_declared_dep_gavs(desc: &Descriptor) -> Result<Vec<Gav>> {
     let entries: Vec<DepEntry> = desc
         .dependencies
         .iter()
-        .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
+        .map(|(k, v)| DepEntry {
+            key: k,
+            version: v.version(),
+            repo_id: v.repository(),
+            exclusions: v.exclusions(),
+            classifier: None,
+            allow_version_conflict: v.allow_version_conflict(),
+        })
         .collect();
     let opts = ResolveOptions {
         default_repos: crate::build::central_repos(),
@@ -550,10 +631,11 @@ fn resolve_declared_dep_gavs(desc: &Descriptor) -> Result<Vec<Gav>> {
         progress: false,
         bom_imports: desc.prod_bom_gavs()?,
         offline: false,
-        skip_version_ranges: false, error_on_version_conflict: false,
+        skip_version_ranges: false,
+        error_on_version_conflict: false,
         snapshot_pins: Default::default(),
         update_snapshots: false,
-        };
+    };
     curie_deps::resolve_declared_gavs(&entries, &opts)
 }
 
@@ -592,7 +674,10 @@ mod tests {
 
     #[test]
     fn validate_errors_when_publish_metadata_missing() {
-        let desc = fake_desc(Some("com.example"), crate::descriptor::PublishConfig::default());
+        let desc = fake_desc(
+            Some("com.example"),
+            crate::descriptor::PublishConfig::default(),
+        );
         let err = validate_for_publish(&desc).unwrap_err().to_string();
         assert!(err.contains("description"), "got: {err}");
         assert!(err.contains("homepage"), "got: {err}");
@@ -668,18 +753,24 @@ mod tests {
         std::fs::write(&jar, b"").unwrap();
         let pom = dir.path().join("my-lib-1.0.0.pom");
         std::fs::write(&pom, b"").unwrap();
-        let artifacts = vec![
-            UploadArtifact::new(&jar, ""),
-            UploadArtifact::pom(&pom),
-        ];
-        let plan = build_upload_plan(&artifacts, "https://nexus.example.com/repo/com/example/my-lib/1.0.0");
+        let artifacts = vec![UploadArtifact::new(&jar, ""), UploadArtifact::pom(&pom)];
+        let plan = build_upload_plan(
+            &artifacts,
+            "https://nexus.example.com/repo/com/example/my-lib/1.0.0",
+        );
         // Each artifact: file + 3 sidecars (sha1, sha256, sha512) = 4.
         // jar = 4 + pom = 4 → total 8.
         assert_eq!(plan.len(), 8);
         let urls: Vec<&str> = plan.iter().map(|j| j.url.as_str()).collect();
-        assert!(urls.contains(&"https://nexus.example.com/repo/com/example/my-lib/1.0.0/my-lib-1.0.0.jar"));
-        assert!(urls.contains(&"https://nexus.example.com/repo/com/example/my-lib/1.0.0/my-lib-1.0.0.jar.sha256"));
-        assert!(urls.contains(&"https://nexus.example.com/repo/com/example/my-lib/1.0.0/my-lib-1.0.0.pom"));
-        assert!(urls.contains(&"https://nexus.example.com/repo/com/example/my-lib/1.0.0/my-lib-1.0.0.pom.sha512"));
+        assert!(urls
+            .contains(&"https://nexus.example.com/repo/com/example/my-lib/1.0.0/my-lib-1.0.0.jar"));
+        assert!(urls.contains(
+            &"https://nexus.example.com/repo/com/example/my-lib/1.0.0/my-lib-1.0.0.jar.sha256"
+        ));
+        assert!(urls
+            .contains(&"https://nexus.example.com/repo/com/example/my-lib/1.0.0/my-lib-1.0.0.pom"));
+        assert!(urls.contains(
+            &"https://nexus.example.com/repo/com/example/my-lib/1.0.0/my-lib-1.0.0.pom.sha512"
+        ));
     }
 }

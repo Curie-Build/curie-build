@@ -138,9 +138,11 @@ pub fn discover(project: &Path) -> Result<WorkspaceContext> {
                                     member_indices: idxs,
                                 });
                             }
-                        } else if let Some(topo_idx) = ws_loaded.members.iter().position(|m| {
-                            m.path.canonicalize().ok() == Some(project_canon.clone())
-                        }) {
+                        } else if let Some(topo_idx) = ws_loaded
+                            .members
+                            .iter()
+                            .position(|m| m.path.canonicalize().ok() == Some(project_canon.clone()))
+                        {
                             best = Some(WorkspaceContext::WorkspaceMember {
                                 workspace_root: dir.to_path_buf(),
                                 member_index: topo_idx,
@@ -179,12 +181,12 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
     let root_desc = descriptor::load(workspace_root)
         .with_context(|| format!("failed to load workspace at {}", workspace_root.display()))?;
 
-    let ws = root_desc
-        .workspace()
-        .ok_or_else(|| anyhow::anyhow!(
+    let ws = root_desc.workspace().ok_or_else(|| {
+        anyhow::anyhow!(
             "{} is not a workspace: its Curie.toml has no [workspace] section",
             workspace_root.display(),
-        ))?;
+        )
+    })?;
 
     let mut raw_members: Vec<Member> = Vec::new();
     let mut seen_canonical: HashSet<PathBuf> = HashSet::new();
@@ -221,20 +223,29 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
             let target_canon = target.canonicalize().with_context(|| {
                 format!(
                     "workspace-dep \"{}\" of \"{}\" points to {} which does not exist",
-                    label, m.declared, target.display(),
+                    label,
+                    m.declared,
+                    target.display(),
                 )
             })?;
-            let target_idx = canon.iter().position(|c| c == &target_canon).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "workspace-dep \"{}\" of \"{}\" → {} is not a workspace member; \
+            let target_idx = canon
+                .iter()
+                .position(|c| c == &target_canon)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "workspace-dep \"{}\" of \"{}\" → {} is not a workspace member; \
                      add it to [workspace.members] (or [workspace.foreign]) in {}",
-                    label, m.declared, target.display(), workspace_root.join("Curie.toml").display(),
-                )
-            })?;
+                        label,
+                        m.declared,
+                        target.display(),
+                        workspace_root.join("Curie.toml").display(),
+                    )
+                })?;
             if target_idx == i {
                 bail!(
                     "workspace-dep \"{}\" of \"{}\" points at itself",
-                    label, m.declared,
+                    label,
+                    m.declared,
                 );
             }
             edges[i].push(target_idx);
@@ -257,7 +268,9 @@ pub fn load(workspace_root: &Path) -> Result<Workspace> {
     let mut slots: Vec<Option<Member>> = raw_members.into_iter().map(Some).collect();
     let mut members: Vec<Member> = Vec::with_capacity(order.len());
     for &old_idx in &order {
-        let mut m = slots[old_idx].take().expect("each slot drained exactly once");
+        let mut m = slots[old_idx]
+            .take()
+            .expect("each slot drained exactly once");
         m.workspace_deps = edges[old_idx].iter().map(|&old| old_to_new[old]).collect();
         members.push(m);
     }
@@ -421,12 +434,10 @@ fn resolve_foreign_member(
         None => tool.default_build_command(path),
     };
 
-    let test_command = resolve_optional_command(&decl.test_command, || {
-        tool.default_test_command(path)
-    });
-    let clean_command = resolve_optional_command(&decl.clean_command, || {
-        tool.default_clean_command(path)
-    });
+    let test_command =
+        resolve_optional_command(&decl.test_command, || tool.default_test_command(path));
+    let clean_command =
+        resolve_optional_command(&decl.clean_command, || tool.default_clean_command(path));
 
     // Synthesise workspace_dependencies with *absolute* paths so that
     // `m.path.join(&dep.path)` in edge building re-anchors onto the dep
@@ -566,10 +577,7 @@ fn clone_git_member(
     cmd.arg(&effective_url);
     cmd.arg(&dest);
 
-    eprintln!(
-        "Cloning member \"{}\" from {} …",
-        dest_path, url,
-    );
+    eprintln!("Cloning member \"{}\" from {} …", dest_path, url,);
 
     let output = cmd
         .output()
@@ -622,7 +630,10 @@ fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
         member.test.coverage = ws.test.coverage;
     }
     inherit_vec_if_empty(&mut member.test.jvm_args, &ws.test.jvm_args);
-    inherit_vec_if_empty(&mut member.test.exclude_classname, &ws.test.exclude_classname);
+    inherit_vec_if_empty(
+        &mut member.test.exclude_classname,
+        &ws.test.exclude_classname,
+    );
     if member.kotlin.version.is_none() {
         member.kotlin.version = ws.kotlin.version.clone();
     }
@@ -649,7 +660,10 @@ fn inherit_from_workspace(member: &mut Descriptor, ws: &Descriptor) {
     }
     merge_btree(&mut member.inherited_bom_imports, &ws.bom_imports);
     merge_btree(&mut member.inherited_test_bom_imports, &ws.test_bom_imports);
-    merge_btree(&mut member.inherited_annotation_processors, &ws.annotation_processors);
+    merge_btree(
+        &mut member.inherited_annotation_processors,
+        &ws.annotation_processors,
+    );
     merge_btree(
         &mut member.inherited_test_annotation_processors,
         &ws.test_annotation_processors,
@@ -732,7 +746,10 @@ pub(crate) fn merge_nested_btree(
 /// Kahn's algorithm.  `edges[v]` is the set of nodes `v` depends on.
 /// Returns the build order (deps come first) or, on cycle, the indices of
 /// the nodes that couldn't be ordered.
-pub(crate) fn topo_sort(n: usize, edges: &[Vec<usize>]) -> std::result::Result<Vec<usize>, Vec<usize>> {
+pub(crate) fn topo_sort(
+    n: usize,
+    edges: &[Vec<usize>],
+) -> std::result::Result<Vec<usize>, Vec<usize>> {
     let mut out_degree: Vec<usize> = edges.iter().map(|e| e.len()).collect();
     let mut reverse: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (v, deps) in edges.iter().enumerate() {
@@ -821,8 +838,8 @@ fn build_list_tree(
         });
     }
 
-    let desc = descriptor::load(root)
-        .with_context(|| format!("failed to load {}", root.display()))?;
+    let desc =
+        descriptor::load(root).with_context(|| format!("failed to load {}", root.display()))?;
 
     if desc.is_workspace() {
         let ws = desc.workspace().unwrap();
@@ -867,10 +884,7 @@ fn build_list_tree(
             parent_ws_abs: parent_ws_abs.to_path_buf(),
             kind: ListKind::Project {
                 label: desc.kind_label().to_string(),
-                version: desc
-                    .project_version()
-                    .unwrap_or("?")
-                    .to_string(),
+                version: desc.project_version().unwrap_or("?").to_string(),
             },
             dep_targets,
             children: Vec::new(),
@@ -976,21 +990,15 @@ fn parent_ws_of(root: &ListNode, target_abs: &Path) -> Option<PathBuf> {
 pub fn compute_view(root: &ListNode, current: &Path, all: bool) -> ListView {
     let mut all_nodes = Vec::new();
     walk_nodes(root, &mut all_nodes);
-    let node_by_abs: HashMap<&PathBuf, &&ListNode> = all_nodes
-        .iter()
-        .map(|n| (&n.abs_path, n))
-        .collect();
+    let node_by_abs: HashMap<&PathBuf, &&ListNode> =
+        all_nodes.iter().map(|n| (&n.abs_path, n)).collect();
 
     let mut required_by: HashMap<PathBuf, Vec<String>> = HashMap::new();
     for n in &all_nodes {
         for dep_abs in &n.dep_targets {
-            let dep_parent = parent_ws_of(root, dep_abs)
-                .unwrap_or_else(|| root.abs_path.clone());
+            let dep_parent = parent_ws_of(root, dep_abs).unwrap_or_else(|| root.abs_path.clone());
             let rel = rel_from(&dep_parent, &n.abs_path);
-            required_by
-                .entry(dep_abs.clone())
-                .or_default()
-                .push(rel);
+            required_by.entry(dep_abs.clone()).or_default().push(rel);
         }
     }
     for v in required_by.values_mut() {
@@ -999,7 +1007,11 @@ pub fn compute_view(root: &ListNode, current: &Path, all: bool) -> ListView {
 
     if all {
         let kept = all_nodes.iter().map(|n| n.abs_path.clone()).collect();
-        return ListView { kept, required_by, current: current.to_path_buf() };
+        return ListView {
+            kept,
+            required_by,
+            current: current.to_path_buf(),
+        };
     }
 
     let mut kept: HashSet<PathBuf> = HashSet::new();
@@ -1034,7 +1046,11 @@ pub fn compute_view(root: &ListNode, current: &Path, all: bool) -> ListView {
 
     kept.insert(root.abs_path.clone());
 
-    ListView { kept, required_by, current: current.to_path_buf() }
+    ListView {
+        kept,
+        required_by,
+        current: current.to_path_buf(),
+    }
 }
 
 const DIM: &str = "\x1b[2m";
@@ -1042,17 +1058,23 @@ const BOLD_CYAN: &str = "\x1b[1;36m";
 const BOLD_YELLOW: &str = "\x1b[1;33m";
 const RESET: &str = "\x1b[0m";
 
-fn render_node(
-    node: &ListNode,
-    view: &ListView,
-    prefix: &str,
-    child_prefix: &str,
-    color: bool,
-) {
-    let pipe   = if color { format!("{DIM}│  {RESET}") } else { "│  ".to_string() };
-    let tee    = if color { format!("{DIM}├─ {RESET}") } else { "├─ ".to_string() };
-    let elbow  = if color { format!("{DIM}└─ {RESET}") } else { "└─ ".to_string() };
-    let gap    = "   ";
+fn render_node(node: &ListNode, view: &ListView, prefix: &str, child_prefix: &str, color: bool) {
+    let pipe = if color {
+        format!("{DIM}│  {RESET}")
+    } else {
+        "│  ".to_string()
+    };
+    let tee = if color {
+        format!("{DIM}├─ {RESET}")
+    } else {
+        "├─ ".to_string()
+    };
+    let elbow = if color {
+        format!("{DIM}└─ {RESET}")
+    } else {
+        "└─ ".to_string()
+    };
+    let gap = "   ";
 
     let label_line = match &node.kind {
         ListKind::Workspace => {
@@ -1317,10 +1339,7 @@ mod tests {
 
     #[test]
     fn workspace_deps_drive_topo_order() {
-        let dir = make_ws_with_deps(&[
-            ("app", &[("lib", "../lib")]),
-            ("lib", &[]),
-        ]);
+        let dir = make_ws_with_deps(&[("app", &[("lib", "../lib")]), ("lib", &[])]);
         let ws = load(dir.path()).unwrap();
         let names: Vec<&str> = ws.members.iter().map(|m| m.declared.as_str()).collect();
         assert_eq!(names, vec!["lib", "app"]);
@@ -1377,10 +1396,7 @@ mod tests {
 
     #[test]
     fn workspace_dep_cycle_is_rejected() {
-        let dir = make_ws_with_deps(&[
-            ("a", &[("b", "../b")]),
-            ("b", &[("a", "../a")]),
-        ]);
+        let dir = make_ws_with_deps(&[("a", &[("b", "../b")]), ("b", &[("a", "../a")])]);
         let err = load(dir.path()).unwrap_err().to_string();
         assert!(err.contains("cycle"), "got: {err}");
     }
@@ -1403,7 +1419,8 @@ mod tests {
         let ws = load_ws_with_content(
             "[workspace]\nmembers = [\"a\"]\n[java]\nreleaseVersion = \"17\"\n",
             &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(ws.members[0].descriptor.java.effective(), Some("17"));
     }
 
@@ -1411,8 +1428,12 @@ mod tests {
     fn java_member_value_overrides_workspace() {
         let ws = load_ws_with_content(
             "[workspace]\nmembers = [\"a\"]\n[java]\nreleaseVersion = \"17\"\n",
-            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n[java]\nreleaseVersion = \"21\"\n")],
-        ).unwrap();
+            &[(
+                "a",
+                "[library]\nname = \"a\"\nversion = \"0.1.0\"\n[java]\nreleaseVersion = \"21\"\n",
+            )],
+        )
+        .unwrap();
         assert_eq!(ws.members[0].descriptor.java.effective(), Some("21"));
     }
 
@@ -1421,7 +1442,8 @@ mod tests {
         let ws = load_ws_with_content(
             "[workspace]\nmembers = [\"a\"]\n",
             &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(ws.members[0].descriptor.java.effective(), None);
     }
 
@@ -1431,9 +1453,13 @@ mod tests {
             "[workspace]\nmembers = [\"a\"]\n\
              [bom-imports]\n\"org.x:bom\" = \"1.0\"\n",
             &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
-        ).unwrap();
+        )
+        .unwrap();
         let d = &ws.members[0].descriptor;
-        assert_eq!(d.inherited_bom_imports.get("org.x:bom").map(String::as_str), Some("1.0"));
+        assert_eq!(
+            d.inherited_bom_imports.get("org.x:bom").map(String::as_str),
+            Some("1.0")
+        );
         assert!(d.bom_imports.is_empty());
         let gavs = d.prod_bom_gavs().unwrap();
         assert_eq!(gavs.len(), 1);
@@ -1445,9 +1471,13 @@ mod tests {
         let ws = load_ws_with_content(
             "[workspace]\nmembers = [\"a\"]\n\
              [bom-imports]\n\"org.x:bom\" = \"1.0\"\n",
-            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
-                    [bom-imports]\n\"org.x:bom\" = \"2.0\"\n")],
-        ).unwrap();
+            &[(
+                "a",
+                "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                    [bom-imports]\n\"org.x:bom\" = \"2.0\"\n",
+            )],
+        )
+        .unwrap();
         let gavs = ws.members[0].descriptor.prod_bom_gavs().unwrap();
         assert_eq!(gavs.len(), 2);
         assert_eq!(gavs[0].to_string(), "org.x:bom:1.0", "inherited (ws) first");
@@ -1460,10 +1490,14 @@ mod tests {
             "[workspace]\nmembers = [\"a\"]\n\
              [bom-imports]\n\"ws:prod\" = \"1\"\n\
              [test-bom-imports]\n\"ws:test\" = \"1\"\n",
-            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
+            &[(
+                "a",
+                "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
                     [bom-imports]\n\"own:prod\" = \"1\"\n\
-                    [test-bom-imports]\n\"own:test\" = \"1\"\n")],
-        ).unwrap();
+                    [test-bom-imports]\n\"own:test\" = \"1\"\n",
+            )],
+        )
+        .unwrap();
         let gavs: Vec<String> = ws.members[0]
             .descriptor
             .test_bom_gavs()
@@ -1471,7 +1505,10 @@ mod tests {
             .iter()
             .map(|g| g.to_string())
             .collect();
-        assert_eq!(gavs, vec!["ws:prod:1", "own:prod:1", "ws:test:1", "own:test:1"]);
+        assert_eq!(
+            gavs,
+            vec!["ws:prod:1", "own:prod:1", "ws:test:1", "own:test:1"]
+        );
     }
 
     #[test]
@@ -1479,7 +1516,10 @@ mod tests {
         let dir = make_ws_with_deps(&[("a", &[])]);
         match discover(dir.path()).unwrap() {
             WorkspaceContext::WorkspaceRoot(p) => {
-                assert_eq!(p.canonicalize().unwrap(), dir.path().canonicalize().unwrap());
+                assert_eq!(
+                    p.canonicalize().unwrap(),
+                    dir.path().canonicalize().unwrap()
+                );
             }
             other => panic!("expected WorkspaceRoot, got {:?}", other),
         }
@@ -1490,7 +1530,10 @@ mod tests {
         let dir = make_ws_with_deps(&[("a", &[]), ("b", &[("a", "../a")])]);
         let b = dir.path().join("b");
         match discover(&b).unwrap() {
-            WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+            WorkspaceContext::WorkspaceMember {
+                workspace_root,
+                member_index,
+            } => {
                 assert_eq!(
                     workspace_root.canonicalize().unwrap(),
                     dir.path().canonicalize().unwrap(),
@@ -1511,7 +1554,10 @@ mod tests {
         .unwrap();
         match discover(dir.path()).unwrap() {
             WorkspaceContext::Standalone(p) => {
-                assert_eq!(p.canonicalize().unwrap(), dir.path().canonicalize().unwrap());
+                assert_eq!(
+                    p.canonicalize().unwrap(),
+                    dir.path().canonicalize().unwrap()
+                );
             }
             other => panic!("expected Standalone, got {:?}", other),
         }
@@ -1549,9 +1595,13 @@ mod tests {
         let ws = load_ws_with_content(
             "[workspace]\nmembers = [\"a\"]\n\
              [[repositories]]\nid = \"ws-repo\"\nurl = \"https://ws.example.com\"\n",
-            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
-                    [[repositories]]\nid = \"own-repo\"\nurl = \"https://own.example.com\"\n")],
-        ).unwrap();
+            &[(
+                "a",
+                "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                    [[repositories]]\nid = \"own-repo\"\nurl = \"https://own.example.com\"\n",
+            )],
+        )
+        .unwrap();
         let repos = &ws.members[0].descriptor.repositories;
         assert_eq!(repos.len(), 2);
         assert_eq!(repos[0].id, "ws-repo");
@@ -1578,9 +1628,13 @@ mod tests {
             "[workspace]\nmembers = [\"a\"]\n\
              [annotation-processors]\n\
              \"shared:proc\" = \"1.0\"\n",
-            &[("a", "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n\
-                    [annotation-processors]\n\"shared:proc\" = \"2.0\"\n")],
-        ).unwrap();
+            &[(
+                "a",
+                "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n\
+                    [annotation-processors]\n\"shared:proc\" = \"2.0\"\n",
+            )],
+        )
+        .unwrap();
         let pairs = ws.members[0].descriptor.ap_pairs();
         assert_eq!(pairs, vec![("shared:proc", "2.0")]);
     }
@@ -1591,15 +1645,22 @@ mod tests {
             "[workspace]\nmembers = [\"a\"]\n\
              [annotation-processor-options.dagger]\n\
              fastInit = \"disabled\"\nformatGeneratedSource = \"disabled\"\n",
-            &[("a", "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n\
-                    [annotation-processor-options.dagger]\nfastInit = \"enabled\"\n")],
-        ).unwrap();
+            &[(
+                "a",
+                "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n\
+                    [annotation-processor-options.dagger]\nfastInit = \"enabled\"\n",
+            )],
+        )
+        .unwrap();
         let flat = ws.members[0].descriptor.flat_ap_options();
         assert_eq!(
             flat,
             vec![
                 ("dagger.fastInit".to_string(), "enabled".to_string()),
-                ("dagger.formatGeneratedSource".to_string(), "disabled".to_string()),
+                (
+                    "dagger.formatGeneratedSource".to_string(),
+                    "disabled".to_string()
+                ),
             ],
         );
     }
@@ -1620,7 +1681,10 @@ mod tests {
         )
         .unwrap();
         let ws = crate::workspace::load(ws_path).unwrap();
-        assert!(ws.members[0].descriptor.spock.enabled(), "spock must inherit from workspace");
+        assert!(
+            ws.members[0].descriptor.spock.enabled(),
+            "spock must inherit from workspace"
+        );
         assert_eq!(ws.members[0].descriptor.spock.version(), "2.3-groovy-4.0");
     }
 
@@ -1694,12 +1758,22 @@ mod tests {
 
         // `m` declares its own `sync = false`, which must win over the
         // workspace default; `pinTransitive` is left absent and inherits.
-        let m = &ws.members.iter().find(|x| x.declared == "m").unwrap().descriptor;
+        let m = &ws
+            .members
+            .iter()
+            .find(|x| x.declared == "m")
+            .unwrap()
+            .descriptor;
         assert!(!m.maven.sync_enabled());
         assert!(m.maven.pin_transitive_enabled());
 
         // `silent` declares no [maven] section at all and inherits both.
-        let silent = &ws.members.iter().find(|x| x.declared == "silent").unwrap().descriptor;
+        let silent = &ws
+            .members
+            .iter()
+            .find(|x| x.declared == "silent")
+            .unwrap()
+            .descriptor;
         assert!(silent.maven.sync_enabled());
         assert!(silent.maven.pin_transitive_enabled());
     }
@@ -1713,42 +1787,51 @@ mod tests {
             "[workspace]\nmembers = [\"core-lib\", \"services\"]\n\
              [java]\nreleaseVersion = \"17\"\n\
              [bom-imports]\n\"ws:bom\" = \"1.0\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         std::fs::create_dir_all(r.join("core-lib")).unwrap();
         std::fs::write(
             r.join("core-lib").join("Curie.toml"),
             "[library]\nname = \"core-lib\"\nversion = \"0.1.0\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         std::fs::create_dir_all(r.join("services")).unwrap();
         std::fs::write(
             r.join("services").join("Curie.toml"),
             "[workspace]\nmembers = [\"mid-lib\", \"apps\"]\n\
              [test-bom-imports]\n\"ws:test-bom\" = \"2.0\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         std::fs::create_dir_all(r.join("services").join("mid-lib")).unwrap();
         std::fs::write(
             r.join("services").join("mid-lib").join("Curie.toml"),
             "[library]\nname = \"mid-lib\"\nversion = \"0.1.0\"\n\
              [workspace-dependencies]\ncore = { path = \"../../core-lib\" }\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         std::fs::create_dir_all(r.join("services").join("apps")).unwrap();
         std::fs::write(
             r.join("services").join("apps").join("Curie.toml"),
             "[workspace]\nmembers = [\"leaf-app\"]\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         std::fs::create_dir_all(r.join("services").join("apps").join("leaf-app")).unwrap();
         std::fs::write(
-            r.join("services").join("apps").join("leaf-app").join("Curie.toml"),
+            r.join("services")
+                .join("apps")
+                .join("leaf-app")
+                .join("Curie.toml"),
             "[application]\nname = \"leaf-app\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n\
              [workspace-dependencies]\n\
              mid = { path = \"../../mid-lib\" }\n\
              core = { path = \"../../../core-lib\" }\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         dir
     }
@@ -1759,7 +1842,10 @@ mod tests {
         let ws = load(dir.path()).unwrap();
         assert_eq!(ws.members.len(), 3, "core-lib, mid-lib, leaf-app");
         let names: Vec<&str> = ws.members.iter().map(|m| m.declared.as_str()).collect();
-        assert_eq!(names, vec!["core-lib", "services/mid-lib", "services/apps/leaf-app"]);
+        assert_eq!(
+            names,
+            vec!["core-lib", "services/mid-lib", "services/apps/leaf-app"]
+        );
     }
 
     #[test]
@@ -1767,20 +1853,34 @@ mod tests {
         let dir = make_nested_workspace();
         let ws = load(dir.path()).unwrap();
 
-        let leaf = ws.members.iter().find(|m| m.declared.contains("leaf-app")).unwrap();
+        let leaf = ws
+            .members
+            .iter()
+            .find(|m| m.declared.contains("leaf-app"))
+            .unwrap();
         assert_eq!(leaf.descriptor.java.effective(), Some("17"));
 
         assert_eq!(
-            leaf.descriptor.inherited_bom_imports.get("ws:bom").map(String::as_str),
+            leaf.descriptor
+                .inherited_bom_imports
+                .get("ws:bom")
+                .map(String::as_str),
             Some("1.0"),
         );
 
         assert_eq!(
-            leaf.descriptor.inherited_test_bom_imports.get("ws:test-bom").map(String::as_str),
+            leaf.descriptor
+                .inherited_test_bom_imports
+                .get("ws:test-bom")
+                .map(String::as_str),
             Some("2.0"),
         );
 
-        let mid = ws.members.iter().find(|m| m.declared.contains("mid-lib")).unwrap();
+        let mid = ws
+            .members
+            .iter()
+            .find(|m| m.declared.contains("mid-lib"))
+            .unwrap();
         assert_eq!(mid.descriptor.java.effective(), Some("17"));
     }
 
@@ -1789,11 +1889,19 @@ mod tests {
         let dir = make_nested_workspace();
         let ws = load(dir.path()).unwrap();
 
-        let leaf_idx = ws.members.iter().position(|m| m.declared.contains("leaf-app")).unwrap();
+        let leaf_idx = ws
+            .members
+            .iter()
+            .position(|m| m.declared.contains("leaf-app"))
+            .unwrap();
         let leaf = &ws.members[leaf_idx];
         assert_eq!(leaf.workspace_deps.len(), 2);
 
-        let mid_idx = ws.members.iter().position(|m| m.declared.contains("mid-lib")).unwrap();
+        let mid_idx = ws
+            .members
+            .iter()
+            .position(|m| m.declared.contains("mid-lib"))
+            .unwrap();
         let mid = &ws.members[mid_idx];
         assert_eq!(mid.workspace_deps.len(), 1);
     }
@@ -1806,17 +1914,20 @@ mod tests {
         std::fs::write(
             r.join("Curie.toml"),
             "[workspace]\nmembers = [\"shared\", \"inner\"]\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::create_dir_all(r.join("shared")).unwrap();
         std::fs::write(
             r.join("shared").join("Curie.toml"),
             "[library]\nname = \"shared\"\nversion = \"0.1.0\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::create_dir_all(r.join("inner")).unwrap();
         std::fs::write(
             r.join("inner").join("Curie.toml"),
             "[workspace]\nmembers = [\"../shared\"]\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let err = load(r).unwrap_err().to_string();
         assert!(err.contains("more than once"), "got: {err}");
@@ -1829,12 +1940,14 @@ mod tests {
         std::fs::write(
             r.join("Curie.toml"),
             "[workspace]\nmembers = [\"a\", \"a\"]\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::create_dir_all(r.join("a")).unwrap();
         std::fs::write(
             r.join("a").join("Curie.toml"),
             "[library]\nname = \"a\"\nversion = \"0.1.0\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let err = load(r).unwrap_err().to_string();
         assert!(err.contains("more than once"), "got: {err}");
@@ -1845,15 +1958,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let r = dir.path();
 
-        std::fs::write(
-            r.join("Curie.toml"),
-            "[workspace]\nmembers = [\"inner\"]\n",
-        ).unwrap();
+        std::fs::write(r.join("Curie.toml"), "[workspace]\nmembers = [\"inner\"]\n").unwrap();
         std::fs::create_dir_all(r.join("inner")).unwrap();
         std::fs::write(
             r.join("inner").join("Curie.toml"),
             "[workspace]\nmembers = [\"..\"]\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let err = load(r).unwrap_err().to_string();
         assert!(err.contains("more than once"), "got: {err}");
@@ -1863,15 +1974,13 @@ mod tests {
     fn nested_empty_inner_workspace_loads_ok() {
         let dir = tempfile::tempdir().unwrap();
         let r = dir.path();
-        std::fs::write(
-            r.join("Curie.toml"),
-            "[workspace]\nmembers = [\"inner\"]\n",
-        ).unwrap();
+        std::fs::write(r.join("Curie.toml"), "[workspace]\nmembers = [\"inner\"]\n").unwrap();
         std::fs::create_dir_all(r.join("inner")).unwrap();
         std::fs::write(
             r.join("inner").join("Curie.toml"),
             "[workspace]\nmembers = []\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let ws = load(r).unwrap();
         assert_eq!(ws.members.len(), 0);
@@ -1886,24 +1995,37 @@ mod tests {
             "[workspace]\nmembers = [\"inner\"]\n\
              [java]\nreleaseVersion = \"17\"\n\
              [bom-imports]\n\"outer:bom\" = \"1.0\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::create_dir_all(r.join("inner")).unwrap();
         std::fs::write(
             r.join("inner").join("Curie.toml"),
             "[workspace]\nmembers = [\"leaf\"]\n\
              [bom-imports]\n\"inner:bom\" = \"2.0\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::create_dir_all(r.join("inner").join("leaf")).unwrap();
         std::fs::write(
             r.join("inner").join("leaf").join("Curie.toml"),
             "[library]\nname = \"leaf\"\nversion = \"0.1.0\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let ws = load(r).unwrap();
         let leaf = &ws.members[0].descriptor;
         assert_eq!(leaf.java.effective(), Some("17"));
-        assert_eq!(leaf.inherited_bom_imports.get("outer:bom").map(String::as_str), Some("1.0"));
-        assert_eq!(leaf.inherited_bom_imports.get("inner:bom").map(String::as_str), Some("2.0"));
+        assert_eq!(
+            leaf.inherited_bom_imports
+                .get("outer:bom")
+                .map(String::as_str),
+            Some("1.0")
+        );
+        assert_eq!(
+            leaf.inherited_bom_imports
+                .get("inner:bom")
+                .map(String::as_str),
+            Some("2.0")
+        );
     }
 
     #[test]
@@ -1914,23 +2036,28 @@ mod tests {
             r.join("Curie.toml"),
             "[workspace]\nmembers = [\"inner\"]\n\
              [bom-imports]\n\"shared:bom\" = \"1.0\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::create_dir_all(r.join("inner")).unwrap();
         std::fs::write(
             r.join("inner").join("Curie.toml"),
             "[workspace]\nmembers = [\"leaf\"]\n\
              [bom-imports]\n\"shared:bom\" = \"2.0\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::create_dir_all(r.join("inner").join("leaf")).unwrap();
         std::fs::write(
             r.join("inner").join("leaf").join("Curie.toml"),
             "[library]\nname = \"leaf\"\nversion = \"0.1.0\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let ws = load(r).unwrap();
         let leaf = &ws.members[0].descriptor;
         assert_eq!(
-            leaf.inherited_bom_imports.get("shared:bom").map(String::as_str),
+            leaf.inherited_bom_imports
+                .get("shared:bom")
+                .map(String::as_str),
             Some("2.0"),
         );
     }
@@ -1943,23 +2070,30 @@ mod tests {
             r.join("Curie.toml"),
             "[workspace]\nmembers = [\"inner\"]\n\
              [[repositories]]\nid = \"outer-repo\"\nurl = \"https://outer.example.com\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::create_dir_all(r.join("inner")).unwrap();
         std::fs::write(
             r.join("inner").join("Curie.toml"),
             "[workspace]\nmembers = [\"leaf\"]\n\
              [[repositories]]\nid = \"inner-repo\"\nurl = \"https://inner.example.com\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::create_dir_all(r.join("inner").join("leaf")).unwrap();
         std::fs::write(
             r.join("inner").join("leaf").join("Curie.toml"),
             "[library]\nname = \"leaf\"\nversion = \"0.1.0\"\n\
              [[repositories]]\nid = \"leaf-repo\"\nurl = \"https://leaf.example.com\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let ws = load(r).unwrap();
-        let repos: Vec<&str> = ws.members[0].descriptor.repositories.iter()
-            .map(|r| r.id.as_str()).collect();
+        let repos: Vec<&str> = ws.members[0]
+            .descriptor
+            .repositories
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
         assert_eq!(repos, vec!["outer-repo", "inner-repo", "leaf-repo"]);
     }
 
@@ -1969,7 +2103,10 @@ mod tests {
         let leaf_path = dir.path().join("services").join("apps").join("leaf-app");
 
         match discover(&leaf_path).unwrap() {
-            WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+            WorkspaceContext::WorkspaceMember {
+                workspace_root,
+                member_index,
+            } => {
                 assert_eq!(
                     workspace_root.canonicalize().unwrap(),
                     dir.path().canonicalize().unwrap(),
@@ -1987,8 +2124,11 @@ mod tests {
         // the workspace should correctly order all 3 members.
         let dir = make_nested_workspace();
         let ws = load(dir.path()).unwrap();
-        let leaf_idx = ws.members.iter()
-            .position(|m| m.declared.contains("leaf-app")).unwrap();
+        let leaf_idx = ws
+            .members
+            .iter()
+            .position(|m| m.declared.contains("leaf-app"))
+            .unwrap();
         // leaf-app has 2 workspace_deps
         assert_eq!(ws.members[leaf_idx].workspace_deps.len(), 2);
     }
@@ -1999,7 +2139,10 @@ mod tests {
         let services = dir.path().join("services");
 
         match discover(&services).unwrap() {
-            WorkspaceContext::WorkspaceSubtree { workspace_root, member_indices } => {
+            WorkspaceContext::WorkspaceSubtree {
+                workspace_root,
+                member_indices,
+            } => {
                 assert_eq!(
                     workspace_root.canonicalize().unwrap(),
                     dir.path().canonicalize().unwrap(),
@@ -2025,20 +2168,19 @@ mod tests {
     fn discover_leaf_prefers_outermost_workspace() {
         let dir = tempfile::tempdir().unwrap();
         let r = dir.path();
-        std::fs::write(
-            r.join("Curie.toml"),
-            "[workspace]\nmembers = [\"inner\"]\n",
-        ).unwrap();
+        std::fs::write(r.join("Curie.toml"), "[workspace]\nmembers = [\"inner\"]\n").unwrap();
         std::fs::create_dir_all(r.join("inner")).unwrap();
         std::fs::write(
             r.join("inner").join("Curie.toml"),
             "[workspace]\nmembers = [\"leaf\"]\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::create_dir_all(r.join("inner").join("leaf")).unwrap();
         std::fs::write(
             r.join("inner").join("leaf").join("Curie.toml"),
             "[library]\nname = \"leaf\"\nversion = \"0.1.0\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         match discover(&r.join("inner").join("leaf")).unwrap() {
             WorkspaceContext::WorkspaceMember { workspace_root, .. } => {
@@ -2057,13 +2199,15 @@ mod tests {
         let ws = load_ws_with_content(
             "[workspace]\nmembers = [\"a\"]\n[java]\nenablePreview = true\n",
             &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
-        ).unwrap();
+        )
+        .unwrap();
         assert!(ws.members[0].descriptor.java.preview_enabled());
 
         let ws2 = load_ws_with_content(
             "[workspace]\nmembers = [\"a\"]\n",
             &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
-        ).unwrap();
+        )
+        .unwrap();
         assert!(!ws2.members[0].descriptor.java.preview_enabled());
     }
 
@@ -2071,9 +2215,13 @@ mod tests {
     fn enable_preview_member_opts_out_with_explicit_false() {
         let ws = load_ws_with_content(
             "[workspace]\nmembers = [\"a\"]\n[java]\nenablePreview = true\n",
-            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
-                    [java]\nenablePreview = false\n")],
-        ).unwrap();
+            &[(
+                "a",
+                "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                    [java]\nenablePreview = false\n",
+            )],
+        )
+        .unwrap();
         assert!(
             !ws.members[0].descriptor.java.preview_enabled(),
             "member enablePreview=false must override workspace true",
@@ -2121,21 +2269,45 @@ mod tests {
         let root = dir.path();
         let root_abs = root.canonicalize().unwrap();
         let core_abs = root.join("core-lib").canonicalize().unwrap();
-        let mid_abs = root.join("services").join("mid-lib").canonicalize().unwrap();
-        let leaf_abs = root.join("services").join("apps").join("leaf-app").canonicalize().unwrap();
+        let mid_abs = root
+            .join("services")
+            .join("mid-lib")
+            .canonicalize()
+            .unwrap();
+        let leaf_abs = root
+            .join("services")
+            .join("apps")
+            .join("leaf-app")
+            .canonicalize()
+            .unwrap();
         let tree = build_list_tree(root, &root_abs, "root", None).unwrap();
         let view = compute_view(&tree, &root_abs, false);
 
-        let core_reqs = view.required_by.get(&core_abs).expect("core-lib must have required_by");
-        let mid_rel  = rel_from(&root_abs, &mid_abs);
+        let core_reqs = view
+            .required_by
+            .get(&core_abs)
+            .expect("core-lib must have required_by");
+        let mid_rel = rel_from(&root_abs, &mid_abs);
         let leaf_rel = rel_from(&root_abs, &leaf_abs);
-        assert!(core_reqs.contains(&mid_rel),  "missing {mid_rel} in core-lib required_by: {core_reqs:?}");
-        assert!(core_reqs.contains(&leaf_rel), "missing {leaf_rel} in core-lib required_by: {core_reqs:?}");
+        assert!(
+            core_reqs.contains(&mid_rel),
+            "missing {mid_rel} in core-lib required_by: {core_reqs:?}"
+        );
+        assert!(
+            core_reqs.contains(&leaf_rel),
+            "missing {leaf_rel} in core-lib required_by: {core_reqs:?}"
+        );
 
         let services_abs = root.join("services").canonicalize().unwrap();
-        let mid_reqs = view.required_by.get(&mid_abs).expect("mid-lib must have required_by");
+        let mid_reqs = view
+            .required_by
+            .get(&mid_abs)
+            .expect("mid-lib must have required_by");
         let leaf_from_services = rel_from(&services_abs, &leaf_abs);
-        assert!(mid_reqs.contains(&leaf_from_services), "missing {leaf_from_services}: {mid_reqs:?}");
+        assert!(
+            mid_reqs.contains(&leaf_from_services),
+            "missing {leaf_from_services}: {mid_reqs:?}"
+        );
     }
 
     #[test]
@@ -2174,7 +2346,8 @@ mod tests {
         let ws = load_ws_with_content(
             "[workspace]\nmembers = [\"a\"]\n\n[test]\ncoverage = true\n",
             &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
-        ).unwrap();
+        )
+        .unwrap();
         assert!(
             ws.members[0].descriptor.test.coverage_enabled(),
             "member must inherit coverage=true from workspace",
@@ -2186,9 +2359,13 @@ mod tests {
     fn coverage_member_explicit_false_overrides_workspace_true() {
         let ws = load_ws_with_content(
             "[workspace]\nmembers = [\"a\"]\n\n[test]\ncoverage = true\n",
-            &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
-                    [test]\ncoverage = false\n")],
-        ).unwrap();
+            &[(
+                "a",
+                "[library]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                    [test]\ncoverage = false\n",
+            )],
+        )
+        .unwrap();
         assert!(
             !ws.members[0].descriptor.test.coverage_enabled(),
             "member coverage=false must override workspace coverage=true",
@@ -2201,7 +2378,8 @@ mod tests {
         let ws = load_ws_with_content(
             "[workspace]\nmembers = [\"a\"]\n",
             &[("a", "[library]\nname = \"a\"\nversion = \"0.1.0\"\n")],
-        ).unwrap();
+        )
+        .unwrap();
         assert!(
             !ws.members[0].descriptor.test.coverage_enabled(),
             "coverage must default to false when neither workspace nor member sets it",
@@ -2272,11 +2450,17 @@ mod tests {
             "[workspace]\nmembers = [\"a\"]\n\
              [[resources.filter]]\nengine = \"substitute\"\nincludes = [\"**/*.properties\"]\n\
              [resources.properties]\nshared = \"ws\"\n",
-            &[("a", "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n")],
+            &[(
+                "a",
+                "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n",
+            )],
         )
         .unwrap();
         let res = &ws.members[0].descriptor.resources;
-        assert!(res.is_active(), "inherited stages should activate the scope");
+        assert!(
+            res.is_active(),
+            "inherited stages should activate the scope"
+        );
         assert_eq!(res.filter.len(), 1);
         assert_eq!(res.filter[0].includes, vec!["**/*.properties"]);
         assert_eq!(res.properties.get("shared").map(String::as_str), Some("ws"));
@@ -2301,8 +2485,11 @@ mod tests {
         let ws = load_ws_with_content(
             "[workspace]\nmembers = [\"a\"]\n\
              [resources.properties]\nk = \"ws\"\nonly_ws = \"yes\"\n",
-            &[("a", "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n\
-                     [resources.properties]\nk = \"member\"\n")],
+            &[(
+                "a",
+                "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n\
+                     [resources.properties]\nk = \"member\"\n",
+            )],
         )
         .unwrap();
         let props = &ws.members[0].descriptor.resources.properties;
@@ -2315,7 +2502,10 @@ mod tests {
         let ws = load_ws_with_content(
             "[workspace]\nmembers = [\"a\"]\n\
              [resources]\ndirectories = [\"ws/dir\"]\n",
-            &[("a", "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n")],
+            &[(
+                "a",
+                "[application]\nname = \"a\"\nversion = \"0.1.0\"\nmainClass = \"X\"\n",
+            )],
         )
         .unwrap();
         // The member inherits no directories (layout is per-module).
@@ -2448,10 +2638,7 @@ mod tests {
         let ws = load(r).unwrap();
         assert_eq!(ws.members.len(), 1);
         assert_eq!(ws.members[0].declared, "remote-lib");
-        assert_eq!(
-            ws.members[0].descriptor.project_name(),
-            Some("remote-lib")
-        );
+        assert_eq!(ws.members[0].descriptor.project_name(), Some("remote-lib"));
         assert!(r.join("remote-lib").exists());
     }
 
@@ -2478,7 +2665,10 @@ mod tests {
 
         let ws = load(r).unwrap();
         assert_eq!(ws.members.len(), 1);
-        assert_eq!(ws.members[0].descriptor.project_name(), Some("branched-lib"));
+        assert_eq!(
+            ws.members[0].descriptor.project_name(),
+            Some("branched-lib")
+        );
     }
 
     #[test]
@@ -2512,7 +2702,10 @@ mod tests {
 
         let ws = load(r).unwrap();
         // Should use the pre-existing directory, NOT the cloned one.
-        assert_eq!(ws.members[0].descriptor.project_name(), Some("pre-existing"));
+        assert_eq!(
+            ws.members[0].descriptor.project_name(),
+            Some("pre-existing")
+        );
         assert_eq!(ws.members[0].descriptor.project_version(), Some("9.9.9"));
     }
 
@@ -2757,7 +2950,10 @@ missingMembers = "error"
         assert!(ws.members[0].branch().is_none());
 
         assert_eq!(ws.members[1].path(), "remote-a");
-        assert_eq!(ws.members[1].git_url(), Some("https://github.com/org/a.git"));
+        assert_eq!(
+            ws.members[1].git_url(),
+            Some("https://github.com/org/a.git")
+        );
         assert!(ws.members[1].branch().is_none());
 
         assert_eq!(ws.members[2].path(), "remote-b");
@@ -2869,7 +3065,10 @@ members = ["a"]
         .unwrap();
         std::fs::create_dir_all(root.join("empty")).unwrap();
         let err = load(root).unwrap_err().to_string();
-        assert!(err.contains("no Curie.toml") || err.contains("no foreign"), "got: {err}");
+        assert!(
+            err.contains("no Curie.toml") || err.contains("no foreign"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -2925,7 +3124,11 @@ members = ["a"]
         std::fs::create_dir_all(root.join("legacy-lib")).unwrap();
         std::fs::write(root.join("legacy-lib").join("Makefile"), "").unwrap();
         std::fs::create_dir_all(root.join("rust-tool")).unwrap();
-        std::fs::write(root.join("rust-tool").join("Cargo.toml"), "[package]\nname=\"t\"\nversion=\"0.1.0\"\nedition=\"2021\"\n").unwrap();
+        std::fs::write(
+            root.join("rust-tool").join("Cargo.toml"),
+            "[package]\nname=\"t\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+        )
+        .unwrap();
 
         let ws = load(root).unwrap();
         assert_eq!(ws.members[0].declared, "legacy-lib");
@@ -2996,7 +3199,11 @@ members = ["a"]
         write_lib(&root.join("app"), "app");
 
         let ws = load(root).unwrap();
-        let foreign = ws.members.iter().find(|m| m.declared == "legacy-lib").unwrap();
+        let foreign = ws
+            .members
+            .iter()
+            .find(|m| m.declared == "legacy-lib")
+            .unwrap();
         assert!(foreign.descriptor.is_foreign());
         // Foreign must not inherit maven.sync from the workspace root.
         assert!(foreign.descriptor.maven.sync.is_none());
@@ -3019,7 +3226,10 @@ members = ["a"]
 
         let ctx = discover(&legacy).unwrap();
         match ctx {
-            WorkspaceContext::WorkspaceMember { workspace_root, member_index } => {
+            WorkspaceContext::WorkspaceMember {
+                workspace_root,
+                member_index,
+            } => {
                 assert_eq!(
                     workspace_root.canonicalize().unwrap(),
                     root.canonicalize().unwrap()

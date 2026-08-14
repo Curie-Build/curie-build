@@ -22,8 +22,7 @@ use crate::api_search::{search_api, ArtifactHit};
 
 const SEARCH_LIMIT: usize = 50;
 const DEBOUNCE_MS: u64 = 400;
-const HEADER: &str =
-    "  curie add (API)    \u{2191}\u{2193} navigate    Enter select    Esc cancel";
+const HEADER: &str = "  curie add (API)    \u{2191}\u{2193} navigate    Enter select    Esc cancel";
 
 // ---------------------------------------------------------------------------
 // State
@@ -37,25 +36,25 @@ enum SearchStatus {
 }
 
 pub(crate) struct UiState {
-    pub(crate) query:        String,
-    pub(crate) results:      Vec<ArtifactHit>,
+    pub(crate) query: String,
+    pub(crate) results: Vec<ArtifactHit>,
     pub(crate) selected_idx: usize,
-    scroll_offset:           usize,
-    status:                  SearchStatus,
-    last_query_sent:         String,
-    last_keystroke:          Instant,
+    scroll_offset: usize,
+    status: SearchStatus,
+    last_query_sent: String,
+    last_keystroke: Instant,
 }
 
 impl UiState {
     fn new() -> Self {
         UiState {
-            query:           String::new(),
-            results:         Vec::new(),
-            selected_idx:    0,
-            scroll_offset:   0,
-            status:          SearchStatus::Idle,
+            query: String::new(),
+            results: Vec::new(),
+            selected_idx: 0,
+            scroll_offset: 0,
+            status: SearchStatus::Idle,
             last_query_sent: String::new(),
-            last_keystroke:  Instant::now(),
+            last_keystroke: Instant::now(),
         }
     }
 
@@ -113,8 +112,11 @@ pub(crate) fn run_ui_inner(
     initial_state: Option<UiState>,
 ) -> Result<(Option<String>, UiState)> {
     let mut state = match initial_state {
-        Some(mut s) => { s.reset_timing(); s }
-        None        => UiState::new(),
+        Some(mut s) => {
+            s.reset_timing();
+            s
+        }
+        None => UiState::new(),
     };
     let debounce = Duration::from_millis(DEBOUNCE_MS);
 
@@ -148,7 +150,12 @@ pub(crate) fn run_ui_inner(
 
         if crossterm::event::poll(timeout)? {
             match crossterm::event::read()? {
-                Event::Key(KeyEvent { code, modifiers, kind: KeyEventKind::Press, .. }) => {
+                Event::Key(KeyEvent {
+                    code,
+                    modifiers,
+                    kind: KeyEventKind::Press,
+                    ..
+                }) => {
                     if handle_key(&mut state, code, modifiers) {
                         // selection confirmed — return chosen coordinate
                         if !state.results.is_empty() {
@@ -156,7 +163,10 @@ pub(crate) fn run_ui_inner(
                             return Ok((Some(coord), state));
                         }
                     } else if matches!(code, KeyCode::Esc)
-                        || matches!((code, modifiers), (KeyCode::Char('c'), KeyModifiers::CONTROL))
+                        || matches!(
+                            (code, modifiers),
+                            (KeyCode::Char('c'), KeyModifiers::CONTROL)
+                        )
                     {
                         return Ok((None, state));
                     }
@@ -187,9 +197,7 @@ fn handle_key(state: &mut UiState, code: KeyCode, modifiers: KeyModifiers) -> bo
             state.last_keystroke = Instant::now();
         }
 
-        (KeyCode::Char(c), mods)
-            if mods == KeyModifiers::NONE || mods == KeyModifiers::SHIFT =>
-        {
+        (KeyCode::Char(c), mods) if mods == KeyModifiers::NONE || mods == KeyModifiers::SHIFT => {
             state.query.push(c);
             state.last_keystroke = Instant::now();
         }
@@ -241,7 +249,11 @@ fn redraw(stdout: &mut impl Write, state: &UiState) -> Result<()> {
     execute!(stdout, cursor::Hide)?;
 
     // Row 0: header
-    execute!(stdout, cursor::MoveTo(0, 0), terminal::Clear(ClearType::CurrentLine))?;
+    execute!(
+        stdout,
+        cursor::MoveTo(0, 0),
+        terminal::Clear(ClearType::CurrentLine)
+    )?;
     write!(stdout, "{}", truncate_str(HEADER, w))?;
 
     // Rows 1..result_rows: results
@@ -284,7 +296,11 @@ fn redraw(stdout: &mut impl Write, state: &UiState) -> Result<()> {
 
     // Row h-1: query prompt
     let query_row = h.saturating_sub(1) as u16;
-    execute!(stdout, cursor::MoveTo(0, query_row), terminal::Clear(ClearType::CurrentLine))?;
+    execute!(
+        stdout,
+        cursor::MoveTo(0, query_row),
+        terminal::Clear(ClearType::CurrentLine)
+    )?;
     let prompt = format!("> {}", state.query);
     write!(stdout, "{}", truncate_str(&prompt, w))?;
 
@@ -319,9 +335,9 @@ pub(crate) fn truncate_str(s: &str, max_chars: usize) -> String {
 
 fn format_status(status: &SearchStatus) -> String {
     match status {
-        SearchStatus::Idle       => "  type to search Maven Central".to_string(),
-        SearchStatus::Searching  => "  Searching\u{2026}".to_string(),
-        SearchStatus::Done(n)    => format!("  {} results", n),
+        SearchStatus::Idle => "  type to search Maven Central".to_string(),
+        SearchStatus::Searching => "  Searching\u{2026}".to_string(),
+        SearchStatus::Done(n) => format!("  {} results", n),
         SearchStatus::Error(msg) => format!("  API error: {}", msg),
     }
 }

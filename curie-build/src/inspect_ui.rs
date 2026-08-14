@@ -16,8 +16,7 @@ use crossterm::{
         DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
         KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
-    execute,
-    terminal,
+    execute, terminal,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -68,15 +67,19 @@ mod theme {
 #[derive(Clone)]
 pub(crate) struct LogTarget {
     pub declared: String,
-    pub path:     PathBuf,
+    pub path: PathBuf,
 }
 
 // ── Internal types ────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 enum LogState {
-    Ok     { duration_ms: u64 },
-    Failed { duration_ms: u64 },
+    Ok {
+        duration_ms: u64,
+    },
+    Failed {
+        duration_ms: u64,
+    },
     /// `.log` exists but no `.meta` sidecar — metadata unavailable.
     NoMetadata,
     /// No `.log` or `.meta`.
@@ -84,37 +87,41 @@ enum LogState {
 }
 
 struct Job {
-    declared:     String,
-    state:        LogState,
+    declared: String,
+    state: LogState,
     /// `None` when no `.meta` is present.
-    started_ms:   Option<u64>,
+    started_ms: Option<u64>,
     /// `"HH:MM:SS"` in local timezone, or `""` when unknown.
     started_disp: String,
-    lines:        Vec<String>,
+    lines: Vec<String>,
     /// UUIDv7 shared by all jobs in one build run; `None` when no `.meta`.
-    build_id:  Option<String>,
+    build_id: Option<String>,
     /// Per-test results from `target/build.tests.json`; empty when absent.
-    tests:     Vec<TestEntry>,
+    tests: Vec<TestEntry>,
     /// Coverage from `target/coverage/`; `None` when absent.
-    coverage:  Option<MemberCoverage>,
+    coverage: Option<MemberCoverage>,
     /// Declared dependencies from `Curie.toml` (with workspace inheritance).
-    deps:      Option<MemberDepsView>,
+    deps: Option<MemberDepsView>,
 }
 
 #[derive(Clone)]
 struct TestEntry {
-    name:        String,
+    name: String,
     #[allow(dead_code)]
-    class_name:  String,
+    class_name: String,
     duration_ms: u64,
-    status:      TestStatus,
-    failure:     Option<String>,
+    status: TestStatus,
+    failure: Option<String>,
     /// Absolute path to the per-test output `.txt` file, or `None`.
     output_file: Option<PathBuf>,
 }
 
 #[derive(Clone, PartialEq)]
-enum TestStatus { Passed, Failed, Skipped }
+enum TestStatus {
+    Passed,
+    Failed,
+    Skipped,
+}
 
 /// The active filter applied to the merged log.
 #[derive(Clone)]
@@ -126,21 +133,21 @@ enum Filter {
 
 struct TreeNode {
     /// Indented display text shown in the members pane.
-    label:      String,
+    label: String,
     /// Used as the log block title when this node is selected.
-    title:      String,
-    filter:     Filter,
+    title: String,
+    filter: Filter,
     /// `None` for the root "all jobs" row and for container rows.
-    state:      Option<LogState>,
+    state: Option<LogState>,
     selectable: bool,
     /// `Some((job_idx, test_idx))` for test method leaf nodes.
-    test_ref:   Option<(usize, usize)>,
+    test_ref: Option<(usize, usize)>,
     /// `Some((badge_text, status))` — drives right-aligned coloured badge for test nodes.
     test_badge: Option<(String, TestStatus)>,
     /// `Some((job_idx, class_name))` for class group nodes.
-    class_ref:  Option<(usize, String)>,
+    class_ref: Option<(usize, String)>,
     /// Index into `jobs` for every node that belongs to a specific job (leaf or child).
-    job_idx:    Option<usize>,
+    job_idx: Option<usize>,
     /// Compact coverage badge (`"87.3% / 74.1%"`) for job / source nodes; `None` when absent.
     coverage_badge: Option<String>,
     /// `Some(job_idx)` for the "Coverage" group under a job.
@@ -152,21 +159,40 @@ struct TreeNode {
 }
 
 enum Row {
-    Header { job: usize },
+    Header {
+        job: usize,
+    },
     /// `line` is an index into `jobs[job].lines`.
-    Body   { job: usize, line: usize },
+    Body {
+        job: usize,
+        line: usize,
+    },
     /// A coloured annotation line at the top of a test's log view.
-    TestAnnotation { text: String, color: Color },
+    TestAnnotation {
+        text: String,
+        color: Color,
+    },
     /// `line` is an index into `InspectState::test_lines`.
-    TestBody       { line: usize },
+    TestBody {
+        line: usize,
+    },
     /// Coverage summary or uncovered-class line shown above a job's log.
-    CoverageLine   { text: String, color: Color },
+    CoverageLine {
+        text: String,
+        color: Color,
+    },
     /// Annotated source line (coverage drill-down).
-    SourceBody     { line: usize },
+    SourceBody {
+        line: usize,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone)]
-enum ActivePane { Members, Log, Search }
+enum ActivePane {
+    Members,
+    Log,
+    Search,
+}
 
 /// Top-level view: what the members tree and detail pane present.
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -243,112 +269,106 @@ enum InputMode {
 
 struct InspectState {
     /// Stored for `reload`.
-    targets:      Vec<LogTarget>,
+    targets: Vec<LogTarget>,
     /// Workspace or standalone project root (descriptor loading).
-    ws_root:      PathBuf,
-    action:       String,
-    jobs:         Vec<Job>,
-    nodes:        Vec<TreeNode>,
+    ws_root: PathBuf,
+    action: String,
+    jobs: Vec<Job>,
+    nodes: Vec<TreeNode>,
     selected_idx: usize,
-    tree_scroll:  usize,
-    rows:         Vec<Row>,
-    scroll:       usize,
+    tree_scroll: usize,
+    rows: Vec<Row>,
+    scroll: usize,
     show_members: bool,
-    active_pane:  ActivePane,
+    active_pane: ActivePane,
     /// Logs / Tests / Coverage / Deps.
-    mode:         ViewMode,
-    filter:       Filter,
-    log_title:    String,
+    mode: ViewMode,
+    filter: Filter,
+    log_title: String,
     /// Terminal height minus chrome rows; kept in sync from the event loop.
-    pane_h:       u16,
+    pane_h: u16,
     /// Visible log height (inner block rows); updated each frame for scroll clamping.
-    log_vis_h:    usize,
-    utc_offset:   time::UtcOffset,
-    input_mode:   InputMode,
+    log_vis_h: usize,
+    utc_offset: time::UtcOffset,
+    input_mode: InputMode,
     /// Current log-content grep pattern.
-    grep:         String,
+    grep: String,
     /// Current job-name search pattern.
-    job_search:   String,
+    job_search: String,
     /// Job indices that have been expanded (tests, sources, or dep scopes).
     expanded_jobs: HashSet<usize>,
     /// `(job_idx, class_name)` pairs that have been expanded to show test method rows.
     expanded_classes: HashSet<(usize, String)>,
     /// Descriptors keyed by member `declared` path (workspace inheritance applied).
-    descriptors:       HashMap<String, descriptor::Descriptor>,
+    descriptors: HashMap<String, descriptor::Descriptor>,
     /// Cached resolved tree lines for `(job_idx, tests)` — compile (`false`) / test (`true`).
-    resolved_deps:     HashMap<(usize, bool), Result<Vec<String>, String>>,
+    resolved_deps: HashMap<(usize, bool), Result<Vec<String>, String>>,
     /// Lines from the currently selected test's output file (empty when not in test view).
-    test_lines:        Vec<String>,
+    test_lines: Vec<String>,
     /// Annotated source lines when a coverage source file is selected.
-    source_lines:      Vec<SourceLine>,
+    source_lines: Vec<SourceLine>,
     /// Pane to return to when the search bar is dismissed with Enter or Esc.
-    pre_search_pane:   ActivePane,
+    pre_search_pane: ActivePane,
     /// Job indices whose log lines contain the current grep pattern (empty when grep inactive).
-    grep_job_matches:  HashSet<usize>,
+    grep_job_matches: HashSet<usize>,
     /// Job indices whose build_id is older than the latest build_id seen across all jobs.
-    stale_jobs:        HashSet<usize>,
+    stale_jobs: HashSet<usize>,
     /// Horizontal character offset for the log pane (scrolled with Left/Right).
-    h_scroll:          usize,
+    h_scroll: usize,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────
 
 pub(crate) fn run_inspect_ui(
-    ws_root:   &std::path::Path,
-    targets:   &[LogTarget],
-    action:    &str,
+    ws_root: &std::path::Path,
+    targets: &[LogTarget],
+    action: &str,
     preselect: Option<usize>,
 ) -> Result<()> {
     // Query local offset before spawning threads or entering raw mode.
-    let utc_offset = time::UtcOffset::current_local_offset()
-        .unwrap_or(time::UtcOffset::UTC);
+    let utc_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
 
     let descriptors = load_descriptors(ws_root, targets);
-    let jobs   = load_jobs(targets, action, utc_offset, &descriptors);
-    let stale_jobs   = collect_stale_jobs(&jobs);
-    let expanded_jobs:    HashSet<usize>           = HashSet::new();
+    let jobs = load_jobs(targets, action, utc_offset, &descriptors);
+    let stale_jobs = collect_stale_jobs(&jobs);
+    let expanded_jobs: HashSet<usize> = HashSet::new();
     let expanded_classes: HashSet<(usize, String)> = HashSet::new();
-    let mode   = ViewMode::Logs;
-    let nodes  = build_tree_nodes(
-        &jobs,
-        mode,
-        &expanded_jobs,
-        &expanded_classes,
-    );
+    let mode = ViewMode::Logs;
+    let nodes = build_tree_nodes(&jobs, mode, &expanded_jobs, &expanded_classes);
     let filter = Filter::All;
-    let rows   = build_rows(&jobs, &filter, "", "");
+    let rows = build_rows(&jobs, &filter, "", "");
 
     let mut state = InspectState {
-        targets:      targets.to_vec(),
-        ws_root:      ws_root.to_path_buf(),
-        action:       action.to_string(),
+        targets: targets.to_vec(),
+        ws_root: ws_root.to_path_buf(),
+        action: action.to_string(),
         jobs,
         nodes,
-        selected_idx:    0,
-        tree_scroll:     0,
+        selected_idx: 0,
+        tree_scroll: 0,
         rows,
-        scroll:          0,
-        show_members:    true,
-        active_pane:     ActivePane::Members,
+        scroll: 0,
+        show_members: true,
+        active_pane: ActivePane::Members,
         mode,
         filter,
-        log_title:       "all jobs".to_string(),
-        pane_h:          24,
-        log_vis_h:       20,
+        log_title: "all jobs".to_string(),
+        pane_h: 24,
+        log_vis_h: 20,
         utc_offset,
-        input_mode:      InputMode::Normal,
-        grep:            String::new(),
-        job_search:      String::new(),
+        input_mode: InputMode::Normal,
+        grep: String::new(),
+        job_search: String::new(),
         expanded_jobs,
         expanded_classes,
         descriptors,
-        resolved_deps:    HashMap::new(),
-        test_lines:       Vec::new(),
-        source_lines:     Vec::new(),
-        pre_search_pane:  ActivePane::Members,
+        resolved_deps: HashMap::new(),
+        test_lines: Vec::new(),
+        source_lines: Vec::new(),
+        pre_search_pane: ActivePane::Members,
         grep_job_matches: HashSet::new(),
         stale_jobs,
-        h_scroll:         0,
+        h_scroll: 0,
     };
 
     // Auto-focus first failure (switches to Tests when a failing test exists).
@@ -425,57 +445,81 @@ fn load_jobs(
     utc_offset: time::UtcOffset,
     descriptors: &HashMap<String, descriptor::Descriptor>,
 ) -> Vec<Job> {
-    targets.iter().map(|t| {
-        let log_path  = t.path.join("target").join(format!("{action}.log"));
-        let meta_path = t.path.join("target").join(format!("{action}.meta"));
-        let meta      = parse_meta(&meta_path);
+    targets
+        .iter()
+        .map(|t| {
+            let log_path = t.path.join("target").join(format!("{action}.log"));
+            let meta_path = t.path.join("target").join(format!("{action}.meta"));
+            let meta = parse_meta(&meta_path);
 
-        let state = match (meta.as_ref(), log_path.exists()) {
-            (Some(m), _) if m.exit_code == 0 => LogState::Ok     { duration_ms: m.duration_ms },
-            (Some(m), _)                     => LogState::Failed  { duration_ms: m.duration_ms },
-            (None,    true)                  => LogState::NoMetadata,
-            (None,    false)                 => LogState::NoLog,
-        };
+            let state = match (meta.as_ref(), log_path.exists()) {
+                (Some(m), _) if m.exit_code == 0 => LogState::Ok {
+                    duration_ms: m.duration_ms,
+                },
+                (Some(m), _) => LogState::Failed {
+                    duration_ms: m.duration_ms,
+                },
+                (None, true) => LogState::NoMetadata,
+                (None, false) => LogState::NoLog,
+            };
 
-        let (started_ms, started_disp) = meta.as_ref()
-            .map(|m| (Some(m.started_ms), format_hms_local(m.started_ms, utc_offset)))
-            .unwrap_or((None, String::new()));
+            let (started_ms, started_disp) = meta
+                .as_ref()
+                .map(|m| {
+                    (
+                        Some(m.started_ms),
+                        format_hms_local(m.started_ms, utc_offset),
+                    )
+                })
+                .unwrap_or((None, String::new()));
 
-        let build_id = meta.as_ref().map(|m| m.build_id.clone());
-        let lines    = if log_path.exists() { load_log(&log_path) } else { Vec::new() };
-        let tests    = parse_test_sidecar(&t.path);
-        let coverage = try_load_member_coverage(&t.path);
-        let deps = descriptors
-            .get(&t.declared)
-            .map(MemberDepsView::from_descriptor);
+            let build_id = meta.as_ref().map(|m| m.build_id.clone());
+            let lines = if log_path.exists() {
+                load_log(&log_path)
+            } else {
+                Vec::new()
+            };
+            let tests = parse_test_sidecar(&t.path);
+            let coverage = try_load_member_coverage(&t.path);
+            let deps = descriptors
+                .get(&t.declared)
+                .map(MemberDepsView::from_descriptor);
 
-        Job {
-            declared: t.declared.clone(),
-            state,
-            started_ms,
-            started_disp,
-            lines,
-            build_id,
-            tests,
-            coverage,
-            deps,
-        }
-    }).collect()
+            Job {
+                declared: t.declared.clone(),
+                state,
+                started_ms,
+                started_disp,
+                lines,
+                build_id,
+                tests,
+                coverage,
+                deps,
+            }
+        })
+        .collect()
 }
 
 /// Return the set of job indices whose build_id is older than the latest seen.
 /// When all jobs share the same id (or have none), the set is empty.
 fn collect_stale_jobs(jobs: &[Job]) -> HashSet<usize> {
-    let latest = jobs.iter()
+    let latest = jobs
+        .iter()
         .filter_map(|j| j.build_id.as_deref())
         .max()
         .map(str::to_string);
-    let Some(latest_id) = latest else { return HashSet::new(); };
-    let has_mixed = jobs.iter()
+    let Some(latest_id) = latest else {
+        return HashSet::new();
+    };
+    let has_mixed = jobs
+        .iter()
         .filter_map(|j| j.build_id.as_deref())
         .any(|id| id != latest_id);
-    if !has_mixed { return HashSet::new(); }
-    jobs.iter().enumerate()
+    if !has_mixed {
+        return HashSet::new();
+    }
+    jobs.iter()
+        .enumerate()
         .filter(|(_, j)| j.build_id.as_deref().is_some_and(|id| id != latest_id))
         .map(|(i, _)| i)
         .collect()
@@ -484,11 +528,11 @@ fn collect_stale_jobs(jobs: &[Job]) -> HashSet<usize> {
 fn parse_test_sidecar(member_root: &std::path::Path) -> Vec<TestEntry> {
     let path = member_root.join("target").join("build.tests.json");
     let content = match std::fs::read_to_string(&path) {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(_) => return Vec::new(),
     };
     let raw: Vec<serde_json::Value> = match serde_json::from_str(&content) {
-        Ok(v)  => v,
+        Ok(v) => v,
         Err(_) => return Vec::new(),
     };
     raw.into_iter()
@@ -497,24 +541,32 @@ fn parse_test_sidecar(member_root: &std::path::Path) -> Vec<TestEntry> {
 }
 
 fn parse_test_entry(v: serde_json::Value, member_root: &std::path::Path) -> Option<TestEntry> {
-    let name        = v["name"].as_str()?.to_string();
-    let class_name  = v["class_name"].as_str().unwrap_or("").to_string();
+    let name = v["name"].as_str()?.to_string();
+    let class_name = v["class_name"].as_str().unwrap_or("").to_string();
     let duration_ms = v["duration_ms"].as_u64().unwrap_or(0);
     let status = match v["status"].as_str().unwrap_or("") {
-        "failed"  => TestStatus::Failed,
+        "failed" => TestStatus::Failed,
         "skipped" => TestStatus::Skipped,
-        _         => TestStatus::Passed,
+        _ => TestStatus::Passed,
     };
     let failure = v["failure"].as_str().map(str::to_string);
     // output_file in JSON is relative to target/, e.g. "test-output/com/..."
-    let output_file = v["output_file"].as_str()
+    let output_file = v["output_file"]
+        .as_str()
         .map(|p| member_root.join("target").join(p));
-    Some(TestEntry { name, class_name, duration_ms, status, failure, output_file })
+    Some(TestEntry {
+        name,
+        class_name,
+        duration_ms,
+        status,
+        failure,
+        output_file,
+    })
 }
 
 fn load_log(path: &std::path::Path) -> Vec<String> {
     let content = match std::fs::read_to_string(path) {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(_) => return Vec::new(),
     };
     let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
@@ -527,9 +579,9 @@ fn load_log(path: &std::path::Path) -> Vec<String> {
 // ── Tree construction ─────────────────────────────────────────────────────
 
 fn build_tree_nodes(
-    jobs:             &[Job],
-    mode:             ViewMode,
-    expanded_jobs:    &HashSet<usize>,
+    jobs: &[Job],
+    mode: ViewMode,
+    expanded_jobs: &HashSet<usize>,
     expanded_classes: &HashSet<(usize, String)>,
 ) -> Vec<TreeNode> {
     let root_label = match mode {
@@ -551,14 +603,18 @@ fn build_tree_nodes(
         let common = {
             let mut n = 0;
             for (a, b) in dirs.iter().zip(current_dirs.iter()) {
-                if *a == b.as_str() { n += 1; } else { break; }
+                if *a == b.as_str() {
+                    n += 1;
+                } else {
+                    break;
+                }
             }
             n
         };
 
         for depth in common..dirs.len() {
             let path_here = dirs[..=depth].join("/");
-            let indent    = "  ".repeat(depth + 1);
+            let indent = "  ".repeat(depth + 1);
             nodes.push(tree_node_plain(
                 &format!("{indent}{}/", dirs[depth]),
                 &format!("{path_here}/"),
@@ -566,7 +622,7 @@ fn build_tree_nodes(
             ));
         }
 
-        let depth  = dirs.len();
+        let depth = dirs.len();
         let indent = "  ".repeat(depth + 1);
         push_job_nodes(
             &mut nodes,
@@ -587,18 +643,20 @@ fn build_tree_nodes(
 }
 
 fn push_job_nodes(
-    nodes:            &mut Vec<TreeNode>,
-    job:              &Job,
-    job_idx:          usize,
-    name:             &str,
-    depth:            usize,
-    indent:           &str,
-    mode:             ViewMode,
-    expanded_jobs:    &HashSet<usize>,
+    nodes: &mut Vec<TreeNode>,
+    job: &Job,
+    job_idx: usize,
+    name: &str,
+    depth: usize,
+    indent: &str,
+    mode: ViewMode,
+    expanded_jobs: &HashSet<usize>,
     expanded_classes: &HashSet<(usize, String)>,
 ) {
     let has_tests = !job.tests.is_empty();
-    let has_coverage = job.coverage.as_ref()
+    let has_coverage = job
+        .coverage
+        .as_ref()
         .is_some_and(|c| !c.sources.is_empty() || !c.report.classes.is_empty());
 
     // Deps mode never expands past the project — compile/test trees live in the detail pane.
@@ -607,7 +665,11 @@ fn push_job_nodes(
         ViewMode::Tests => (
             has_tests,
             None,
-            if has_tests { Some(test_summary_badge(&job.tests)) } else { None },
+            if has_tests {
+                Some(test_summary_badge(&job.tests))
+            } else {
+                None
+            },
             None,
         ),
         ViewMode::Coverage => (
@@ -630,7 +692,11 @@ fn push_job_nodes(
     };
 
     let expand_marker = if expandable {
-        if expanded_jobs.contains(&job_idx) { " ▾" } else { " ▸" }
+        if expanded_jobs.contains(&job_idx) {
+            " ▾"
+        } else {
+            " ▸"
+        }
     } else {
         ""
     };
@@ -661,17 +727,17 @@ fn push_job_nodes(
     };
 
     nodes.push(TreeNode {
-        label:      format!("{indent}{name}{expand_marker}"),
-        title:      job.declared.clone(),
-        filter:     Filter::Prefix(job.declared.clone()),
+        label: format!("{indent}{name}{expand_marker}"),
+        title: job.declared.clone(),
+        filter: Filter::Prefix(job.declared.clone()),
         state,
         selectable: true,
-        test_ref:   None,
+        test_ref: None,
         test_badge: job_test_badge,
-        class_ref:  None,
-        job_idx:    Some(job_idx),
+        class_ref: None,
+        job_idx: Some(job_idx),
         coverage_badge: job_cov_badge,
-        coverage_group_ref:  None,
+        coverage_group_ref: None,
         coverage_source_ref: None,
         deps_badge,
     });
@@ -681,27 +747,27 @@ fn push_job_nodes(
     }
 
     let child_indent = "  ".repeat(depth + 2);
-    let leaf_indent  = "  ".repeat(depth + 3);
+    let leaf_indent = "  ".repeat(depth + 3);
 
     match mode {
         ViewMode::Logs | ViewMode::Deps => {}
         ViewMode::Tests => {
             for (class_name, tests_in_class) in group_by_class(&job.tests) {
                 let class_expanded = expanded_classes.contains(&(job_idx, class_name.clone()));
-                let class_marker   = if class_expanded { " ▾" } else { " ▸" };
+                let class_marker = if class_expanded { " ▾" } else { " ▸" };
                 let short_class = class_name.rsplit('.').next().unwrap_or(&class_name);
                 nodes.push(TreeNode {
-                    label:      format!("{child_indent}{short_class}{class_marker}"),
-                    title:      format!("{} › {}", job.declared, class_name),
-                    filter:     Filter::Prefix(job.declared.clone()),
-                    state:      None,
+                    label: format!("{child_indent}{short_class}{class_marker}"),
+                    title: format!("{} › {}", job.declared, class_name),
+                    filter: Filter::Prefix(job.declared.clone()),
+                    state: None,
                     selectable: true,
-                    test_ref:   None,
+                    test_ref: None,
                     test_badge: None,
-                    class_ref:  Some((job_idx, class_name.clone())),
-                    job_idx:    Some(job_idx),
+                    class_ref: Some((job_idx, class_name.clone())),
+                    job_idx: Some(job_idx),
                     coverage_badge: None,
-                    coverage_group_ref:  None,
+                    coverage_group_ref: None,
                     coverage_source_ref: None,
                     deps_badge: None,
                 });
@@ -711,17 +777,17 @@ fn push_job_nodes(
                         let test = &job.tests[test_idx];
                         let badge = test_badge(&test.status, test.duration_ms);
                         nodes.push(TreeNode {
-                            label:      format!("{leaf_indent}{}", test.name),
-                            title:      format!("{} › {} › {}", job.declared, class_name, test.name),
-                            filter:     Filter::Prefix(job.declared.clone()),
-                            state:      None,
+                            label: format!("{leaf_indent}{}", test.name),
+                            title: format!("{} › {} › {}", job.declared, class_name, test.name),
+                            filter: Filter::Prefix(job.declared.clone()),
+                            state: None,
                             selectable: true,
-                            test_ref:   Some((job_idx, test_idx)),
+                            test_ref: Some((job_idx, test_idx)),
                             test_badge: Some((badge, test.status.clone())),
-                            class_ref:  None,
-                            job_idx:    Some(job_idx),
+                            class_ref: None,
+                            job_idx: Some(job_idx),
                             coverage_badge: None,
-                            coverage_group_ref:  None,
+                            coverage_group_ref: None,
                             coverage_source_ref: None,
                             deps_badge: None,
                         });
@@ -760,9 +826,18 @@ fn push_job_nodes(
 }
 
 fn test_summary_badge(tests: &[TestEntry]) -> String {
-    let passed  = tests.iter().filter(|t| t.status == TestStatus::Passed).count();
-    let failed  = tests.iter().filter(|t| t.status == TestStatus::Failed).count();
-    let skipped = tests.iter().filter(|t| t.status == TestStatus::Skipped).count();
+    let passed = tests
+        .iter()
+        .filter(|t| t.status == TestStatus::Passed)
+        .count();
+    let failed = tests
+        .iter()
+        .filter(|t| t.status == TestStatus::Failed)
+        .count();
+    let skipped = tests
+        .iter()
+        .filter(|t| t.status == TestStatus::Skipped)
+        .count();
     if failed > 0 {
         format!("{passed}✓ {failed}✗")
     } else if skipped > 0 {
@@ -785,17 +860,17 @@ fn coverage_source_node(
     badge: String,
 ) -> TreeNode {
     TreeNode {
-        label:      format!("{indent}{name}"),
-        title:      format!("{} › {}", job.declared, name),
-        filter:     Filter::Prefix(job.declared.clone()),
-        state:      None,
+        label: format!("{indent}{name}"),
+        title: format!("{} › {}", job.declared, name),
+        filter: Filter::Prefix(job.declared.clone()),
+        state: None,
         selectable: true,
-        test_ref:   None,
+        test_ref: None,
         test_badge: None,
-        class_ref:  None,
-        job_idx:    Some(job_idx),
+        class_ref: None,
+        job_idx: Some(job_idx),
         coverage_badge: Some(badge),
-        coverage_group_ref:  None,
+        coverage_group_ref: None,
         coverage_source_ref: Some((job_idx, src_idx)),
         deps_badge: None,
     }
@@ -806,26 +881,38 @@ fn group_by_class(tests: &[TestEntry]) -> Vec<(String, Vec<usize>)> {
     let mut order: Vec<String> = Vec::new();
     let mut map: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
     for (i, t) in tests.iter().enumerate() {
-        let key = if t.class_name.is_empty() { "(unknown)".to_string() } else { t.class_name.clone() };
-        if !map.contains_key(&key) { order.push(key.clone()); }
+        let key = if t.class_name.is_empty() {
+            "(unknown)".to_string()
+        } else {
+            t.class_name.clone()
+        };
+        if !map.contains_key(&key) {
+            order.push(key.clone());
+        }
         map.entry(key).or_default().push(i);
     }
-    order.into_iter().map(|k| { let v = map.remove(&k).unwrap(); (k, v) }).collect()
+    order
+        .into_iter()
+        .map(|k| {
+            let v = map.remove(&k).unwrap();
+            (k, v)
+        })
+        .collect()
 }
 
 fn tree_node_plain(label: &str, title: &str, filter: Filter) -> TreeNode {
     TreeNode {
-        label:      label.to_string(),
-        title:      title.to_string(),
+        label: label.to_string(),
+        title: title.to_string(),
         filter,
-        state:      None,
+        state: None,
         selectable: true,
-        test_ref:   None,
+        test_ref: None,
         test_badge: None,
-        class_ref:  None,
-        job_idx:    None,
+        class_ref: None,
+        job_idx: None,
         coverage_badge: None,
-        coverage_group_ref:  None,
+        coverage_group_ref: None,
         coverage_source_ref: None,
         deps_badge: None,
     }
@@ -833,22 +920,24 @@ fn tree_node_plain(label: &str, title: &str, filter: Filter) -> TreeNode {
 
 /// Find the node whose filter prefix equals `declared` exactly (leaf lookup).
 fn find_node_for_declared(nodes: &[TreeNode], declared: &str) -> Option<usize> {
-    nodes.iter().position(|n| {
-        matches!(&n.filter, Filter::Prefix(p) if p == declared)
-    })
+    nodes
+        .iter()
+        .position(|n| matches!(&n.filter, Filter::Prefix(p) if p == declared))
 }
 
 // ── Filtering ─────────────────────────────────────────────────────────────
 
 fn job_matches(filter: &Filter, declared: &str) -> bool {
     match filter {
-        Filter::All       => true,
+        Filter::All => true,
         Filter::Prefix(p) => declared == p || declared.starts_with(&format!("{p}/")),
     }
 }
 
 fn job_search_matches(declared: &str, job_search: &str) -> bool {
-    if job_search.is_empty() { return true; }
+    if job_search.is_empty() {
+        return true;
+    }
     declared.to_lowercase().contains(&job_search.to_lowercase())
 }
 
@@ -868,7 +957,8 @@ fn build_rows(jobs: &[Job], filter: &Filter, grep: &str, job_search: &str) -> Ve
     indices.sort_by(|&a, &b| {
         let sa = jobs[a].started_ms.unwrap_or(u64::MAX);
         let sb = jobs[b].started_ms.unwrap_or(u64::MAX);
-        sa.cmp(&sb).then_with(|| jobs[a].declared.cmp(&jobs[b].declared))
+        sa.cmp(&sb)
+            .then_with(|| jobs[a].declared.cmp(&jobs[b].declared))
     });
 
     let mut rows = Vec::new();
@@ -899,15 +989,15 @@ fn build_rows(jobs: &[Job], filter: &Filter, grep: &str, job_search: &str) -> Ve
 // ── Selection and reload ──────────────────────────────────────────────────
 
 fn apply_selection(state: &mut InspectState) {
-    let node     = &state.nodes[state.selected_idx];
+    let node = &state.nodes[state.selected_idx];
     let test_ref = node.test_ref;
-    let cov_src  = node.coverage_source_ref;
-    let title    = node.title.clone();
-    let filter   = node.filter.clone();
+    let cov_src = node.coverage_source_ref;
+    let title = node.title.clone();
+    let filter = node.filter.clone();
 
     state.log_title = title;
-    state.filter    = filter;
-    state.h_scroll  = 0;
+    state.filter = filter;
+    state.h_scroll = 0;
 
     if let Some((job_idx, test_idx)) = test_ref {
         state.source_lines.clear();
@@ -965,7 +1055,8 @@ fn load_source_view(state: &mut InspectState, job_idx: usize, src_idx: usize) {
                 color: coverage_color(class.line_pct()),
             },
             Row::CoverageLine {
-                text: "(no source HTML — re-run tests with coverage to generate the report)".to_string(),
+                text: "(no source HTML — re-run tests with coverage to generate the report)"
+                    .to_string(),
                 color: theme::COMMENT,
             },
         ];
@@ -981,40 +1072,55 @@ fn load_source_view(state: &mut InspectState, job_idx: usize, src_idx: usize) {
 }
 
 fn load_test_view(state: &mut InspectState, job_idx: usize, test_idx: usize) {
-    let test    = &state.jobs[job_idx].tests[test_idx];
+    let test = &state.jobs[job_idx].tests[test_idx];
     let failure = test.failure.clone();
-    let status  = test.status.clone();
-    state.test_lines = test.output_file.as_ref()
+    let status = test.status.clone();
+    state.test_lines = test
+        .output_file
+        .as_ref()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|s| s.lines().map(str::to_string).collect())
         .unwrap_or_default();
 
     let mut rows: Vec<Row> = Vec::new();
     if let Some(msg) = failure {
-        rows.push(Row::TestAnnotation { text: msg, color: theme::RED });
+        rows.push(Row::TestAnnotation {
+            text: msg,
+            color: theme::RED,
+        });
     }
     for li in 0..state.test_lines.len() {
         rows.push(Row::TestBody { line: li });
     }
     if rows.is_empty() {
         let placeholder_color = match status {
-            TestStatus::Passed  => theme::GREEN,
-            TestStatus::Failed  => theme::RED,
+            TestStatus::Passed => theme::GREEN,
+            TestStatus::Failed => theme::RED,
             TestStatus::Skipped => theme::YELLOW,
         };
-        rows.push(Row::TestAnnotation { text: "(no output captured)".to_string(), color: placeholder_color });
+        rows.push(Row::TestAnnotation {
+            text: "(no output captured)".to_string(),
+            color: placeholder_color,
+        });
     }
-    state.rows   = rows;
-    let max      = state.rows.len().saturating_sub(state.log_vis_h.max(1));
+    state.rows = rows;
+    let max = state.rows.len().saturating_sub(state.log_vis_h.max(1));
     state.scroll = state.scroll.min(max);
 }
 
 /// Job indices whose log lines contain `grep` (case-insensitive). Empty when grep is inactive.
 fn grep_hits(jobs: &[Job], grep: &str) -> HashSet<usize> {
-    if grep.is_empty() { return HashSet::new(); }
+    if grep.is_empty() {
+        return HashSet::new();
+    }
     let pattern = grep.to_lowercase();
     (0..jobs.len())
-        .filter(|&i| jobs[i].lines.iter().any(|l| l.to_lowercase().contains(&pattern)))
+        .filter(|&i| {
+            jobs[i]
+                .lines
+                .iter()
+                .any(|l| l.to_lowercase().contains(&pattern))
+        })
         .collect()
 }
 
@@ -1022,11 +1128,16 @@ fn grep_hits(jobs: &[Job], grep: &str) -> HashSet<usize> {
 /// When the selected node is a test leaf or coverage source, re-applies that view.
 fn rebuild_rows(state: &mut InspectState) {
     state.grep_job_matches = grep_hits(&state.jobs, &state.grep);
-    if let Some((job_idx, test_idx)) = state.nodes.get(state.selected_idx).and_then(|n| n.test_ref) {
+    if let Some((job_idx, test_idx)) = state.nodes.get(state.selected_idx).and_then(|n| n.test_ref)
+    {
         load_test_view(state, job_idx, test_idx);
         return;
     }
-    if let Some((job_idx, src_idx)) = state.nodes.get(state.selected_idx).and_then(|n| n.coverage_source_ref) {
+    if let Some((job_idx, src_idx)) = state
+        .nodes
+        .get(state.selected_idx)
+        .and_then(|n| n.coverage_source_ref)
+    {
         load_source_view(state, job_idx, src_idx);
         return;
     }
@@ -1048,7 +1159,9 @@ fn rebuild_rows(state: &mut InspectState) {
         ViewMode::Coverage => {
             let mut rows = build_rows(&state.jobs, &state.filter, &state.grep, &state.job_search);
             if let Some(cov_rows) = coverage_panel_for_selection(state) {
-                let insert_at = rows.iter().position(|r| matches!(r, Row::Header { .. }))
+                let insert_at = rows
+                    .iter()
+                    .position(|r| matches!(r, Row::Header { .. }))
                     .map(|i| i + 1)
                     .unwrap_or(0);
                 for (offset, row) in cov_rows.into_iter().enumerate() {
@@ -1065,7 +1178,7 @@ fn rebuild_rows(state: &mut InspectState) {
             }
         }
     }
-    let max      = state.rows.len().saturating_sub(state.log_vis_h.max(1));
+    let max = state.rows.len().saturating_sub(state.log_vis_h.max(1));
     state.scroll = state.scroll.min(max);
 }
 
@@ -1073,7 +1186,9 @@ fn rebuild_rows(state: &mut InspectState) {
 fn deps_selected_job(state: &InspectState) -> Option<usize> {
     let node = state.nodes.get(state.selected_idx)?;
     let job_idx = node.job_idx?;
-    let Filter::Prefix(p) = &node.filter else { return None; };
+    let Filter::Prefix(p) = &node.filter else {
+        return None;
+    };
     let job = state.jobs.get(job_idx)?;
     if job.declared != *p {
         return None;
@@ -1181,7 +1296,9 @@ fn build_deps_overview_rows(state: &InspectState) -> Vec<Row> {
         if !job_search_matches(&job.declared, &state.job_search) {
             continue;
         }
-        let Some(view) = job.deps.as_ref() else { continue; };
+        let Some(view) = job.deps.as_ref() else {
+            continue;
+        };
         let n = view.compile_test_count();
         rows.push(Row::CoverageLine {
             text: format!(
@@ -1241,7 +1358,9 @@ fn tests_panel_for_selection(state: &InspectState) -> Option<Vec<Row>> {
         return None;
     }
     let job_idx = node.job_idx?;
-    let Filter::Prefix(p) = &node.filter else { return None; };
+    let Filter::Prefix(p) = &node.filter else {
+        return None;
+    };
     let job = state.jobs.get(job_idx)?;
     if job.declared != *p {
         return None;
@@ -1258,10 +1377,28 @@ fn build_tests_panel_rows(job: &Job) -> Vec<Row> {
         });
         return rows;
     }
-    let passed  = job.tests.iter().filter(|t| t.status == TestStatus::Passed).count();
-    let failed  = job.tests.iter().filter(|t| t.status == TestStatus::Failed).count();
-    let skipped = job.tests.iter().filter(|t| t.status == TestStatus::Skipped).count();
-    let color = if failed > 0 { theme::RED } else if skipped > 0 { theme::YELLOW } else { theme::GREEN };
+    let passed = job
+        .tests
+        .iter()
+        .filter(|t| t.status == TestStatus::Passed)
+        .count();
+    let failed = job
+        .tests
+        .iter()
+        .filter(|t| t.status == TestStatus::Failed)
+        .count();
+    let skipped = job
+        .tests
+        .iter()
+        .filter(|t| t.status == TestStatus::Skipped)
+        .count();
+    let color = if failed > 0 {
+        theme::RED
+    } else if skipped > 0 {
+        theme::YELLOW
+    } else {
+        theme::GREEN
+    };
     rows.push(Row::CoverageLine {
         text: format!(
             "Tests  {} passed  {} failed  {} skipped  — expand job ▸ class ▸ method for output",
@@ -1270,10 +1407,22 @@ fn build_tests_panel_rows(job: &Job) -> Vec<Row> {
         color,
     });
     for (class_name, idxs) in group_by_class(&job.tests) {
-        let f = idxs.iter().filter(|&&i| job.tests[i].status == TestStatus::Failed).count();
-        let p = idxs.iter().filter(|&&i| job.tests[i].status == TestStatus::Passed).count();
+        let f = idxs
+            .iter()
+            .filter(|&&i| job.tests[i].status == TestStatus::Failed)
+            .count();
+        let p = idxs
+            .iter()
+            .filter(|&&i| job.tests[i].status == TestStatus::Passed)
+            .count();
         let s = idxs.len() - f - p;
-        let c = if f > 0 { theme::RED } else if s > 0 { theme::YELLOW } else { theme::GREEN };
+        let c = if f > 0 {
+            theme::RED
+        } else if s > 0 {
+            theme::YELLOW
+        } else {
+            theme::GREEN
+        };
         rows.push(Row::CoverageLine {
             text: format!("  {class_name}  {p}✓ {f}✗ {s}⊘"),
             color: c,
@@ -1320,7 +1469,9 @@ fn coverage_panel_for_selection(state: &InspectState) -> Option<Vec<Row>> {
     }
     let job_idx = node.job_idx?;
     // Exact job node (filter matches declared path), not a directory prefix container.
-    let Filter::Prefix(p) = &node.filter else { return None; };
+    let Filter::Prefix(p) = &node.filter else {
+        return None;
+    };
     if state.jobs.get(job_idx)?.declared != *p {
         return None;
     }
@@ -1343,8 +1494,11 @@ fn build_coverage_panel_rows(cov: &MemberCoverage) -> Vec<Row> {
     if !cov.sources.is_empty() {
         let mut sources: Vec<&SourceFileCoverage> = cov.sources.iter().collect();
         sources.sort_by(|a, b| {
-            b.line_missed.cmp(&a.line_missed)
-                .then_with(|| a.line_pct().partial_cmp(&b.line_pct()).unwrap_or(std::cmp::Ordering::Equal))
+            b.line_missed.cmp(&a.line_missed).then_with(|| {
+                a.line_pct()
+                    .partial_cmp(&b.line_pct())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
         });
         for src in sources.into_iter().take(COVERAGE_PANEL_LIMIT) {
             rows.push(Row::CoverageLine {
@@ -1359,7 +1513,10 @@ fn build_coverage_panel_rows(cov: &MemberCoverage) -> Vec<Row> {
         }
         if cov.sources.len() > COVERAGE_PANEL_LIMIT {
             rows.push(Row::CoverageLine {
-                text: format!("  … and {} more source files", cov.sources.len() - COVERAGE_PANEL_LIMIT),
+                text: format!(
+                    "  … and {} more source files",
+                    cov.sources.len() - COVERAGE_PANEL_LIMIT
+                ),
                 color: theme::COMMENT,
             });
         }
@@ -1446,12 +1603,12 @@ fn switch_mode(state: &mut InspectState, mode: ViewMode) {
 }
 
 fn reload(state: &mut InspectState) {
-    let targets    = state.targets.clone();
-    let action     = state.action.clone();
+    let targets = state.targets.clone();
+    let action = state.action.clone();
     let utc_offset = state.utc_offset;
-    let ws_root    = state.ws_root.clone();
+    let ws_root = state.ws_root.clone();
     state.descriptors = load_descriptors(&ws_root, &targets);
-    state.jobs       = load_jobs(&targets, &action, utc_offset, &state.descriptors);
+    state.jobs = load_jobs(&targets, &action, utc_offset, &state.descriptors);
     state.stale_jobs = collect_stale_jobs(&state.jobs);
     state.resolved_deps.clear();
     // Refresh deps views attached to jobs (already done in load_jobs).
@@ -1463,13 +1620,21 @@ fn reload(state: &mut InspectState) {
 /// Focus the first failing job.  If it has failing tests, switch to Tests mode,
 /// expand the job+class, and select the first failing test.
 fn auto_select_failed(state: &mut InspectState) -> bool {
-    let failed_job = state.jobs.iter().enumerate()
+    let failed_job = state
+        .jobs
+        .iter()
+        .enumerate()
         .find(|(_, j)| matches!(j.state, LogState::Failed { .. }));
 
-    let Some((job_idx, _)) = failed_job else { return false; };
+    let Some((job_idx, _)) = failed_job else {
+        return false;
+    };
 
     // Look for the first failing test in this job.
-    let first_failing_test = state.jobs[job_idx].tests.iter().enumerate()
+    let first_failing_test = state.jobs[job_idx]
+        .tests
+        .iter()
+        .enumerate()
         .find(|(_, t)| t.status == TestStatus::Failed)
         .map(|(i, _)| {
             let class_name = state.jobs[job_idx].tests[i].class_name.clone();
@@ -1482,7 +1647,11 @@ fn auto_select_failed(state: &mut InspectState) -> bool {
         state.expanded_classes.insert((job_idx, class_name.clone()));
         rebuild_tree(state);
 
-        if let Some(ni) = state.nodes.iter().position(|n| n.test_ref == Some((job_idx, test_idx))) {
+        if let Some(ni) = state
+            .nodes
+            .iter()
+            .position(|n| n.test_ref == Some((job_idx, test_idx)))
+        {
             state.selected_idx = ni;
             apply_selection(state);
             return true;
@@ -1500,7 +1669,7 @@ fn auto_select_failed(state: &mut InspectState) -> bool {
 
 fn sync_tree_scroll(state: &mut InspectState) {
     let visible = (state.pane_h as usize).saturating_sub(2); // borders
-    let sel     = state.selected_idx;
+    let sel = state.selected_idx;
     if sel < state.tree_scroll {
         state.tree_scroll = sel;
     } else if visible > 0 && sel >= state.tree_scroll + visible {
@@ -1512,17 +1681,25 @@ fn sync_tree_scroll(state: &mut InspectState) {
 
 fn next_node(nodes: &[TreeNode], from: usize) -> usize {
     let n = nodes.len();
-    if n == 0 { return 0; }
+    if n == 0 {
+        return 0;
+    }
     let mut i = (from + 1) % n;
-    while i != from && !nodes[i].selectable { i = (i + 1) % n; }
+    while i != from && !nodes[i].selectable {
+        i = (i + 1) % n;
+    }
     i
 }
 
 fn prev_node(nodes: &[TreeNode], from: usize) -> usize {
     let n = nodes.len();
-    if n == 0 { return 0; }
+    if n == 0 {
+        return 0;
+    }
     let mut i = (from + n - 1) % n;
-    while i != from && !nodes[i].selectable { i = (i + n - 1) % n; }
+    while i != from && !nodes[i].selectable {
+        i = (i + n - 1) % n;
+    }
     i
 }
 
@@ -1530,35 +1707,39 @@ fn prev_node(nodes: &[TreeNode], from: usize) -> usize {
 
 fn gutter_color(state: &LogState) -> Color {
     match state {
-        LogState::Ok         { .. } => theme::GREEN,
-        LogState::Failed     { .. } => theme::RED,
-        LogState::NoMetadata        => theme::YELLOW,
-        LogState::NoLog             => theme::COMMENT,
+        LogState::Ok { .. } => theme::GREEN,
+        LogState::Failed { .. } => theme::RED,
+        LogState::NoMetadata => theme::YELLOW,
+        LogState::NoLog => theme::COMMENT,
     }
 }
 
 fn badge_str(state: &LogState) -> String {
     match state {
-        LogState::Ok         { duration_ms } => format!("✓ {}", fmt_duration(*duration_ms)),
-        LogState::Failed     { duration_ms } => format!("✗ {}", fmt_duration(*duration_ms)),
-        LogState::NoMetadata                 => "skipped".to_string(),
-        LogState::NoLog                      => "(no log)".to_string(),
+        LogState::Ok { duration_ms } => format!("✓ {}", fmt_duration(*duration_ms)),
+        LogState::Failed { duration_ms } => format!("✗ {}", fmt_duration(*duration_ms)),
+        LogState::NoMetadata => "skipped".to_string(),
+        LogState::NoLog => "(no log)".to_string(),
     }
 }
 
 fn badge_style(state: &LogState) -> Style {
     match state {
-        LogState::Ok         { .. } => Style::default().fg(theme::GREEN).add_modifier(Modifier::BOLD),
-        LogState::Failed     { .. } => Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
-        LogState::NoMetadata        => Style::default().fg(theme::YELLOW).add_modifier(Modifier::DIM),
-        LogState::NoLog             => Style::default().add_modifier(Modifier::DIM),
+        LogState::Ok { .. } => Style::default()
+            .fg(theme::GREEN)
+            .add_modifier(Modifier::BOLD),
+        LogState::Failed { .. } => Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+        LogState::NoMetadata => Style::default()
+            .fg(theme::YELLOW)
+            .add_modifier(Modifier::DIM),
+        LogState::NoLog => Style::default().add_modifier(Modifier::DIM),
     }
 }
 
 fn test_badge(status: &TestStatus, duration_ms: u64) -> String {
     match status {
-        TestStatus::Passed  => format!("✓ {}ms", duration_ms),
-        TestStatus::Failed  => format!("✗ {}ms", duration_ms),
+        TestStatus::Passed => format!("✓ {}ms", duration_ms),
+        TestStatus::Failed => format!("✗ {}ms", duration_ms),
         TestStatus::Skipped => "⊘ skipped".to_string(),
     }
 }
@@ -1566,9 +1747,11 @@ fn test_badge(status: &TestStatus, duration_ms: u64) -> String {
 #[allow(dead_code)]
 fn test_badge_style(status: &TestStatus) -> Style {
     match status {
-        TestStatus::Passed  => Style::default().fg(theme::GREEN),
-        TestStatus::Failed  => Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
-        TestStatus::Skipped => Style::default().fg(theme::YELLOW).add_modifier(Modifier::DIM),
+        TestStatus::Passed => Style::default().fg(theme::GREEN),
+        TestStatus::Failed => Style::default().fg(theme::RED).add_modifier(Modifier::BOLD),
+        TestStatus::Skipped => Style::default()
+            .fg(theme::YELLOW)
+            .add_modifier(Modifier::DIM),
     }
 }
 
@@ -1579,7 +1762,7 @@ fn fmt_duration(ms: u64) -> String {
 
 /// Format epoch-milliseconds as `HH:MM:SS` in the given UTC offset.
 fn format_hms_local(epoch_ms: u64, offset: time::UtcOffset) -> String {
-    let secs   = (epoch_ms / 1000) as i64 + offset.whole_seconds() as i64;
+    let secs = (epoch_ms / 1000) as i64 + offset.whole_seconds() as i64;
     let time_s = secs.rem_euclid(86400) as u64;
     let h = time_s / 3600;
     let m = (time_s % 3600) / 60;
@@ -1727,10 +1910,16 @@ fn render_frame(f: &mut Frame, state: &InspectState) {
 }
 
 fn mode_tabs_line(mode: ViewMode) -> Paragraph<'static> {
-    let mut spans = vec![Span::styled("  ", Style::default().fg(theme::COMMENT).bg(theme::BG))];
+    let mut spans = vec![Span::styled(
+        "  ",
+        Style::default().fg(theme::COMMENT).bg(theme::BG),
+    )];
     for (i, m) in ViewMode::ALL.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(" │ ", Style::default().fg(theme::COMMENT).bg(theme::BG)));
+            spans.push(Span::styled(
+                " │ ",
+                Style::default().fg(theme::COMMENT).bg(theme::BG),
+            ));
         }
         let label = format!(" {} ", m.label());
         let style = if *m == mode {
@@ -1774,7 +1963,7 @@ fn hint_text(state: &InspectState) -> &'static str {
 
 fn render_members_block(f: &mut Frame, state: &InspectState, area: Rect) {
     // Only highlight border when Members pane itself is focused (not when Search is active).
-    let is_active    = state.active_pane == ActivePane::Members;
+    let is_active = state.active_pane == ActivePane::Members;
     let border_style = if is_active {
         Style::default().fg(theme::CYAN).bg(theme::BG)
     } else {
@@ -1793,14 +1982,16 @@ fn render_members_block(f: &mut Frame, state: &InspectState, area: Rect) {
         .border_style(border_style)
         .style(Style::default().bg(theme::BG));
 
-    let inner   = block.inner(area);
-    let vis_h   = inner.height as usize;
-    let inner_w = inner.width  as usize;
-    let js      = &state.job_search;
-    let gm      = &state.grep_job_matches;
-    let stale   = &state.stale_jobs;
+    let inner = block.inner(area);
+    let vis_h = inner.height as usize;
+    let inner_w = inner.width as usize;
+    let js = &state.job_search;
+    let gm = &state.grep_job_matches;
+    let stale = &state.stale_jobs;
 
-    let lines: Vec<Line<'static>> = state.nodes.iter()
+    let lines: Vec<Line<'static>> = state
+        .nodes
+        .iter()
         .enumerate()
         .skip(state.tree_scroll)
         .take(vis_h)
@@ -1812,21 +2003,24 @@ fn render_members_block(f: &mut Frame, state: &InspectState, area: Rect) {
 }
 
 fn member_line(
-    node:         &TreeNode,
-    is_selected:  bool,
-    inner_w:      usize,
-    job_search:   &str,
+    node: &TreeNode,
+    is_selected: bool,
+    inner_w: usize,
+    job_search: &str,
     grep_matches: &HashSet<usize>,
-    stale_jobs:   &HashSet<usize>,
+    stale_jobs: &HashSet<usize>,
 ) -> Line<'static> {
     match &node.state {
         Some(log_state) => {
             let ji = node.job_idx;
             // Dim when either search filter is active and this job doesn't match.
             let job_search_dim = !job_search.is_empty()
-                && !node.title.to_lowercase().contains(&job_search.to_lowercase());
-            let grep_dim = !grep_matches.is_empty()
-                && ji.map_or(true, |i| !grep_matches.contains(&i));
+                && !node
+                    .title
+                    .to_lowercase()
+                    .contains(&job_search.to_lowercase());
+            let grep_dim =
+                !grep_matches.is_empty() && ji.map_or(true, |i| !grep_matches.contains(&i));
             let is_stale = ji.map_or(false, |i| stale_jobs.contains(&i));
             let search_dim = job_search_dim || grep_dim;
 
@@ -1843,10 +2037,14 @@ fn member_line(
 
             // Right-aligned: optional coverage badge, then state badge.
             let cov = node.coverage_badge.as_deref().unwrap_or("");
-            let cov_w = if cov.is_empty() { 0 } else { cov.chars().count() + 1 };
+            let cov_w = if cov.is_empty() {
+                0
+            } else {
+                cov.chars().count() + 1
+            };
             let badge_w = state_badge.chars().count() + cov_w;
             let label_w = inner_w.saturating_sub(badge_w + 1);
-            let label:  String = node.label.chars().take(label_w).collect();
+            let label: String = node.label.chars().take(label_w).collect();
             let padding = " ".repeat(label_w.saturating_sub(label.chars().count()) + 1);
             let label_style = if is_stale || search_dim {
                 Style::default().fg(theme::COMMENT)
@@ -1877,12 +2075,18 @@ fn member_line(
             if let Some((badge_text, status)) = &node.test_badge {
                 // Test leaf / Tests-mode job summary: right-aligned coloured badge.
                 let badge_color = match status {
-                    TestStatus::Passed  => theme::GREEN,
-                    TestStatus::Failed  => theme::RED,
+                    TestStatus::Passed => theme::GREEN,
+                    TestStatus::Failed => theme::RED,
                     TestStatus::Skipped => theme::YELLOW,
                 };
-                let badge_modifier = if *status == TestStatus::Failed { Modifier::BOLD } else { Modifier::empty() };
-                let bstyle  = Style::default().fg(badge_color).add_modifier(badge_modifier);
+                let badge_modifier = if *status == TestStatus::Failed {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                };
+                let bstyle = Style::default()
+                    .fg(badge_color)
+                    .add_modifier(badge_modifier);
                 right_aligned_badge_line(&node.label, badge_text, bstyle, inner_w, is_selected)
             } else if let Some(badge_text) = &node.coverage_badge {
                 // Coverage source file: cyan badge with line/branch %.
@@ -1948,13 +2152,19 @@ fn render_log_block(f: &mut Frame, state: &InspectState, area: Rect) {
     let inner = block.inner(area);
     let vis_h = inner.height as usize;
     let start = state.scroll.min(state.rows.len());
-    let end   = (start + vis_h).min(state.rows.len());
+    let end = (start + vis_h).min(state.rows.len());
 
     let h_off = state.h_scroll;
     let lines: Vec<Line<'static>> = state.rows[start..end]
         .iter()
         .map(|row| {
-            let line = render_row(row, &state.jobs, &state.test_lines, &state.source_lines, &state.grep);
+            let line = render_row(
+                row,
+                &state.jobs,
+                &state.test_lines,
+                &state.source_lines,
+                &state.grep,
+            );
             trim_line_left(line, h_off)
         })
         .collect();
@@ -1965,21 +2175,27 @@ fn render_log_block(f: &mut Frame, state: &InspectState, area: Rect) {
 
 /// Remove the first `offset` characters from a line's span list, preserving per-span styles.
 fn trim_line_left(line: Line<'static>, offset: usize) -> Line<'static> {
-    if offset == 0 { return line; }
+    if offset == 0 {
+        return line;
+    }
     let mut skip = offset;
-    let spans: Vec<Span<'static>> = line.spans.into_iter().filter_map(|span| {
-        let n = span.content.chars().count();
-        if skip >= n {
-            skip -= n;
-            None
-        } else if skip > 0 {
-            let trimmed: String = span.content.chars().skip(skip).collect();
-            skip = 0;
-            Some(Span::styled(trimmed, span.style))
-        } else {
-            Some(span)
-        }
-    }).collect();
+    let spans: Vec<Span<'static>> = line
+        .spans
+        .into_iter()
+        .filter_map(|span| {
+            let n = span.content.chars().count();
+            if skip >= n {
+                skip -= n;
+                None
+            } else if skip > 0 {
+                let trimmed: String = span.content.chars().skip(skip).collect();
+                skip = 0;
+                Some(Span::styled(trimmed, span.style))
+            } else {
+                Some(span)
+            }
+        })
+        .collect();
     Line::from(spans)
 }
 
@@ -1992,18 +2208,24 @@ fn render_row(
 ) -> Line<'static> {
     match row {
         Row::Header { job } => {
-            let j     = &jobs[*job];
+            let j = &jobs[*job];
             let color = gutter_color(&j.state);
             header_line(j, color)
         }
         Row::Body { job, line } => {
-            let j     = &jobs[*job];
+            let j = &jobs[*job];
             let color = gutter_color(&j.state);
             body_line(&j.lines[*line], color, grep)
         }
         Row::TestAnnotation { text, color } => {
-            let gutter = Span::styled("▌ ", Style::default().fg(*color).add_modifier(Modifier::BOLD));
-            let msg    = Span::styled(text.clone(), Style::default().fg(*color).add_modifier(Modifier::BOLD));
+            let gutter = Span::styled(
+                "▌ ",
+                Style::default().fg(*color).add_modifier(Modifier::BOLD),
+            );
+            let msg = Span::styled(
+                text.clone(),
+                Style::default().fg(*color).add_modifier(Modifier::BOLD),
+            );
             Line::from(vec![gutter, msg]).style(Style::default().bg(theme::SURFACE))
         }
         Row::TestBody { line } => {
@@ -2011,13 +2233,14 @@ fn render_row(
             body_line(text, theme::CYAN, grep)
         }
         Row::CoverageLine { text, color } => {
-            let gutter = Span::styled("▌ ", Style::default().fg(*color).add_modifier(Modifier::BOLD));
-            let msg    = Span::styled(text.clone(), Style::default().fg(*color));
+            let gutter = Span::styled(
+                "▌ ",
+                Style::default().fg(*color).add_modifier(Modifier::BOLD),
+            );
+            let msg = Span::styled(text.clone(), Style::default().fg(*color));
             Line::from(vec![gutter, msg]).style(Style::default().bg(theme::SURFACE))
         }
-        Row::SourceBody { line } => {
-            render_source_line(source_lines.get(*line), grep)
-        }
+        Row::SourceBody { line } => render_source_line(source_lines.get(*line), grep),
     }
 }
 
@@ -2026,14 +2249,16 @@ fn render_source_line(src: Option<&SourceLine>, grep: &str) -> Line<'static> {
         return Line::from("");
     };
     let (gutter_color, text_style, marker) = match src.hit {
-        LineHit::Full    => (theme::GREEN,  Style::default().fg(theme::GREEN),  "█"),
+        LineHit::Full => (theme::GREEN, Style::default().fg(theme::GREEN), "█"),
         LineHit::Partial => (theme::YELLOW, Style::default().fg(theme::YELLOW), "▒"),
-        LineHit::Missed  => (theme::RED,    Style::default().fg(theme::RED),    "█"),
-        LineHit::None    => (theme::COMMENT, Style::default().fg(theme::COMMENT), "·"),
+        LineHit::Missed => (theme::RED, Style::default().fg(theme::RED), "█"),
+        LineHit::None => (theme::COMMENT, Style::default().fg(theme::COMMENT), "·"),
     };
     let gutter = Span::styled(
         format!("{marker} {:>4} ", src.number),
-        Style::default().fg(gutter_color).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(gutter_color)
+            .add_modifier(Modifier::BOLD),
     );
     let body_text = if let Some(title) = &src.title {
         // Keep the branch tooltip on partial/missed lines for context.
@@ -2056,21 +2281,34 @@ fn render_source_line(src: Option<&SourceLine>, grep: &str) -> Line<'static> {
 }
 
 fn header_line(job: &Job, color: Color) -> Line<'static> {
-    let gutter  = Span::styled("▌ ", Style::default().fg(color).add_modifier(Modifier::BOLD));
+    let gutter = Span::styled(
+        "▌ ",
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    );
     let content = if job.started_disp.is_empty() {
         format!("{}  {}", job.declared, badge_str(&job.state))
     } else {
-        format!("{}  started {}  {}", job.declared, job.started_disp, badge_str(&job.state))
+        format!(
+            "{}  started {}  {}",
+            job.declared,
+            job.started_disp,
+            badge_str(&job.state)
+        )
     };
-    let text = Span::styled(content, Style::default().fg(color).add_modifier(Modifier::BOLD));
-    Line::from(vec![gutter, text])
-        .style(Style::default().bg(theme::SURFACE))
+    let text = Span::styled(
+        content,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    );
+    Line::from(vec![gutter, text]).style(Style::default().bg(theme::SURFACE))
 }
 
 fn body_line(text: &str, color: Color, grep: &str) -> Line<'static> {
-    let gutter     = Span::styled("▌ ", Style::default().fg(color).add_modifier(Modifier::BOLD));
+    let gutter = Span::styled(
+        "▌ ",
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    );
     let body_spans = parse_ansi_line(text);
-    let mut spans  = vec![gutter];
+    let mut spans = vec![gutter];
     if grep.is_empty() {
         spans.extend(body_spans);
     } else {
@@ -2082,15 +2320,21 @@ fn body_line(text: &str, color: Color, grep: &str) -> Line<'static> {
 /// Split `spans` at occurrences of `pattern` and apply a yellow highlight to each match.
 fn highlight_spans(spans: Vec<Span<'static>>, pattern: &str) -> Vec<Span<'static>> {
     let pattern_lower = pattern.to_lowercase();
-    let highlight     = Style::default().bg(theme::YELLOW).fg(theme::BG);
-    let mut result    = Vec::new();
+    let highlight = Style::default().bg(theme::YELLOW).fg(theme::BG);
+    let mut result = Vec::new();
 
     for span in spans {
-        let content       = span.content.to_string();
+        let content = span.content.to_string();
         let content_lower = content.to_lowercase();
         if content_lower.contains(&pattern_lower) {
-            split_span_at_pattern(&content, &content_lower, &pattern_lower,
-                                  span.style, highlight, &mut result);
+            split_span_at_pattern(
+                &content,
+                &content_lower,
+                &pattern_lower,
+                span.style,
+                highlight,
+                &mut result,
+            );
         } else {
             result.push(span);
         }
@@ -2099,12 +2343,12 @@ fn highlight_spans(spans: Vec<Span<'static>>, pattern: &str) -> Vec<Span<'static
 }
 
 fn split_span_at_pattern(
-    content:       &str,
+    content: &str,
     content_lower: &str,
     pattern_lower: &str,
-    base_style:    Style,
-    highlight:     Style,
-    out:           &mut Vec<Span<'static>>,
+    base_style: Style,
+    highlight: Style,
+    out: &mut Vec<Span<'static>>,
 ) {
     let pat_len = pattern_lower.len();
     let mut pos = 0;
@@ -2118,7 +2362,7 @@ fn split_span_at_pattern(
             }
             Some(rel) => {
                 let start = pos + rel;
-                let end   = start + pat_len;
+                let end = start + pat_len;
                 if start > pos {
                     out.push(Span::styled(content[pos..start].to_string(), base_style));
                 }
@@ -2132,15 +2376,15 @@ fn split_span_at_pattern(
 fn parse_ansi_line(s: &str) -> Vec<Span<'static>> {
     match s.into_text() {
         Ok(mut text) => text.lines.pop().map(|l| l.spans).unwrap_or_default(),
-        Err(_)       => vec![Span::raw(s.to_string())],
+        Err(_) => vec![Span::raw(s.to_string())],
     }
 }
 
 fn render_status_bar(f: &mut Frame, state: &InspectState, area: Rect) {
     let content = match &state.input_mode {
-        InputMode::Grep      => format!("/ {}█", state.grep),
+        InputMode::Grep => format!("/ {}█", state.grep),
         InputMode::JobSearch => format!("f {}█", state.job_search),
-        InputMode::Normal    => return,
+        InputMode::Normal => return,
     };
     // Cyan background when the search bar has keyboard focus; dimmer when a pane does.
     let style = if state.active_pane == ActivePane::Search {
@@ -2159,7 +2403,7 @@ const MOUSE_SCROLL_STEP: usize = 3;
 
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    state:    &mut InspectState,
+    state: &mut InspectState,
 ) -> Result<()> {
     loop {
         terminal.draw(|f| render_frame(f, state))?;
@@ -2263,7 +2507,12 @@ fn handle_mouse_click(state: &mut InspectState, pos: Position, layout: &PaneLayo
     }
 }
 
-fn handle_mouse_scroll(state: &mut InspectState, pos: Position, layout: &PaneLayout, direction: i32) {
+fn handle_mouse_scroll(
+    state: &mut InspectState,
+    pos: Position,
+    layout: &PaneLayout,
+    direction: i32,
+) {
     let step = MOUSE_SCROLL_STEP as i32 * direction;
     if let Some(members) = layout.members {
         if members.contains(pos) {
@@ -2302,8 +2551,8 @@ fn handle_key(state: &mut InspectState, key: KeyEvent) -> bool {
     }
 
     let members_active = state.show_members && state.active_pane == ActivePane::Members;
-    let searching      = state.input_mode != InputMode::Normal;
-    let log_ph         = state.log_vis_h.max(1);
+    let searching = state.input_mode != InputMode::Normal;
+    let log_ph = state.log_vis_h.max(1);
 
     match key.code {
         // Esc with active search: clear search instead of quitting.
@@ -2363,8 +2612,12 @@ fn handle_key(state: &mut InspectState, key: KeyEvent) -> bool {
             let max = state.rows.len().saturating_sub(1);
             state.scroll = (state.scroll + (log_ph / 2).max(1)).min(max);
         }
-        KeyCode::Char('g') => { state.scroll = 0; }
-        KeyCode::Char('G') => { state.scroll = state.rows.len().saturating_sub(1); }
+        KeyCode::Char('g') => {
+            state.scroll = 0;
+        }
+        KeyCode::Char('G') => {
+            state.scroll = state.rows.len().saturating_sub(1);
+        }
 
         KeyCode::Char('r') => reload(state),
 
@@ -2379,15 +2632,15 @@ fn handle_key(state: &mut InspectState, key: KeyEvent) -> bool {
 
         KeyCode::Char('/') => {
             state.pre_search_pane = state.active_pane.clone();
-            state.input_mode      = InputMode::Grep;
-            state.active_pane     = ActivePane::Search;
+            state.input_mode = InputMode::Grep;
+            state.active_pane = ActivePane::Search;
             state.grep.clear();
             rebuild_rows(state);
         }
         KeyCode::Char('f') => {
             state.pre_search_pane = state.active_pane.clone();
-            state.input_mode      = InputMode::JobSearch;
-            state.active_pane     = ActivePane::Search;
+            state.input_mode = InputMode::JobSearch;
+            state.active_pane = ActivePane::Search;
             state.job_search.clear();
             rebuild_rows(state);
         }
@@ -2414,17 +2667,21 @@ fn handle_key_search(state: &mut InspectState, key: KeyEvent) -> bool {
         }
         KeyCode::Backspace => {
             match state.input_mode {
-                InputMode::Grep      => { state.grep.pop(); }
-                InputMode::JobSearch => { state.job_search.pop(); }
-                _                    => {}
+                InputMode::Grep => {
+                    state.grep.pop();
+                }
+                InputMode::JobSearch => {
+                    state.job_search.pop();
+                }
+                _ => {}
             }
             rebuild_rows(state);
         }
         KeyCode::Char(c) => {
             match state.input_mode {
-                InputMode::Grep      => state.grep.push(c),
+                InputMode::Grep => state.grep.push(c),
                 InputMode::JobSearch => state.job_search.push(c),
-                _                    => {}
+                _ => {}
             }
             rebuild_rows(state);
         }
@@ -2491,7 +2748,9 @@ fn collapse_test_node(state: &mut InspectState) {
     if let Some((job_idx, test_idx)) = node.test_ref {
         // On a test leaf: collapse the parent class.
         let class_name = state.jobs[job_idx].tests[test_idx].class_name.clone();
-        state.expanded_classes.remove(&(job_idx, class_name.clone()));
+        state
+            .expanded_classes
+            .remove(&(job_idx, class_name.clone()));
         rebuild_tree_and_reselect_class(state, job_idx, &class_name);
     } else if let Some((job_idx, _)) = node.coverage_source_ref {
         // On a coverage source: collapse the parent job.
@@ -2510,7 +2769,9 @@ fn job_idx_for_node(state: &InspectState) -> Option<usize> {
     if node.test_ref.is_some() || node.coverage_source_ref.is_some() || node.class_ref.is_some() {
         return None;
     }
-    let Filter::Prefix(p) = &node.filter else { return None; };
+    let Filter::Prefix(p) = &node.filter else {
+        return None;
+    };
     state.jobs.iter().position(|j| &j.declared == p)
 }
 
@@ -2531,7 +2792,9 @@ fn rebuild_tree_and_reselect(state: &mut InspectState, job_idx: Option<usize>) {
 fn rebuild_tree_and_reselect_class(state: &mut InspectState, job_idx: usize, class_name: &str) {
     rebuild_tree(state);
     if let Some(ni) = state.nodes.iter().position(|n| {
-        n.class_ref.as_ref().map_or(false, |(ji, cn)| *ji == job_idx && cn == class_name)
+        n.class_ref
+            .as_ref()
+            .map_or(false, |(ji, cn)| *ji == job_idx && cn == class_name)
     }) {
         state.selected_idx = ni;
     }
@@ -2554,7 +2817,11 @@ fn cycle_panes(state: &mut InspectState) {
             }
         }
         ActivePane::Search => {
-            if state.show_members { ActivePane::Members } else { ActivePane::Log }
+            if state.show_members {
+                ActivePane::Members
+            } else {
+                ActivePane::Log
+            }
         }
     };
     // Switching to Members implicitly shows the pane.
@@ -2572,18 +2839,18 @@ fn toggle_members(state: &mut InspectState) {
         }
     } else {
         state.show_members = true;
-        state.active_pane  = ActivePane::Members;
+        state.active_pane = ActivePane::Members;
     }
 }
 
 /// Clear the active search pattern and return focus to the pre-search pane.
 fn clear_search(state: &mut InspectState) {
     match state.input_mode {
-        InputMode::Grep      => state.grep.clear(),
+        InputMode::Grep => state.grep.clear(),
         InputMode::JobSearch => state.job_search.clear(),
-        InputMode::Normal    => {}
+        InputMode::Normal => {}
     }
-    state.input_mode  = InputMode::Normal;
+    state.input_mode = InputMode::Normal;
     state.active_pane = state.pre_search_pane.clone();
     rebuild_rows(state);
 }
@@ -2596,21 +2863,21 @@ mod tests {
 
     fn make_job(declared: &str, started_ms: Option<u64>, exit_code: Option<i32>) -> Job {
         let state = match exit_code {
-            Some(0) => LogState::Ok     { duration_ms: 1000 },
-            Some(_) => LogState::Failed { duration_ms: 800  },
-            None    => LogState::NoLog,
+            Some(0) => LogState::Ok { duration_ms: 1000 },
+            Some(_) => LogState::Failed { duration_ms: 800 },
+            None => LogState::NoLog,
         };
         let started_disp = started_ms.map(format_hms_utc).unwrap_or_default();
         Job {
-            declared:     declared.to_string(),
+            declared: declared.to_string(),
             state,
             started_ms,
             started_disp,
-            lines:    vec!["line one".to_string(), "line two".to_string()],
+            lines: vec!["line one".to_string(), "line two".to_string()],
             build_id: None,
-            tests:    vec![],
+            tests: vec![],
             coverage: None,
-            deps:     None,
+            deps: None,
         }
     }
 
@@ -2707,7 +2974,10 @@ mod tests {
 
     #[test]
     fn tree_root_then_flat_members() {
-        let jobs  = vec![make_job("alpha", None, Some(0)), make_job("beta", None, Some(0))];
+        let jobs = vec![
+            make_job("alpha", None, Some(0)),
+            make_job("beta", None, Some(0)),
+        ];
         let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(nodes[0].title, "all jobs");
         assert!(matches!(nodes[0].filter, Filter::All));
@@ -2732,7 +3002,7 @@ mod tests {
 
     #[test]
     fn tree_single_member() {
-        let jobs  = vec![make_job("mylib", None, Some(0))];
+        let jobs = vec![make_job("mylib", None, Some(0))];
         let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(nodes.len(), 2);
         assert!(matches!(&nodes[1].filter, Filter::Prefix(p) if p == "mylib"));
@@ -2740,7 +3010,7 @@ mod tests {
 
     #[test]
     fn tree_deep_nesting() {
-        let jobs  = vec![make_job("a/b/c/leaf", None, Some(0))];
+        let jobs = vec![make_job("a/b/c/leaf", None, Some(0))];
         let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(nodes.len(), 5);
         assert!(matches!(&nodes[4].filter, Filter::Prefix(p) if p == "a/b/c/leaf"));
@@ -2753,7 +3023,7 @@ mod tests {
             make_job("svc/web", None, Some(0)),
         ];
         let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
-        let svc   = nodes.iter().find(|n| n.label.contains("svc/")).unwrap();
+        let svc = nodes.iter().find(|n| n.label.contains("svc/")).unwrap();
         assert!(matches!(&svc.filter, Filter::Prefix(p) if p == "svc"));
     }
 
@@ -2768,7 +3038,7 @@ mod tests {
     #[test]
     fn match_exact_leaf() {
         let f = Filter::Prefix("services/api".to_string());
-        assert!( job_matches(&f, "services/api"));
+        assert!(job_matches(&f, "services/api"));
         assert!(!job_matches(&f, "services/web"));
         assert!(!job_matches(&f, "services"));
     }
@@ -2776,8 +3046,8 @@ mod tests {
     #[test]
     fn match_subtree() {
         let f = Filter::Prefix("services".to_string());
-        assert!( job_matches(&f, "services/api"));
-        assert!( job_matches(&f, "services/web"));
+        assert!(job_matches(&f, "services/api"));
+        assert!(job_matches(&f, "services/web"));
         assert!(!job_matches(&f, "services-extra")); // must be a path boundary
     }
 
@@ -2785,8 +3055,8 @@ mod tests {
     fn match_prefix_not_a_path_boundary() {
         let f = Filter::Prefix("svc".to_string());
         assert!(!job_matches(&f, "svc-extra"));
-        assert!( job_matches(&f, "svc/child"));
-        assert!( job_matches(&f, "svc"));
+        assert!(job_matches(&f, "svc/child"));
+        assert!(job_matches(&f, "svc"));
     }
 
     // ── job_search_matches ───────────────────────────────────────────────
@@ -2799,8 +3069,8 @@ mod tests {
 
     #[test]
     fn job_search_case_insensitive() {
-        assert!( job_search_matches("Services/Api", "api"));
-        assert!( job_search_matches("services/api", "API"));
+        assert!(job_search_matches("Services/Api", "api"));
+        assert!(job_search_matches("services/api", "API"));
         assert!(!job_search_matches("services/web", "api"));
     }
 
@@ -2822,26 +3092,40 @@ mod tests {
         let jobs = vec![
             make_job("svc/api", Some(1000), Some(0)),
             make_job("svc/web", Some(2000), Some(0)),
-            make_job("app",     Some(3000), Some(0)),
+            make_job("app", Some(3000), Some(0)),
         ];
-        let f    = Filter::Prefix("svc".to_string());
+        let f = Filter::Prefix("svc".to_string());
         let rows = build_rows(&jobs, &f, "", "");
-        let headers: Vec<usize> = rows.iter().filter_map(|r| {
-            if let Row::Header { job } = r { Some(*job) } else { None }
-        }).collect();
+        let headers: Vec<usize> = rows
+            .iter()
+            .filter_map(|r| {
+                if let Row::Header { job } = r {
+                    Some(*job)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(headers, vec![0, 1]);
     }
 
     #[test]
     fn rows_unknown_start_sorts_last() {
         let jobs = vec![
-            make_job("notime", None,       Some(0)),
-            make_job("known",  Some(1000), Some(0)),
+            make_job("notime", None, Some(0)),
+            make_job("known", Some(1000), Some(0)),
         ];
-        let rows    = build_rows(&jobs, &Filter::All, "", "");
-        let headers: Vec<usize> = rows.iter().filter_map(|r| {
-            if let Row::Header { job } = r { Some(*job) } else { None }
-        }).collect();
+        let rows = build_rows(&jobs, &Filter::All, "", "");
+        let headers: Vec<usize> = rows
+            .iter()
+            .filter_map(|r| {
+                if let Row::Header { job } = r {
+                    Some(*job)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(headers[0], 1, "known-start job must sort first");
         assert_eq!(headers[1], 0, "no-meta job must sort last");
     }
@@ -2853,8 +3137,11 @@ mod tests {
             make_job("b", Some(2000), Some(0)),
             make_job("c", Some(3000), Some(0)),
         ];
-        let rows    = build_rows(&jobs, &Filter::All, "", "");
-        let headers = rows.iter().filter(|r| matches!(r, Row::Header { .. })).count();
+        let rows = build_rows(&jobs, &Filter::All, "", "");
+        let headers = rows
+            .iter()
+            .filter(|r| matches!(r, Row::Header { .. }))
+            .count();
         assert_eq!(headers, 3);
     }
 
@@ -2880,10 +3167,17 @@ mod tests {
             make_job("b", Some(2000), Some(0)),
         ];
         jobs[1].lines = vec!["different content".to_string(), "no match here".to_string()];
-        let rows    = build_rows(&jobs, &Filter::All, "line", "");
-        let headers: Vec<usize> = rows.iter().filter_map(|r| {
-            if let Row::Header { job } = r { Some(*job) } else { None }
-        }).collect();
+        let rows = build_rows(&jobs, &Filter::All, "line", "");
+        let headers: Vec<usize> = rows
+            .iter()
+            .filter_map(|r| {
+                if let Row::Header { job } = r {
+                    Some(*job)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(headers, vec![0]); // only job a whose lines contain "line"
     }
 
@@ -2892,12 +3186,19 @@ mod tests {
         let jobs = vec![
             make_job("services/api", Some(1000), Some(0)),
             make_job("services/web", Some(2000), Some(0)),
-            make_job("app",          Some(3000), Some(0)),
+            make_job("app", Some(3000), Some(0)),
         ];
-        let rows    = build_rows(&jobs, &Filter::All, "", "api");
-        let headers: Vec<usize> = rows.iter().filter_map(|r| {
-            if let Row::Header { job } = r { Some(*job) } else { None }
-        }).collect();
+        let rows = build_rows(&jobs, &Filter::All, "", "api");
+        let headers: Vec<usize> = rows
+            .iter()
+            .filter_map(|r| {
+                if let Row::Header { job } = r {
+                    Some(*job)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert_eq!(headers, vec![0]); // only services/api
     }
 
@@ -2905,14 +3206,14 @@ mod tests {
 
     #[test]
     fn next_node_wraps() {
-        let jobs  = vec![make_job("a", None, Some(0)), make_job("b", None, Some(0))];
+        let jobs = vec![make_job("a", None, Some(0)), make_job("b", None, Some(0))];
         let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(next_node(&nodes, 2), 0);
     }
 
     #[test]
     fn prev_node_wraps() {
-        let jobs  = vec![make_job("a", None, Some(0)), make_job("b", None, Some(0))];
+        let jobs = vec![make_job("a", None, Some(0)), make_job("b", None, Some(0))];
         let nodes = build_tree_nodes(&jobs, ViewMode::Logs, &HashSet::new(), &HashSet::new());
         assert_eq!(prev_node(&nodes, 0), 2);
     }
@@ -2951,7 +3252,7 @@ mod tests {
     #[test]
     fn format_hms_local_negative_offset() {
         let offset = time::UtcOffset::from_whole_seconds(-18000).unwrap(); // UTC-5
-        // 12:00:00 UTC → 07:00:00 local
+                                                                           // 12:00:00 UTC → 07:00:00 local
         assert_eq!(format_hms_local(43200 * 1000, offset), "07:00:00");
     }
 
@@ -2966,7 +3267,7 @@ mod tests {
 
     #[test]
     fn highlight_spans_no_match() {
-        let spans  = vec![Span::raw("hello world")];
+        let spans = vec![Span::raw("hello world")];
         let result = highlight_spans(spans, "xyz");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].content, "hello world");
@@ -2974,17 +3275,20 @@ mod tests {
 
     #[test]
     fn highlight_spans_single_match() {
-        let spans  = vec![Span::raw("hello world")];
+        let spans = vec![Span::raw("hello world")];
         let result = highlight_spans(spans, "world");
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].content, "hello ");
         assert_eq!(result[1].content, "world");
-        assert_eq!(result[1].style, Style::default().bg(theme::YELLOW).fg(theme::BG));
+        assert_eq!(
+            result[1].style,
+            Style::default().bg(theme::YELLOW).fg(theme::BG)
+        );
     }
 
     #[test]
     fn highlight_spans_case_insensitive() {
-        let spans  = vec![Span::raw("Hello World")];
+        let spans = vec![Span::raw("Hello World")];
         let result = highlight_spans(spans, "world");
         assert_eq!(result.len(), 2);
         assert_eq!(result[1].content, "World"); // original case preserved
@@ -2992,7 +3296,7 @@ mod tests {
 
     #[test]
     fn highlight_spans_multiple_matches() {
-        let spans  = vec![Span::raw("abcabc")];
+        let spans = vec![Span::raw("abcabc")];
         let result = highlight_spans(spans, "abc");
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].content, "abc");
@@ -3113,7 +3417,10 @@ mod tests {
         expanded_jobs.insert(0);
         let nodes = build_tree_nodes(&[job], ViewMode::Coverage, &expanded_jobs, &HashSet::new());
         assert!(!nodes.iter().any(|n| n.coverage_group_ref.is_some()));
-        let src = nodes.iter().find(|n| n.coverage_source_ref == Some((0, 0))).unwrap();
+        let src = nodes
+            .iter()
+            .find(|n| n.coverage_source_ref == Some((0, 0)))
+            .unwrap();
         assert!(src.label.contains("Foo.java"), "got: {}", src.label);
         assert_eq!(src.coverage_badge.as_deref(), Some("90.0% / 75.0%"));
     }
@@ -3136,7 +3443,10 @@ mod tests {
         expanded_jobs.insert(0);
         let jobs = vec![job];
         let nodes = build_tree_nodes(&jobs, ViewMode::Coverage, &expanded_jobs, &HashSet::new());
-        let src_idx = nodes.iter().position(|n| n.coverage_source_ref == Some((0, 0))).unwrap();
+        let src_idx = nodes
+            .iter()
+            .position(|n| n.coverage_source_ref == Some((0, 0)))
+            .unwrap();
 
         let mut state = InspectState {
             targets: vec![],
@@ -3174,8 +3484,14 @@ mod tests {
         assert_eq!(state.source_lines.len(), 3);
         assert_eq!(state.source_lines[1].hit, LineHit::Full);
         assert_eq!(state.source_lines[2].hit, LineHit::Missed);
-        assert!(state.rows.iter().any(|r| matches!(r, Row::SourceBody { line: 1 })));
-        assert!(state.rows.iter().any(|r| matches!(r, Row::SourceBody { line: 2 })));
+        assert!(state
+            .rows
+            .iter()
+            .any(|r| matches!(r, Row::SourceBody { line: 1 })));
+        assert!(state
+            .rows
+            .iter()
+            .any(|r| matches!(r, Row::SourceBody { line: 2 })));
     }
 
     #[test]
@@ -3256,10 +3572,9 @@ mod tests {
             h_scroll: 0,
         };
         // Pre-seed resolve cache so the panel does not hit the network/resolver.
-        state.resolved_deps.insert(
-            (0, false),
-            Ok(vec!["└─ com.example:core:1.2.3".into()]),
-        );
+        state
+            .resolved_deps
+            .insert((0, false), Ok(vec!["└─ com.example:core:1.2.3".into()]));
         state.resolved_deps.insert(
             (0, true),
             Ok(vec!["└─ org.junit.jupiter:junit-jupiter:5.10.0".into()]),
@@ -3308,7 +3623,10 @@ mod tests {
         let nodes = build_tree_nodes(&[job], ViewMode::Tests, &HashSet::new(), &HashSet::new());
         let lib = nodes.iter().find(|n| n.title == "lib").unwrap();
         assert!(lib.coverage_badge.is_none());
-        assert_eq!(lib.test_badge.as_ref().map(|(s, _)| s.as_str()), Some("1✓ 1✗"));
+        assert_eq!(
+            lib.test_badge.as_ref().map(|(s, _)| s.as_str()),
+            Some("1✓ 1✗")
+        );
         assert!(lib.label.contains("▸"));
     }
 
@@ -3327,7 +3645,9 @@ mod tests {
         expanded.insert(0);
         let nodes = build_tree_nodes(&[job], ViewMode::Logs, &expanded, &HashSet::new());
         // Even when "expanded", Logs mode never shows test children.
-        assert!(nodes.iter().all(|n| n.test_ref.is_none() && n.class_ref.is_none()));
+        assert!(nodes
+            .iter()
+            .all(|n| n.test_ref.is_none() && n.class_ref.is_none()));
         assert!(!nodes[1].label.contains("▸"));
     }
 
@@ -3563,7 +3883,9 @@ mod tests {
 
     #[test]
     fn mouse_wheel_scrolls_members_tree() {
-        let jobs: Vec<_> = (0..40).map(|i| make_job(&format!("m{i:02}"), None, Some(0))).collect();
+        let jobs: Vec<_> = (0..40)
+            .map(|i| make_job(&format!("m{i:02}"), None, Some(0)))
+            .collect();
         let mut state = make_state(jobs, ViewMode::Logs);
         state.tree_scroll = 5;
         state.pane_h = 10; // small visible window

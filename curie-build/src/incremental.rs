@@ -212,7 +212,11 @@ pub(crate) fn finalize_staged(part: &Path, dest: &Path) -> Result<()> {
                 Ok(())
             } else {
                 Err(e).with_context(|| {
-                    format!("failed to rename {} \u{2192} {}", part.display(), dest.display())
+                    format!(
+                        "failed to rename {} \u{2192} {}",
+                        part.display(),
+                        dest.display()
+                    )
                 })
             }
         }
@@ -271,8 +275,7 @@ pub(crate) fn write_source_set(path: &Path, set: &BTreeSet<String>) -> Result<()
         body.push_str(p);
         body.push('\n');
     }
-    std::fs::write(path, body)
-        .with_context(|| format!("failed to write {}", path.display()))
+    std::fs::write(path, body).with_context(|| format!("failed to write {}", path.display()))
 }
 
 /// Load a `u64` fingerprint previously written with [`write_u64_stamp`], or
@@ -400,8 +403,7 @@ pub(crate) fn javac_version_stamp_path(target_dir: &Path) -> PathBuf {
 /// Write the current `javac` version to the stamp file in `target_dir`.
 pub(crate) fn write_javac_version_stamp(target_dir: &Path, version: &str) -> Result<()> {
     let path = javac_version_stamp_path(target_dir);
-    std::fs::write(&path, version)
-        .with_context(|| format!("failed to write {}", path.display()))
+    std::fs::write(&path, version).with_context(|| format!("failed to write {}", path.display()))
 }
 
 /// Returns the reason a recompile is (or is not) required.
@@ -491,7 +493,11 @@ mod tests {
             Some("javac 99".to_string())
         });
         assert_eq!(first.as_deref(), Some("javac 21"));
-        assert_eq!(second.as_deref(), Some("javac 21"), "second call must return the cached value");
+        assert_eq!(
+            second.as_deref(),
+            Some("javac 21"),
+            "second call must return the cached value"
+        );
         assert_eq!(calls.get(), 1, "detector must run exactly once");
     }
 
@@ -509,7 +515,11 @@ mod tests {
         });
         assert_eq!(first, None);
         assert_eq!(second, None, "a cached None must not be re-detected");
-        assert_eq!(calls.get(), 1, "detector must run exactly once even for None");
+        assert_eq!(
+            calls.get(),
+            1,
+            "detector must run exactly once even for None"
+        );
     }
 
     /// Write `content` to `path`, creating parent directories as needed.
@@ -522,11 +532,8 @@ mod tests {
 
     /// Set the mtime of `path` to `time`.
     fn set_mtime(path: &Path, time: SystemTime) {
-        filetime::set_file_mtime(
-            path,
-            filetime::FileTime::from_system_time(time),
-        )
-        .unwrap_or_else(|e| panic!("set_mtime({}) failed: {e}", path.display()));
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(time))
+            .unwrap_or_else(|e| panic!("set_mtime({}) failed: {e}", path.display()));
     }
 
     // -- mtime ----------------------------------------------------------------
@@ -583,7 +590,10 @@ mod tests {
         let resource = dir.path().join("BenchmarkList");
         write_file(&resource, b"resource");
         // No .class files — should behave as if the directory is empty.
-        assert_eq!(oldest_class_mtime_in_dir(dir.path()), SystemTime::UNIX_EPOCH);
+        assert_eq!(
+            oldest_class_mtime_in_dir(dir.path()),
+            SystemTime::UNIX_EPOCH
+        );
     }
 
     // -- newest_mtime ---------------------------------------------------------
@@ -619,7 +629,10 @@ mod tests {
         let toml = dir.path().join("Curie.toml");
         write_file(&toml, b"[application]");
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]), CompileStatus::NoClassFiles);
+        assert_eq!(
+            needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]),
+            CompileStatus::NoClassFiles
+        );
     }
 
     #[test]
@@ -632,7 +645,10 @@ mod tests {
         let toml = dir.path().join("Curie.toml");
         write_file(&toml, b"[application]");
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]), CompileStatus::NoClassFiles);
+        assert_eq!(
+            needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]),
+            CompileStatus::NoClassFiles
+        );
     }
 
     #[test]
@@ -659,7 +675,10 @@ mod tests {
             write_javac_version_stamp(dir.path(), &v).unwrap();
         }
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]), CompileStatus::UpToDate);
+        assert_eq!(
+            needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]),
+            CompileStatus::UpToDate
+        );
     }
 
     #[test]
@@ -686,7 +705,10 @@ mod tests {
             write_javac_version_stamp(dir.path(), &v).unwrap();
         }
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]), CompileStatus::SourceChanged);
+        assert_eq!(
+            needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]),
+            CompileStatus::SourceChanged
+        );
     }
 
     #[test]
@@ -713,7 +735,10 @@ mod tests {
             write_javac_version_stamp(dir.path(), &v).unwrap();
         }
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]), CompileStatus::TomlChanged);
+        assert_eq!(
+            needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]),
+            CompileStatus::TomlChanged
+        );
     }
 
     #[test]
@@ -737,7 +762,10 @@ mod tests {
         // Write a *different* javac version to simulate a JDK upgrade.
         write_javac_version_stamp(dir.path(), "javac 99.0.0").unwrap();
 
-        assert_eq!(needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]), CompileStatus::JdkChanged);
+        assert_eq!(
+            needs_recompile(&[src], &classes_dir, &toml, dir.path(), &[]),
+            CompileStatus::JdkChanged
+        );
     }
 
     #[test]
@@ -903,7 +931,12 @@ mod tests {
         set_mtime(&res_file, base + Duration::from_secs(5));
         let missing_toml = placeholder_toml(dir.path());
 
-        assert!(needs_repackage(&jar, &classes_dir, Some(&resources_dir), &missing_toml));
+        assert!(needs_repackage(
+            &jar,
+            &classes_dir,
+            Some(&resources_dir),
+            &missing_toml
+        ));
     }
 
     #[test]
@@ -926,7 +959,12 @@ mod tests {
         set_mtime(&jar, base + Duration::from_secs(5));
         let missing_toml = placeholder_toml(dir.path());
 
-        assert!(!needs_repackage(&jar, &classes_dir, Some(&resources_dir), &missing_toml));
+        assert!(!needs_repackage(
+            &jar,
+            &classes_dir,
+            Some(&resources_dir),
+            &missing_toml
+        ));
     }
 
     /// B4: a change to Curie.toml (e.g. `[application] mainClass`) must
@@ -1063,7 +1101,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = source_set_stamp_path(dir.path(), ".sources");
         std::fs::write(&path, "\n  /a/Foo.java  \n\n/a/Bar.java\n").unwrap();
-        assert_eq!(load_source_set(&path).unwrap(), set_of(&["/a/Foo.java", "/a/Bar.java"]));
+        assert_eq!(
+            load_source_set(&path).unwrap(),
+            set_of(&["/a/Foo.java", "/a/Bar.java"])
+        );
     }
 
     #[test]
@@ -1107,13 +1148,19 @@ mod tests {
 
     #[test]
     fn compile_status_source_set_changed_reason_and_needs_recompile() {
-        assert_eq!(CompileStatus::SourceSetChanged.reason(), "source set changed");
+        assert_eq!(
+            CompileStatus::SourceSetChanged.reason(),
+            "source set changed"
+        );
         assert!(CompileStatus::SourceSetChanged.needs_recompile());
     }
 
     #[test]
     fn compile_status_missing_classes_reason_and_needs_recompile() {
-        assert_eq!(CompileStatus::MissingClasses.reason(), "missing class files");
+        assert_eq!(
+            CompileStatus::MissingClasses.reason(),
+            "missing class files"
+        );
         assert!(CompileStatus::MissingClasses.needs_recompile());
     }
 
@@ -1126,8 +1173,15 @@ mod tests {
         let p2 = staging_path(dest);
 
         assert!(p1.starts_with("/tmp/target"));
-        assert!(p1.file_name().unwrap().to_string_lossy().contains("foo.jar.part."));
-        assert_ne!(p1, p2, "consecutive calls must produce distinct staging names");
+        assert!(p1
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("foo.jar.part."));
+        assert_ne!(
+            p1, p2,
+            "consecutive calls must produce distinct staging names"
+        );
     }
 
     #[test]

@@ -48,10 +48,11 @@ pub fn resolve_agent_jar(
             progress: false,
             bom_imports: vec![],
             offline,
-            skip_version_ranges: false, error_on_version_conflict: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            },
+        },
     )
     .context("failed to resolve JaCoCo agent")?;
 
@@ -69,9 +70,17 @@ fn select_jar_from_resolve(
 ) -> Result<std::path::PathBuf> {
     jars.iter()
         .find(|p| jar_filename_matches(p, coord_fragment, Some(classifier)))
-        .or_else(|| jars.iter().find(|p| jar_filename_matches(p, coord_fragment, None)))
+        .or_else(|| {
+            jars.iter()
+                .find(|p| jar_filename_matches(p, coord_fragment, None))
+        })
         .cloned()
-        .with_context(|| format!("no jar matched {} with classifier {}", coord_fragment, classifier))
+        .with_context(|| {
+            format!(
+                "no jar matched {} with classifier {}",
+                coord_fragment, classifier
+            )
+        })
 }
 
 fn jar_filename_matches(path: &std::path::Path, coord: &str, classifier: Option<&str>) -> bool {
@@ -110,10 +119,11 @@ pub fn resolve_cli_jar(
             progress: false,
             bom_imports: vec![],
             offline,
-            skip_version_ranges: false, error_on_version_conflict: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            },
+        },
     )
     .context("failed to resolve JaCoCo CLI")?;
 
@@ -198,7 +208,11 @@ impl CoverageSummary {
 
     /// One-line human-readable summary, e.g. "72.5% lines, 55.0% branches".
     pub fn summary_line(&self) -> String {
-        format!("{:.1}% lines, {:.1}% branches", self.line_pct(), self.branch_pct())
+        format!(
+            "{:.1}% lines, {:.1}% branches",
+            self.line_pct(),
+            self.branch_pct()
+        )
     }
 
     /// Compact badge for the members pane, e.g. `"87.3% / 74.1%"`.
@@ -254,12 +268,16 @@ pub struct CoverageReport {
 impl CoverageReport {
     /// Classes with missed lines, worst first, capped at `limit`.
     pub fn top_uncovered(&self, limit: usize) -> Vec<&ClassCoverage> {
-        let mut rows: Vec<&ClassCoverage> = self.classes.iter()
-            .filter(|c| c.line_missed > 0)
-            .collect();
+        let mut rows: Vec<&ClassCoverage> =
+            self.classes.iter().filter(|c| c.line_missed > 0).collect();
         rows.sort_by(|a, b| {
-            b.line_missed.cmp(&a.line_missed)
-                .then_with(|| a.line_pct().partial_cmp(&b.line_pct()).unwrap_or(std::cmp::Ordering::Equal))
+            b.line_missed
+                .cmp(&a.line_missed)
+                .then_with(|| {
+                    a.line_pct()
+                        .partial_cmp(&b.line_pct())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .then_with(|| a.qualified_name().cmp(&b.qualified_name()))
         });
         rows.into_iter().take(limit).collect()
@@ -407,7 +425,9 @@ pub fn list_source_files(html_dir: &Path, classes: &[ClassCoverage]) -> Vec<Sour
         }
     }
     sources.sort_by(|a, b| {
-        a.package.cmp(&b.package).then_with(|| a.file_name.cmp(&b.file_name))
+        a.package
+            .cmp(&b.package)
+            .then_with(|| a.file_name.cmp(&b.file_name))
     });
     sources
 }
@@ -466,7 +486,12 @@ fn parse_html_source_line(number: usize, raw: &str) -> SourceLine {
     let hit = line_hit_from_html(raw);
     let title = extract_title_attr(raw);
     let text = decode_html_entities(&strip_html_tags(raw));
-    SourceLine { number, text, hit, title }
+    SourceLine {
+        number,
+        text,
+        hit,
+        title,
+    }
 }
 
 fn line_hit_from_html(raw: &str) -> LineHit {
@@ -489,7 +514,9 @@ fn has_coverage_class(raw: &str, token: &str) -> bool {
     let mut rest = raw;
     while let Some(idx) = rest.find("class=\"") {
         let start = idx + "class=\"".len();
-        let Some(end) = rest[start..].find('"') else { break; };
+        let Some(end) = rest[start..].find('"') else {
+            break;
+        };
         let classes = &rest[start..start + end];
         if classes.split_whitespace().any(|c| c == token) {
             return true;
@@ -504,7 +531,11 @@ fn extract_title_attr(raw: &str) -> Option<String> {
     let start = idx + "title=\"".len();
     let end = raw[start..].find('"')? + start;
     let title = decode_html_entities(&raw[start..end]);
-    if title.is_empty() { None } else { Some(title) }
+    if title.is_empty() {
+        None
+    } else {
+        Some(title)
+    }
 }
 
 fn strip_html_tags(s: &str) -> String {
@@ -538,7 +569,8 @@ fn decode_html_entities(s: &str) -> String {
                 "&nbsp;" => " ",
                 _ => {
                     // Numeric &#NNN; / &#xHH;
-                    if let Some(num) = entity.strip_prefix("&#x").and_then(|e| e.strip_suffix(';')) {
+                    if let Some(num) = entity.strip_prefix("&#x").and_then(|e| e.strip_suffix(';'))
+                    {
                         if let Ok(v) = u32::from_str_radix(num, 16) {
                             if let Some(c) = char::from_u32(v) {
                                 out.push(c);
@@ -546,7 +578,9 @@ fn decode_html_entities(s: &str) -> String {
                                 continue;
                             }
                         }
-                    } else if let Some(num) = entity.strip_prefix("&#").and_then(|e| e.strip_suffix(';')) {
+                    } else if let Some(num) =
+                        entity.strip_prefix("&#").and_then(|e| e.strip_suffix(';'))
+                    {
                         if let Ok(v) = num.parse::<u32>() {
                             if let Some(c) = char::from_u32(v) {
                                 out.push(c);
@@ -608,15 +642,15 @@ fn parse_csv_content(content: &str) -> Result<CoverageReport> {
         if cols.len() < 9 {
             continue;
         }
-        let b_missed  = cols[5].parse::<u64>().unwrap_or(0);
+        let b_missed = cols[5].parse::<u64>().unwrap_or(0);
         let b_covered = cols[6].parse::<u64>().unwrap_or(0);
-        let l_missed  = cols[7].parse::<u64>().unwrap_or(0);
+        let l_missed = cols[7].parse::<u64>().unwrap_or(0);
         let l_covered = cols[8].parse::<u64>().unwrap_or(0);
 
-        branch_missed  += b_missed;
+        branch_missed += b_missed;
         branch_covered += b_covered;
-        line_missed    += l_missed;
-        line_covered   += l_covered;
+        line_missed += l_missed;
+        line_covered += l_covered;
 
         classes.push(ClassCoverage {
             package: cols[1].to_string(),
@@ -774,14 +808,18 @@ mod tests {
         assert_eq!(top.len(), 2);
         assert_eq!(top[0].class_name, "Baz"); // 8 missed
         assert_eq!(top[1].class_name, "Foo"); // 5 missed
-        // Fully-covered Bar is excluded.
+                                              // Fully-covered Bar is excluded.
         assert!(top.iter().all(|c| c.class_name != "Bar"));
     }
 
     #[test]
     fn default_jacoco_version_is_semver() {
         let parts: Vec<&str> = DEFAULT_JACOCO_VERSION.split('.').collect();
-        assert!(parts.len() >= 2, "expected semver, got: {}", DEFAULT_JACOCO_VERSION);
+        assert!(
+            parts.len() >= 2,
+            "expected semver, got: {}",
+            DEFAULT_JACOCO_VERSION
+        );
     }
 
     #[test]
@@ -857,7 +895,10 @@ public class Foo {
 
     #[test]
     fn strip_and_decode_html() {
-        assert_eq!(strip_html_tags("<span class=\"fc\">a&lt;b</span>"), "a&lt;b");
+        assert_eq!(
+            strip_html_tags("<span class=\"fc\">a&lt;b</span>"),
+            "a&lt;b"
+        );
         assert_eq!(decode_html_entities("a&lt;b&amp;c"), "a<b&c");
     }
 }

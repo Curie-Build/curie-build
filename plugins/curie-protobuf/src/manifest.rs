@@ -17,11 +17,7 @@ pub fn build(cfg: &ProtobufConfig) -> Result<curie_plugin::Manifest> {
     }];
 
     if cfg.grpc {
-        let grpc_version = cfg
-            .grpc_version
-            .as_deref()
-            .unwrap_or("1.60.0")
-            .to_string();
+        let grpc_version = cfg.grpc_version.as_deref().unwrap_or("1.60.0").to_string();
         artifacts.push(curie_plugin::Artifact {
             id: "grpc-plugin".to_string(),
             group: "io.grpc".to_string(),

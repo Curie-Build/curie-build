@@ -34,8 +34,12 @@ pub fn write_sources_jar(
 ) -> Result<()> {
     let part = staging_path(jar_path);
     if let Some(parent) = part.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent for staging file {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create parent for staging file {}",
+                parent.display()
+            )
+        })?;
     }
 
     {
@@ -53,90 +57,91 @@ pub fn write_sources_jar(
             .last_modified_time(epoch())
             .unix_permissions(0o755);
 
-    // MANIFEST.MF (must be first).
-    zip.start_file("META-INF/", dir_opts)
-        .context("failed to write META-INF/ entry")?;
-    // Use the crate-wide manifest builder so every MANIFEST.MF (even the
-    // minimal ones in sources jars) goes through the common path.
-    zip.start_file("META-INF/MANIFEST.MF", file_opts)
-        .context("failed to start MANIFEST.MF entry")?;
-    zip.write_all(build_manifest(None, None, None).as_bytes())
-        .context("failed to write MANIFEST.MF")?;
+        // MANIFEST.MF (must be first).
+        zip.start_file("META-INF/", dir_opts)
+            .context("failed to write META-INF/ entry")?;
+        // Use the crate-wide manifest builder so every MANIFEST.MF (even the
+        // minimal ones in sources jars) goes through the common path.
+        zip.start_file("META-INF/MANIFEST.MF", file_opts)
+            .context("failed to start MANIFEST.MF entry")?;
+        zip.write_all(build_manifest(None, None, None).as_bytes())
+            .context("failed to write MANIFEST.MF")?;
 
-    // Collect (entry_path → fs_path) from all source roots and the resources dir.
-    let mut entries: std::collections::BTreeMap<String, PathBuf> = std::collections::BTreeMap::new();
+        // Collect (entry_path → fs_path) from all source roots and the resources dir.
+        let mut entries: std::collections::BTreeMap<String, PathBuf> =
+            std::collections::BTreeMap::new();
 
-    for root in src_roots {
-        let pkg_prefix_dotted = pkg_prefix_for_src_root(root);
-        // Convert "com.example.foo" → "com/example/foo" for jar paths.
-        let pkg_prefix_slashed = pkg_prefix_dotted.replace('.', "/");
+        for root in src_roots {
+            let pkg_prefix_dotted = pkg_prefix_for_src_root(root);
+            // Convert "com.example.foo" → "com/example/foo" for jar paths.
+            let pkg_prefix_slashed = pkg_prefix_dotted.replace('.', "/");
 
-        for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
-            if !entry.file_type().is_file() {
+            for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let fs_path = entry.path().to_path_buf();
+                // Only Java + Kotlin sources.
+                let is_source = matches!(
+                    fs_path.extension().and_then(|s| s.to_str()),
+                    Some("java") | Some("kt") | Some("groovy")
+                );
+                if !is_source {
+                    continue;
+                }
+                let rel = match fs_path.strip_prefix(root) {
+                    Ok(r) => r.to_string_lossy().replace('\\', "/"),
+                    Err(_) => continue,
+                };
+                let entry_path = if pkg_prefix_slashed.is_empty() {
+                    rel
+                } else {
+                    format!("{}/{}", pkg_prefix_slashed, rel)
+                };
+                entries.insert(entry_path, fs_path);
+            }
+        }
+
+        if let Some(res_root) = resources_dir {
+            for entry in WalkDir::new(res_root).into_iter().filter_map(|e| e.ok()) {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let fs_path = entry.path().to_path_buf();
+                if let Ok(rel) = fs_path.strip_prefix(res_root) {
+                    let entry_path = rel.to_string_lossy().replace('\\', "/");
+                    // Resources don't overwrite sources with the same path.
+                    entries.entry(entry_path).or_insert(fs_path);
+                }
+            }
+        }
+
+        // Add intermediate dir entries to keep the jar layout tidy (matches Maven).
+        let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for entry_path in entries.keys() {
+            let parts: Vec<&str> = entry_path.split('/').collect();
+            for i in 1..parts.len() {
+                dirs.insert(format!("{}/", parts[..i].join("/")));
+            }
+        }
+        for d in &dirs {
+            if d == "META-INF/" {
                 continue;
             }
-            let fs_path = entry.path().to_path_buf();
-            // Only Java + Kotlin sources.
-            let is_source = matches!(
-                fs_path.extension().and_then(|s| s.to_str()),
-                Some("java") | Some("kt") | Some("groovy")
-            );
-            if !is_source {
-                continue;
-            }
-            let rel = match fs_path.strip_prefix(root) {
-                Ok(r) => r.to_string_lossy().replace('\\', "/"),
-                Err(_) => continue,
-            };
-            let entry_path = if pkg_prefix_slashed.is_empty() {
-                rel
-            } else {
-                format!("{}/{}", pkg_prefix_slashed, rel)
-            };
-            entries.insert(entry_path, fs_path);
+            zip.start_file(d, dir_opts)
+                .with_context(|| format!("failed to write dir entry {d}"))?;
         }
-    }
 
-    if let Some(res_root) = resources_dir {
-        for entry in WalkDir::new(res_root).into_iter().filter_map(|e| e.ok()) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let fs_path = entry.path().to_path_buf();
-            if let Ok(rel) = fs_path.strip_prefix(res_root) {
-                let entry_path = rel.to_string_lossy().replace('\\', "/");
-                // Resources don't overwrite sources with the same path.
-                entries.entry(entry_path).or_insert(fs_path);
-            }
+        for (entry_path, fs_path) in &entries {
+            let bytes = std::fs::read(fs_path)
+                .with_context(|| format!("failed to read source {}", fs_path.display()))?;
+            zip.start_file(entry_path.as_str(), file_opts)
+                .with_context(|| format!("failed to start jar entry {entry_path}"))?;
+            zip.write_all(&bytes)
+                .with_context(|| format!("failed to write jar entry {entry_path}"))?;
         }
-    }
 
-    // Add intermediate dir entries to keep the jar layout tidy (matches Maven).
-    let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for entry_path in entries.keys() {
-        let parts: Vec<&str> = entry_path.split('/').collect();
-        for i in 1..parts.len() {
-            dirs.insert(format!("{}/", parts[..i].join("/")));
-        }
-    }
-    for d in &dirs {
-        if d == "META-INF/" {
-            continue;
-        }
-        zip.start_file(d, dir_opts)
-            .with_context(|| format!("failed to write dir entry {d}"))?;
-    }
-
-    for (entry_path, fs_path) in &entries {
-        let bytes = std::fs::read(fs_path)
-            .with_context(|| format!("failed to read source {}", fs_path.display()))?;
-        zip.start_file(entry_path.as_str(), file_opts)
-            .with_context(|| format!("failed to start jar entry {entry_path}"))?;
-        zip.write_all(&bytes)
-            .with_context(|| format!("failed to write jar entry {entry_path}"))?;
-    }
-
-    zip.finish().context("failed to finalize sources jar")?;
+        zip.finish().context("failed to finalize sources jar")?;
     } // drop ZipWriter + File
 
     finalize_staged(&part, jar_path)?;
@@ -181,13 +186,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src").join("main").join("java");
         std::fs::create_dir_all(src.join("com").join("foo")).unwrap();
-        std::fs::write(src.join("com").join("foo").join("Bar.java"), b"package com.foo; class Bar {}").unwrap();
+        std::fs::write(
+            src.join("com").join("foo").join("Bar.java"),
+            b"package com.foo; class Bar {}",
+        )
+        .unwrap();
 
         let jar = dir.path().join("out.jar");
         write_sources_jar(&jar, &[src], None).unwrap();
 
         let entries = list_jar_entries(&jar);
-        assert!(entries.contains(&"com/foo/Bar.java".to_string()), "got: {entries:?}");
+        assert!(
+            entries.contains(&"com/foo/Bar.java".to_string()),
+            "got: {entries:?}"
+        );
     }
 
     #[test]
@@ -195,7 +207,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src").join("com.example.foo");
         std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(src.join("Hello.java"), b"package com.example.foo; class Hello {}").unwrap();
+        std::fs::write(
+            src.join("Hello.java"),
+            b"package com.example.foo; class Hello {}",
+        )
+        .unwrap();
 
         let jar = dir.path().join("out.jar");
         write_sources_jar(&jar, &[src], None).unwrap();
@@ -212,13 +228,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src").join("main").join("kotlin");
         std::fs::create_dir_all(src.join("com").join("foo")).unwrap();
-        std::fs::write(src.join("com").join("foo").join("Baz.kt"), b"package com.foo; fun main() {}").unwrap();
+        std::fs::write(
+            src.join("com").join("foo").join("Baz.kt"),
+            b"package com.foo; fun main() {}",
+        )
+        .unwrap();
 
         let jar = dir.path().join("out.jar");
         write_sources_jar(&jar, &[src], None).unwrap();
 
         let entries = list_jar_entries(&jar);
-        assert!(entries.contains(&"com/foo/Baz.kt".to_string()), "got: {entries:?}");
+        assert!(
+            entries.contains(&"com/foo/Baz.kt".to_string()),
+            "got: {entries:?}"
+        );
     }
 
     #[test]
@@ -236,7 +259,10 @@ mod tests {
         write_sources_jar(&jar, &[src], Some(&res)).unwrap();
 
         let entries = list_jar_entries(&jar);
-        assert!(entries.contains(&"config.properties".to_string()), "got: {entries:?}");
+        assert!(
+            entries.contains(&"config.properties".to_string()),
+            "got: {entries:?}"
+        );
     }
 
     #[test]
@@ -244,8 +270,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src").join("com.example");
         std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(src.join("Greeter.groovy"), b"package com.example; class Greeter {}").unwrap();
-        std::fs::write(src.join("Helper.java"),    b"package com.example; class Helper {}").unwrap();
+        std::fs::write(
+            src.join("Greeter.groovy"),
+            b"package com.example; class Greeter {}",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("Helper.java"),
+            b"package com.example; class Helper {}",
+        )
+        .unwrap();
 
         let jar = dir.path().join("out.jar");
         write_sources_jar(&jar, &[src], None).unwrap();
@@ -276,7 +310,10 @@ mod tests {
 
         let bytes_a = std::fs::read(&a).unwrap();
         let bytes_b = std::fs::read(&b).unwrap();
-        assert_eq!(bytes_a, bytes_b, "two runs must produce byte-identical jars");
+        assert_eq!(
+            bytes_a, bytes_b,
+            "two runs must produce byte-identical jars"
+        );
     }
 
     #[test]

@@ -16,8 +16,7 @@ use crate::incremental::{finalize_staged, staging_path};
 /// Reproducible-build epoch: 2024-01-01 00:00:00 UTC.
 /// Matches SOURCE_DATE_EPOCH convention used by Debian, Nix, etc.
 fn epoch() -> zip::DateTime {
-    zip::DateTime::from_date_and_time(2024, 1, 1, 0, 0, 0)
-        .expect("epoch constant is valid")
+    zip::DateTime::from_date_and_time(2024, 1, 1, 0, 0, 0).expect("epoch constant is valid")
 }
 
 /// Build an OS-appropriate classpath string from a list of JAR paths.
@@ -269,12 +268,16 @@ pub(crate) fn populate_libs_dir(libs_dir: &Path, dep_jars: &[PathBuf]) -> Result
         // Try hardlink first; fall back to copy on any error (cross-device,
         // unsupported filesystem, permissions, etc.).
         if std::fs::hard_link(src, &dst).is_err() {
-            std::fs::copy(src, &dst)
-                .with_context(|| format!("failed to copy {} to {}", src.display(), dst.display()))?;
+            std::fs::copy(src, &dst).with_context(|| {
+                format!("failed to copy {} to {}", src.display(), dst.display())
+            })?;
         }
     }
 
-    crate::parallel::emit(&crate::style::info("Libs", &format!("{} JAR(s) → target/libs/", dep_jars.len())));
+    crate::parallel::emit(&crate::style::info(
+        "Libs",
+        &format!("{} JAR(s) → target/libs/", dep_jars.len()),
+    ));
     if qualified > 0 {
         crate::parallel::emit(&crate::style::warn(
             "Libs",
@@ -307,8 +310,12 @@ pub(crate) fn write_deterministic_jar(
 ) -> Result<()> {
     let part = staging_path(jar_path);
     if let Some(parent) = part.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent for staging file {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create parent for staging file {}",
+                parent.display()
+            )
+        })?;
     }
 
     // Write the complete JAR to the staging file first. Only on success do we
@@ -330,99 +337,97 @@ pub(crate) fn write_deterministic_jar(
             .last_modified_time(epoch())
             .unix_permissions(0o755);
 
-    // --- MANIFEST.MF (must be first entry per JAR spec) ---------------------
-    zip.start_file("META-INF/", dir_options)
-        .context("failed to write META-INF/ directory entry")?;
+        // --- MANIFEST.MF (must be first entry per JAR spec) ---------------------
+        zip.start_file("META-INF/", dir_options)
+            .context("failed to write META-INF/ directory entry")?;
 
-    // Build the full manifest using the single common helper. This ensures
-    // Main-Class (and Automatic-Module-Name) are folded exactly like Class-Path
-    // and that all writers in the crate produce consistent output.
-    let cp_value = if !dep_jars.is_empty() {
-        Some(manifest_class_path_value(dep_jars))
-    } else {
-        None
-    };
-    let manifest = build_manifest(main_class, cp_value.as_deref(), automatic_module_name);
-
-    zip.start_file("META-INF/MANIFEST.MF", options)
-        .context("failed to start MANIFEST.MF entry")?;
-    zip.write_all(manifest.as_bytes())
-        .context("failed to write MANIFEST.MF")?;
-
-    // --- build-info.properties (optional) -----------------------------------
-    if let Some(props) = build_info {
-        zip.start_file("META-INF/build-info.properties", options)
-            .context("failed to start META-INF/build-info.properties entry")?;
-        zip.write_all(props.as_bytes())
-            .context("failed to write META-INF/build-info.properties")?;
-    }
-
-    // --- collect entries from classes_dir and resources_dir -----------------
-    // We gather (zip_path, fs_path) pairs from both roots, deduplicate by
-    // zip_path (class files win over resources for the same path, matching
-    // Maven's behaviour), then sort and write.
-    let mut entries: std::collections::BTreeMap<String, PathBuf> = std::collections::BTreeMap::new();
-
-    for (root, label) in [
-        (Some(classes_dir), "classes"),
-        (resources_dir, "resources"),
-    ] {
-        let Some(root) = root else { continue };
-        for entry in WalkDir::new(root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file() || e.file_type().is_dir())
-        {
-            let rel = entry
-                .path()
-                .strip_prefix(root)
-                .ok()
-                .map(|r| r.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
-            if rel.is_empty() {
-                continue; // skip the root dir itself
-            }
-            let zip_path = if entry.file_type().is_dir() {
-                format!("{}/", rel)
-            } else {
-                rel
-            };
-            // Skip exactly the entries we already wrote ourselves above: the
-            // META-INF/ directory entry, MANIFEST.MF (always regenerated),
-            // and build-info.properties (only when we generated one).
-            // Everything else under META-INF/ — service loader
-            // registrations, annotation-processor metadata, native-image
-            // configs, Kotlin module files, etc. — is preserved.
-            if zip_path == "META-INF/" || zip_path == "META-INF/MANIFEST.MF" {
-                continue;
-            }
-            if build_info.is_some() && zip_path == "META-INF/build-info.properties" {
-                continue;
-            }
-            // Class files take precedence; skip if already inserted from classes.
-            if label == "resources" && entries.contains_key(&zip_path) {
-                continue;
-            }
-            entries.insert(zip_path, entry.into_path());
-        }
-    }
-
-    // BTreeMap is already sorted lexicographically.
-    for (zip_path, fs_path) in &entries {
-        if zip_path.ends_with('/') {
-            zip.start_file(zip_path, dir_options)
-                .with_context(|| format!("failed to write directory entry {}", zip_path))?;
+        // Build the full manifest using the single common helper. This ensures
+        // Main-Class (and Automatic-Module-Name) are folded exactly like Class-Path
+        // and that all writers in the crate produce consistent output.
+        let cp_value = if !dep_jars.is_empty() {
+            Some(manifest_class_path_value(dep_jars))
         } else {
-            zip.start_file(zip_path, options)
-                .with_context(|| format!("failed to start entry {}", zip_path))?;
-            let data = std::fs::read(fs_path)
-                .with_context(|| format!("failed to read {}", fs_path.display()))?;
-            zip.write_all(&data)
-                .with_context(|| format!("failed to write entry {}", zip_path))?;
-        }
-    }
+            None
+        };
+        let manifest = build_manifest(main_class, cp_value.as_deref(), automatic_module_name);
 
-    zip.finish().context("failed to finalise JAR")?;
+        zip.start_file("META-INF/MANIFEST.MF", options)
+            .context("failed to start MANIFEST.MF entry")?;
+        zip.write_all(manifest.as_bytes())
+            .context("failed to write MANIFEST.MF")?;
+
+        // --- build-info.properties (optional) -----------------------------------
+        if let Some(props) = build_info {
+            zip.start_file("META-INF/build-info.properties", options)
+                .context("failed to start META-INF/build-info.properties entry")?;
+            zip.write_all(props.as_bytes())
+                .context("failed to write META-INF/build-info.properties")?;
+        }
+
+        // --- collect entries from classes_dir and resources_dir -----------------
+        // We gather (zip_path, fs_path) pairs from both roots, deduplicate by
+        // zip_path (class files win over resources for the same path, matching
+        // Maven's behaviour), then sort and write.
+        let mut entries: std::collections::BTreeMap<String, PathBuf> =
+            std::collections::BTreeMap::new();
+
+        for (root, label) in [(Some(classes_dir), "classes"), (resources_dir, "resources")] {
+            let Some(root) = root else { continue };
+            for entry in WalkDir::new(root)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file() || e.file_type().is_dir())
+            {
+                let rel = entry
+                    .path()
+                    .strip_prefix(root)
+                    .ok()
+                    .map(|r| r.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                if rel.is_empty() {
+                    continue; // skip the root dir itself
+                }
+                let zip_path = if entry.file_type().is_dir() {
+                    format!("{}/", rel)
+                } else {
+                    rel
+                };
+                // Skip exactly the entries we already wrote ourselves above: the
+                // META-INF/ directory entry, MANIFEST.MF (always regenerated),
+                // and build-info.properties (only when we generated one).
+                // Everything else under META-INF/ — service loader
+                // registrations, annotation-processor metadata, native-image
+                // configs, Kotlin module files, etc. — is preserved.
+                if zip_path == "META-INF/" || zip_path == "META-INF/MANIFEST.MF" {
+                    continue;
+                }
+                if build_info.is_some() && zip_path == "META-INF/build-info.properties" {
+                    continue;
+                }
+                // Class files take precedence; skip if already inserted from classes.
+                if label == "resources" && entries.contains_key(&zip_path) {
+                    continue;
+                }
+                entries.insert(zip_path, entry.into_path());
+            }
+        }
+
+        // BTreeMap is already sorted lexicographically.
+        for (zip_path, fs_path) in &entries {
+            if zip_path.ends_with('/') {
+                zip.start_file(zip_path, dir_options)
+                    .with_context(|| format!("failed to write directory entry {}", zip_path))?;
+            } else {
+                zip.start_file(zip_path, options)
+                    .with_context(|| format!("failed to start entry {}", zip_path))?;
+                let data = std::fs::read(fs_path)
+                    .with_context(|| format!("failed to read {}", fs_path.display()))?;
+                zip.write_all(&data)
+                    .with_context(|| format!("failed to write entry {}", zip_path))?;
+            }
+        }
+
+        zip.finish().context("failed to finalise JAR")?;
     } // drop ZipWriter + File for the part before rename
 
     finalize_staged(&part, jar_path)?;
@@ -447,7 +452,8 @@ mod tests {
     #[test]
     fn fold_manifest_header_long_value_is_folded() {
         // Build a value that definitely exceeds 72 bytes on the first line.
-        let value = "libs/aaaa.jar libs/bbbb.jar libs/cccc.jar libs/dddd.jar libs/eeee.jar libs/ffff.jar";
+        let value =
+            "libs/aaaa.jar libs/bbbb.jar libs/cccc.jar libs/dddd.jar libs/eeee.jar libs/ffff.jar";
         let result = format_manifest_header("Class-Path", value);
         for line in result.split("\r\n").filter(|l| !l.is_empty()) {
             assert!(
@@ -463,7 +469,13 @@ mod tests {
             .split("\r\n")
             .filter(|l| !l.is_empty())
             .enumerate()
-            .map(|(i, l)| if i == 0 { l["Class-Path: ".len()..].to_string() } else { l[1..].to_string() })
+            .map(|(i, l)| {
+                if i == 0 {
+                    l["Class-Path: ".len()..].to_string()
+                } else {
+                    l[1..].to_string()
+                }
+            })
             .collect::<Vec<_>>()
             .join("");
         assert_eq!(reconstructed, value);
@@ -509,7 +521,10 @@ mod tests {
         // Simulate a manifest that an external tool (or old Curie) wrote with a folded Main-Class.
         let folded = "Manifest-Version: 1.0\r\nMain-Class: com.example.a.very.long.package.name.that.\r\n was.folded.by.the.writer\r\n\r\n";
         let got = get_manifest_header(folded, "Main-Class").expect("must unfold");
-        assert_eq!(got, "com.example.a.very.long.package.name.that.was.folded.by.the.writer");
+        assert_eq!(
+            got,
+            "com.example.a.very.long.package.name.that.was.folded.by.the.writer"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -526,16 +541,8 @@ mod tests {
         std::fs::write(classes_dir.join("Foo.class"), b"\xca\xfe\xba\xbe").unwrap();
 
         let jar_path = tmp.path().join("out.jar");
-        write_deterministic_jar(
-            &jar_path,
-            &classes_dir,
-            None,
-            None,
-            &[],
-            build_info,
-            None,
-        )
-        .unwrap();
+        write_deterministic_jar(&jar_path, &classes_dir, None, None, &[], build_info, None)
+            .unwrap();
 
         std::fs::read(&jar_path).unwrap()
     }
@@ -564,7 +571,10 @@ mod tests {
     /// Helper: write a JAR with a `Foo.class` in `classes_dir` plus the given
     /// `(rel_path, content)` files under `resources_dir`, and return the raw
     /// bytes so we can inspect the ZIP entries.
-    fn jar_bytes_with_resources(build_info: Option<&str>, resource_files: &[(&str, &[u8])]) -> Vec<u8> {
+    fn jar_bytes_with_resources(
+        build_info: Option<&str>,
+        resource_files: &[(&str, &[u8])],
+    ) -> Vec<u8> {
         let tmp = tempfile::tempdir().unwrap();
         let classes_dir = tmp.path().join("classes");
         std::fs::create_dir_all(&classes_dir).unwrap();
@@ -631,7 +641,10 @@ mod tests {
     fn build_info_entry_is_after_manifest() {
         let bytes = jar_bytes_with_build_info(Some("git.commit.id=abc\n"));
         let names = zip_entry_names(&bytes);
-        let manifest_pos = names.iter().position(|n| n == "META-INF/MANIFEST.MF").unwrap();
+        let manifest_pos = names
+            .iter()
+            .position(|n| n == "META-INF/MANIFEST.MF")
+            .unwrap();
         let props_pos = names
             .iter()
             .position(|n| n == "META-INF/build-info.properties")
@@ -650,11 +663,16 @@ mod tests {
     fn meta_inf_services_resource_is_preserved() {
         let bytes = jar_bytes_with_resources(
             None,
-            &[("META-INF/services/java.sql.Driver", b"com.example.MyDriver\n")],
+            &[(
+                "META-INF/services/java.sql.Driver",
+                b"com.example.MyDriver\n",
+            )],
         );
         let names = zip_entry_names(&bytes);
         assert!(
-            names.iter().any(|n| n == "META-INF/services/java.sql.Driver"),
+            names
+                .iter()
+                .any(|n| n == "META-INF/services/java.sql.Driver"),
             "META-INF/services/java.sql.Driver must be preserved; entries: {:?}",
             names,
         );
@@ -668,8 +686,15 @@ mod tests {
     fn manifest_mf_resource_is_not_duplicated() {
         let bytes = jar_bytes_with_resources(None, &[("META-INF/MANIFEST.MF", b"Custom: yes\r\n")]);
         let names = zip_entry_names(&bytes);
-        let count = names.iter().filter(|n| *n == "META-INF/MANIFEST.MF").count();
-        assert_eq!(count, 1, "expected exactly one MANIFEST.MF entry; entries: {:?}", names);
+        let count = names
+            .iter()
+            .filter(|n| *n == "META-INF/MANIFEST.MF")
+            .count();
+        assert_eq!(
+            count, 1,
+            "expected exactly one MANIFEST.MF entry; entries: {:?}",
+            names
+        );
         let manifest = zip_entry_content(&bytes, "META-INF/MANIFEST.MF");
         assert!(
             manifest.contains("Manifest-Version: 1.0"),
@@ -685,14 +710,21 @@ mod tests {
     fn build_info_resource_is_not_duplicated_when_generated() {
         let bytes = jar_bytes_with_resources(
             Some("git.commit.id=generated\n"),
-            &[("META-INF/build-info.properties", b"git.commit.id=user-provided\n")],
+            &[(
+                "META-INF/build-info.properties",
+                b"git.commit.id=user-provided\n",
+            )],
         );
         let names = zip_entry_names(&bytes);
         let count = names
             .iter()
             .filter(|n| *n == "META-INF/build-info.properties")
             .count();
-        assert_eq!(count, 1, "expected exactly one build-info.properties entry; entries: {:?}", names);
+        assert_eq!(
+            count, 1,
+            "expected exactly one build-info.properties entry; entries: {:?}",
+            names
+        );
         assert_eq!(
             zip_entry_content(&bytes, "META-INF/build-info.properties"),
             "git.commit.id=generated\n",
@@ -704,7 +736,10 @@ mod tests {
     fn build_info_resource_preserved_when_not_generated() {
         let bytes = jar_bytes_with_resources(
             None,
-            &[("META-INF/build-info.properties", b"git.commit.id=user-provided\n")],
+            &[(
+                "META-INF/build-info.properties",
+                b"git.commit.id=user-provided\n",
+            )],
         );
         assert_eq!(
             zip_entry_content(&bytes, "META-INF/build-info.properties"),
@@ -717,11 +752,18 @@ mod tests {
     fn meta_inf_root_directory_entry_is_not_duplicated() {
         let bytes = jar_bytes_with_resources(
             None,
-            &[("META-INF/services/java.sql.Driver", b"com.example.MyDriver\n")],
+            &[(
+                "META-INF/services/java.sql.Driver",
+                b"com.example.MyDriver\n",
+            )],
         );
         let names = zip_entry_names(&bytes);
         let count = names.iter().filter(|n| *n == "META-INF/").count();
-        assert_eq!(count, 1, "expected exactly one META-INF/ directory entry; entries: {:?}", names);
+        assert_eq!(
+            count, 1,
+            "expected exactly one META-INF/ directory entry; entries: {:?}",
+            names
+        );
     }
 
     #[test]
@@ -745,7 +787,10 @@ mod tests {
                     .to_string_lossy()
                     .starts_with("myapp.jar.part.")
             });
-        assert!(!has_leftover_part, "no .part.* sibling should be left after successful write");
+        assert!(
+            !has_leftover_part,
+            "no .part.* sibling should be left after successful write"
+        );
     }
 
     // ── libs/ filename disambiguation (bug #19) ──────────────────────────────
@@ -775,15 +820,22 @@ mod tests {
 
     #[test]
     fn group_id_from_repo_path_parses_layout() {
-        let p = PathBuf::from("/home/u/.m2/repository/javax/inject/javax.inject/1/javax.inject-1.jar");
+        let p =
+            PathBuf::from("/home/u/.m2/repository/javax/inject/javax.inject/1/javax.inject-1.jar");
         assert_eq!(group_id_from_repo_path(&p).as_deref(), Some("javax.inject"));
         let p2 = PathBuf::from("/home/u/.m2/repository/com/google/guava/guava/33.0/guava-33.0.jar");
-        assert_eq!(group_id_from_repo_path(&p2).as_deref(), Some("com.google.guava"));
+        assert_eq!(
+            group_id_from_repo_path(&p2).as_deref(),
+            Some("com.google.guava")
+        );
     }
 
     #[test]
     fn group_id_from_repo_path_none_for_non_repo_path() {
-        assert_eq!(group_id_from_repo_path(&PathBuf::from("/tmp/whatever/foo-1.0.jar")), None);
+        assert_eq!(
+            group_id_from_repo_path(&PathBuf::from("/tmp/whatever/foo-1.0.jar")),
+            None
+        );
     }
 
     #[test]
@@ -818,7 +870,10 @@ mod tests {
 
         assert_eq!(
             sorted_dir_names(&libs),
-            vec!["com.example-javax.inject-1.jar", "javax.inject-javax.inject-1.jar"],
+            vec![
+                "com.example-javax.inject-1.jar",
+                "javax.inject-javax.inject-1.jar"
+            ],
             "both colliding JARs must be kept under distinct names",
         );
     }
@@ -831,7 +886,10 @@ mod tests {
         // Build 1: a single dep keeps its bare filename.
         let a = fake_m2_jar(tmp.path(), "javax.inject", "javax.inject", "1");
         populate_libs_dir(&libs, std::slice::from_ref(&a)).unwrap();
-        assert!(libs.join("javax.inject-1.jar").exists(), "build 1 writes the bare name");
+        assert!(
+            libs.join("javax.inject-1.jar").exists(),
+            "build 1 writes the bare name"
+        );
 
         // Build 2: a colliding dep is added → both get group-qualified, and the
         // stale bare name from build 1 must be gone (libs/ is wiped each build).
@@ -844,7 +902,10 @@ mod tests {
         );
         assert_eq!(
             sorted_dir_names(&libs),
-            vec!["com.example-javax.inject-1.jar", "javax.inject-javax.inject-1.jar"],
+            vec![
+                "com.example-javax.inject-1.jar",
+                "javax.inject-javax.inject-1.jar"
+            ],
         );
     }
 

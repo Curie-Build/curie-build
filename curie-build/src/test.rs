@@ -1,3 +1,4 @@
+use crate::build::central_repos;
 use crate::compile::{
     flat_package_src_dirs, flat_package_test_dirs, resolve_configured_source_dirs,
     KOTLIN_COMPILER_COORD, KOTLIN_STDLIB_COORD,
@@ -7,15 +8,13 @@ use crate::incremental::{
     Inputs, Stamp,
 };
 use crate::jar::classpath_string;
-use crate::{build, descriptor};
-use crate::build::central_repos;
-use anyhow::{bail, Context, Result};
 use crate::lock;
+use crate::{build, descriptor};
+use anyhow::{bail, Context, Result};
 use curie_deps::resolver::{resolve, DepEntry, ResolveOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-const JUNIT_STANDALONE_COORD: &str =
-    "org.junit.platform:junit-platform-console-standalone";
+const JUNIT_STANDALONE_COORD: &str = "org.junit.platform:junit-platform-console-standalone";
 
 /// Stamp file (under `target/`) recording the canonical test source set from
 /// the last successful test compile, used to detect added/removed test sources
@@ -92,8 +91,11 @@ pub fn run_tests_with_options(
     update_snapshots: bool,
 ) -> Result<()> {
     // --- discover test sources -----------------------------------------------
-    let extra_test_dirs =
-        resolve_configured_source_dirs(project_root, &desc.java.test_source_dirs, "testSourceDirs")?;
+    let extra_test_dirs = resolve_configured_source_dirs(
+        project_root,
+        &desc.java.test_source_dirs,
+        "testSourceDirs",
+    )?;
     let (java_test_sources, kotlin_test_sources) =
         discover_test_sources(project_root, &extra_test_dirs);
     let groovy_test_sources = discover_groovy_test_sources(project_root, &extra_test_dirs);
@@ -113,7 +115,7 @@ pub fn run_tests_with_options(
     }
 
     let has_kotlin_tests = !kotlin_test_sources.is_empty();
-    let has_java_tests   = !java_test_sources.is_empty();
+    let has_java_tests = !java_test_sources.is_empty();
     let has_groovy_tests = !groovy_test_sources.is_empty();
 
     // --- resolve JUnit standalone launcher -----------------------------------
@@ -143,7 +145,14 @@ pub fn run_tests_with_options(
         let pairs: Vec<DepEntry> = desc
             .test_dependencies
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v.version(), repo_id: v.repository(), exclusions: v.exclusions(), classifier: None, allow_version_conflict: v.allow_version_conflict() })
+            .map(|(k, v)| DepEntry {
+                key: k,
+                version: v.version(),
+                repo_id: v.repository(),
+                exclusions: v.exclusions(),
+                classifier: None,
+                allow_version_conflict: v.allow_version_conflict(),
+            })
             .collect();
 
         lock::resolve_with_lock(
@@ -161,7 +170,7 @@ pub fn run_tests_with_options(
                 error_on_version_conflict: true,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                },
+            },
             update_snapshots,
         )
         .context("test dependency resolution failed")?
@@ -175,10 +184,8 @@ pub fn run_tests_with_options(
     // resolve the full transitive closure.
     let spock_jars: Vec<PathBuf> = if desc.spock.enabled() {
         let spock_version = desc.spock.version();
-        let spock_bom = curie_deps::Gav::from_key_version(
-            "org.spockframework:spock-bom",
-            spock_version,
-        )?;
+        let spock_bom =
+            curie_deps::Gav::from_key_version("org.spockframework:spock-bom", spock_version)?;
         let mut spock_bom_imports = test_bom_gavs.clone();
         spock_bom_imports.push(spock_bom);
 
@@ -197,13 +204,17 @@ pub fn run_tests_with_options(
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: spock_bom_imports,
                 offline,
-                skip_version_ranges: false, error_on_version_conflict: false,
+                skip_version_ranges: false,
+                error_on_version_conflict: false,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                },
+            },
         )
         .context("Spock resolution failed")?;
-        crate::parallel::emit(&crate::style::resolve("Resolve Spock", &format!("{} JAR(s)", jars.len())));
+        crate::parallel::emit(&crate::style::resolve(
+            "Resolve Spock",
+            &format!("{} JAR(s)", jars.len()),
+        ));
         jars
     } else {
         vec![]
@@ -218,8 +229,22 @@ pub fn run_tests_with_options(
         let kver = desc.kotlin.version();
         let kotlin_jars = resolve(
             &[
-                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false },
-                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false },
+                DepEntry {
+                    key: KOTLIN_COMPILER_COORD,
+                    version: kver,
+                    repo_id: None,
+                    exclusions: vec![],
+                    classifier: None,
+                    allow_version_conflict: false,
+                },
+                DepEntry {
+                    key: KOTLIN_STDLIB_COORD,
+                    version: kver,
+                    repo_id: None,
+                    exclusions: vec![],
+                    classifier: None,
+                    allow_version_conflict: false,
+                },
             ],
             &ResolveOptions {
                 default_repos: central_repos(),
@@ -227,10 +252,11 @@ pub fn run_tests_with_options(
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: test_bom_gavs.clone(),
                 offline,
-                skip_version_ranges: false, error_on_version_conflict: false,
+                skip_version_ranges: false,
+                error_on_version_conflict: false,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                },
+            },
         )
         .context("Kotlin compiler/stdlib resolution failed (test phase)")?;
 
@@ -238,7 +264,10 @@ pub fn run_tests_with_options(
             .iter()
             .filter(|p| {
                 p.file_name()
-                    .map(|f| !f.to_string_lossy().starts_with("kotlin-compiler-embeddable"))
+                    .map(|f| {
+                        !f.to_string_lossy()
+                            .starts_with("kotlin-compiler-embeddable")
+                    })
                     .unwrap_or(true)
             })
             .cloned()
@@ -251,8 +280,22 @@ pub fn run_tests_with_options(
         let kver = desc.kotlin.version();
         let kotlin_jars = resolve(
             &[
-                DepEntry { key: KOTLIN_COMPILER_COORD, version: kver, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false },
-                DepEntry { key: KOTLIN_STDLIB_COORD, version: kver, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false },
+                DepEntry {
+                    key: KOTLIN_COMPILER_COORD,
+                    version: kver,
+                    repo_id: None,
+                    exclusions: vec![],
+                    classifier: None,
+                    allow_version_conflict: false,
+                },
+                DepEntry {
+                    key: KOTLIN_STDLIB_COORD,
+                    version: kver,
+                    repo_id: None,
+                    exclusions: vec![],
+                    classifier: None,
+                    allow_version_conflict: false,
+                },
             ],
             &ResolveOptions {
                 default_repos: central_repos(),
@@ -260,10 +303,11 @@ pub fn run_tests_with_options(
                 progress: false,
                 bom_imports: test_bom_gavs.clone(),
                 offline,
-                skip_version_ranges: false, error_on_version_conflict: false,
+                skip_version_ranges: false,
+                error_on_version_conflict: false,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                },
+            },
         )
         .context("Kotlin compiler resolution failed (test phase)")?;
 
@@ -286,7 +330,14 @@ pub fn run_tests_with_options(
     } else {
         let ap_entries: Vec<DepEntry> = test_ap_coords
             .iter()
-            .map(|(k, v)| DepEntry { key: k, version: v, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false })
+            .map(|(k, v)| DepEntry {
+                key: k,
+                version: v,
+                repo_id: None,
+                exclusions: vec![],
+                classifier: None,
+                allow_version_conflict: false,
+            })
             .collect();
         let jars = resolve(
             &ap_entries,
@@ -296,10 +347,11 @@ pub fn run_tests_with_options(
                 progress: crate::parallel::try_get_sink().is_none(),
                 bom_imports: test_bom_gavs.clone(),
                 offline,
-                skip_version_ranges: false, error_on_version_conflict: false,
+                skip_version_ranges: false,
+                error_on_version_conflict: false,
                 snapshot_pins: Default::default(),
                 update_snapshots: false,
-                },
+            },
         )
         .context("test annotation-processor resolution failed")?;
 
@@ -314,7 +366,14 @@ pub fn run_tests_with_options(
                 .map(|(_, v)| *v)
                 .expect("on-cp coord must be in test_ap_coords");
             let single = resolve(
-                &[DepEntry { key: coord, version, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }],
+                &[DepEntry {
+                    key: coord,
+                    version,
+                    repo_id: None,
+                    exclusions: vec![],
+                    classifier: None,
+                    allow_version_conflict: false,
+                }],
                 &ResolveOptions {
                     default_repos: central_repos(),
                     named_repos: extra_repos.clone(),
@@ -325,10 +384,13 @@ pub fn run_tests_with_options(
                     error_on_version_conflict: false,
                     snapshot_pins: Default::default(),
                     update_snapshots: false,
-                    },
+                },
             )
             .with_context(|| {
-                format!("test annotation-processor classpath resolution failed for {}", coord)
+                format!(
+                    "test annotation-processor classpath resolution failed for {}",
+                    coord
+                )
             })?;
             on_cp_jars.extend(single);
         }
@@ -337,8 +399,7 @@ pub fn run_tests_with_options(
 
     // --- compile test sources (incremental) ----------------------------------
     let test_classes_dir = project_root.join("target").join("test-classes");
-    std::fs::create_dir_all(&test_classes_dir)
-        .context("failed to create target/test-classes")?;
+    std::fs::create_dir_all(&test_classes_dir).context("failed to create target/test-classes")?;
 
     let toml_path = project_root.join("Curie.toml");
     let test_manifest_path = project_root.join("target").join(".test-classes.toml");
@@ -371,9 +432,10 @@ pub fn run_tests_with_options(
     // Source-set tracking (all languages): catches a test source added with a
     // preserved-old mtime, or a deletion, which mtime comparison alone misses.
     let test_source_set = incremental::canonical_source_set(&all_test_sources);
-    let test_source_set_prev = incremental::load_source_set(
-        &incremental::source_set_stamp_path(&project_root.join("target"), TEST_SOURCE_SET_STAMP),
-    );
+    let test_source_set_prev = incremental::load_source_set(&incremental::source_set_stamp_path(
+        &project_root.join("target"),
+        TEST_SOURCE_SET_STAMP,
+    ));
     let test_source_set_changed =
         incremental::source_set_changed(test_source_set_prev.as_ref(), &test_source_set);
 
@@ -435,10 +497,14 @@ pub fn run_tests_with_options(
             // Phase 1: kotlinc — compile all .kt + .java test sources together.
             let mut kotlinc = Command::new("java");
             kotlinc.arg("--enable-native-access=ALL-UNNAMED");
-            kotlinc.arg("-cp").arg(classpath_string(&test_kotlin_compiler_jars));
+            kotlinc
+                .arg("-cp")
+                .arg(classpath_string(&test_kotlin_compiler_jars));
             kotlinc.arg("org.jetbrains.kotlin.cli.jvm.K2JVMCompiler");
             kotlinc.arg("-no-stdlib").arg("-no-reflect");
-            kotlinc.arg("-module-name").arg(kotlin_test_module_name(desc));
+            kotlinc
+                .arg("-module-name")
+                .arg(kotlin_test_module_name(desc));
             kotlinc.arg("-d").arg(&test_classes_dir);
 
             if !shared_cp.is_empty() {
@@ -470,10 +536,7 @@ pub fn run_tests_with_options(
             if desc.java.preview_enabled() {
                 javac.arg("--enable-preview");
             }
-            javac
-                .arg("-g")
-                .arg("-d")
-                .arg(&test_classes_dir);
+            javac.arg("-g").arg("-d").arg(&test_classes_dir);
 
             // Classpath for compiling Java tests: test-classes (kotlin bytecode
             // from phase 1) + shared_cp.
@@ -490,10 +553,11 @@ pub fn run_tests_with_options(
                     .join("target")
                     .join("generated-test-sources")
                     .join("annotations");
-                std::fs::create_dir_all(&gen_dir).with_context(|| {
-                    format!("failed to create {}", gen_dir.display())
-                })?;
-                javac.arg("-processorpath").arg(classpath_string(&test_ap_jars));
+                std::fs::create_dir_all(&gen_dir)
+                    .with_context(|| format!("failed to create {}", gen_dir.display()))?;
+                javac
+                    .arg("-processorpath")
+                    .arg(classpath_string(&test_ap_jars));
                 javac.arg("-s").arg(&gen_dir);
             }
             for (key, value) in desc.flat_test_ap_options() {
@@ -516,13 +580,20 @@ pub fn run_tests_with_options(
             if let Some(old) = &old_test_manifest {
                 if let Some(new) = crate::class_manifest::load(&test_manifest_path)? {
                     let stale = crate::class_manifest::stale_classes(
-                        old, Some(&new), &current_test_sources_set, None,
+                        old,
+                        Some(&new),
+                        &current_test_sources_set,
+                        None,
                     );
                     let n = crate::class_manifest::delete_classes(&test_classes_dir, &stale)?;
                     if n > 0 {
                         crate::parallel::emit(&crate::style::stale(
                             "Stale tests",
-                            &format!("removed {} orphaned class file{}", n, if n == 1 { "" } else { "s" }),
+                            &format!(
+                                "removed {} orphaned class file{}",
+                                n,
+                                if n == 1 { "" } else { "s" }
+                            ),
                         ));
                     }
                 }
@@ -541,17 +612,25 @@ pub fn run_tests_with_options(
                     // → resolve the Groovy runtime now.
                     use crate::compile::GROOVY_COORD;
                     resolve(
-                        &[DepEntry { key: GROOVY_COORD, version: desc.groovy.version(), repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }],
+                        &[DepEntry {
+                            key: GROOVY_COORD,
+                            version: desc.groovy.version(),
+                            repo_id: None,
+                            exclusions: vec![],
+                            classifier: None,
+                            allow_version_conflict: false,
+                        }],
                         &ResolveOptions {
                             default_repos: central_repos(),
                             named_repos: extra_repos.clone(),
                             progress: crate::parallel::try_get_sink().is_none(),
                             bom_imports: test_bom_gavs.clone(),
                             offline,
-                            skip_version_ranges: false, error_on_version_conflict: false,
+                            skip_version_ranges: false,
+                            error_on_version_conflict: false,
                             snapshot_pins: Default::default(),
                             update_snapshots: false,
-                            },
+                        },
                     )
                     .context("Groovy test compiler resolution failed")?
                 } else {
@@ -565,11 +644,19 @@ pub fn run_tests_with_options(
             // (excluding the standalone launcher jar which is not a compile dep).
             let groovyc_process_cp: Vec<PathBuf> = {
                 let mut cp = groovy_cp_jars.clone();
-                cp.extend(shared_cp.iter().filter(|p| {
-                    !p.file_name()
-                        .map(|f| f.to_string_lossy().starts_with("junit-platform-console-standalone"))
-                        .unwrap_or(false)
-                }).cloned());
+                cp.extend(
+                    shared_cp
+                        .iter()
+                        .filter(|p| {
+                            !p.file_name()
+                                .map(|f| {
+                                    f.to_string_lossy()
+                                        .starts_with("junit-platform-console-standalone")
+                                })
+                                .unwrap_or(false)
+                        })
+                        .cloned(),
+                );
                 cp
             };
 
@@ -577,18 +664,26 @@ pub fn run_tests_with_options(
             if let Some(arg) = crate::compile::groovy_target_bytecode_arg(desc) {
                 groovyc.arg(arg);
             }
-            groovyc.arg("-cp").arg(classpath_string(&groovyc_process_cp));
+            groovyc
+                .arg("-cp")
+                .arg(classpath_string(&groovyc_process_cp));
             groovyc.arg("org.codehaus.groovy.tools.FileSystemCompiler");
             groovyc.arg("-d").arg(&test_classes_dir);
             let gcp = crate::compile::groovyc_compiler_classpath(
                 &shared_cp,
                 &groovy_cp_jars,
-                if has_java_tests { Some(&test_classes_dir) } else { None },
+                if has_java_tests {
+                    Some(&test_classes_dir)
+                } else {
+                    None
+                },
             );
             if !gcp.is_empty() {
                 groovyc.arg("--classpath").arg(classpath_string(&gcp));
             }
-            for src in &groovy_test_sources { groovyc.arg(src); }
+            for src in &groovy_test_sources {
+                groovyc.arg(src);
+            }
             let status = crate::proc::spawn_cmd(&mut groovyc)
                 .context("failed to invoke groovyc for test compilation")?;
             if !status.success() {
@@ -604,7 +699,10 @@ pub fn run_tests_with_options(
         // Stamp the canonical test source set so the next build detects
         // additions/deletions that leave no surviving mtime to compare against.
         incremental::write_source_set(
-            &incremental::source_set_stamp_path(&project_root.join("target"), TEST_SOURCE_SET_STAMP),
+            &incremental::source_set_stamp_path(
+                &project_root.join("target"),
+                TEST_SOURCE_SET_STAMP,
+            ),
             &test_source_set,
         )?;
     } else {
@@ -614,7 +712,16 @@ pub fn run_tests_with_options(
     // --- skip if stamp is newer than all inputs ------------------------------
     let stamp_path = project_root.join("target").join(".test-stamp");
 
-    if filter.is_none() && !needs_test_run(&all_test_sources, classes_dir, &toml_path, &stamp_path, resources_dir, test_resources_dir) {
+    if filter.is_none()
+        && !needs_test_run(
+            &all_test_sources,
+            classes_dir,
+            &toml_path,
+            &stamp_path,
+            resources_dir,
+            test_resources_dir,
+        )
+    {
         crate::parallel::emit(&crate::style::up_to_date("Tests"));
         return Ok(());
     }
@@ -644,14 +751,12 @@ pub fn run_tests_with_options(
 
     // --- prepare per-test result directories ---------------------------------
     let sidecar_path = project_root.join("target").join("build.tests.json");
-    let output_dir   = project_root.join("target").join("test-output");
+    let output_dir = project_root.join("target").join("test-output");
 
     if output_dir.exists() {
-        std::fs::remove_dir_all(&output_dir)
-            .context("failed to clear target/test-output")?;
+        std::fs::remove_dir_all(&output_dir).context("failed to clear target/test-output")?;
     }
-    std::fs::create_dir_all(&output_dir)
-        .context("failed to create target/test-output")?;
+    std::fs::create_dir_all(&output_dir).context("failed to create target/test-output")?;
 
     // JUnit Platform's default class-name filter matches *Test/*Tests and
     // similar Java/Kotlin conventions but skips Groovy *Spec classes.  When
@@ -668,16 +773,15 @@ pub fn run_tests_with_options(
         .context("failed to prepare Curie test runner")?;
 
     let agent_coords = desc.test_dep_java_agent_coords();
-    let agent_jars   = crate::java_agent::find_agent_jars(&agent_coords, &run_cp);
+    let agent_jars = crate::java_agent::find_agent_jars(&agent_coords, &run_cp);
 
     // --- coverage: resolve JaCoCo agent and prepare exec output path ---------
-    let coverage_dir  = project_root.join("target").join("coverage");
+    let coverage_dir = project_root.join("target").join("coverage");
     let coverage_exec = coverage_dir.join("jacoco.exec");
     let jacoco_agent_jar: Option<PathBuf> = if coverage {
-        std::fs::create_dir_all(&coverage_dir)
-            .context("failed to create target/coverage")?;
+        std::fs::create_dir_all(&coverage_dir).context("failed to create target/coverage")?;
         let default_repos = build::central_repos();
-        let extra_repos   = build::extra_repos(desc);
+        let extra_repos = build::extra_repos(desc);
         let jar = crate::coverage::resolve_agent_jar(&default_repos, &extra_repos, offline)
             .context("failed to resolve JaCoCo agent for coverage")?;
         crate::parallel::emit(&crate::style::resolve("Coverage", "JaCoCo agent"));
@@ -706,8 +810,8 @@ pub fn run_tests_with_options(
         &desc.test.exclude_classname,
     );
 
-    let status = crate::proc::spawn_cmd(&mut java)
-        .context("failed to invoke java — is a JRE installed?")?;
+    let status =
+        crate::proc::spawn_cmd(&mut java).context("failed to invoke java — is a JRE installed?")?;
 
     crate::parallel::emit("");
 
@@ -718,7 +822,7 @@ pub fn run_tests_with_options(
     // --- coverage report generation ------------------------------------------
     if coverage && coverage_exec.exists() {
         let default_repos = build::central_repos();
-        let extra_repos   = build::extra_repos(desc);
+        let extra_repos = build::extra_repos(desc);
         let cli_jar = crate::coverage::resolve_cli_jar(&default_repos, &extra_repos, offline)
             .context("failed to resolve JaCoCo CLI for report generation")?;
 
@@ -734,9 +838,7 @@ pub fn run_tests_with_options(
         )?;
 
         let html_index = coverage_dir.join("html").join("index.html");
-        let rel_html = html_index
-            .strip_prefix(project_root)
-            .unwrap_or(&html_index);
+        let rel_html = html_index.strip_prefix(project_root).unwrap_or(&html_index);
 
         crate::parallel::emit(&crate::style::active("Coverage", &summary.summary_line()));
         crate::parallel::emit(&crate::style::info(
@@ -840,9 +942,7 @@ fn discover_test_sources(
         let colocated_kotlin: Vec<PathBuf> = walk_files(&pkg_dir)
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
-                name.ends_with("Test.kt")
-                    || name.ends_with("Tests.kt")
-                    || name.ends_with("Spec.kt")
+                name.ends_with("Test.kt") || name.ends_with("Tests.kt") || name.ends_with("Spec.kt")
             })
             .map(|e| e.into_path())
             .collect();
@@ -894,10 +994,7 @@ fn discover_test_sources(
 /// `src/main/groovy` is a production root; files there named `*Test.groovy` / `*Spec.groovy`
 /// are production classes (Maven-compatible).  The co-located convention applies only to
 /// flat-package roots under `src/<dot.pkg>/`.
-fn discover_groovy_test_sources(
-    project_root: &Path,
-    extra_test_dirs: &[PathBuf],
-) -> Vec<PathBuf> {
+fn discover_groovy_test_sources(project_root: &Path, extra_test_dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut sources: Vec<PathBuf> = Vec::new();
 
     // Separate test tree src/test/groovy/
@@ -959,17 +1056,25 @@ fn resolve_standalone(
     // coord is "group:artifact:version" — split off the version for the resolver.
     // The resolver takes (key, version) pairs where key = "group:artifact".
     let jars = resolve(
-        &[DepEntry { key: JUNIT_STANDALONE_COORD, version: junit_version, repo_id: None, exclusions: vec![], classifier: None, allow_version_conflict: false }],
+        &[DepEntry {
+            key: JUNIT_STANDALONE_COORD,
+            version: junit_version,
+            repo_id: None,
+            exclusions: vec![],
+            classifier: None,
+            allow_version_conflict: false,
+        }],
         &ResolveOptions {
             default_repos: central_repos(),
             named_repos: extra_repos.to_vec(),
             progress: false,
             bom_imports: vec![],
             offline,
-            skip_version_ranges: false, error_on_version_conflict: false,
+            skip_version_ranges: false,
+            error_on_version_conflict: false,
             snapshot_pins: Default::default(),
             update_snapshots: false,
-            },
+        },
     )
     .with_context(|| format!("failed to resolve {}", coord))?;
 
@@ -1062,11 +1167,25 @@ mod tests {
         // A file like LoadTest.java in src/main/java is a production class.
         // The co-located convention does NOT apply to Maven layout roots.
         let dir = tempfile::tempdir().unwrap();
-        let main_java = dir.path().join("src").join("main").join("java").join("com").join("example");
+        let main_java = dir
+            .path()
+            .join("src")
+            .join("main")
+            .join("java")
+            .join("com")
+            .join("example");
         fs::create_dir_all(&main_java).unwrap();
         fs::write(main_java.join("LoadTest.java"), b"public class LoadTest {}").unwrap();
-        fs::write(main_java.join("SmokeTests.java"), b"public class SmokeTests {}").unwrap();
-        fs::write(main_java.join("OpenApiSpec.java"), b"public class OpenApiSpec {}").unwrap();
+        fs::write(
+            main_java.join("SmokeTests.java"),
+            b"public class SmokeTests {}",
+        )
+        .unwrap();
+        fs::write(
+            main_java.join("OpenApiSpec.java"),
+            b"public class OpenApiSpec {}",
+        )
+        .unwrap();
 
         let (java, _kotlin) = discover_test_sources(dir.path(), &[]);
         assert!(
@@ -1078,13 +1197,31 @@ mod tests {
     #[test]
     fn separate_test_tree_java_is_discovered() {
         let dir = tempfile::tempdir().unwrap();
-        let test_java = dir.path().join("src").join("test").join("java").join("com").join("example");
+        let test_java = dir
+            .path()
+            .join("src")
+            .join("test")
+            .join("java")
+            .join("com")
+            .join("example");
         fs::create_dir_all(&test_java).unwrap();
-        fs::write(test_java.join("GreeterTest.java"), b"public class GreeterTest {}").unwrap();
-        fs::write(test_java.join("HelperUtil.java"), b"public class HelperUtil {}").unwrap();
+        fs::write(
+            test_java.join("GreeterTest.java"),
+            b"public class GreeterTest {}",
+        )
+        .unwrap();
+        fs::write(
+            test_java.join("HelperUtil.java"),
+            b"public class HelperUtil {}",
+        )
+        .unwrap();
 
         let (java, _kotlin) = discover_test_sources(dir.path(), &[]);
-        assert_eq!(java.len(), 2, "all files in src/test/java are test sources; got: {java:?}");
+        assert_eq!(
+            java.len(),
+            2,
+            "all files in src/test/java are test sources; got: {java:?}"
+        );
     }
 
     #[test]
@@ -1092,12 +1229,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pkg = dir.path().join("src").join("com.example");
         fs::create_dir_all(&pkg).unwrap();
-        fs::write(pkg.join("Greeter.java"), b"package com.example; class Greeter {}").unwrap();
-        fs::write(pkg.join("GreeterTest.java"), b"package com.example; class GreeterTest {}").unwrap();
-        fs::write(pkg.join("GreeterSpec.java"), b"package com.example; class GreeterSpec {}").unwrap();
+        fs::write(
+            pkg.join("Greeter.java"),
+            b"package com.example; class Greeter {}",
+        )
+        .unwrap();
+        fs::write(
+            pkg.join("GreeterTest.java"),
+            b"package com.example; class GreeterTest {}",
+        )
+        .unwrap();
+        fs::write(
+            pkg.join("GreeterSpec.java"),
+            b"package com.example; class GreeterSpec {}",
+        )
+        .unwrap();
 
         let (java, _kotlin) = discover_test_sources(dir.path(), &[]);
-        assert_eq!(java.len(), 2, "only *Test.java and *Spec.java from flat-package are test sources; got: {java:?}");
+        assert_eq!(
+            java.len(),
+            2,
+            "only *Test.java and *Spec.java from flat-package are test sources; got: {java:?}"
+        );
         assert!(java.iter().any(|p| p.ends_with("GreeterTest.java")));
         assert!(java.iter().any(|p| p.ends_with("GreeterSpec.java")));
     }
@@ -1105,9 +1258,19 @@ mod tests {
     #[test]
     fn groovy_colocated_tests_not_from_maven_layout() {
         let dir = tempfile::tempdir().unwrap();
-        let main_groovy = dir.path().join("src").join("main").join("groovy").join("com").join("example");
+        let main_groovy = dir
+            .path()
+            .join("src")
+            .join("main")
+            .join("groovy")
+            .join("com")
+            .join("example");
         fs::create_dir_all(&main_groovy).unwrap();
-        fs::write(main_groovy.join("GreeterSpec.groovy"), b"package com.example; class GreeterSpec {}").unwrap();
+        fs::write(
+            main_groovy.join("GreeterSpec.groovy"),
+            b"package com.example; class GreeterSpec {}",
+        )
+        .unwrap();
 
         let sources = discover_groovy_test_sources(dir.path(), &[]);
         assert!(
@@ -1119,12 +1282,26 @@ mod tests {
     #[test]
     fn groovy_separate_test_tree_is_discovered() {
         let dir = tempfile::tempdir().unwrap();
-        let test_groovy = dir.path().join("src").join("test").join("groovy").join("com").join("example");
+        let test_groovy = dir
+            .path()
+            .join("src")
+            .join("test")
+            .join("groovy")
+            .join("com")
+            .join("example");
         fs::create_dir_all(&test_groovy).unwrap();
-        fs::write(test_groovy.join("GreeterSpec.groovy"), b"package com.example; class GreeterSpec {}").unwrap();
+        fs::write(
+            test_groovy.join("GreeterSpec.groovy"),
+            b"package com.example; class GreeterSpec {}",
+        )
+        .unwrap();
 
         let sources = discover_groovy_test_sources(dir.path(), &[]);
-        assert_eq!(sources.len(), 1, "src/test/groovy files must be test sources; got: {sources:?}");
+        assert_eq!(
+            sources.len(),
+            1,
+            "src/test/groovy files must be test sources; got: {sources:?}"
+        );
     }
 
     #[test]
@@ -1132,7 +1309,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let test_dir = dir.path().join("test").join("com").join("example");
         fs::create_dir_all(&test_dir).unwrap();
-        fs::write(test_dir.join("GreeterTest.java"), b"public class GreeterTest {}").unwrap();
+        fs::write(
+            test_dir.join("GreeterTest.java"),
+            b"public class GreeterTest {}",
+        )
+        .unwrap();
         fs::write(test_dir.join("Helper.java"), b"public class Helper {}").unwrap();
 
         let extra = vec![dir.path().join("test")];
@@ -1144,4 +1325,3 @@ mod tests {
         );
     }
 }
-

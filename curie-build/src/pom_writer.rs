@@ -3,7 +3,7 @@
 //! Uses the `quick-xml` writer for correct XML serialisation (automatic
 //! character escaping, well-formed structure).
 
-use crate::descriptor::{Descriptor, DependencyValue, PublishConfig};
+use crate::descriptor::{DependencyValue, Descriptor, PublishConfig};
 use crate::incremental::{finalize_staged, staging_path};
 use anyhow::Result;
 use curie_deps::Gav;
@@ -18,9 +18,9 @@ use std::path::Path;
 /// Build a POM XML document for the given descriptor and its declared
 /// dependencies (with versions already resolved through any BOMs).
 pub fn build_pom(desc: &Descriptor, declared_deps: &[Gav]) -> Result<String> {
-    let group_id = desc
-        .group_id()
-        .ok_or_else(|| anyhow::anyhow!("groupId must be set on [application] or [library] to publish"))?;
+    let group_id = desc.group_id().ok_or_else(|| {
+        anyhow::anyhow!("groupId must be set on [application] or [library] to publish")
+    })?;
     let artifact_id = desc.buildable_name();
     let version = desc.buildable_version();
     let pub_cfg = &desc.publish;
@@ -194,7 +194,9 @@ fn write_developers(w: &mut XmlWriter<'_>, pub_cfg: &PublishConfig) -> Result<()
 }
 
 fn write_scm(w: &mut XmlWriter<'_>, pub_cfg: &PublishConfig) -> Result<()> {
-    let Some(scm) = &pub_cfg.scm else { return Ok(()) };
+    let Some(scm) = &pub_cfg.scm else {
+        return Ok(());
+    };
     w.write_event(Event::Start(BytesStart::new("scm")))?;
     if let Some(u) = &scm.url {
         text_elem(w, "url", u)?;
@@ -269,8 +271,12 @@ fn write_dependency_management(
 /// Split `"group:artifact"` into `("group", "artifact")`.
 fn split_coord(coord: &str) -> Result<(&str, &str)> {
     let mut parts = coord.splitn(2, ':');
-    let group = parts.next().ok_or_else(|| anyhow::anyhow!("invalid coordinate: {}", coord))?;
-    let artifact = parts.next().ok_or_else(|| anyhow::anyhow!("invalid coordinate (missing ':'): {}", coord))?;
+    let group = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("invalid coordinate: {}", coord))?;
+    let artifact = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("invalid coordinate (missing ':'): {}", coord))?;
     Ok((group, artifact))
 }
 
@@ -278,15 +284,39 @@ fn split_coord(coord: &str) -> Result<(&str, &str)> {
 /// return `(spdx_id, None)` so the SPDX id still becomes the `<name>`.
 fn spdx_lookup(spdx: &str) -> (&str, Option<&str>) {
     match spdx {
-        "Apache-2.0" => ("Apache License 2.0", Some("https://www.apache.org/licenses/LICENSE-2.0.txt")),
+        "Apache-2.0" => (
+            "Apache License 2.0",
+            Some("https://www.apache.org/licenses/LICENSE-2.0.txt"),
+        ),
         "MIT" => ("MIT License", Some("https://opensource.org/licenses/MIT")),
-        "BSD-2-Clause" => ("BSD 2-Clause License", Some("https://opensource.org/licenses/BSD-2-Clause")),
-        "BSD-3-Clause" => ("BSD 3-Clause License", Some("https://opensource.org/licenses/BSD-3-Clause")),
-        "MPL-2.0" => ("Mozilla Public License 2.0", Some("https://www.mozilla.org/en-US/MPL/2.0/")),
-        "GPL-2.0" => ("GNU General Public License v2.0", Some("https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt")),
-        "GPL-3.0" => ("GNU General Public License v3.0", Some("https://www.gnu.org/licenses/gpl-3.0.txt")),
-        "LGPL-2.1" => ("GNU Lesser General Public License v2.1", Some("https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt")),
-        "LGPL-3.0" => ("GNU Lesser General Public License v3.0", Some("https://www.gnu.org/licenses/lgpl-3.0.txt")),
+        "BSD-2-Clause" => (
+            "BSD 2-Clause License",
+            Some("https://opensource.org/licenses/BSD-2-Clause"),
+        ),
+        "BSD-3-Clause" => (
+            "BSD 3-Clause License",
+            Some("https://opensource.org/licenses/BSD-3-Clause"),
+        ),
+        "MPL-2.0" => (
+            "Mozilla Public License 2.0",
+            Some("https://www.mozilla.org/en-US/MPL/2.0/"),
+        ),
+        "GPL-2.0" => (
+            "GNU General Public License v2.0",
+            Some("https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt"),
+        ),
+        "GPL-3.0" => (
+            "GNU General Public License v3.0",
+            Some("https://www.gnu.org/licenses/gpl-3.0.txt"),
+        ),
+        "LGPL-2.1" => (
+            "GNU Lesser General Public License v2.1",
+            Some("https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt"),
+        ),
+        "LGPL-3.0" => (
+            "GNU Lesser General Public License v3.0",
+            Some("https://www.gnu.org/licenses/lgpl-3.0.txt"),
+        ),
         "ISC" => ("ISC License", Some("https://opensource.org/licenses/ISC")),
         "Unlicense" => ("The Unlicense", Some("https://unlicense.org/")),
         other => (other, None),
@@ -415,7 +445,10 @@ mod tests {
     #[test]
     fn build_bom_pom_bom_import_has_pom_scope() {
         let mut bom_imports = BTreeMap::new();
-        bom_imports.insert("io.micronaut:micronaut-bom".to_string(), "4.3.2".to_string());
+        bom_imports.insert(
+            "io.micronaut:micronaut-bom".to_string(),
+            "4.3.2".to_string(),
+        );
         let desc = fake_bom_desc(
             Some("com.example"),
             "my-platform",
@@ -486,7 +519,14 @@ mod tests {
 
     #[test]
     fn build_bom_pom_errors_when_group_id_missing() {
-        let desc = fake_bom_desc(None, "x", "1.0", BTreeMap::new(), BTreeMap::new(), PublishConfig::default());
+        let desc = fake_bom_desc(
+            None,
+            "x",
+            "1.0",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            PublishConfig::default(),
+        );
         let err = build_bom_pom(&desc).unwrap_err().to_string();
         assert!(err.contains("groupId"), "got: {err}");
     }

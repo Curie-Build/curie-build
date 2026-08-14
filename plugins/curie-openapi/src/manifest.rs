@@ -35,11 +35,13 @@ mod tests {
     use std::path::PathBuf;
 
     fn minimal_config() -> OpenApiConfig {
-        serde_json::from_str(r#"{
+        serde_json::from_str(
+            r#"{
             "version": "7.2.0",
             "specFile": "api/greeter.yaml",
             "generatorName": "java"
-        }"#)
+        }"#,
+        )
         .unwrap()
     }
 
@@ -47,7 +49,10 @@ mod tests {
     fn manifest_artifact_has_no_classifier() {
         let m = build(&minimal_config());
         let json = serde_json::to_string(&m.artifacts[0]).unwrap();
-        assert!(!json.contains("classifier"), "classifier should be absent from JSON: {json}");
+        assert!(
+            !json.contains("classifier"),
+            "classifier should be absent from JSON: {json}"
+        );
     }
 
     #[test]
@@ -84,15 +89,20 @@ mod tests {
 
     #[test]
     fn manifest_custom_output_and_source_folder() {
-        let cfg: OpenApiConfig = serde_json::from_str(r#"{
+        let cfg: OpenApiConfig = serde_json::from_str(
+            r#"{
             "version": "7.2.0",
             "specFile": "spec/api.yaml",
             "generatorName": "spring",
             "outputDir": "target/gen",
             "sourceFolder": "src/main/java"
-        }"#)
+        }"#,
+        )
         .unwrap();
         let m = build(&cfg);
-        assert_eq!(m.outputs.source_dirs[0], PathBuf::from("target/gen/src/main/java"));
+        assert_eq!(
+            m.outputs.source_dirs[0],
+            PathBuf::from("target/gen/src/main/java")
+        );
     }
 }

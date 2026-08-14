@@ -65,9 +65,8 @@ impl Hash for Gav {
 /// per the fix for bug #21: [A-Za-z0-9._-]+
 fn is_valid_coord_part(s: &str) -> bool {
     !s.is_empty()
-        && s.chars().all(|c| {
-            c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-'
-        })
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
 /// Validates a coordinate part. Errors with a descriptive message if it
@@ -75,10 +74,7 @@ fn is_valid_coord_part(s: &str) -> bool {
 /// path traversal in local repository layout).
 fn validate_coord(name: &str, s: &str) -> Result<()> {
     if !is_valid_coord_part(s) {
-        bail!(
-            "invalid {} {:?}: must match [A-Za-z0-9._-]+",
-            name, s
-        );
+        bail!("invalid {} {:?}: must match [A-Za-z0-9._-]+", name, s);
     }
     if s == "." || s == ".." {
         bail!("invalid {} {:?}: must not be . or ..", name, s);
@@ -164,7 +160,10 @@ impl Gav {
         let version = version.trim().to_string();
 
         if group.is_empty() || artifact.is_empty() || version.is_empty() {
-            bail!("dependency key {:?} has empty group, artifact, or version", key);
+            bail!(
+                "dependency key {:?} has empty group, artifact, or version",
+                key
+            );
         }
 
         let g = Gav {
@@ -288,14 +287,20 @@ impl Gav {
     pub fn local_repository_path(&self) -> Result<PathBuf> {
         self.validate_for_path()?;
         let home = home_dir()?;
-        Ok(home.join(".m2").join("repository").join(self.relative_path()))
+        Ok(home
+            .join(".m2")
+            .join("repository")
+            .join(self.relative_path()))
     }
 
     /// Absolute POM path in the local `~/.m2/repository` cache.
     pub fn pom_local_repository_path(&self) -> Result<PathBuf> {
         self.validate_for_path()?;
         let home = home_dir()?;
-        Ok(home.join(".m2").join("repository").join(self.relative_pom_path()))
+        Ok(home
+            .join(".m2")
+            .join("repository")
+            .join(self.relative_pom_path()))
     }
 
     /// Canonical `group:artifact:version` (or with `:classifier` when present) notation.
@@ -376,7 +381,12 @@ mod tests {
 
     #[test]
     fn relative_path_with_classifier() {
-        let g = Gav::from_key_version_classifier("org.jacoco:org.jacoco.agent", "0.8.13", Some("runtime")).unwrap();
+        let g = Gav::from_key_version_classifier(
+            "org.jacoco:org.jacoco.agent",
+            "0.8.13",
+            Some("runtime"),
+        )
+        .unwrap();
         assert_eq!(
             g.relative_path(),
             "org/jacoco/org.jacoco.agent/0.8.13/org.jacoco.agent-0.8.13-runtime.jar"
@@ -505,11 +515,19 @@ mod tests {
 
     #[test]
     fn is_snapshot_strict_suffix() {
-        assert!(Gav::from_key_version("g:a", "1.0-SNAPSHOT").unwrap().is_snapshot());
+        assert!(Gav::from_key_version("g:a", "1.0-SNAPSHOT")
+            .unwrap()
+            .is_snapshot());
         assert!(!Gav::from_key_version("g:a", "1.0").unwrap().is_snapshot());
-        assert!(!Gav::from_key_version("g:a", "1.0-snapshot").unwrap().is_snapshot());
-        assert!(!Gav::from_key_version("g:a", "1.0-SNAPSHOTX").unwrap().is_snapshot());
-        assert!(!Gav::from_key_version("g:a", "1.0-20260610.123456-3").unwrap().is_snapshot());
+        assert!(!Gav::from_key_version("g:a", "1.0-snapshot")
+            .unwrap()
+            .is_snapshot());
+        assert!(!Gav::from_key_version("g:a", "1.0-SNAPSHOTX")
+            .unwrap()
+            .is_snapshot());
+        assert!(!Gav::from_key_version("g:a", "1.0-20260610.123456-3")
+            .unwrap()
+            .is_snapshot());
     }
 
     #[test]
@@ -528,12 +546,9 @@ mod tests {
 
     #[test]
     fn relative_path_unique_snapshot_with_classifier() {
-        let mut g = Gav::from_key_version_classifier(
-            "com.example:foo",
-            "1.0-SNAPSHOT",
-            Some("sources"),
-        )
-        .unwrap();
+        let mut g =
+            Gav::from_key_version_classifier("com.example:foo", "1.0-SNAPSHOT", Some("sources"))
+                .unwrap();
         g.snapshot_version = Some("1.0-20260610.123456-3".into());
         assert_eq!(
             g.relative_path(),

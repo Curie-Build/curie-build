@@ -60,7 +60,12 @@ struct ApiDoc {
 /// Query the Maven Central REST API and return up to `rows` results.
 pub fn search_api(query: &str, rows: usize) -> Result<Vec<ArtifactHit>> {
     let client = build_client()?;
-    let url = format!("{}?q={}&rows={}&wt=json", API_BASE, percent_encode(query), rows);
+    let url = format!(
+        "{}?q={}&rows={}&wt=json",
+        API_BASE,
+        percent_encode(query),
+        rows
+    );
     let body = client
         .get(&url)
         .send()
@@ -85,8 +90,9 @@ fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for byte in s.bytes() {
         match byte {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
-            | b'-' | b'_' | b'.' | b'~' | b':' => out.push(byte as char),
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' => {
+                out.push(byte as char)
+            }
             b' ' => out.push('+'),
             b => out.push_str(&format!("%{:02X}", b)),
         }
@@ -119,7 +125,8 @@ fn parse_response(body: &str) -> Result<Vec<ArtifactHit>> {
 /// recently active projects.
 fn sort_by_popularity(hits: &mut Vec<ArtifactHit>) {
     hits.sort_by(|a, b| {
-        b.version_count.cmp(&a.version_count)
+        b.version_count
+            .cmp(&a.version_count)
             .then_with(|| b.timestamp.cmp(&a.timestamp))
     });
 }

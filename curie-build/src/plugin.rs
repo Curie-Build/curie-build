@@ -57,10 +57,7 @@ fn spawn_with_stdin_thread(
     let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to spawn {}", cmd.get_program().to_string_lossy()))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .expect("stdin was requested as piped");
+    let mut stdin = child.stdin.take().expect("stdin was requested as piped");
     let data = data.to_vec();
     let handle = thread::spawn(move || {
         let res = stdin.write_all(&data);
@@ -85,16 +82,10 @@ fn check_write_result_vs_status(
             return Err(e).with_context(|| format!("failed to write stdin to {bin_name}"));
         }
         // Child exited with failure (EPIPE or other write error); report child's status.
-        anyhow::bail!(
-            "{bin_name} exited with status {:?}",
-            status.code()
-        );
+        anyhow::bail!("{bin_name} exited with status {:?}", status.code());
     }
     if !status.success() {
-        anyhow::bail!(
-            "{bin_name} exited with status {:?}",
-            status.code()
-        );
+        anyhow::bail!("{bin_name} exited with status {:?}", status.code());
     }
     Ok(())
 }
@@ -116,8 +107,7 @@ pub fn fetch_manifest(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit());
 
-    let (child, write_th) =
-        spawn_with_stdin_thread(cmd, envelope_json.as_bytes())?;
+    let (child, write_th) = spawn_with_stdin_thread(cmd, envelope_json.as_bytes())?;
 
     let output = child
         .wait_with_output()
@@ -202,22 +192,28 @@ pub fn generate_sources(
     offline: bool,
 ) -> Result<()> {
     let bin_name = format!("curie-{name}");
-    let bin = which::which(&bin_name)
-        .with_context(|| format!("{bin_name} not found on PATH"))?;
+    let bin = which::which(&bin_name).with_context(|| format!("{bin_name} not found on PATH"))?;
 
     // Merge the config envelope with the resolved artifact paths.
     let mut envelope: serde_json::Value = serde_json::from_str(config_envelope)
         .context("internal: failed to parse config envelope")?;
     let artifacts_json: serde_json::Value = resolved
         .iter()
-        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.display().to_string())))
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                serde_json::Value::String(v.display().to_string()),
+            )
+        })
         .collect::<serde_json::Map<_, _>>()
         .into();
     envelope["artifacts"] = artifacts_json;
-    let run_json = serde_json::to_string(&envelope).context("internal: failed to serialize run envelope")?;
+    let run_json =
+        serde_json::to_string(&envelope).context("internal: failed to serialize run envelope")?;
 
     let mut cmd = std::process::Command::new(&bin);
-    cmd.args(["generate-sources", "--project"]).arg(project_root);
+    cmd.args(["generate-sources", "--project"])
+        .arg(project_root);
     if offline {
         cmd.arg("--offline");
     }
@@ -226,10 +222,7 @@ pub fn generate_sources(
     let status = crate::proc::spawn_cmd_with_stdin(&mut cmd, run_json.as_bytes())
         .with_context(|| format!("failed to run {bin_name}"))?;
     if !status.success() {
-        anyhow::bail!(
-            "{bin_name} exited with status {:?}",
-            status.code()
-        );
+        anyhow::bail!("{bin_name} exited with status {:?}", status.code());
     }
 
     Ok(())
@@ -261,7 +254,10 @@ pub fn write_stamp(
         .iter()
         .map(|d| {
             let abs = project_root.join(d);
-            MtimeEntry { path: d.clone(), mtime_ns: mtime_ns(&abs) }
+            MtimeEntry {
+                path: d.clone(),
+                mtime_ns: mtime_ns(&abs),
+            }
         })
         .collect();
 
@@ -269,11 +265,18 @@ pub fn write_stamp(
         .into_iter()
         .map(|abs| {
             let rel = abs.strip_prefix(project_root).unwrap_or(&abs).to_path_buf();
-            MtimeEntry { path: rel, mtime_ns: mtime_ns(&abs) }
+            MtimeEntry {
+                path: rel,
+                mtime_ns: mtime_ns(&abs),
+            }
         })
         .collect();
 
-    let stamp = Stamp { dir_mtimes, file_mtimes, config_hash: config_hash.to_string() };
+    let stamp = Stamp {
+        dir_mtimes,
+        file_mtimes,
+        config_hash: config_hash.to_string(),
+    };
 
     if let Some(parent) = stamp_path.parent() {
         std::fs::create_dir_all(parent).context("failed to create .curie-plugins dir")?;
@@ -345,9 +348,11 @@ fn mtime_ns(path: &Path) -> u128 {
 
 /// Walk manifest input dirs and collect matching files.
 fn collect_input_files(manifest: &PluginManifest, project_root: &Path) -> Vec<PathBuf> {
-    let regex = manifest.inputs.file_regex.as_deref().and_then(|r| {
-        regex::Regex::new(r).ok()
-    });
+    let regex = manifest
+        .inputs
+        .file_regex
+        .as_deref()
+        .and_then(|r| regex::Regex::new(r).ok());
 
     let mut files: Vec<PathBuf> = manifest
         .inputs
@@ -496,7 +501,11 @@ mod tests {
     }
 
     fn test_repo(url: &str) -> Repository {
-        Repository { id: "test".into(), name: "Test".into(), url: url.to_string() }
+        Repository {
+            id: "test".into(),
+            name: "Test".into(),
+            url: url.to_string(),
+        }
     }
 
     fn sha1_hex(data: &[u8]) -> String {
@@ -505,7 +514,8 @@ mod tests {
     }
 
     fn sample_manifest() -> PluginManifest {
-        serde_json::from_str(r#"{
+        serde_json::from_str(
+            r#"{
             "name": "test",
             "description": "test plugin",
             "version": "0.1.0",
@@ -516,7 +526,9 @@ mod tests {
             },
             "outputs": { "source_dirs": ["target/generated-sources/protobuf"] },
             "artifacts": []
-        }"#).unwrap()
+        }"#,
+        )
+        .unwrap()
     }
 
     /// Fixed config hash used by the input-tracking tests, which only care
@@ -566,7 +578,12 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         fs::write(&proto_file, b"syntax = \"proto3\"; // modified").unwrap();
 
-        assert!(!is_up_to_date(&manifest, &stamp_path, tmp.path(), TEST_HASH));
+        assert!(!is_up_to_date(
+            &manifest,
+            &stamp_path,
+            tmp.path(),
+            TEST_HASH
+        ));
     }
 
     #[test]
@@ -583,7 +600,12 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         fs::write(proto_dir.join("new.proto"), b"syntax = \"proto3\";").unwrap();
 
-        assert!(!is_up_to_date(&manifest, &stamp_path, tmp.path(), TEST_HASH));
+        assert!(!is_up_to_date(
+            &manifest,
+            &stamp_path,
+            tmp.path(),
+            TEST_HASH
+        ));
     }
 
     #[test]
@@ -600,7 +622,12 @@ mod tests {
 
         // ...but the current build has a different config hash (e.g. modelPackage
         // changed).  No input file moved, yet the plugin must re-run.
-        assert!(!is_up_to_date(&manifest, &stamp_path, tmp.path(), "different-hash"));
+        assert!(!is_up_to_date(
+            &manifest,
+            &stamp_path,
+            tmp.path(),
+            "different-hash"
+        ));
     }
 
     #[test]
@@ -611,7 +638,13 @@ mod tests {
         fs::write(proto_dir.join("foo.proto"), b"syntax = \"proto3\";").unwrap();
 
         let manifest = sample_manifest();
-        write_stamp(&manifest, &tmp.path().join("stamp.json"), tmp.path(), "abc123").unwrap();
+        write_stamp(
+            &manifest,
+            &tmp.path().join("stamp.json"),
+            tmp.path(),
+            "abc123",
+        )
+        .unwrap();
         let stamp_path = tmp.path().join("stamp.json");
         assert!(is_up_to_date(&manifest, &stamp_path, tmp.path(), "abc123"));
     }
@@ -634,7 +667,12 @@ mod tests {
         value.as_object_mut().unwrap().remove("config_hash");
         fs::write(&stamp_path, serde_json::to_string(&value).unwrap()).unwrap();
 
-        assert!(!is_up_to_date(&manifest, &stamp_path, tmp.path(), "real-hash"));
+        assert!(!is_up_to_date(
+            &manifest,
+            &stamp_path,
+            tmp.path(),
+            "real-hash"
+        ));
     }
 
     #[test]
@@ -757,7 +795,11 @@ mod tests {
         {
             let _home = crate::testenv::set_home(tmp.path());
             let result = download_artifact(&art, &repos, false);
-            assert!(result.is_ok(), "expected success: {:#}", result.unwrap_err());
+            assert!(
+                result.is_ok(),
+                "expected success: {:#}",
+                result.unwrap_err()
+            );
         }
 
         // The mock was hit — meaning the repo URL was used, not Maven Central.
@@ -802,7 +844,11 @@ mod tests {
         {
             let _home = crate::testenv::set_home(tmp.path());
             let result = download_artifact(&art, &repos, false);
-            assert!(result.is_ok(), "expected fallback success: {:#}", result.unwrap_err());
+            assert!(
+                result.is_ok(),
+                "expected fallback success: {:#}",
+                result.unwrap_err()
+            );
         }
 
         _m2_jar.assert();
@@ -966,9 +1012,15 @@ echo '{"name":"dummy","description":"test","version":"0.0.0","types":[],"inputs"
             big
         );
 
-        let result = with_path_prepended(tmp.path(), || fetch_manifest("dummy", &envelope, tmp.path()));
+        let result = with_path_prepended(tmp.path(), || {
+            fetch_manifest("dummy", &envelope, tmp.path())
+        });
 
-        assert!(result.is_ok(), "expected success: {:#}", result.unwrap_err());
+        assert!(
+            result.is_ok(),
+            "expected success: {:#}",
+            result.unwrap_err()
+        );
         let m = result.unwrap();
         assert_eq!(m.name, "dummy");
     }
@@ -987,7 +1039,9 @@ exit 42
         let large = "y".repeat(100 * 1024);
         let envelope = format!(r#"{{"curie_version":"0","config":{{"data":"{}"}}}}"#, large);
 
-        let result = with_path_prepended(tmp.path(), || fetch_manifest("errplug", &envelope, tmp.path()));
+        let result = with_path_prepended(tmp.path(), || {
+            fetch_manifest("errplug", &envelope, tmp.path())
+        });
 
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
@@ -1075,7 +1129,11 @@ echo 'GEN_STDERR_LINE' >&2
             r
         });
 
-        assert!(result.is_ok(), "expected success: {:#}", result.unwrap_err());
+        assert!(
+            result.is_ok(),
+            "expected success: {:#}",
+            result.unwrap_err()
+        );
         let lines = sink.lines.lock().unwrap().clone();
         assert!(
             lines.iter().any(|l| l.contains("GEN_STDOUT_LINE")),

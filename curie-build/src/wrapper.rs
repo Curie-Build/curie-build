@@ -64,9 +64,16 @@ mod tests {
     #[test]
     fn wrapper_jar_is_nonempty() {
         // Sanity check that build.rs actually produced a JAR.
-        assert!(WRAPPER_JAR.len() > 256, "embedded wrapper.jar suspiciously small");
+        assert!(
+            WRAPPER_JAR.len() > 256,
+            "embedded wrapper.jar suspiciously small"
+        );
         // Standard ZIP/JAR magic: 'P' 'K' 0x03 0x04.
-        assert_eq!(&WRAPPER_JAR[..4], b"PK\x03\x04", "not a valid ZIP/JAR header");
+        assert_eq!(
+            &WRAPPER_JAR[..4],
+            b"PK\x03\x04",
+            "not a valid ZIP/JAR header"
+        );
     }
 
     #[test]

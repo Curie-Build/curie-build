@@ -52,10 +52,7 @@ mod tests {
             url: "https://repo1.maven.org/maven2/".to_string(),
         };
         let url = repo.artifact_url("com/example/foo/1.0/foo-1.0.jar");
-        assert!(
-            !url.contains("//com"),
-            "double slash in URL: {url}"
-        );
+        assert!(!url.contains("//com"), "double slash in URL: {url}");
         assert_eq!(
             url,
             "https://repo1.maven.org/maven2/com/example/foo/1.0/foo-1.0.jar"

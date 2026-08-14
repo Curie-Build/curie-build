@@ -58,7 +58,11 @@ pub fn put_blob(digest: &str, bytes: &[u8]) -> Result<PathBuf> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let staging = path.with_extension(format!("part.{}.{}", std::process::id(), std::process::id()));
+    let staging = path.with_extension(format!(
+        "part.{}.{}",
+        std::process::id(),
+        std::process::id()
+    ));
     std::fs::write(&staging, bytes)
         .with_context(|| format!("failed to write staging blob {}", staging.display()))?;
     std::fs::rename(&staging, &path).with_context(|| {
@@ -85,11 +89,13 @@ pub fn materialize_blob(digest: &str, dest: &Path) -> Result<()> {
     }
     match std::fs::hard_link(&src, dest) {
         Ok(()) => Ok(()),
-        Err(_) => {
-            std::fs::copy(&src, dest).map(|_| ()).with_context(|| {
-                format!("failed to copy blob {} to {}", src.display(), dest.display())
-            })
-        }
+        Err(_) => std::fs::copy(&src, dest).map(|_| ()).with_context(|| {
+            format!(
+                "failed to copy blob {} to {}",
+                src.display(),
+                dest.display()
+            )
+        }),
     }
 }
 
@@ -132,8 +138,8 @@ fn tag_resolution_path(registry: &str, repository: &str, tag: &str) -> Result<Pa
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::layer::sha256_digest;
+    use super::*;
 
     #[test]
     fn put_get_roundtrip() {

@@ -111,9 +111,7 @@ impl RegistryClient {
                 .map(|s| s.contains("oci"))
                 .unwrap_or(false);
 
-        let config_desc = manifest
-            .get("config")
-            .context("manifest missing config")?;
+        let config_desc = manifest.get("config").context("manifest missing config")?;
         let config_digest = config_desc
             .get("digest")
             .and_then(|v| v.as_str())
@@ -232,7 +230,10 @@ impl RegistryClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().unwrap_or_default();
-            bail!("failed to download blob {digest} ({status}): {}", body.trim());
+            bail!(
+                "failed to download blob {digest} ({status}): {}",
+                body.trim()
+            );
         }
         let bytes = resp.bytes().context("read blob body")?.to_vec();
         let actual = sha256_digest(&bytes);
@@ -251,10 +252,7 @@ impl RegistryClient {
         reference: &ImageReference,
         creds: Option<&Credentials>,
     ) -> Result<reqwest::blocking::Response> {
-        let mut req = self
-            .client
-            .get(url)
-            .header(reqwest::header::ACCEPT, accept);
+        let mut req = self.client.get(url).header(reqwest::header::ACCEPT, accept);
         if let Some(c) = creds {
             req = req.basic_auth(&c.username, Some(&c.password));
         }
@@ -285,7 +283,7 @@ impl RegistryClient {
                 .header(reqwest::header::ACCEPT, accept)
                 .bearer_auth(token)
                 .send()
-                .with_context(|| format!("HTTP GET {url} (with bearer)") )?;
+                .with_context(|| format!("HTTP GET {url} (with bearer)"))?;
             return Ok(resp2);
         }
 
@@ -357,7 +355,7 @@ mod tests {
         let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
 
         let layer_bytes = b"\x1f\x8b".to_vec(); // not a real gzip; we'll put exact digest
-        // Use real digest of layer_bytes:
+                                                // Use real digest of layer_bytes:
         let layer_digest = sha256_digest(&layer_bytes);
         let mut manifest_val: Value = serde_json::from_slice(&manifest_bytes).unwrap();
         manifest_val["layers"][0]["digest"] = serde_json::json!(layer_digest);
@@ -374,7 +372,10 @@ mod tests {
         let _m2 = server
             .mock(
                 "GET",
-                mockito::Matcher::Regex(format!("/v2/library/test/blobs/{}", regex::escape(&config_digest))),
+                mockito::Matcher::Regex(format!(
+                    "/v2/library/test/blobs/{}",
+                    regex::escape(&config_digest)
+                )),
             )
             .with_status(200)
             .with_body(config_bytes.clone())
@@ -382,7 +383,10 @@ mod tests {
         let _m3 = server
             .mock(
                 "GET",
-                mockito::Matcher::Regex(format!("/v2/library/test/blobs/{}", regex::escape(&layer_digest))),
+                mockito::Matcher::Regex(format!(
+                    "/v2/library/test/blobs/{}",
+                    regex::escape(&layer_digest)
+                )),
             )
             .with_status(200)
             .with_body(layer_bytes.clone())

@@ -32,22 +32,19 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ansi_to_tui::IntoText;
 use crossterm::{cursor, execute, terminal};
 use ratatui::{
-    Terminal,
-    TerminalOptions,
-    Viewport,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
-    Frame,
+    Frame, Terminal, TerminalOptions, Viewport,
 };
 
 /// Minimum pane height (2 border rows + 7 content rows).
@@ -92,15 +89,26 @@ enum TuiMsg {
     /// free pane (or queues it as a running background job).  Only started jobs
     /// ever occupy a pane, so pending/never-dispatched jobs don't show as empty
     /// boxes — they appear in the "Pending" overflow line instead.
-    SlotStarted { slot_idx: usize },
+    SlotStarted {
+        slot_idx: usize,
+    },
     /// Job cancelled by an earlier build failure — it will never run.  Shown in
     /// the "Skipped (<reason>)" overflow group instead of "Pending".
-    SlotSkipped { slot_idx: usize, reason: String },
-    Line { slot_idx: usize, line: String },
+    SlotSkipped {
+        slot_idx: usize,
+        reason: String,
+    },
+    Line {
+        slot_idx: usize,
+        line: String,
+    },
     /// Job finished.  `success` controls whether the pane is eligible for
     /// reuse: on success the pane is immediately handed to the next waiting
     /// background job; on failure the pane keeps the error output visible.
-    SlotDone { slot_idx: usize, success: bool },
+    SlotDone {
+        slot_idx: usize,
+        success: bool,
+    },
     Shutdown,
 }
 
@@ -122,7 +130,9 @@ impl crate::parallel::LineSink for TuiSlot {
     /// assigned a visible pane.  Jobs that never start (e.g. cancelled after an
     /// earlier failure) never send this and so never show an empty pane.
     fn start(&self) {
-        let _ = self.sender.send(TuiMsg::SlotStarted { slot_idx: self.slot_idx });
+        let _ = self.sender.send(TuiMsg::SlotStarted {
+            slot_idx: self.slot_idx,
+        });
     }
 
     /// Signal that this job was cancelled by an earlier failure and will never
@@ -139,7 +149,10 @@ impl crate::parallel::LineSink for TuiSlot {
         if let Ok(mut f) = self.log.lock() {
             let _ = writeln!(f, "{}", line);
         }
-        let _ = self.sender.send(TuiMsg::Line { slot_idx: self.slot_idx, line });
+        let _ = self.sender.send(TuiMsg::Line {
+            slot_idx: self.slot_idx,
+            line,
+        });
     }
 
     /// No-op: the TUI path never buffers lines; everything goes straight to
@@ -153,7 +166,10 @@ impl crate::parallel::LineSink for TuiSlot {
     /// next waiting background job.  On failure the pane retains its current
     /// output so the error stays visible.
     fn complete(&self, success: bool) {
-        let _ = self.sender.send(TuiMsg::SlotDone { slot_idx: self.slot_idx, success });
+        let _ = self.sender.send(TuiMsg::SlotDone {
+            slot_idx: self.slot_idx,
+            success,
+        });
     }
 
     /// TUI slots occupy the full terminal width; no prefix is subtracted.
@@ -210,7 +226,10 @@ impl TuiRenderer {
             render_loop(receiver, names, visible_count, done_label);
         });
 
-        let renderer = TuiRenderer { sender, thread: Some(thread) };
+        let renderer = TuiRenderer {
+            sender,
+            thread: Some(thread),
+        };
         (renderer, slots)
     }
 }
@@ -253,12 +272,7 @@ struct RenderState {
     done_label: String,
 }
 
-fn render_loop(
-    rx: mpsc::Receiver<TuiMsg>,
-    names: Vec<String>,
-    visible: usize,
-    done_label: String,
-) {
+fn render_loop(rx: mpsc::Receiver<TuiMsg>, names: Vec<String>, visible: usize, done_label: String) {
     // When visible == 0 (e.g. curie clean), use an inline viewport — status
     // lines are rendered at the current cursor position without entering the
     // alternate screen.  When visible > 0, use the full alternate screen.
@@ -267,9 +281,12 @@ fn render_loop(
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = {
         let res = if inline_mode {
-            Terminal::with_options(backend, TerminalOptions {
-                viewport: Viewport::Inline(5),
-            })
+            Terminal::with_options(
+                backend,
+                TerminalOptions {
+                    viewport: Viewport::Inline(5),
+                },
+            )
         } else {
             Terminal::new(backend)
         };
@@ -300,7 +317,12 @@ fn render_loop(
     let mut state = RenderState {
         slots: names
             .into_iter()
-            .map(|name| SlotData { name, done: None, skipped: false, ring: VecDeque::new() })
+            .map(|name| SlotData {
+                name,
+                done: None,
+                skipped: false,
+                ring: VecDeque::new(),
+            })
             .collect(),
         pane_to_slot: Vec::new(),
         background_queue: VecDeque::new(),
@@ -328,10 +350,14 @@ fn render_loop(
     loop {
         let msg = match pending.pop_front().or_else(|| rx.recv().ok()) {
             Some(m) => m,
-            None    => break,
+            None => break,
         };
         if dbg.is_on() {
-            dbg.log(&format!("RECV pending_remaining={} msg={}", pending.len(), describe_msg(&msg)));
+            dbg.log(&format!(
+                "RECV pending_remaining={} msg={}",
+                pending.len(),
+                describe_msg(&msg)
+            ));
         }
         match msg {
             TuiMsg::SlotStarted { slot_idx } => {
@@ -359,16 +385,16 @@ fn render_loop(
                 // Redraw immediately so the green/red outcome is visible.
                 let _ = terminal.draw(|f| render_frame(f, &state));
 
-                if let Some(pane_idx) =
-                    state.pane_to_slot.iter().position(|&s| s == slot_idx)
-                {
+                if let Some(pane_idx) = state.pane_to_slot.iter().position(|&s| s == slot_idx) {
                     if success && !state.background_queue.is_empty() {
                         // Rule 1: hold green 1 s, then replace with next job.
-                        if let Some(stashed) =
-                            drain_hold(&rx, &mut terminal, &mut state, 1)
-                        {
+                        if let Some(stashed) = drain_hold(&rx, &mut terminal, &mut state, 1) {
                             if dbg.is_on() {
-                                dbg.log(&format!("DRAIN_HOLD(1s) pending={} stashed={}", pending.len(), describe_msg(&stashed)));
+                                dbg.log(&format!(
+                                    "DRAIN_HOLD(1s) pending={} stashed={}",
+                                    pending.len(),
+                                    describe_msg(&stashed)
+                                ));
                             }
                             match stashed {
                                 // Shutdown during the hold still runs the close
@@ -384,9 +410,10 @@ fn render_loop(
                                 // fully now so it is removed from the queue and
                                 // won't be popped as the next promoted job.  A
                                 // failure takes over a running pane immediately.
-                                TuiMsg::SlotDone { slot_idx: s, success: ok }
-                                    if state.pane_to_slot.iter().all(|&x| x != s) =>
-                                {
+                                TuiMsg::SlotDone {
+                                    slot_idx: s,
+                                    success: ok,
+                                } if state.pane_to_slot.iter().all(|&x| x != s) => {
                                     state.slots[s].done = Some(ok);
                                     state.background_queue.retain(|&x| x != s);
                                     if !ok {
@@ -403,9 +430,9 @@ fn render_loop(
                         // during the hold and were already removed from queue.
                         let next = loop {
                             match state.background_queue.pop_front() {
-                                None                                            => break None,
-                                Some(s) if state.slots[s].done.is_none()       => break Some(s),
-                                Some(_)                                         => continue,
+                                None => break None,
+                                Some(s) if state.slots[s].done.is_none() => break Some(s),
+                                Some(_) => continue,
                             }
                         };
                         if let Some(next) = next {
@@ -422,11 +449,13 @@ fn render_loop(
                         let _ = terminal.draw(|f| render_frame(f, &state));
                     } else if success {
                         // Rule 2: no replacement — hold 2 s then close.
-                        if let Some(stashed) =
-                            drain_hold(&rx, &mut terminal, &mut state, 2)
-                        {
+                        if let Some(stashed) = drain_hold(&rx, &mut terminal, &mut state, 2) {
                             if dbg.is_on() {
-                                dbg.log(&format!("DRAIN_HOLD(2s) pending={} stashed={}", pending.len(), describe_msg(&stashed)));
+                                dbg.log(&format!(
+                                    "DRAIN_HOLD(2s) pending={} stashed={}",
+                                    pending.len(),
+                                    describe_msg(&stashed)
+                                ));
                             }
                             match stashed {
                                 // Shutdown during the hold still runs the close
@@ -438,9 +467,10 @@ fn render_loop(
                                     let _ = terminal.draw(|f| render_frame(f, &state));
                                     break;
                                 }
-                                TuiMsg::SlotDone { slot_idx: s, success: ok }
-                                    if state.pane_to_slot.iter().all(|&x| x != s) =>
-                                {
+                                TuiMsg::SlotDone {
+                                    slot_idx: s,
+                                    success: ok,
+                                } if state.pane_to_slot.iter().all(|&x| x != s) => {
                                     state.slots[s].done = Some(ok);
                                     state.background_queue.retain(|&x| x != s);
                                     if !ok {
@@ -540,8 +570,8 @@ const TAIL_LINES: usize = 15;
 /// `apply_shutdown` would see those slots as `done == None` and incorrectly
 /// mark them as skipped.
 fn resolve_outstanding_done_messages(
-    rx:      &mpsc::Receiver<TuiMsg>,
-    state:   &mut RenderState,
+    rx: &mpsc::Receiver<TuiMsg>,
+    state: &mut RenderState,
     pending: &std::collections::VecDeque<TuiMsg>,
 ) {
     // Apply SlotDone messages already held in `pending`.
@@ -580,8 +610,10 @@ impl DbgLog {
     fn open() -> Self {
         if std::env::var_os("CURIE_TUI_DEBUG").is_some() {
             let f = std::fs::OpenOptions::new()
-                .create(true).append(true)
-                .open("/tmp/curie-tui-debug.log").ok();
+                .create(true)
+                .append(true)
+                .open("/tmp/curie-tui-debug.log")
+                .ok();
             DbgLog(f.map(std::io::BufWriter::new))
         } else {
             DbgLog(None)
@@ -598,31 +630,47 @@ impl DbgLog {
         }
     }
 
-    fn is_on(&self) -> bool { self.0.is_some() }
+    fn is_on(&self) -> bool {
+        self.0.is_some()
+    }
 }
 
 fn describe_msg(msg: &TuiMsg) -> String {
     match msg {
-        TuiMsg::SlotStarted { slot_idx }       => format!("SlotStarted(slot={slot_idx})"),
-        TuiMsg::SlotSkipped { slot_idx, reason }
-                                                => format!("SlotSkipped(slot={slot_idx} reason={reason:?})"),
-        TuiMsg::Line        { slot_idx, .. }   => format!("Line(slot={slot_idx})"),
-        TuiMsg::SlotDone    { slot_idx, success }
-                                                => format!("SlotDone(slot={slot_idx} ok={success})"),
-        TuiMsg::Shutdown                        => "Shutdown".to_string(),
+        TuiMsg::SlotStarted { slot_idx } => format!("SlotStarted(slot={slot_idx})"),
+        TuiMsg::SlotSkipped { slot_idx, reason } => {
+            format!("SlotSkipped(slot={slot_idx} reason={reason:?})")
+        }
+        TuiMsg::Line { slot_idx, .. } => format!("Line(slot={slot_idx})"),
+        TuiMsg::SlotDone { slot_idx, success } => format!("SlotDone(slot={slot_idx} ok={success})"),
+        TuiMsg::Shutdown => "Shutdown".to_string(),
     }
 }
 
-fn log_apply_shutdown(dbg: &mut DbgLog, state: &RenderState, pending: &std::collections::VecDeque<TuiMsg>) {
-    if !dbg.is_on() { return; }
-    let none_slots: Vec<usize> = state.slots.iter().enumerate()
+fn log_apply_shutdown(
+    dbg: &mut DbgLog,
+    state: &RenderState,
+    pending: &std::collections::VecDeque<TuiMsg>,
+) {
+    if !dbg.is_on() {
+        return;
+    }
+    let none_slots: Vec<usize> = state
+        .slots
+        .iter()
+        .enumerate()
         .filter(|(_, s)| s.done.is_none() && !s.skipped)
         .map(|(i, _)| i)
         .collect();
-    let pending_done: Vec<String> = pending.iter()
-        .filter_map(|m| if let TuiMsg::SlotDone { slot_idx, success } = m {
-            Some(format!("SD({slot_idx} ok={success})"))
-        } else { None })
+    let pending_done: Vec<String> = pending
+        .iter()
+        .filter_map(|m| {
+            if let TuiMsg::SlotDone { slot_idx, success } = m {
+                Some(format!("SD({slot_idx} ok={success})"))
+            } else {
+                None
+            }
+        })
         .collect();
     dbg.log(&format!(
         "APPLY_SHUTDOWN none_slots={none_slots:?} pending_done=[{}]",
@@ -668,20 +716,20 @@ fn print_failed_tails(state: &RenderState, max_lines: usize, out: &mut dyn io::W
 /// Mirrors the format of [`render_overflow_lines`]: `"  · {label}{names}\n"`.
 /// No output is produced when `names` is empty.
 fn print_summary_group(
-    out:        &mut dyn io::Write,
-    label:      &str,
-    names:      &[&str],
+    out: &mut dyn io::Write,
+    label: &str,
+    names: &[&str],
     label_ansi: &str,
-    name_ansi:  &str,
-    term_w:     usize,
+    name_ansi: &str,
+    term_w: usize,
 ) {
     if names.is_empty() {
         return;
     }
-    let prefix     = "  \u{00b7} ";
+    let prefix = "  \u{00b7} ";
     let prefix_len = 4;
-    let budget     = term_w.saturating_sub(prefix_len + label.len());
-    let body       = build_overflow_names(names, budget);
+    let budget = term_w.saturating_sub(prefix_len + label.len());
+    let body = build_overflow_names(names, budget);
     let _ = writeln!(out, "{prefix}{label_ansi}{label}{name_ansi}{body}\x1b[0m");
 }
 
@@ -702,27 +750,40 @@ fn print_build_summary(state: &RenderState, out: &mut dyn io::Write) {
         .map(|(w, _)| w as usize)
         .unwrap_or(80);
 
-    let skipped:  Vec<&str> = state.slots.iter()
+    let skipped: Vec<&str> = state
+        .slots
+        .iter()
         .filter(|s| s.skipped)
         .map(|s| s.name.as_str())
         .collect();
-    let done_ok:  Vec<&str> = state.slots.iter()
+    let done_ok: Vec<&str> = state
+        .slots
+        .iter()
         .filter(|s| s.done == Some(true))
         .map(|s| s.name.as_str())
         .collect();
-    let done_err: Vec<&str> = state.slots.iter()
+    let done_err: Vec<&str> = state
+        .slots
+        .iter()
         .filter(|s| s.done == Some(false))
         .map(|s| s.name.as_str())
         .collect();
 
     let skip_label = match state.skip_reason.as_deref() {
         Some(r) => format!("Skipped ({}): ", r),
-        None    => "Skipped: ".to_string(),
+        None => "Skipped: ".to_string(),
     };
 
-    print_summary_group(out, &skip_label, &skipped,  "\x1b[33m",   "\x1b[2m",  term_w);
-    print_summary_group(out, &format!("{}: ", state.done_label), &done_ok,  "\x1b[1;32m", "\x1b[32m", term_w);
-    print_summary_group(out, "Failed: ",  &done_err, "\x1b[1;31m", "\x1b[31m", term_w);
+    print_summary_group(out, &skip_label, &skipped, "\x1b[33m", "\x1b[2m", term_w);
+    print_summary_group(
+        out,
+        &format!("{}: ", state.done_label),
+        &done_ok,
+        "\x1b[1;32m",
+        "\x1b[32m",
+        term_w,
+    );
+    print_summary_group(out, "Failed: ", &done_err, "\x1b[1;31m", "\x1b[31m", term_w);
 }
 
 /// Apply the shutdown close rules to the render state.
@@ -735,7 +796,9 @@ fn print_build_summary(state: &RenderState, out: &mut dyn io::Write) {
 /// Called from every shutdown path — including when `Shutdown` interrupts a
 /// pane's hold window — so a held-green pane is never left open.
 fn apply_shutdown(state: &mut RenderState) {
-    state.pane_to_slot.retain(|&s| state.slots[s].done != Some(true));
+    state
+        .pane_to_slot
+        .retain(|&s| state.slots[s].done != Some(true));
     for slot in &mut state.slots {
         if slot.done.is_none() {
             slot.skipped = true;
@@ -780,7 +843,7 @@ fn distribute_pane_heights(total: u16, count: usize) -> Vec<u16> {
         return Vec::new();
     }
     let count = count as u16;
-    let base  = total / count;
+    let base = total / count;
     let extra = total % count;
     (0..count)
         .map(|i| base + if i < extra { 1 } else { 0 })
@@ -798,9 +861,9 @@ fn drain_hold(
     state: &mut RenderState,
     hold_secs: u64,
 ) -> Option<TuiMsg> {
-    let deadline       = Instant::now() + Duration::from_secs(hold_secs);
+    let deadline = Instant::now() + Duration::from_secs(hold_secs);
     let frame_interval = Duration::from_millis(33); // cap at ~30 fps
-    let mut last_draw  = Instant::now() - frame_interval;
+    let mut last_draw = Instant::now() - frame_interval;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -873,16 +936,15 @@ fn drain_available(
 fn render_frame(f: &mut Frame, state: &RenderState) {
     let area = f.area();
 
-    let groups        = classify_overflow_slots(state);
+    let groups = classify_overflow_slots(state);
     let overflow_rows = count_nonempty_groups(&groups) as u16;
 
     // Open panes share all the height not taken by the overflow lines, so when
     // a pane closes the survivors grow to reclaim the freed rows.
-    let avail   = area.height.saturating_sub(overflow_rows);
+    let avail = area.height.saturating_sub(overflow_rows);
     let heights = distribute_pane_heights(avail, state.pane_to_slot.len());
 
-    let mut constraints: Vec<Constraint> =
-        heights.iter().map(|&h| Constraint::Length(h)).collect();
+    let mut constraints: Vec<Constraint> = heights.iter().map(|&h| Constraint::Length(h)).collect();
     for _ in 0..overflow_rows {
         constraints.push(Constraint::Length(1));
     }
@@ -919,31 +981,21 @@ fn render_frame(f: &mut Frame, state: &RenderState) {
 ///   running  → dim border, bold cyan name
 ///   success  → bold green border + name + ✓
 ///   failure  → bold red border + name + ✗
-fn render_pane(
-    f: &mut Frame,
-    area: Rect,
-    name: &str,
-    done: Option<bool>,
-    ring: &VecDeque<String>,
-) {
+fn render_pane(f: &mut Frame, area: Rect, name: &str, done: Option<bool>, ring: &VecDeque<String>) {
     let (color, status) = match done {
-        None           => (Color::Cyan,  ""),
-        Some(true)     => (Color::Green, " ✓"),
-        Some(false)    => (Color::Red,   " ✗"),
+        None => (Color::Cyan, ""),
+        Some(true) => (Color::Green, " ✓"),
+        Some(false) => (Color::Red, " ✗"),
     };
 
     let border_style = match done {
-        None  => Style::new().fg(color).add_modifier(Modifier::DIM),
-        _     => Style::new().fg(color).add_modifier(Modifier::BOLD),
+        None => Style::new().fg(color).add_modifier(Modifier::DIM),
+        _ => Style::new().fg(color).add_modifier(Modifier::BOLD),
     };
     let title_style = Style::new().fg(color).add_modifier(Modifier::BOLD);
 
-    let title_left  = Line::from(vec![
-        Span::styled(format!(" {} ", name), title_style),
-    ]);
-    let title_right = Line::from(vec![
-        Span::styled(format!("{} ", status), title_style),
-    ]);
+    let title_left = Line::from(vec![Span::styled(format!(" {} ", name), title_style)]);
+    let title_right = Line::from(vec![Span::styled(format!("{} ", status), title_style)]);
 
     let block = Block::new()
         .borders(Borders::ALL)
@@ -990,10 +1042,10 @@ fn render_content(f: &mut Frame, area: Rect, ring: &VecDeque<String>) {
 // ── Overflow classification ────────────────────────────────────────────────
 
 struct OverflowGroups<'a> {
-    running:  Vec<&'a str>,
-    pending:  Vec<&'a str>,
-    skipped:  Vec<&'a str>,
-    done_ok:  Vec<&'a str>,
+    running: Vec<&'a str>,
+    pending: Vec<&'a str>,
+    skipped: Vec<&'a str>,
+    done_ok: Vec<&'a str>,
     done_err: Vec<&'a str>,
 }
 
@@ -1004,10 +1056,10 @@ fn classify_overflow_slots(state: &RenderState) -> OverflowGroups<'_> {
         state.background_queue.iter().copied().collect();
 
     let mut g = OverflowGroups {
-        running:  Vec::new(),
-        pending:  Vec::new(),
-        skipped:  Vec::new(),
-        done_ok:  Vec::new(),
+        running: Vec::new(),
+        pending: Vec::new(),
+        skipped: Vec::new(),
+        done_ok: Vec::new(),
         done_err: Vec::new(),
     };
 
@@ -1017,11 +1069,11 @@ fn classify_overflow_slots(state: &RenderState) -> OverflowGroups<'_> {
         }
         match slot.done {
             // Cancelled by an earlier failure — never ran.
-            None if slot.skipped            => g.skipped.push(&slot.name),
+            None if slot.skipped => g.skipped.push(&slot.name),
             None if in_queue.contains(&idx) => g.running.push(&slot.name),
-            None                            => g.pending.push(&slot.name),
-            Some(true)                      => g.done_ok.push(&slot.name),
-            Some(false)                     => g.done_err.push(&slot.name),
+            None => g.pending.push(&slot.name),
+            Some(true) => g.done_ok.push(&slot.name),
+            Some(false) => g.done_err.push(&slot.name),
         }
     }
     g
@@ -1048,30 +1100,55 @@ fn render_overflow_lines(
     skip_reason: Option<&str>,
     done_label: &str,
 ) {
-    let dim    = Style::new().add_modifier(Modifier::DIM);
-    let cyan   = Style::new().fg(Color::Cyan);
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let cyan = Style::new().fg(Color::Cyan);
     let yellow = Style::new().fg(Color::Yellow);
-    let green  = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
-    let red    = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
+    let green = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
+    let red = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
 
     struct GroupSpec<'a> {
-        label:       String,
-        names:       &'a [&'a str],
+        label: String,
+        names: &'a [&'a str],
         label_style: Style,
-        name_style:  Style,
+        name_style: Style,
     }
 
     let skipped_label = match skip_reason {
         Some(reason) => format!("Skipped ({}): ", reason),
-        None         => "Skipped: ".to_string(),
+        None => "Skipped: ".to_string(),
     };
 
     let specs = [
-        GroupSpec { label: "Running: ".into(), names: &groups.running,  label_style: cyan,   name_style: dim   },
-        GroupSpec { label: "Pending: ".into(), names: &groups.pending,  label_style: dim,    name_style: dim   },
-        GroupSpec { label: skipped_label,      names: &groups.skipped,  label_style: yellow, name_style: dim   },
-        GroupSpec { label: format!("{}: ", done_label), names: &groups.done_ok,  label_style: green,  name_style: green },
-        GroupSpec { label: "Failed: ".into(),  names: &groups.done_err, label_style: red,    name_style: red   },
+        GroupSpec {
+            label: "Running: ".into(),
+            names: &groups.running,
+            label_style: cyan,
+            name_style: dim,
+        },
+        GroupSpec {
+            label: "Pending: ".into(),
+            names: &groups.pending,
+            label_style: dim,
+            name_style: dim,
+        },
+        GroupSpec {
+            label: skipped_label,
+            names: &groups.skipped,
+            label_style: yellow,
+            name_style: dim,
+        },
+        GroupSpec {
+            label: format!("{}: ", done_label),
+            names: &groups.done_ok,
+            label_style: green,
+            name_style: green,
+        },
+        GroupSpec {
+            label: "Failed: ".into(),
+            names: &groups.done_err,
+            label_style: red,
+            name_style: red,
+        },
     ];
 
     let mut area_idx = 0;
@@ -1085,16 +1162,16 @@ fn render_overflow_lines(
         let area = areas[area_idx];
         area_idx += 1;
 
-        let prefix     = "  \u{00b7} "; // "  · "
+        let prefix = "  \u{00b7} "; // "  · "
         let prefix_len = 4;
-        let label_len  = spec.label.len();
-        let budget     = width.saturating_sub(prefix_len + label_len);
-        let body       = build_overflow_names(spec.names, budget);
+        let label_len = spec.label.len();
+        let budget = width.saturating_sub(prefix_len + label_len);
+        let body = build_overflow_names(spec.names, budget);
 
         let line = Line::from(vec![
-            Span::styled(prefix,             dim),
+            Span::styled(prefix, dim),
             Span::styled(spec.label.clone(), spec.label_style),
-            Span::styled(body,               spec.name_style),
+            Span::styled(body, spec.name_style),
         ]);
         f.render_widget(Paragraph::new(line), area);
     }
@@ -1135,7 +1212,11 @@ pub(crate) fn build_overflow_names(names: &[&str], budget: usize) -> String {
     let text_len = |k: usize| -> usize {
         let nl = names_len(k);
         let rem = total - k;
-        nl + if rem == 0 { 0 } else { more_suffix(k, rem).len() }
+        nl + if rem == 0 {
+            0
+        } else {
+            more_suffix(k, rem).len()
+        }
     };
 
     // Find the *largest* k in [0, total] such that text_len(k) ≤ budget.
@@ -1503,14 +1584,14 @@ mod tests {
         let mut st = empty_state(3, 2);
         note_started(&mut st, 0);
         note_started(&mut st, 1);
-        st.slots[0].done = Some(true);  // succeeded
+        st.slots[0].done = Some(true); // succeeded
         st.slots[1].done = Some(false); // failed
-        // slot 2 never started.
+                                        // slot 2 never started.
 
         apply_shutdown(&mut st);
 
         assert_eq!(st.pane_to_slot, vec![1]); // only the failed pane remains
-        assert!(st.slots[2].skipped);         // never-started job marked skipped
+        assert!(st.slots[2].skipped); // never-started job marked skipped
     }
 
     #[test]
@@ -1539,9 +1620,9 @@ mod tests {
     #[test]
     fn tail_skips_successful_and_pending_slots() {
         let mut st = empty_state(3, 3);
-        st.slots[0].done = Some(true);   // succeeded — not printed
-        st.slots[1].done = None;          // still running — not printed
-        st.slots[2].done = Some(false);  // failed — printed
+        st.slots[0].done = Some(true); // succeeded — not printed
+        st.slots[1].done = None; // still running — not printed
+        st.slots[2].done = Some(false); // failed — printed
         st.slots[2].ring.push_back("err line".to_string());
 
         let mut buf = Vec::<u8>::new();
@@ -1572,7 +1653,10 @@ mod tests {
         }
         // The first 5 lines (0..4) must be absent.
         for i in 0..5u32 {
-            assert!(!out.contains(&format!("line {i}\n")), "old line {i} must be trimmed");
+            assert!(
+                !out.contains(&format!("line {i}\n")),
+                "old line {i} must be trimmed"
+            );
         }
     }
 
@@ -1598,7 +1682,7 @@ mod tests {
         let mut st = empty_state(3, 3);
         st.slots[0].done = Some(false);
         st.slots[0].ring.push_back("alpha error".to_string());
-        st.slots[1].done = Some(true);   // skipped
+        st.slots[1].done = Some(true); // skipped
         st.slots[2].done = Some(false);
         st.slots[2].ring.push_back("beta error".to_string());
 
@@ -1607,7 +1691,7 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
 
         let pos_alpha = out.find("alpha error").unwrap();
-        let pos_beta  = out.find("beta error").unwrap();
+        let pos_beta = out.find("beta error").unwrap();
         assert!(pos_alpha < pos_beta, "slot 0 must appear before slot 2");
     }
 
@@ -1664,7 +1748,10 @@ mod tests {
         print_build_summary(&st, &mut buf);
         let out = String::from_utf8(buf).unwrap();
 
-        assert!(out.contains("Skipped (core failed):"), "skipped label with reason missing");
+        assert!(
+            out.contains("Skipped (core failed):"),
+            "skipped label with reason missing"
+        );
         assert!(out.contains("m1"));
         assert!(out.contains("m2"));
     }
@@ -1680,8 +1767,14 @@ mod tests {
         print_build_summary(&st, &mut buf);
         let out = String::from_utf8(buf).unwrap();
 
-        assert!(!out.contains("Failed:"),  "empty Failed group must not appear");
-        assert!(!out.contains("Skipped:"), "empty Skipped group must not appear");
+        assert!(
+            !out.contains("Failed:"),
+            "empty Failed group must not appear"
+        );
+        assert!(
+            !out.contains("Skipped:"),
+            "empty Skipped group must not appear"
+        );
     }
 
     #[test]
@@ -1700,11 +1793,11 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
 
         let pos_skipped = out.find("Skipped").unwrap();
-        let pos_done    = out.find("Done:").unwrap();
-        let pos_failed  = out.find("Failed:").unwrap();
+        let pos_done = out.find("Done:").unwrap();
+        let pos_failed = out.find("Failed:").unwrap();
 
-        assert!(pos_skipped < pos_done,   "Skipped must appear before Done");
-        assert!(pos_done    < pos_failed, "Done must appear before Failed");
+        assert!(pos_skipped < pos_done, "Skipped must appear before Done");
+        assert!(pos_done < pos_failed, "Done must appear before Failed");
     }
 
     // ── drain_available regression ─────────────────────────────────────────
@@ -1721,13 +1814,19 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel::<TuiMsg>(10);
 
         // Slot 0 done — put in the channel for drain_available to receive.
-        tx.send(TuiMsg::SlotDone { slot_idx: 0, success: true }).unwrap();
+        tx.send(TuiMsg::SlotDone {
+            slot_idx: 0,
+            success: true,
+        })
+        .unwrap();
         drop(tx); // close so try_recv returns Err after the one message
 
         let mut state = empty_state(2, 2);
         // Simulate drain_hold having already stashed SD_1 for slot 1.
-        let mut pending: VecDeque<TuiMsg> =
-            VecDeque::from([TuiMsg::SlotDone { slot_idx: 1, success: true }]);
+        let mut pending: VecDeque<TuiMsg> = VecDeque::from([TuiMsg::SlotDone {
+            slot_idx: 1,
+            success: true,
+        }]);
 
         drain_available(&rx, &mut state, &mut pending);
 
@@ -1739,7 +1838,13 @@ mod tests {
 
     /// Helper: build a VecDeque<TuiMsg> from a list of (slot, success) pairs.
     fn slot_done_queue(pairs: &[(usize, bool)]) -> VecDeque<TuiMsg> {
-        pairs.iter().map(|&(s, ok)| TuiMsg::SlotDone { slot_idx: s, success: ok }).collect()
+        pairs
+            .iter()
+            .map(|&(s, ok)| TuiMsg::SlotDone {
+                slot_idx: s,
+                success: ok,
+            })
+            .collect()
     }
 
     #[test]
@@ -1762,8 +1867,16 @@ mod tests {
     fn resolve_drains_slot_done_from_channel() {
         // Both SD_0 and SD_1 arrive via the channel (pending is empty).
         let (tx, rx) = mpsc::sync_channel::<TuiMsg>(4);
-        tx.send(TuiMsg::SlotDone { slot_idx: 0, success: true  }).unwrap();
-        tx.send(TuiMsg::SlotDone { slot_idx: 1, success: false }).unwrap();
+        tx.send(TuiMsg::SlotDone {
+            slot_idx: 0,
+            success: true,
+        })
+        .unwrap();
+        tx.send(TuiMsg::SlotDone {
+            slot_idx: 1,
+            success: false,
+        })
+        .unwrap();
         drop(tx);
 
         let mut state = empty_state(2, 2);
@@ -1779,7 +1892,11 @@ mod tests {
     fn resolve_combines_pending_and_channel() {
         // SD_0 is in pending, SD_1 is still in the channel.
         let (tx, rx) = mpsc::sync_channel::<TuiMsg>(4);
-        tx.send(TuiMsg::SlotDone { slot_idx: 1, success: false }).unwrap();
+        tx.send(TuiMsg::SlotDone {
+            slot_idx: 1,
+            success: false,
+        })
+        .unwrap();
         drop(tx);
 
         let mut state = empty_state(2, 2);
@@ -1804,7 +1921,11 @@ mod tests {
 
         resolve_outstanding_done_messages(&rx, &mut state, &pending);
 
-        assert_eq!(state.slots[0].done, Some(true), "first result must not be overwritten");
+        assert_eq!(
+            state.slots[0].done,
+            Some(true),
+            "first result must not be overwritten"
+        );
     }
 
     #[test]
@@ -1812,7 +1933,11 @@ mod tests {
         // A Line message in the channel must be silently dropped — it is
         // irrelevant at shutdown and must not cause a panic or affect done state.
         let (tx, rx) = mpsc::sync_channel::<TuiMsg>(4);
-        tx.send(TuiMsg::Line { slot_idx: 0, line: "hello".to_string() }).unwrap();
+        tx.send(TuiMsg::Line {
+            slot_idx: 0,
+            line: "hello".to_string(),
+        })
+        .unwrap();
         drop(tx);
 
         let mut state = empty_state(1, 1);
@@ -2015,7 +2140,10 @@ mod tests {
     #[test]
     fn truncate_osc_mid_line_strips_only_osc() {
         let input = "\x1b[33mfile: \x1b]8;;file:///tmp/F.java\x07F.java\x1b]8;;\x07\x1b[0m";
-        assert_eq!(truncate_to_cols(input, 40), "\x1b[33mfile: F.java\x1b[0m\x1b[0m");
+        assert_eq!(
+            truncate_to_cols(input, 40),
+            "\x1b[33mfile: F.java\x1b[0m\x1b[0m"
+        );
     }
 
     #[test]
