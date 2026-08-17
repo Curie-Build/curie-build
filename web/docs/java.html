@@ -92,7 +92,7 @@
     <p>Both layouts are discovered by scanning for <code>*.java</code> files. You can migrate from Maven layout to flat-package layout gradually — Curie will compile whichever files it finds.</p>
 
     <h2>Custom source directories</h2>
-    <p>Projects that keep hierarchical packages under a non-standard root (Guava's <code>src/com/google/…</code> and <code>test/com/google/…</code>) declare those roots explicitly. Configured directories are added to auto-discovery; every file under a test root is a test source, matching Maven's <code>src/test/java</code> rule.</p>
+    <p>Projects that keep hierarchical packages under a non-standard root (for example <code>src/com/example/…</code> and <code>test/com/example/…</code>) declare those roots explicitly. Configured directories are added to auto-discovery; every file under a test root is a test source, matching Maven's <code>src/test/java</code> rule.</p>
 
     <div class="code">
       <header>

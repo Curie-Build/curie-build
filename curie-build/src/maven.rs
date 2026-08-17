@@ -446,13 +446,15 @@ pub struct ResourceFiltering {
 }
 
 /// One `<resource>`/`<testResource>` block: a source directory, whether
-/// `<filtering>` is on, and any include/exclude patterns.
+/// `<filtering>` is on, any include/exclude patterns, and an optional
+/// remapped `<targetPath>`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MavenResourceEntry {
     pub directory: String,
     pub filtering: bool,
     pub includes: Vec<String>,
     pub excludes: Vec<String>,
+    pub target_path: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2219,6 +2221,9 @@ fn write_one_filtered_resource(
     }
     write_pattern_list(w, "includes", "include", &entry.includes)?;
     write_pattern_list(w, "excludes", "exclude", &entry.excludes)?;
+    if let Some(target) = &entry.target_path {
+        text_elem(w, "targetPath", target)?;
+    }
     w.write_event(Event::End(BytesEnd::new(inner)))?;
     Ok(())
 }
@@ -2256,8 +2261,12 @@ fn build_resource_filtering(desc: &Descriptor, layout: &MavenLayout) -> Result<R
         return Ok(ResourceFiltering::default());
     }
 
-    let main = scope_resource_entries(&desc.resources, layout.resources.as_deref());
-    let test = scope_resource_entries(&desc.test_resources, layout.test_resources.as_deref());
+    let main = scope_resource_entries(&desc.resources, layout.resources.as_deref(), "resources")?;
+    let test = scope_resource_entries(
+        &desc.test_resources,
+        layout.test_resources.as_deref(),
+        "test-resources",
+    )?;
     let delimiter = resolve_maven_delimiter(desc)?;
     let filters = merge_filter_files(desc);
 
@@ -2296,41 +2305,149 @@ fn ensure_maven_representable(scope: &Resources, label: &str) -> Result<()> {
     Ok(())
 }
 
-/// One `<resource>` entry per source directory: filtering is on for directories
-/// the (single) stage covers; includes/excludes come from that stage.
-fn scope_resource_entries(scope: &Resources, auto: Option<&Path>) -> Vec<MavenResourceEntry> {
-    let directories = scope_directories(scope, auto);
+/// One or more `<resource>` entries per source directory.
+///
+/// Maven's `<filtering>true</filtering>` rewrites every file that resource
+/// copies.  Curie copies one set and filters a (possibly smaller) set, so a
+/// single Maven block is faithful only when those sets agree.  A full-tree
+/// copy with a narrower filter becomes two blocks (filtered + verbatim).
+/// Anything Maven cannot express is a hard error.
+fn scope_resource_entries(
+    scope: &Resources,
+    auto: Option<&Path>,
+    label: &str,
+) -> Result<Vec<MavenResourceEntry>> {
     let stage = scope.filter.first();
-    directories
-        .into_iter()
-        .map(|directory| {
-            let filtering = stage
-                .map(|s| stage_covers_dir(s, &directory))
-                .unwrap_or(false);
-            let (includes, excludes) = match (filtering, stage) {
-                (true, Some(s)) => (s.includes.clone(), s.excludes.clone()),
-                _ => (Vec::new(), Vec::new()),
-            };
-            MavenResourceEntry {
-                directory,
-                filtering,
-                includes,
-                excludes,
-            }
-        })
-        .collect()
+    let mut entries = Vec::new();
+    for dir in maven_source_directories(scope, auto) {
+        entries.extend(maven_entries_for_directory(&dir, stage, label)?);
+    }
+    Ok(entries)
 }
 
-/// The scope's source directories (maven-relative strings): its configured
-/// `directories`, or the auto-discovered default as a single entry.
-fn scope_directories(scope: &Resources, auto: Option<&Path>) -> Vec<String> {
+fn maven_entries_for_directory(
+    dir: &crate::descriptor::ResourceDirectory,
+    stage: Option<&crate::descriptor::FilterStage>,
+    label: &str,
+) -> Result<Vec<MavenResourceEntry>> {
+    let target_path = nonempty_target_path(&dir.target_path);
+    let Some(stage) = stage.filter(|s| stage_covers_dir(s, &dir.path)) else {
+        return Ok(vec![maven_resource_entry(
+            dir.path.clone(),
+            false,
+            dir.includes.clone(),
+            dir.excludes.clone(),
+            target_path,
+        )]);
+    };
+    if stage_filters_entire_copy_set(dir, stage) {
+        return Ok(vec![maven_resource_entry(
+            dir.path.clone(),
+            true,
+            dir.includes.clone(),
+            dir.excludes.clone(),
+            target_path,
+        )]);
+    }
+    if can_split_copy_all_filter_subset(dir, stage) {
+        return Ok(split_copy_all_filter_subset(dir, stage, target_path));
+    }
+    anyhow::bail!(
+        "curie maven sync cannot reproduce [{}] for directory '{}': \
+         the copy set (directories includes/excludes {:?}/{:?}) differs from \
+         the filter stage includes/excludes {:?}/{:?}, and Maven filters \
+         every file a <resource> copies.  Make the two sets match, drop the \
+         filter from this directory, or set [maven] sync = false.",
+        label,
+        dir.path,
+        dir.includes,
+        dir.excludes,
+        stage.includes,
+        stage.excludes
+    );
+}
+
+/// The stage rewrites every file this directory copies, so one filtered
+/// Maven `<resource>` with the copy set is faithful.
+fn stage_filters_entire_copy_set(
+    dir: &crate::descriptor::ResourceDirectory,
+    stage: &crate::descriptor::FilterStage,
+) -> bool {
+    if stage.includes.is_empty() && stage.excludes.is_empty() {
+        return true;
+    }
+    stage.includes == dir.includes && stage.excludes == dir.excludes
+}
+
+/// Copy everything (optional directory excludes), filter a narrower include
+/// set, no stage excludes — two Maven blocks can express that.
+fn can_split_copy_all_filter_subset(
+    dir: &crate::descriptor::ResourceDirectory,
+    stage: &crate::descriptor::FilterStage,
+) -> bool {
+    dir.includes.is_empty() && stage.excludes.is_empty() && !stage.includes.is_empty()
+}
+
+fn split_copy_all_filter_subset(
+    dir: &crate::descriptor::ResourceDirectory,
+    stage: &crate::descriptor::FilterStage,
+    target_path: Option<String>,
+) -> Vec<MavenResourceEntry> {
+    let mut verbatim_excludes = dir.excludes.clone();
+    verbatim_excludes.extend(stage.includes.iter().cloned());
+    vec![
+        maven_resource_entry(
+            dir.path.clone(),
+            true,
+            stage.includes.clone(),
+            dir.excludes.clone(),
+            target_path.clone(),
+        ),
+        maven_resource_entry(
+            dir.path.clone(),
+            false,
+            Vec::new(),
+            verbatim_excludes,
+            target_path,
+        ),
+    ]
+}
+
+fn maven_resource_entry(
+    directory: String,
+    filtering: bool,
+    includes: Vec<String>,
+    excludes: Vec<String>,
+    target_path: Option<String>,
+) -> MavenResourceEntry {
+    MavenResourceEntry {
+        directory,
+        filtering,
+        includes,
+        excludes,
+        target_path,
+    }
+}
+
+fn nonempty_target_path(path: &str) -> Option<String> {
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
+/// The scope's source directories, or the auto-discovered default as a
+/// single identity entry.
+fn maven_source_directories(
+    scope: &Resources,
+    auto: Option<&Path>,
+) -> Vec<crate::descriptor::ResourceDirectory> {
     if !scope.directories.is_empty() {
         return scope.directories.clone();
     }
-    auto.map(|p| vec![path_to_maven(p)])
-        .into_iter()
-        .flatten()
-        .collect()
+    auto.map(|p| vec![crate::descriptor::ResourceDirectory::new(path_to_maven(p))])
+        .unwrap_or_default()
 }
 
 /// Whether a stage filters files from `directory` (no `directories` restriction
@@ -4050,6 +4167,160 @@ mod tests {
         );
         // Pure merge (no filter stages) → no filtering flag.
         assert!(!xml.contains("<filtering>true</filtering>"), "got: {xml}");
+    }
+
+    #[test]
+    fn pom_emits_resource_mapping_target_path() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
+
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.resources.section_present = true;
+        desc.resources
+            .directories
+            .push(crate::descriptor::ResourceDirectory {
+                path: "..".into(),
+                includes: vec!["LICENSE".into(), "proguard/*".into()],
+                excludes: vec![],
+                target_path: "META-INF".into(),
+            });
+
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let xml = render(&project, "deadbeef").unwrap();
+        assert!(xml.contains("<directory>..</directory>"), "got: {xml}");
+        assert!(
+            xml.contains("<targetPath>META-INF</targetPath>"),
+            "got: {xml}"
+        );
+        assert!(xml.contains("<include>LICENSE</include>"), "got: {xml}");
+        assert!(xml.contains("<include>proguard/*</include>"), "got: {xml}");
+        // Mappings-only: no auto-discovered src/main/resources entry.
+        assert!(
+            !xml.contains("<directory>src/main/resources</directory>"),
+            "got: {xml}"
+        );
+    }
+
+    #[test]
+    fn pom_splits_copy_all_from_narrower_filter_includes() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
+
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.resources.section_present = true;
+        desc.resources.directories = vec!["src/main/resources".into()];
+        desc.resources.filter = vec![substitute_stage_for(&["**/*.properties"], &[])];
+
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let entries = &project.resource_filtering.main;
+        assert_eq!(
+            entries.len(),
+            2,
+            "expected filtered + verbatim split: {entries:?}"
+        );
+        assert!(entries[0].filtering);
+        assert_eq!(entries[0].includes, vec!["**/*.properties"]);
+        assert!(entries[0].excludes.is_empty());
+        assert!(!entries[1].filtering);
+        assert!(entries[1].includes.is_empty());
+        assert_eq!(entries[1].excludes, vec!["**/*.properties"]);
+    }
+
+    #[test]
+    fn pom_filters_remapped_copy_set_when_stage_filters_all() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
+
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.resources.section_present = true;
+        desc.resources
+            .directories
+            .push(crate::descriptor::ResourceDirectory {
+                path: ".".into(),
+                includes: vec!["LICENSE".into(), "app.properties".into()],
+                excludes: vec![],
+                target_path: "META-INF".into(),
+            });
+        desc.resources.filter = vec![substitute_stage_for(&[], &[])];
+
+        let project = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let entries = &project.resource_filtering.main;
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(entries[0].filtering);
+        assert_eq!(entries[0].includes, vec!["LICENSE", "app.properties"]);
+        assert_eq!(entries[0].target_path.as_deref(), Some("META-INF"));
+    }
+
+    #[test]
+    fn maven_sync_errors_when_copy_set_differs_from_filter_set() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "src/main/java/com/example/Hello.java",
+            "package com.example; class Hello {}",
+        );
+
+        let mut desc = minimal_app("my-app", Some("com.example"));
+        desc.resources.section_present = true;
+        desc.resources
+            .directories
+            .push(crate::descriptor::ResourceDirectory {
+                path: ".".into(),
+                includes: vec!["LICENSE".into(), "app.properties".into()],
+                excludes: vec![],
+                target_path: "META-INF".into(),
+            });
+        desc.resources.filter = vec![substitute_stage_for(&["**/*.properties"], &[])];
+
+        let err = build_project(
+            &desc,
+            dir.path(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("cannot reproduce [resources]"), "got: {err}");
+        assert!(err.contains("copy set"), "got: {err}");
+        assert!(err.contains("**/*.properties"), "got: {err}");
     }
 
     #[test]

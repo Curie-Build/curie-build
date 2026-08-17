@@ -52,6 +52,7 @@ members = [
     "osgi-bundle-demo",
     "resource-filtering-demo",
     "liquid-filtering-demo",
+    "resource-mapping-demo",
     "polyrepo-demo",
     "foreign-projects-demo",
     "custom-layout-demo",

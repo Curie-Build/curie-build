@@ -357,6 +357,30 @@
       </tbody>
     </table>
 
+    <h2 id="resources">[resources] / [test-resources]</h2>
+    <p>Production and test resource scopes. See <a href="/docs/resources.html">Resource filtering</a> for the stage pipeline, engines, and remapping.</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>directories</code></td><td>string or table[]</td><td>auto-discovered</td><td>Source roots to merge. A string copies the whole tree; a table has <code>path</code> plus optional <code>includes</code>/<code>excludes</code>/<code>targetPath</code>. Not inherited</td></tr>
+        <tr><td><code>filter</code></td><td>object[]</td><td><code>[]</code></td><td>Ordered filter stages. Inherited by members that declare none of their own</td></tr>
+        <tr><td><code>properties</code></td><td>map</td><td><code>{}</code></td><td>Scope-local substitution variables. Merged member-wins</td></tr>
+        <tr><td><code>filterFiles</code></td><td>string[]</td><td><code>[]</code></td><td>External <code>.properties</code> files contributing variables</td></tr>
+        <tr><td><code>nonFilteredExtensions</code></td><td>string[]</td><td><code>[]</code></td><td>Extra extensions copied verbatim (in addition to the built-in binary list)</td></tr>
+      </tbody>
+    </table>
+    <p>Each table entry in <code>directories</code>:</p>
+    <table>
+      <thead><tr><th>Key</th><th>Type</th><th>Required</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>path</code></td><td>string</td><td>Yes</td><td>Project-relative source. <code>"."</code> is the project root; <code>".."</code> is the parent</td></tr>
+        <tr><td><code>includes</code></td><td>string[]</td><td>No</td><td>Globs relative to <code>path</code>. Empty ⇒ every file</td></tr>
+        <tr><td><code>excludes</code></td><td>string[]</td><td>No</td><td>Globs that win over <code>includes</code></td></tr>
+        <tr><td><code>targetPath</code></td><td>string</td><td>No</td><td>Destination prefix in the JAR. Must be relative and must not contain <code>..</code></td></tr>
+      </tbody>
+    </table>
+
     <h2 id="plugin">[plugin.*]</h2>
     <p>Activates an external <code>curie-&lt;name&gt;</code> binary. The table body is forwarded to the plugin as JSON. See <a href="/docs/plugins.html">Plugins</a> and <a href="/docs/plugin-authoring.html">Plugin authoring</a>.</p>
     <p>First-party plugins: <code>protobuf</code>, <code>openapi</code> (source generators), and <code>osgi</code> (lifecycle - see <a href="/docs/osgi.html">OSGi bundles</a>).</p>

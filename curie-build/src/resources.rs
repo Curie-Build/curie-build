@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use crate::descriptor::{Descriptor, FilterStage, Resources, SubstituteOpts};
+use crate::descriptor::{Descriptor, FilterStage, ResourceDirectory, Resources, SubstituteOpts};
 
 /// Result of running both resource scopes.  A `None` directory means that scope
 /// is inactive and downstream consumers should keep using the raw source dir.
@@ -107,7 +107,7 @@ fn process_scope(
     if !scope.is_active() {
         return Ok(None);
     }
-    let roots = resolve_source_roots(project_root, &scope.directories, auto, label)?;
+    let roots = resolve_source_roots(project_root, scope, auto, label)?;
     if roots.is_empty() {
         return Ok(None);
     }
@@ -132,8 +132,9 @@ fn fingerprint_stamp_path(out_dir: &Path, label: &str) -> PathBuf {
 }
 
 /// Whether the scope's output must be re-filtered: missing output, a changed
-/// value fingerprint, or any source file newer than the last filter stamp.
-fn scope_is_stale(out_dir: &Path, stamp: &Path, fingerprint: u64, roots: &[PathBuf]) -> bool {
+/// value fingerprint, or any selected source file newer than the last filter
+/// stamp.
+fn scope_is_stale(out_dir: &Path, stamp: &Path, fingerprint: u64, roots: &[SourceRoot]) -> bool {
     if !out_dir.exists() {
         return true;
     }
@@ -145,29 +146,67 @@ fn scope_is_stale(out_dir: &Path, stamp: &Path, fingerprint: u64, roots: &[PathB
     };
     roots
         .iter()
-        .any(|root| newest_mtime_under(root) > Some(stamp_mtime))
+        .any(|root| newest_mtime_in_root(root) > Some(stamp_mtime))
 }
 
-/// Resolve a scope's source roots: the configured `directories` (each validated
-/// to exist) when present, else the single auto-discovered dir, else empty.
+/// One source root feeding a scope's processed output, from `directories`
+/// or auto-discovery.
+#[derive(Debug, Clone)]
+struct SourceRoot {
+    path: PathBuf,
+    includes: Vec<String>,
+    excludes: Vec<String>,
+    target_path: String,
+    /// Skip VCS metadata directories (`.git`, `.svn`, `.hg`) while walking.
+    /// Set when the entry is not an identity copy, which often points at a
+    /// repo or project root.
+    prune_vcs: bool,
+}
+
+impl SourceRoot {
+    fn identity(path: PathBuf) -> Self {
+        SourceRoot {
+            path,
+            includes: Vec::new(),
+            excludes: Vec::new(),
+            target_path: String::new(),
+            prune_vcs: false,
+        }
+    }
+
+    fn from_directory(path: PathBuf, dir: &ResourceDirectory) -> Self {
+        SourceRoot {
+            path,
+            includes: dir.includes.clone(),
+            excludes: dir.excludes.clone(),
+            target_path: dir.target_path.clone(),
+            prune_vcs: !dir.is_identity(),
+        }
+    }
+}
+
+/// Resolve a scope's source roots: the configured `directories` (each
+/// validated to exist) when present, else the single auto-discovered dir.
 fn resolve_source_roots(
     project_root: &Path,
-    configured: &[String],
+    scope: &Resources,
     auto: Option<&Path>,
     label: &str,
-) -> Result<Vec<PathBuf>> {
-    if !configured.is_empty() {
-        let mut roots = Vec::with_capacity(configured.len());
-        for dir in configured {
-            let path = project_root.join(dir);
-            if !path.is_dir() {
-                bail!("[{}] source directory '{}' does not exist", label, dir);
-            }
-            roots.push(path);
-        }
-        return Ok(roots);
+) -> Result<Vec<SourceRoot>> {
+    if scope.directories.is_empty() {
+        return Ok(auto
+            .map(|p| vec![SourceRoot::identity(p.to_path_buf())])
+            .unwrap_or_default());
     }
-    Ok(auto.map(|p| vec![p.to_path_buf()]).unwrap_or_default())
+    let mut roots = Vec::with_capacity(scope.directories.len());
+    for dir in &scope.directories {
+        let path = project_root.join(&dir.path);
+        if !path.is_dir() {
+            bail!("[{}] source directory '{}' does not exist", label, dir.path);
+        }
+        roots.push(SourceRoot::from_directory(path, dir));
+    }
+    Ok(roots)
 }
 
 // ---------------------------------------------------------------------------
@@ -431,7 +470,7 @@ impl CompiledStage {
 fn compile_stages(
     project_root: &Path,
     scope: &Resources,
-    scope_roots: &[PathBuf],
+    scope_roots: &[SourceRoot],
     label: &str,
 ) -> Result<Vec<CompiledStage>> {
     let mut compiled = Vec::with_capacity(scope.filter.len());
@@ -451,7 +490,7 @@ fn compile_stages(
 fn compile_stage_roots(
     project_root: &Path,
     stage: &FilterStage,
-    scope_roots: &[PathBuf],
+    scope_roots: &[SourceRoot],
     label: &str,
 ) -> Result<Option<Vec<PathBuf>>> {
     if stage.directories.is_empty() {
@@ -460,7 +499,7 @@ fn compile_stage_roots(
     let mut roots = Vec::with_capacity(stage.directories.len());
     for dir in &stage.directories {
         let path = project_root.join(dir);
-        if !scope_roots.contains(&path) {
+        if !scope_roots.iter().any(|r| r.path == path) {
             bail!(
                 "[{}] filter stage directory '{}' is not one of the [{}] source directories",
                 label,
@@ -481,7 +520,7 @@ fn compile_stage_roots(
 /// wins on a relative-path collision) and folding each text file through the
 /// matching stages.  Builds into a `.part` staging dir, then atomically swaps.
 fn filter_roots(
-    roots: &[PathBuf],
+    roots: &[SourceRoot],
     out_dir: &Path,
     stages: &[CompiledStage],
     vars: &VarContext,
@@ -520,29 +559,134 @@ pub(crate) fn staging_dir(out_dir: &Path) -> PathBuf {
     out_dir.with_file_name(name)
 }
 
-/// Walk one source root, writing each file into `staging` (filtered or verbatim).
+/// Walk one source root, writing each selected file into `staging` (filtered
+/// or verbatim), remapped under `target_path` when set.
 fn merge_root_into(
-    root: &Path,
+    root: &SourceRoot,
     staging: &Path,
     stages: &[CompiledStage],
     vars: &VarContext,
     non_filtered_exts: &HashSet<String>,
 ) -> Result<()> {
-    for entry in walkdir::WalkDir::new(root).sort_by_file_name() {
-        let entry = entry.with_context(|| format!("failed to walk {}", root.display()))?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let abs = entry.path();
-        let rel = abs.strip_prefix(root).expect("walked path is under root");
-        let dest = staging.join(rel);
+    for_each_selected_file(root, |abs, rel| {
+        let dest = staging.join(mapped_rel(&root.target_path, rel));
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        process_one_file(root, rel, abs, &dest, stages, vars, non_filtered_exts)?;
+        process_one_file(&root.path, rel, abs, &dest, stages, vars, non_filtered_exts)
+    })
+}
+
+/// Destination path of a selected file: `targetPath/rel`, or `rel` when the
+/// mapping has no target prefix.
+fn mapped_rel(target_path: &str, rel: &Path) -> PathBuf {
+    if target_path.is_empty() {
+        return rel.to_path_buf();
+    }
+    let mut dest = PathBuf::new();
+    for part in target_path.split(['/', '\\']) {
+        if !part.is_empty() && part != "." {
+            dest.push(part);
+        }
+    }
+    dest.join(rel)
+}
+
+/// Call `visit(abs, rel)` for every file under `root` that passes the root's
+/// include/exclude globs.  VCS directories are skipped when `prune_vcs`.
+fn for_each_selected_file(
+    root: &SourceRoot,
+    mut visit: impl FnMut(&Path, &Path) -> Result<()>,
+) -> Result<()> {
+    let walker = walkdir::WalkDir::new(&root.path)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|e| keep_walk_entry(e, root));
+    for entry in walker {
+        let entry = entry.with_context(|| format!("failed to walk {}", root.path.display()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let abs = entry.path();
+        let rel = abs
+            .strip_prefix(&root.path)
+            .expect("walked path is under root");
+        let rel_str = rel_to_slash(rel);
+        if !file_is_selected(&rel_str, &root.includes, &root.excludes) {
+            continue;
+        }
+        visit(abs, rel)?;
     }
     Ok(())
+}
+
+/// Whether a walk entry should be descended into / yielded.  Files always
+/// pass (include/exclude is applied after); directories are pruned when
+/// they cannot contain a match or are VCS metadata.
+fn keep_walk_entry(entry: &walkdir::DirEntry, root: &SourceRoot) -> bool {
+    if !entry.file_type().is_dir() {
+        return true;
+    }
+    if root.prune_vcs && is_vcs_dir(entry.file_name()) {
+        return false;
+    }
+    let Ok(rel) = entry.path().strip_prefix(&root.path) else {
+        return true;
+    };
+    if rel.as_os_str().is_empty() {
+        return true;
+    }
+    dir_may_match_includes(&rel_to_slash(rel), &root.includes)
+}
+
+fn is_vcs_dir(name: &std::ffi::OsStr) -> bool {
+    name == ".git" || name == ".svn" || name == ".hg"
+}
+
+/// Whether `rel_path` (slash-separated) is selected by `includes`/`excludes`.
+/// Empty `includes` means every file; `excludes` win.
+fn file_is_selected(rel_path: &str, includes: &[String], excludes: &[String]) -> bool {
+    let included = includes.is_empty() || includes.iter().any(|p| glob_match(p, rel_path));
+    let excluded = excludes.iter().any(|p| glob_match(p, rel_path));
+    included && !excluded
+}
+
+/// Whether `rel_dir` might contain a file matching any include pattern.
+/// Conservative: never returns false when a match could exist.
+fn dir_may_match_includes(rel_dir: &str, includes: &[String]) -> bool {
+    if includes.is_empty() {
+        return true;
+    }
+    includes
+        .iter()
+        .any(|pat| dir_may_match_pattern(pat, rel_dir))
+}
+
+/// Conservative directory prune for one include glob.  `**` matches anywhere;
+/// a literal prefix must share an ancestor/descendant relationship with `dir`.
+fn dir_may_match_pattern(pattern: &str, dir: &str) -> bool {
+    if dir.is_empty() || pattern.starts_with("**") {
+        return true;
+    }
+    let glob_idx = pattern.find(['*', '?']).unwrap_or(pattern.len());
+    let literal = pattern[..glob_idx].trim_end_matches('/');
+    if literal.is_empty() {
+        return true;
+    }
+    if dir == literal || literal.starts_with(&format!("{dir}/")) {
+        return true;
+    }
+    if glob_idx < pattern.len() && dir.starts_with(&format!("{literal}/")) {
+        let rest = &pattern[glob_idx..];
+        if rest.starts_with("**") {
+            return true;
+        }
+        // Single-segment glob (`dir/*`): only immediate children of `literal`.
+        let extra = &dir[literal.len() + 1..];
+        return !extra.contains('/');
+    }
+    false
 }
 
 /// Process a single file: copy binaries verbatim, otherwise fold its text
@@ -778,12 +922,13 @@ fn file_mtime_secs(path: &Path) -> u64 {
 }
 
 /// Stable value fingerprint of a scope: all resolved variables, every stage's
-/// config, the resolved source-root list, and filter-file mtimes.  A change in
-/// any of these forces a re-filter even when no source file's mtime moved.
+/// config, every remapping, the resolved source-root list, and filter-file
+/// mtimes.  A change in any of these forces a re-filter even when no source
+/// file's mtime moved.
 fn fingerprint_scope(
     scope: &Resources,
     vars: &VarContext,
-    roots: &[PathBuf],
+    roots: &[SourceRoot],
     filter_file_mtimes: &[u64],
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -792,7 +937,10 @@ fn fingerprint_scope(
         value.hash(&mut hasher);
     }
     for root in roots {
-        root.hash(&mut hasher);
+        root.path.hash(&mut hasher);
+        root.includes.hash(&mut hasher);
+        root.excludes.hash(&mut hasher);
+        root.target_path.hash(&mut hasher);
     }
     for mtime in filter_file_mtimes {
         mtime.hash(&mut hasher);
@@ -822,15 +970,19 @@ fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// Newest mtime of any file under `root` (recursively), or `None` when empty.
-fn newest_mtime_under(root: &Path) -> Option<std::time::SystemTime> {
-    walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter_map(|e| e.metadata().ok())
-        .filter_map(|m| m.modified().ok())
-        .max()
+/// Newest mtime of any *selected* file under `root`, or `None` when empty.
+fn newest_mtime_in_root(root: &SourceRoot) -> Option<std::time::SystemTime> {
+    let mut newest = None;
+    let _ = for_each_selected_file(root, |abs, _rel| {
+        if let Some(mtime) = file_mtime(abs) {
+            newest = Some(match newest {
+                Some(prev) if prev >= mtime => prev,
+                _ => mtime,
+            });
+        }
+        Ok(())
+    });
+    newest
 }
 
 #[cfg(test)]
@@ -945,10 +1097,14 @@ mod tests {
         );
     }
 
+    fn identity_roots(paths: &[PathBuf]) -> Vec<SourceRoot> {
+        paths.iter().cloned().map(SourceRoot::identity).collect()
+    }
+
     #[test]
     fn fingerprint_changes_on_stage_edit() {
         let vars = ctx(&[]);
-        let roots = vec![PathBuf::from("/r")];
+        let roots = identity_roots(&[PathBuf::from("/r")]);
         let mut a = Resources::default();
         a.filter.push(FilterStage {
             engine: crate::descriptor::Engine::Substitute,
@@ -967,7 +1123,7 @@ mod tests {
 
     #[test]
     fn fingerprint_changes_on_var_edit() {
-        let roots = vec![PathBuf::from("/r")];
+        let roots = identity_roots(&[PathBuf::from("/r")]);
         let scope = Resources::default();
         let fa = fingerprint_scope(&scope, &ctx(&[("v", "1")]), &roots, &[]);
         let fb = fingerprint_scope(&scope, &ctx(&[("v", "2")]), &roots, &[]);
@@ -976,13 +1132,43 @@ mod tests {
 
     #[test]
     fn fingerprint_stable_when_unchanged() {
-        let roots = vec![PathBuf::from("/r")];
+        let roots = identity_roots(&[PathBuf::from("/r")]);
         let scope = Resources::default();
         let vars = ctx(&[("v", "1")]);
         assert_eq!(
             fingerprint_scope(&scope, &vars, &roots, &[7]),
             fingerprint_scope(&scope, &vars, &roots, &[7])
         );
+    }
+
+    fn mapped_dir(path: &str, includes: &[&str], target_path: &str) -> ResourceDirectory {
+        ResourceDirectory {
+            path: path.into(),
+            includes: includes.iter().map(|s| s.to_string()).collect(),
+            excludes: vec![],
+            target_path: target_path.into(),
+        }
+    }
+
+    #[test]
+    fn fingerprint_changes_on_directory_target_path_edit() {
+        let vars = ctx(&[]);
+        let mut a = Resources::default();
+        a.directories
+            .push(mapped_dir("..", &["LICENSE"], "META-INF"));
+        let mut b = a.clone();
+        b.directories[0].target_path = "META-INF/legal".into();
+        let roots_a = vec![SourceRoot::from_directory(
+            PathBuf::from("/r"),
+            &a.directories[0],
+        )];
+        let roots_b = vec![SourceRoot::from_directory(
+            PathBuf::from("/r"),
+            &b.directories[0],
+        )];
+        let fa = fingerprint_scope(&a, &vars, &roots_a, &[]);
+        let fb = fingerprint_scope(&b, &vars, &roots_b, &[]);
+        assert_ne!(fa, fb);
     }
 
     // -- dir-walk / chaining integration --------------------------------------
@@ -1031,11 +1217,12 @@ mod tests {
             filter: stages.to_vec(),
             ..Default::default()
         };
-        let compiled = must(compile_stages(dir.path(), &scope, &root_paths, "resources"));
+        let roots = identity_roots(&root_paths);
+        let compiled = must(compile_stages(dir.path(), &scope, &roots, "resources"));
         let out = dir.path().join("out");
         let vctx = ctx(vars);
         let non_filtered = binary_extension_set(&[]);
-        filter_roots(&root_paths, &out, &compiled, &vctx, &non_filtered).unwrap();
+        filter_roots(&roots, &out, &compiled, &vctx, &non_filtered).unwrap();
 
         let mut got = BTreeMap::new();
         for entry in walkdir::WalkDir::new(&out)
@@ -1120,7 +1307,7 @@ mod tests {
             filter: vec![substitute_stage(&["**/*.properties"], &[], &["r1"])],
             ..Default::default()
         };
-        let roots = vec![root0.clone(), root1.clone()];
+        let roots = identity_roots(&[root0.clone(), root1.clone()]);
         let compiled = must(compile_stages(dir.path(), &scope, &roots, "resources"));
         let out = dir.path().join("out");
         filter_roots(
@@ -1149,7 +1336,7 @@ mod tests {
             filter: vec![substitute_stage(&[], &[], &["nope"])],
             ..Default::default()
         };
-        let roots = vec![dir.path().join("r0")];
+        let roots = identity_roots(&[dir.path().join("r0")]);
         let err = match compile_stages(dir.path(), &scope, &roots, "resources") {
             Err(e) => e,
             Ok(_) => panic!("expected a stage-directory validation error"),
@@ -1157,6 +1344,203 @@ mod tests {
         assert!(err
             .to_string()
             .contains("not one of the [resources] source directories"));
+    }
+
+    // -- resource remapping ---------------------------------------------------
+
+    fn collect_out(out: &Path) -> BTreeMap<String, String> {
+        let mut got = BTreeMap::new();
+        for entry in walkdir::WalkDir::new(out)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_file() {
+                let rel = entry.path().strip_prefix(out).unwrap();
+                got.insert(
+                    rel_to_slash(rel),
+                    std::fs::read_to_string(entry.path()).unwrap(),
+                );
+            }
+        }
+        got
+    }
+
+    fn write_tree(root: &Path, files: &[(&str, &str)]) {
+        for (rel, contents) in files {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, contents).unwrap();
+        }
+    }
+
+    #[test]
+    fn directory_remaps_selected_files_under_target_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("repo");
+        write_tree(
+            &src,
+            &[
+                ("LICENSE", "Apache-2.0"),
+                ("README.md", "do not copy"),
+                ("proguard/base.pro", "-keep class Foo"),
+                ("proguard/cache.pro", "-keep class Bar"),
+                ("android/skip.pro", "nope"),
+            ],
+        );
+
+        let spec = mapped_dir("repo", &["LICENSE", "proguard/*"], "META-INF");
+        let roots = vec![SourceRoot::from_directory(src, &spec)];
+        let out = dir.path().join("out");
+        filter_roots(&roots, &out, &[], &ctx(&[]), &binary_extension_set(&[])).unwrap();
+
+        let got = collect_out(&out);
+        assert_eq!(
+            got.get("META-INF/LICENSE").map(String::as_str),
+            Some("Apache-2.0")
+        );
+        assert_eq!(
+            got.get("META-INF/proguard/base.pro").map(String::as_str),
+            Some("-keep class Foo")
+        );
+        assert_eq!(
+            got.get("META-INF/proguard/cache.pro").map(String::as_str),
+            Some("-keep class Bar")
+        );
+        assert!(!got.contains_key("META-INF/README.md"));
+        assert!(!got.contains_key("README.md"));
+        assert!(!got.contains_key("META-INF/android/skip.pro"));
+        assert_eq!(got.len(), 3);
+    }
+
+    #[test]
+    fn directory_excludes_win_over_includes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("extra");
+        write_tree(&src, &[("keep.txt", "yes"), ("drop.txt", "no")]);
+        let mut spec = mapped_dir("extra", &["*.txt"], "");
+        spec.excludes = vec!["drop.txt".into()];
+        let roots = vec![SourceRoot::from_directory(src, &spec)];
+        let out = dir.path().join("out");
+        filter_roots(&roots, &out, &[], &ctx(&[]), &binary_extension_set(&[])).unwrap();
+        let got = collect_out(&out);
+        assert_eq!(got.get("keep.txt").map(String::as_str), Some("yes"));
+        assert!(!got.contains_key("drop.txt"));
+    }
+
+    #[test]
+    fn remapped_directory_merges_with_identity_later_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let resources = dir.path().join("resources");
+        let extra = dir.path().join("extra");
+        write_tree(&resources, &[("app.properties", "from-resources")]);
+        write_tree(
+            &extra,
+            &[("LICENSE", "lic"), ("app.properties", "from-extra")],
+        );
+        let spec = mapped_dir("extra", &["LICENSE", "app.properties"], "");
+        let roots = vec![
+            SourceRoot::identity(resources),
+            SourceRoot::from_directory(extra, &spec),
+        ];
+        let out = dir.path().join("out");
+        filter_roots(&roots, &out, &[], &ctx(&[]), &binary_extension_set(&[])).unwrap();
+        let got = collect_out(&out);
+        assert_eq!(got.get("LICENSE").map(String::as_str), Some("lic"));
+        assert_eq!(
+            got.get("app.properties").map(String::as_str),
+            Some("from-extra")
+        );
+    }
+
+    #[test]
+    fn remapped_directory_does_not_copy_vcs_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("repo");
+        write_tree(
+            &src,
+            &[
+                ("LICENSE", "ok"),
+                (".git/HEAD", "ref: refs/heads/master"),
+                (".git/objects/ab/cd", "blob"),
+            ],
+        );
+        let spec = ResourceDirectory {
+            path: "repo".into(),
+            includes: vec![],
+            excludes: vec![],
+            target_path: "META-INF".into(),
+        };
+        let roots = vec![SourceRoot::from_directory(src, &spec)];
+        let out = dir.path().join("out");
+        filter_roots(&roots, &out, &[], &ctx(&[]), &binary_extension_set(&[])).unwrap();
+        let got = collect_out(&out);
+        assert_eq!(got.get("META-INF/LICENSE").map(String::as_str), Some("ok"));
+        assert!(got.keys().all(|k| !k.contains(".git")));
+    }
+
+    #[test]
+    fn directory_missing_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut scope = Resources {
+            section_present: true,
+            ..Default::default()
+        };
+        scope
+            .directories
+            .push(mapped_dir("nope", &["LICENSE"], "META-INF"));
+        let err = resolve_source_roots(dir.path(), &scope, None, "resources")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("source directory 'nope' does not exist"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn process_resources_table_directory_materializes_output() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tree(
+            dir.path(),
+            &[
+                ("LICENSE", "Apache"),
+                ("proguard/base.pro", "-keep"),
+                ("README.md", "skip"),
+            ],
+        );
+        std::fs::write(
+            dir.path().join("Curie.toml"),
+            "[application]\nname = \"x\"\nversion = \"1.0\"\nmainClass = \"X\"\n\
+             [resources]\ndirectories = [\
+             { path = \".\", includes = [\"LICENSE\", \"proguard/*\"], targetPath = \"META-INF\" }\
+             ]\n",
+        )
+        .unwrap();
+        let desc = crate::descriptor::load(dir.path()).unwrap();
+        let target = dir.path().join("target");
+        let out = process_resources(dir.path(), &desc, None, None, None, &target).unwrap();
+        let main = out.main_dir.expect("custom directories activate the scope");
+        let got = collect_out(&main);
+        assert_eq!(
+            got.get("META-INF/LICENSE").map(String::as_str),
+            Some("Apache")
+        );
+        assert_eq!(
+            got.get("META-INF/proguard/base.pro").map(String::as_str),
+            Some("-keep")
+        );
+        assert!(!got.contains_key("README.md"));
+        assert!(!got.contains_key("META-INF/README.md"));
+    }
+
+    #[test]
+    fn dir_may_match_prunes_unrelated_trees() {
+        assert!(dir_may_match_pattern("LICENSE", ""));
+        assert!(!dir_may_match_pattern("LICENSE", "proguard"));
+        assert!(dir_may_match_pattern("proguard/*", "proguard"));
+        assert!(!dir_may_match_pattern("proguard/*", "android"));
+        assert!(dir_may_match_pattern("**/*.txt", "anywhere"));
+        assert!(dir_may_match_pattern("proguard/*", ""));
     }
 
     #[test]
@@ -1362,7 +1746,7 @@ mod tests {
             filter: vec![stage],
             ..Default::default()
         };
-        let roots = vec![root.clone()];
+        let roots = identity_roots(&[root.clone()]);
         let compiled = must(compile_stages(dir.path(), &scope, &roots, "resources"));
         let out = dir.path().join("out");
         filter_roots(

@@ -1,0 +1,23 @@
+# resource-mapping-demo
+#
+# Demonstrates curie's resource remapping (Maven `<resource><targetPath>`).
+#
+#   * `directories` mixes a path string (copy the tree as-is) with a table
+#     that remaps project-root `LICENSE` and `proguard/*` into `META-INF/`.
+#   * `README.md` lives next to LICENSE but is not in `includes`, so it
+#     stays out of the JAR.
+
+[application]
+name = "resource-mapping-demo"
+version = "0.1.0"
+groupId = "com.example"
+mainClass = "com.example.mapping.App"
+
+[test-dependencies]
+"org.junit.jupiter:junit-jupiter" = "6.0.3"
+
+[resources]
+directories = [
+    "src/main/resources",
+    { path = ".", includes = ["LICENSE", "proguard/*"], targetPath = "META-INF" },
+]

@@ -1,6 +1,7 @@
 use crate::foreign::ForeignTool;
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::de::Error;
+use serde::{Deserialize, Deserializer};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -99,7 +100,7 @@ pub struct Descriptor {
     /// strategy (`test-mode`).
     pub modules: ModulesConfig,
     /// Populated from `[resources]` — production-resource source directories
-    /// and filter stages.  `section_present`/`is_active()` gate filtering;
+    /// and filter stages.  `section_present`/`is_active()` gate processing;
     /// absent or empty keeps the zero-copy verbatim path.
     pub resources: Resources,
     /// Populated from `[test-resources]` — the independent test-resource scope.
@@ -943,12 +944,14 @@ impl Spock {
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Resources {
-    /// Source roots for this scope, project-relative.  Empty ⇒ auto-discover
-    /// (main: `src/main/resources` or `resources/`; test: `src/test/resources`
-    /// or `test-resources/`).  When several are given they merge into one
-    /// output; later dirs win on a relative-path collision (Maven ordering).
+    /// Source roots for this scope, project-relative.  Each entry is a path
+    /// string (`"src/main/resources"`) or a table with optional `includes` /
+    /// `excludes` / `targetPath`.  Empty ⇒ auto-discover (main:
+    /// `src/main/resources` or `resources/`; test: `src/test/resources` or
+    /// `test-resources/`).  Later entries win on an output-path collision
+    /// (Maven ordering).
     #[serde(default)]
-    pub directories: Vec<String>,
+    pub directories: Vec<ResourceDirectory>,
     /// Ordered filter stages.  Empty ⇒ no filtering (verbatim copy/merge).
     #[serde(default)]
     pub filter: Vec<FilterStage>,
@@ -974,6 +977,103 @@ impl Resources {
     /// into one output even with no filtering.
     pub fn is_active(&self) -> bool {
         self.section_present && (!self.filter.is_empty() || !self.directories.is_empty())
+    }
+
+    /// Project-relative source-root paths, in declaration order, de-duplicated.
+    pub fn source_dir_names(&self) -> Vec<&str> {
+        let mut names = Vec::new();
+        for dir in &self.directories {
+            if !names.contains(&dir.path.as_str()) {
+                names.push(dir.path.as_str());
+            }
+        }
+        names
+    }
+}
+
+/// One source root in `[resources].directories` / `[test-resources].directories`.
+///
+/// Written as a path string (`"src/main/resources"`) or as a table when the
+/// copy set or destination prefix is not the identity:
+///
+/// ```toml
+/// directories = [
+///   "src/main/resources",
+///   { path = ".", includes = ["LICENSE", "proguard/*"], targetPath = "META-INF" },
+/// ]
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourceDirectory {
+    /// Project-relative source.  `"."` is the project root; `".."` is the parent.
+    pub path: String,
+    /// Globs selecting files to copy, relative to [`path`](Self::path).
+    /// Empty ⇒ all files under the directory.
+    pub includes: Vec<String>,
+    /// Globs excluding files (wins over `includes`).
+    pub excludes: Vec<String>,
+    /// Destination prefix in the processed output / JAR.  Empty ⇒ identity
+    /// (files keep their path relative to `path`).
+    pub target_path: String,
+}
+
+impl ResourceDirectory {
+    /// Identity root: copy every file, keep relative paths.
+    pub fn new(path: impl Into<String>) -> Self {
+        ResourceDirectory {
+            path: path.into(),
+            includes: Vec::new(),
+            excludes: Vec::new(),
+            target_path: String::new(),
+        }
+    }
+
+    /// No includes, excludes, or `targetPath` — the string-form equivalent.
+    pub fn is_identity(&self) -> bool {
+        self.includes.is_empty() && self.excludes.is_empty() && self.target_path.is_empty()
+    }
+}
+
+impl From<&str> for ResourceDirectory {
+    fn from(path: &str) -> Self {
+        ResourceDirectory::new(path)
+    }
+}
+
+impl From<String> for ResourceDirectory {
+    fn from(path: String) -> Self {
+        ResourceDirectory::new(path)
+    }
+}
+
+impl<'de> Deserialize<'de> for ResourceDirectory {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ResourceDirectoryTable {
+            path: String,
+            #[serde(default)]
+            includes: Vec<String>,
+            #[serde(default)]
+            excludes: Vec<String>,
+            #[serde(rename = "targetPath", default)]
+            target_path: String,
+        }
+        match toml::Value::deserialize(deserializer)? {
+            toml::Value::String(path) => Ok(ResourceDirectory::new(path)),
+            table @ toml::Value::Table(_) => {
+                let table = ResourceDirectoryTable::deserialize(table).map_err(D::Error::custom)?;
+                Ok(ResourceDirectory {
+                    path: table.path,
+                    includes: table.includes,
+                    excludes: table.excludes,
+                    target_path: table.target_path,
+                })
+            }
+            other => Err(D::Error::custom(format!(
+                "expected a path string or a table with `path`, found {}",
+                other.type_str()
+            ))),
+        }
     }
 }
 
@@ -2243,25 +2343,57 @@ fn validate_relative_no_dotdot(path: &str, where_: &str) -> Result<()> {
 /// `"test-resources"` for diagnostics.  Checked for both scopes at load time,
 /// matching curie's strict-config philosophy.
 fn validate_resource_scope(scope: &Resources, section: &str) -> Result<()> {
-    // The set of source roots a stage may restrict itself to: the scope's own
+    for dir in &scope.directories {
+        validate_resource_directory(dir, section)?;
+    }
+    // The set of source roots a stage may restrict itself to: the scope's
     // `directories`, or (when none configured) the auto-discovered default,
     // which isn't known at load time — so only validate the subset relation
-    // when explicit `directories` are present.
+    // when explicit source roots are present.
+    let source_dirs = scope.source_dir_names();
     for stage in &scope.filter {
         validate_stage_engine_opts(stage, section)?;
-        if !scope.directories.is_empty() {
+        if !source_dirs.is_empty() {
             for dir in &stage.directories {
-                if !scope.directories.contains(dir) {
+                if !source_dirs.contains(&dir.as_str()) {
                     bail!(
                         "[{}] filter stage directory '{}' is not one of the [{}] source \
                          directories {:?}",
                         section,
                         dir,
                         section,
-                        scope.directories
+                        source_dirs
                     );
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// Reject an empty directory path or a `targetPath` that would escape the
+/// processed output (absolute, or containing `..`).
+fn validate_resource_directory(dir: &ResourceDirectory, section: &str) -> Result<()> {
+    if dir.path.is_empty() {
+        bail!("[{}] directory path must not be empty", section);
+    }
+    validate_target_path(&dir.target_path, section)
+}
+
+fn validate_target_path(path: &str, section: &str) -> Result<()> {
+    if path.is_empty() {
+        return Ok(());
+    }
+    if path.starts_with('/') || path.starts_with('\\') {
+        bail!(
+            "[{}] targetPath '{}' must be a relative path",
+            section,
+            path
+        );
+    }
+    for part in path.split(['/', '\\']) {
+        if part == ".." {
+            bail!("[{}] targetPath '{}' must not contain '..'", section, path);
         }
     }
     Ok(())
@@ -4504,9 +4636,105 @@ foo = "bar"
         let d = load_str(&toml).unwrap();
         assert_eq!(
             d.resources.directories,
-            vec!["src/main/resources", "src/main/config"]
+            vec![
+                ResourceDirectory::new("src/main/resources"),
+                ResourceDirectory::new("src/main/config"),
+            ]
         );
         assert!(d.resources.is_active()); // custom directories activate the scope
+    }
+
+    #[test]
+    fn directory_table_parses_includes_and_target_path() {
+        let toml = format!(
+            "{APP}\n[resources]\ndirectories = [\n\
+             {{ path = \"..\", includes = [\"LICENSE\", \"proguard/*\"], targetPath = \"META-INF\" }},\n\
+             ]\n"
+        );
+        let d = load_str(&toml).unwrap();
+        assert!(d.resources.is_active());
+        assert_eq!(d.resources.directories.len(), 1);
+        let dir = &d.resources.directories[0];
+        assert_eq!(dir.path, "..");
+        assert_eq!(dir.includes, vec!["LICENSE", "proguard/*"]);
+        assert!(dir.excludes.is_empty());
+        assert_eq!(dir.target_path, "META-INF");
+        assert_eq!(d.resources.source_dir_names(), vec![".."]);
+    }
+
+    #[test]
+    fn directory_string_and_table_can_mix() {
+        let toml = format!(
+            "{APP}\n[resources]\ndirectories = [\n\
+             \"src/main/resources\",\n\
+             {{ path = \".\", includes = [\"LICENSE\"], targetPath = \"META-INF\" }},\n\
+             ]\n"
+        );
+        let d = load_str(&toml).unwrap();
+        assert_eq!(d.resources.directories[0].path, "src/main/resources");
+        assert!(d.resources.directories[0].is_identity());
+        assert_eq!(d.resources.directories[1].path, ".");
+        assert_eq!(d.resources.directories[1].target_path, "META-INF");
+    }
+
+    #[test]
+    fn directory_table_target_path_optional() {
+        let toml = format!("{APP}\n[resources]\ndirectories = [{{ path = \"extra\" }}]\n");
+        let d = load_str(&toml).unwrap();
+        assert_eq!(d.resources.directories[0].target_path, "");
+        assert!(d.resources.directories[0].includes.is_empty());
+        assert!(d.resources.directories[0].is_identity());
+    }
+
+    #[test]
+    fn directory_empty_path_rejected() {
+        let toml = format!("{APP}\n[resources]\ndirectories = [\"\"]\n");
+        let err = load_str(&toml).unwrap_err().to_string();
+        assert!(
+            err.contains("directory path must not be empty"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn directory_absolute_target_path_rejected() {
+        let toml = format!(
+            "{APP}\n[resources]\ndirectories = [\
+             {{ path = \".\", targetPath = \"/META-INF\" }}]\n"
+        );
+        let err = load_str(&toml).unwrap_err().to_string();
+        assert!(err.contains("must be a relative path"), "got: {err}");
+    }
+
+    #[test]
+    fn directory_parent_target_path_rejected() {
+        let toml = format!(
+            "{APP}\n[resources]\ndirectories = [\
+             {{ path = \".\", targetPath = \"../escape\" }}]\n"
+        );
+        let err = load_str(&toml).unwrap_err().to_string();
+        assert!(err.contains("must not contain '..'"), "got: {err}");
+    }
+
+    #[test]
+    fn directory_unknown_field_rejected() {
+        let toml = format!(
+            "{APP}\n[resources]\ndirectories = [\
+             {{ path = \".\", target = \"META-INF\" }}]\n"
+        );
+        let err = load_str(&toml).unwrap_err().to_string();
+        assert!(err.contains("unknown field"), "got: {err}");
+    }
+
+    #[test]
+    fn filter_stage_may_reference_table_directory() {
+        let toml = format!(
+            "{APP}\n[resources]\ndirectories = [\
+             {{ path = \"..\", includes = [\"LICENSE\"], targetPath = \"META-INF\" }}]\n\
+             [[resources.filter]]\nengine = \"substitute\"\ndirectories = [\"..\"]\n"
+        );
+        let d = load_str(&toml).unwrap();
+        assert_eq!(d.resources.filter[0].directories, vec![".."]);
     }
 
     #[test]

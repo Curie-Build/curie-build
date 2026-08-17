@@ -121,6 +121,26 @@ engine = <span class="str">"substitute"</span>
 includes = [<span class="str">"**/test.properties"</span>]</pre>
     </div>
 
+    <h2>Selecting and remapping files</h2>
+    <p>Each <code>directories</code> entry is a source root. A string copies the whole tree at identity paths. A table adds an optional copy set and destination prefix — Maven's <code>&lt;resource&gt;&lt;includes&gt;</code> / <code>&lt;targetPath&gt;</code>:</p>
+
+    <div class="code">
+      <header>
+        <span class="dot live"></span><span class="dot"></span><span class="dot"></span>
+        <span>Curie.toml — remapping</span>
+      </header>
+<pre><span class="kw">[resources]</span>
+directories = [
+  <span class="str">"src/main/resources"</span>,                  <span class="com"># copy the tree as-is</span>
+  { path = <span class="str">"."</span>,                          <span class="com"># project-relative source</span>
+    includes = [<span class="str">"LICENSE"</span>, <span class="str">"proguard/*"</span>], <span class="com"># copy set; empty means every file</span>
+    targetPath = <span class="str">"META-INF"</span> },           <span class="com"># destination prefix in the JAR</span>
+]</pre>
+    </div>
+
+    <p>Later entries win on an output-path collision, after <code>targetPath</code> is prepended. <code>includes</code> / <code>excludes</code> select what is <em>copied</em> (distinct from filter-stage globs, which select what is <em>filtered</em>). Listing any <code>directories</code> replaces auto-discovery, so keep <code>"src/main/resources"</code> in the list when you still want that tree. <code>targetPath</code> must be relative and must not contain <code>..</code>. VCS metadata (<code>.git</code>, <code>.svn</code>, <code>.hg</code>) is skipped when walking a non-identity entry, so pointing <code>path</code> at a repository root is safe. <code>directories</code> are not inherited from a workspace root (paths are member-relative).</p>
+    <p><code>curie maven sync</code> emits one <code>&lt;resource&gt;</code> per entry with <code>&lt;directory&gt;</code> and, when set, <code>&lt;includes&gt;</code> / <code>&lt;excludes&gt;</code> and <code>&lt;targetPath&gt;</code> — or two blocks when a filter stage applies to only some of the copied files (see Maven sync fidelity below).</p>
+
     <h2>The stage pipeline</h2>
     <p>Within a scope, filtering is an <strong>ordered list of stages</strong> (<code>[[resources.filter]]</code>). Each stage picks an engine, the files it applies to (include/exclude globs), an optional subset of origin directories, and that engine's own nested options. Stages run in declaration order and <strong>chain on the same file</strong> — a file matched by two stages is rendered by the first, then its output feeds the second. A file matched by no stage is copied verbatim.</p>
     <ul>
@@ -180,12 +200,14 @@ includes = [<span class="str">"**/*.yml"</span>, <span class="str">"**/*.propert
 
     <h2>Maven sync fidelity</h2>
     <p><code>curie maven sync</code> maps a scope cleanly only when its pipeline is <strong>one <code>substitute</code> stage</strong> (the common case): it emits <code>&lt;resources&gt;</code>/<code>&lt;testResources&gt;</code> per directory with <code>&lt;filtering&gt;</code>, the includes/excludes, a <code>maven-resources-plugin</code> <code>&lt;delimiter&gt;</code> override (so a Maven build substitutes byte-identically), and the scope properties/filters. Multiple source directories map fine — Maven supports multiple <code>&lt;resource&gt;</code> entries.</p>
-    <p>For anything Maven cannot faithfully reproduce — a <code>liquid</code> stage, or multiple chained stages in <em>either</em> scope — <code>curie maven sync</code> <strong>fails with a hard error</strong> naming the offending scope, rather than emitting a misleading POM that would ship differently-filtered resources. Silent metadata loss is exactly the divergence sync exists to prevent.</p>
+    <p>Maven's <code>&lt;filtering&gt;</code> rewrites every file that <code>&lt;resource&gt;</code> copies. Curie copies one set and may filter a smaller set, so sync emits two Maven blocks when it can (a full-tree copy plus a narrower filter: one filtered, one verbatim-with-excludes). When the copy set and the filter set cannot be expressed that way — a <code>directories</code> table with <code>includes</code> plus a different stage <code>includes</code> — sync <strong>fails with a hard error</strong> rather than filtering files Curie left verbatim.</p>
+    <p>For anything else Maven cannot faithfully reproduce — a <code>liquid</code> stage, or multiple chained stages in <em>either</em> scope — <code>curie maven sync</code> likewise <strong>fails with a hard error</strong> naming the offending scope. Silent metadata loss is exactly the divergence sync exists to prevent.</p>
 
     <h2>Examples</h2>
     <ul>
       <li><strong><code>examples/resource-filtering-demo/</code></strong> — <code>substitute</code> engine: two merged source directories, a stage scoped to one of them, a binary file copied untouched, and an independent <code>[test-resources]</code> scope filtering a test fixture.</li>
       <li><strong><code>examples/liquid-filtering-demo/</code></strong> — <code>liquid</code> engine: Liquid templating with conditionals, filters (<code>upcase</code>, <code>downcase</code>), and nested variable access. Shows how the liquid and substitute engines can coexist across different scopes or stages.</li>
+      <li><strong><code>examples/resource-mapping-demo/</code></strong> — a <code>directories</code> table entry copies project-root <code>LICENSE</code> and <code>proguard/*</code> to <code>META-INF/</code>, merged with a normal <code>src/main/resources</code> tree.</li>
     </ul>
   </main>
 </div>

@@ -93,9 +93,9 @@
       <li><strong>tests/</strong> — a top-level <code>tests/</code> directory for integration tests that should only see the public surface. Mirrors Maven's <code>src/test/java/</code> when using the flat-package layout.</li>
     </ul>
 
-    <p>Maven-style projects keep using <code>src/test/java/</code>. Hierarchical trees that are not in either default location (Guava's <code>test/</code>) are declared with <code>[java] testSourceDirs</code>.</p>
+    <p>Maven-style projects keep using <code>src/test/java/</code>. Hierarchical trees that are not in either default location (for example a top-level <code>test/</code> directory) are declared with <code>[java] testSourceDirs</code>.</p>
 
-    <p>At run time the launcher scans only <code>target/test-classes</code>. Production classes stay on the runtime classpath but are not discovered as tests — a testing library that ships <code>TestCase</code> subclasses (Guava testlib's <code>*Tester</code> types) would otherwise explode into hundreds of thousands of unintended tests, the same way Surefire only scans the test output directory.</p>
+    <p>At run time the launcher scans only <code>target/test-classes</code>. Production classes stay on the runtime classpath but are not discovered as tests — a testing library that ships <code>TestCase</code> subclasses would otherwise be discovered as tests itself, the same way Surefire only scans the test output directory.</p>
 
     <h2>Declaring test dependencies</h2>
     <div class="code">
