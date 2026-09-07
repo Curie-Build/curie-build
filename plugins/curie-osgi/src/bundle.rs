@@ -6,9 +6,35 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Cursor, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
+
+/// Resolve a plugin-context path against `--project`.
+///
+/// Curie documents these as absolute, but workspace builds historically
+/// sent CWD-relative member paths (`./osgi-bundle-demo/target/foo.jar`
+/// with `--project ./osgi-bundle-demo`). Joining those blindly doubles
+/// the member prefix.
+pub(crate) fn resolve_context_path(project_root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    if path_already_under(project_root, path) {
+        return path.to_path_buf();
+    }
+    project_root.join(path)
+}
+
+fn path_already_under(project_root: &Path, path: &Path) -> bool {
+    let root = strip_dot_slash(project_root);
+    let candidate = strip_dot_slash(path);
+    candidate.starts_with(root)
+}
+
+fn strip_dot_slash(path: &Path) -> &Path {
+    path.strip_prefix(".").unwrap_or(path)
+}
 
 pub fn run(project_root: &Path, env: &Envelope) -> Result<()> {
     let ctx = env
@@ -16,11 +42,7 @@ pub fn run(project_root: &Path, env: &Envelope) -> Result<()> {
         .as_ref()
         .context("curie-build did not provide a plugin context")?;
     let jar = ctx.jar.as_ref().context("plugin context has no jar path")?;
-    let jar = if jar.is_absolute() {
-        jar.clone()
-    } else {
-        project_root.join(jar)
-    };
+    let jar = resolve_context_path(project_root, jar);
     if !jar.exists() {
         bail!("project JAR does not exist: {}", jar.display());
     }
@@ -179,6 +201,50 @@ mod tests {
         ];
         let manifest = "Manifest-Version: 1.0\r\nMain-Class: com.example.Greeter\r\n\r\n";
         write_jar(path, manifest, &entries).unwrap();
+    }
+
+    #[test]
+    fn resolve_context_path_does_not_double_workspace_member_prefix() {
+        let project_root = Path::new("./osgi-bundle-demo");
+        let jar = Path::new("./osgi-bundle-demo/target/osgi-greeter-1.0.0.jar");
+        assert_eq!(
+            resolve_context_path(project_root, jar),
+            PathBuf::from("./osgi-bundle-demo/target/osgi-greeter-1.0.0.jar")
+        );
+    }
+
+    #[test]
+    fn resolve_context_path_joins_project_relative_jar() {
+        let project_root = Path::new("./osgi-bundle-demo");
+        let jar = Path::new("target/osgi-greeter-1.0.0.jar");
+        assert_eq!(
+            resolve_context_path(project_root, jar),
+            PathBuf::from("./osgi-bundle-demo/target/osgi-greeter-1.0.0.jar")
+        );
+    }
+
+    #[test]
+    fn resolve_context_path_keeps_absolute_jar() {
+        let jar = PathBuf::from("/tmp/proj/target/lib.jar");
+        assert_eq!(resolve_context_path(Path::new("/tmp/proj"), &jar), jar);
+    }
+
+    #[test]
+    fn resolve_context_path_tolerates_mixed_dot_slash_prefixes() {
+        assert_eq!(
+            resolve_context_path(
+                Path::new("osgi-bundle-demo"),
+                Path::new("./osgi-bundle-demo/target/lib.jar"),
+            ),
+            PathBuf::from("./osgi-bundle-demo/target/lib.jar")
+        );
+        assert_eq!(
+            resolve_context_path(
+                Path::new("./osgi-bundle-demo"),
+                Path::new("osgi-bundle-demo/target/lib.jar"),
+            ),
+            PathBuf::from("osgi-bundle-demo/target/lib.jar")
+        );
     }
 
     #[test]

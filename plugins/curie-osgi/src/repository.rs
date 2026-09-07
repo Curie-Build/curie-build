@@ -25,11 +25,7 @@ pub fn run(project_root: &Path, env: &Envelope) -> Result<()> {
     )?;
 
     let jar = ctx.jar.as_ref().context("plugin context has no jar path")?;
-    let jar = if jar.is_absolute() {
-        jar.clone()
-    } else {
-        project_root.join(jar)
-    };
+    let jar = crate::bundle::resolve_context_path(project_root, jar);
     if !jar.exists() {
         bail!("project JAR does not exist: {}", jar.display());
     }

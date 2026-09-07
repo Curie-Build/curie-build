@@ -116,7 +116,7 @@ pub fn fetch_manifest(
 
     let mut cmd = std::process::Command::new(&bin);
     cmd.args(["manifest", "--project"])
-        .arg(project_root)
+        .arg(absolute_path(project_root))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit());
@@ -227,7 +227,7 @@ pub fn generate_sources(
 
     let mut cmd = std::process::Command::new(&bin);
     cmd.args(["generate-sources", "--project"])
-        .arg(project_root);
+        .arg(absolute_path(project_root));
     if offline {
         cmd.arg("--offline");
     }
@@ -254,16 +254,32 @@ pub struct ContextExtras {
     pub repositories: Vec<PluginRepository>,
 }
 
+/// Make `path` absolute without requiring it to exist on disk.
+///
+/// Workspace member paths are typically CWD-relative (`osgi-bundle-demo/...`).
+/// Plugin envelopes document these as absolute so plugins can resolve them
+/// against `--project` without doubling the member prefix.
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Build a [`PluginContext`] from a descriptor plus optional extras.
 pub fn build_context(
     project_root: &Path,
     desc: &crate::descriptor::Descriptor,
     extras: ContextExtras,
 ) -> PluginContext {
+    let project_root = absolute_path(project_root);
     let target_dir = extras
         .target_dir
+        .map(|p| absolute_path(&p))
         .unwrap_or_else(|| project_root.join("target"));
-    let jar = extras.jar.or_else(|| {
+    let jar = extras.jar.map(|p| absolute_path(&p)).or_else(|| {
         let name = format!(
             "{}-{}.jar",
             desc.buildable_name().replace(':', "-"),
@@ -276,9 +292,9 @@ pub fn build_context(
         artifact_id: desc.buildable_name().to_string(),
         version: desc.buildable_version().to_string(),
         jar,
-        classes_dir: extras.classes_dir,
+        classes_dir: extras.classes_dir.map(|p| absolute_path(&p)),
         target_dir,
-        project_root: project_root.to_path_buf(),
+        project_root,
         offline: extras.offline,
         dry_run: extras.dry_run,
         publish_url: extras.publish_url,
@@ -413,7 +429,7 @@ pub fn run_phase(
 
     let mut cmd = std::process::Command::new(&bin);
     cmd.args(["run", "--phase", phase, "--project"])
-        .arg(project_root);
+        .arg(absolute_path(project_root));
     if offline {
         cmd.arg("--offline");
     }
@@ -1475,6 +1491,72 @@ exit 9
     fn parse_phase_result_rejects_garbage() {
         let err = parse_phase_result(b"not-json").unwrap_err().to_string();
         assert!(err.contains("invalid JSON"), "got: {err}");
+    }
+
+    #[test]
+    fn build_context_absolutizes_relative_workspace_member_paths() {
+        let desc = crate::descriptor::fake_library_desc(
+            Some("com.example.curie"),
+            "osgi-greeter",
+            "1.0.0",
+            crate::descriptor::PublishConfig::default(),
+        );
+        let project_root = Path::new("./osgi-bundle-demo");
+        let jar = PathBuf::from("./osgi-bundle-demo/target/osgi-greeter-1.0.0.jar");
+        let target_dir = PathBuf::from("./osgi-bundle-demo/target");
+        let classes_dir = PathBuf::from("./osgi-bundle-demo/target/classes");
+
+        let ctx = build_context(
+            project_root,
+            &desc,
+            ContextExtras {
+                jar: Some(jar),
+                classes_dir: Some(classes_dir),
+                target_dir: Some(target_dir),
+                ..Default::default()
+            },
+        );
+
+        let cwd = std::env::current_dir().unwrap();
+        assert!(ctx.project_root.is_absolute());
+        assert_eq!(ctx.project_root, cwd.join("./osgi-bundle-demo"));
+        assert_eq!(
+            ctx.jar.as_ref().map(|p| p.as_path()),
+            Some(
+                cwd.join("./osgi-bundle-demo/target/osgi-greeter-1.0.0.jar")
+                    .as_path()
+            )
+        );
+        assert_eq!(ctx.target_dir, cwd.join("./osgi-bundle-demo/target"));
+        assert_eq!(
+            ctx.classes_dir.as_ref().map(|p| p.as_path()),
+            Some(cwd.join("./osgi-bundle-demo/target/classes").as_path())
+        );
+    }
+
+    #[test]
+    fn build_context_keeps_already_absolute_paths() {
+        let desc = crate::descriptor::fake_library_desc(
+            Some("com.example.curie"),
+            "osgi-greeter",
+            "1.0.0",
+            crate::descriptor::PublishConfig::default(),
+        );
+        let tmp = TempDir::new().unwrap();
+        let project_root = tmp.path();
+        let jar = project_root.join("target/osgi-greeter-1.0.0.jar");
+        let ctx = build_context(
+            project_root,
+            &desc,
+            ContextExtras {
+                jar: Some(jar.clone()),
+                target_dir: Some(project_root.join("target")),
+                ..Default::default()
+            },
+        );
+        assert_eq!(ctx.project_root, project_root);
+        assert_eq!(ctx.jar, Some(jar));
+        assert_eq!(ctx.target_dir, project_root.join("target"));
     }
 
     #[test]
